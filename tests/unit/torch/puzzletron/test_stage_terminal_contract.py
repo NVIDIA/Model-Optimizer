@@ -26,6 +26,8 @@ import modelopt.torch.puzzletron.stages.diagnostics as diagnostic_stages
 import modelopt.torch.puzzletron.stages.future as future_stages
 import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
 from examples.puzzletron import main as puzzletron_main
+from examples.puzzletron import finalize_depth_importance as depth_finalizer
+from examples.puzzletron import run_runtime_stats_shard as runtime_stats_shard
 from examples.puzzletron import tokenize_data as tokenize_data_module
 from examples.puzzletron.main import _completion_is_valid, _validate_worker_result
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
@@ -320,6 +322,55 @@ def test_resume_rechecks_canonical_artifact_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(puzzletron_main, "check_marker", lambda *_args, **_kwargs: True)
 
     assert not _completion_is_valid(config, tmp_path / "config.yaml", "width_importance")
+
+
+def test_vllm_stats_merge_publishes_terminal_manifest(tmp_path, monkeypatch):
+    config = _config(tmp_path, vllm_stats={"enabled": True})
+    stats_path = tmp_path / "subblock_stats.json"
+    stats_path.write_text("[{\"args\": {\"runtime_stats\": true}}]\n")
+    summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("{}\n")
+    monkeypatch.setattr(runtime_stats_shard, "_inject_runtime_descriptor", lambda _config: None)
+    monkeypatch.setattr(
+        runtime_stats_shard,
+        "finalize_vllm_measurements",
+        lambda _config: {"summary": str(summary)},
+    )
+
+    runtime_stats_shard._finalize_vllm_stage(config)
+
+    assert stage_is_complete(config, "vllm_stats")
+    payload = json.loads((tmp_path / "manifests" / "vllm_stats.json").read_text())
+    assert payload["status"] == "success"
+    assert payload["outputs"]["subblock_stats_path"] == str(stats_path)
+
+
+def test_depth_finalizer_publishes_terminal_manifest(tmp_path):
+    config = _config(
+        tmp_path,
+        depth_importance={"enabled": True, "max_removals": 2},
+    )
+    trajectory_path = tmp_path / "depth" / "iterative" / "trajectory.json"
+    trajectory_path.parent.mkdir(parents=True)
+    trajectory_path.write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "max_removals": 2,
+                "selected": [{"layer_idx": 1}, {"layer_idx": 2}],
+                "scenarios": [{}, {}, {}],
+            }
+        )
+        + "\n"
+    )
+
+    depth_finalizer.finalize_depth_importance(config)
+
+    assert stage_is_complete(config, "depth_importance")
+    payload = json.loads((tmp_path / "manifests" / "depth_importance.json").read_text())
+    assert payload["status"] == "success"
+    assert payload["outputs"]["trajectory_path"] == str(trajectory_path)
 
 
 def _config(tmp_path, **sections):

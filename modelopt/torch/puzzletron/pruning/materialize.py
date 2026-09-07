@@ -394,8 +394,6 @@ def materialize_checkpoint_from_sorted(
 
     from ..identity import stable_hash
     from ..utils.vllm_adapter import (
-        _delete,
-        _get_text_config,
         configure_anymodel_metadata,
         convert_block_configs_to_per_layer_config,
     )
@@ -411,12 +409,15 @@ def materialize_checkpoint_from_sorted(
     # instantiate heterogeneous tensors from ``block_configs``, while vLLM
     # AnyModel consumes ``per_layer_config``.  Persist both equivalent views.
     configure_anymodel_metadata(child_model_config, descriptor)
-    # child_model_config is a deep copy of the sorted-teacher config, which may
-    # carry a stale per_layer_config for the teacher architecture.  Drop it so
-    # convert_block_configs_to_per_layer_config re-derives it from the pruned
-    # block_configs without hitting the equivalence check.
-    _delete(_get_text_config(child_model_config), "per_layer_config")
-    convert_block_configs_to_per_layer_config(child_model_config, keep_block_configs=True)
+    # ``child_model_config`` starts as a copy of the teacher configuration.
+    # Its derived per-layer view therefore describes the teacher, while the
+    # newly generated block configs describe the selected width scenario.
+    # Rebuild that derived view from the canonical block configs.
+    convert_block_configs_to_per_layer_config(
+        child_model_config,
+        keep_block_configs=True,
+        replace_existing=True,
+    )
     child_model_config.block_configs = [
         block.to_dict() if hasattr(block, "to_dict") else block
         for block in child_model_config.block_configs

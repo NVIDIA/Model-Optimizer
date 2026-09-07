@@ -55,6 +55,7 @@ __all__ = [
     "build_recipe_config",
     "build_stage_recipe_config",
     "build_solution_recipe_config",
+    "configure_sdpa_backends",
     "inject_descriptor_model_kwargs",
     "inject_descriptor_pipeline_config",
     "scoring_params",
@@ -79,6 +80,46 @@ def _as_dict(node) -> dict:
     if OmegaConf.is_config(node):
         return OmegaConf.to_container(node, resolve=True)
     return dict(node)
+
+
+def configure_sdpa_backends(automodel_cfg) -> bool:
+    """Apply an explicit AutoModel SDPA policy to the current worker process.
+
+    Native AutoModel models can call ``scaled_dot_product_attention`` outside
+    the recipe's SDPA wrapper. Apply the configured backend policy globally so
+    those direct calls use the same selection as the generated recipe.
+    """
+    sdpa_method = _as_dict(automodel_cfg).get("sdpa_method")
+    if sdpa_method is None:
+        return False
+
+    enabled = {
+        (entry if isinstance(entry, str) else getattr(entry, "name", str(entry))).upper()
+        for entry in sdpa_method
+    }
+    setters = {
+        "FLASH_ATTENTION": "enable_flash_sdp",
+        "EFFICIENT_ATTENTION": "enable_mem_efficient_sdp",
+        "MATH": "enable_math_sdp",
+        "CUDNN_ATTENTION": "enable_cudnn_sdp",
+    }
+    unknown = enabled.difference(setters)
+    if unknown:
+        raise ValueError(
+            "Unknown SDPA backend(s) in automodel.sdpa_method: "
+            f"{sorted(unknown)}. Valid values: {sorted(setters)}"
+        )
+
+    # Deferred import keeps the configuration compiler usable on login nodes.
+    import torch
+
+    for backend, setter_name in setters.items():
+        setter = getattr(torch.backends.cuda, setter_name, None)
+        if setter is None:
+            raise RuntimeError(f"PyTorch does not provide torch.backends.cuda.{setter_name}")
+        setter(backend in enabled)
+    logger.info("Applied global SDPA backend policy: %s", sorted(enabled))
+    return True
 
 
 def _teacher_path(hydra_cfg) -> str:
@@ -259,10 +300,15 @@ def build_stage_recipe_config(automodel_cfg) -> dict:
             "pp_batch_size": pp,
         }
 
+    model = {"torch_dtype": "bf16", "trust_remote_code": False}
+    for key in ("sdpa_method", "use_sdpa_patching"):
+        if key in config:
+            model[key] = config[key]
+
     return {
         "step_scheduler": {"global_batch_size": 1, "local_batch_size": 1, "max_steps": 1},
         "dist_env": {"backend": "nccl"},
-        "model": {"torch_dtype": "bf16", "trust_remote_code": False},
+        "model": model,
         "checkpoint": {"enabled": False},
         "distributed": distributed,
         "distributed_config": {

@@ -15,6 +15,7 @@
 
 """Tests for the puzzletron -> NeMo recipe config translation (no NeMo/GPU)."""
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,9 @@ from omegaconf import OmegaConf
 from modelopt.torch.puzzletron.plugins.automodel.config import (
     _align_pipeline_batch_size,
     build_recipe_config,
+    build_stage_recipe_config,
     build_solution_recipe_config,
+    configure_sdpa_backends,
 )
 
 
@@ -104,6 +107,42 @@ def test_build_recipe_config_rejects_pure_ddp_replication():
 
     with pytest.raises(ValueError, match="dp_shard greater than one"):
         build_recipe_config(cfg)
+
+
+def test_build_stage_recipe_config_forwards_sdpa_backend_selection():
+    recipe = build_stage_recipe_config(
+        {
+            "sdpa_method": ["FLASH_ATTENTION", "EFFICIENT_ATTENTION", "MATH"],
+            "parallel": {
+                "tp": 1,
+                "cp": 1,
+                "pp": 1,
+                "ep": 1,
+                "dp_shard": 1,
+                "dp_replicate": 1,
+            },
+        }
+    )
+
+    assert recipe["model"]["sdpa_method"] == [
+        "FLASH_ATTENTION",
+        "EFFICIENT_ATTENTION",
+        "MATH",
+    ]
+
+
+def test_configure_sdpa_backends_applies_worker_global_policy(monkeypatch):
+    calls = {}
+    cuda = SimpleNamespace(
+        enable_flash_sdp=lambda value: calls.setdefault("flash", value),
+        enable_mem_efficient_sdp=lambda value: calls.setdefault("efficient", value),
+        enable_math_sdp=lambda value: calls.setdefault("math", value),
+        enable_cudnn_sdp=lambda value: calls.setdefault("cudnn", value),
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(backends=SimpleNamespace(cuda=cuda)))
+
+    assert configure_sdpa_backends({"sdpa_method": ["FLASH_ATTENTION", "MATH"]})
+    assert calls == {"flash": True, "efficient": False, "math": True, "cudnn": False}
 
 
 @pytest.mark.parametrize("legacy_key", ["recipe", "recipe_path"])

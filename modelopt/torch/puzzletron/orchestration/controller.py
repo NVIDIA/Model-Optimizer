@@ -585,15 +585,19 @@ class CampaignController:
                 (attempt.metadata or {}).get("stage_finalization_failure")
                 for attempt in record.attempts
             ]
-            if all(
+            retry_validation = node.stage_id == "vllm_stats" and all(
+                isinstance(failure, Mapping) and failure.get("phase") == "validation"
+                for failure in finalization_failures
+            )
+            if retry_validation or all(
                 isinstance(failure, Mapping) and failure.get("phase") == "aggregation"
                 for failure in finalization_failures
             ):
                 failure = finalization_failures[0]
                 assert isinstance(failure, Mapping)
                 self._finalization_failures[node.stage_id] = _FinalizationFailure(
-                    phase="aggregation",
-                    reason=str(failure.get("reason") or "stage aggregation failed"),
+                    phase=str(failure["phase"]),
+                    reason=str(failure.get("reason") or "stage finalization failed"),
                     exception_type=(
                         str(failure["exception_type"])
                         if failure.get("exception_type") is not None
@@ -601,7 +605,7 @@ class CampaignController:
                     ),
                 )
                 self.logger.wait(
-                    f"{node.stage_id}: recovered aggregation failure; retrying finalization"
+                    f"{node.stage_id}: recovered finalization failure; retrying finalization"
                 )
                 continue
             self._failed_stages.add(node.stage_id)

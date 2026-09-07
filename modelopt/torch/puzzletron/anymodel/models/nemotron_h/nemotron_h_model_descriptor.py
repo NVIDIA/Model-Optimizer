@@ -900,11 +900,12 @@ class NemotronHModelDescriptor(ModelDescriptor):
         """Use NemotronH's real HF remote-code names for AutoModel PP splitting.
 
         NeMo's built-in HF splitter assumes ``model.embed_tokens`` and ``model.norm``.
-        NemotronH exposes the token embedding and final norm as ``model.embeddings`` and
-        ``model.norm_f``.  If we let the generic split run, stage 0 drops the embedding and
-        the first PP forward receives integer token ids with no embedding module.  Keeping
-        these names in the descriptor makes the PP layout explicit for NemotronH and gives
-        future remote-code families one place to declare their own split names.
+        The HF NemotronH model registers its token embedding and final norm as
+        ``backbone.embeddings`` and ``backbone.norm_f``. If we let the generic split run,
+        stage 0 drops the embedding and the first PP forward receives integer token ids with
+        no embedding module. Keeping these registered names in the descriptor makes the PP
+        layout explicit for NemotronH and gives future remote-code families one place to
+        declare their own split names.
         """
         pp_size = int(pp_size or 1)
         if pp_size <= 1:
@@ -933,17 +934,19 @@ class NemotronHModelDescriptor(ModelDescriptor):
             raise ValueError("NemotronH PP split needs num_hidden_layers in the model config")
 
         if force_hf:
-            first_stage_fqns = ("model.embeddings",)
-            last_stage_fqns = ("model.norm_f", "lm_head")
+            first_stage_fqns = ("backbone.embeddings",)
+            last_stage_fqns = ("backbone.norm_f", "lm_head")
+            layer_fqn_template = "backbone.layers.{layer_idx}"
         else:
             first_stage_fqns = ("model.embed_tokens",)
             last_stage_fqns = ("model.norm", "lm_head")
+            layer_fqn_template = "model.layers.{layer_idx}"
 
         return cls.build_sequential_pipeline_module_fqns(
             num_stages=num_stages,
             num_layers=int(num_layers),
             first_stage_fqns=first_stage_fqns,
-            layer_fqn_template="model.layers.{layer_idx}",
+            layer_fqn_template=layer_fqn_template,
             last_stage_fqns=last_stage_fqns,
         )
 

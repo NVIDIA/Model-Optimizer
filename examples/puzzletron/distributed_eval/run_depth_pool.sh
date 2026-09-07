@@ -188,4 +188,8 @@ trap - EXIT INT TERM
 if ((coordinator_rc != 0)); then
   exit "${coordinator_rc}"
 fi
+if [[ "${GROUP_INDEX}" == "0" && "${GROUP_RANK}" == "0" ]]; then
+  CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" "${SCRIPT_DIR}/../finalize_depth_importance.py" \
+    --config "${CONFIG_PATH}" "${override_args[@]}"
+fi
 exit "${worker_rc}"

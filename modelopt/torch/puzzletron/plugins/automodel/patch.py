@@ -37,6 +37,7 @@ this module does not require ``nemo_automodel``. Call :func:`apply_patch` before
 loading any model; :func:`remove_patch` restores the original state.
 """
 
+import importlib
 import json
 import logging
 import os
@@ -236,6 +237,40 @@ def _precache_trust_remote_code_distributed(
         )
 
 
+def _resolve_hf_decoder_layer_classes(
+    checkpoint_dir: str | Path,
+    anymodel_descriptor: str | None,
+    *,
+    trust_remote_code: bool,
+) -> list[type] | None:
+    """Resolve the exact remote decoder class selected by a checkpoint's ``auto_map``.
+
+    Dynamic-module caches can contain several unrelated classes with the same
+    name.  Resolve the checkpoint's CausalLM class first, then take its sibling
+    decoder class from the same module so construction patches the live class
+    object rather than a name-matched class from another cache entry.
+    """
+    if anymodel_descriptor != "nemotron_h" or not trust_remote_code:
+        return None
+
+    try:
+        with open(Path(checkpoint_dir) / "config.json") as f:
+            auto_map = json.load(f).get("auto_map", {})
+        class_reference = auto_map.get("AutoModelForCausalLM")
+        if not isinstance(class_reference, str):
+            return None
+
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        model_cls = get_class_from_dynamic_module(class_reference, checkpoint_dir)
+        module = importlib.import_module(model_cls.__module__)
+        decoder_cls = getattr(module, "NemotronHBlock", None)
+        return [decoder_cls] if isinstance(decoder_cls, type) else None
+    except (ImportError, OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("AnyModel: unable to resolve exact NemotronH decoder class (%s)", exc)
+        return None
+
+
 def _patch_get_init_context(model_init) -> None:
     """Re-wrap ``PreTrainedModel.get_init_context`` to tolerate newer transformers.
 
@@ -272,6 +307,7 @@ def _patch_nemotron_h_backbone_alias() -> None:
         return
 
     orig_parallelize = strategy_cls.parallelize
+    orig_decoder_blocks = parallelizer._nemotronh_decoder_blocks
 
     class _ModuleDictLayerList(nn.ModuleList):
         def __init__(self, module_dict):
@@ -324,8 +360,42 @@ def _patch_nemotron_h_backbone_alias() -> None:
                 )
         return orig_parallelize(self, model, *args, **kwargs)
 
+    def _decoder_blocks_with_stage_local_alias(model):
+        # Pipeline splitting clears the registered ``backbone`` module on some
+        # stages but leaves the transient ``model`` alias intact. The upstream
+        # resolver tests only attribute presence, then dereferences ``None``.
+        if (
+            model.__class__.__name__ == "NemotronHForCausalLM"
+            and getattr(model, "backbone", None) is None
+        ):
+            inner = getattr(model, "model", None)
+            if inner is not None:
+                container = inner.layers
+                blocks = (
+                    list(container.values()) if isinstance(container, nn.ModuleDict) else list(container)
+                )
+                return container, blocks
+        return orig_decoder_blocks(model)
+
     strategy_cls.parallelize = _parallelize_with_backbone_alias
     strategy_cls._puzzletron_backbone_alias_patch = True
+    parallelizer._nemotronh_decoder_blocks = _decoder_blocks_with_stage_local_alias
+    parallelizer._puzzletron_orig_nemotronh_decoder_blocks = orig_decoder_blocks
+
+
+def _ensure_hf_nemotron_h_pipeline_alias(result):
+    """Expose HF Nemotron-H's backbone through AutoModel's pipeline convention."""
+    is_custom_model, model = result
+    if is_custom_model or model.__class__.__name__ != "NemotronHForCausalLM" or hasattr(model, "model"):
+        return result
+
+    backbone = getattr(model, "backbone", None)
+    if backbone is not None:
+        # Pipeline splitting mutates the inner module through ``model.model``.
+        # Keep this as a non-registered alias so checkpoints retain only the
+        # canonical ``backbone`` module path.
+        object.__setattr__(model, "model", backbone)
+    return result
 
 
 def _patch_native_nemotron_stage_local_initialization() -> None:
@@ -669,7 +739,9 @@ def apply_patch() -> None:
 
     def _patched_init_model(cls, *model_args, **kwargs):
         stack = _get_ctx_stack()
-        block_configs, anymodel_descriptor = stack[-1] if stack else (None, None)
+        block_configs, anymodel_descriptor, decoder_layer_classes = (
+            stack[-1] if stack else (None, None, None)
+        )
         active_descriptor = None
 
         with ExitStack() as es:
@@ -677,7 +749,11 @@ def apply_patch() -> None:
                 hf_descriptor = ModelDescriptorFactory.get(anymodel_descriptor)
                 if hf_descriptor is not None:
                     es.enter_context(
-                        deci_x_patcher(model_descriptor=hf_descriptor, block_configs=block_configs)
+                        deci_x_patcher(
+                            model_descriptor=hf_descriptor,
+                            block_configs=block_configs,
+                            decoder_layer_classes=decoder_layer_classes,
+                        )
                     )
                     logger.info(
                         "AnyModel: deci_x_patcher with %d block configs (descriptor=%s)",
@@ -708,7 +784,9 @@ def apply_patch() -> None:
                         anymodel_descriptor,
                     )
 
-            result = orig_init_model(cls, *model_args, **kwargs)
+            result = _ensure_hf_nemotron_h_pipeline_alias(
+                orig_init_model(cls, *model_args, **kwargs)
+            )
 
         # Custom-model (force_hf=False) post-init hooks; no-op for the HF path.
         if active_descriptor is not None and isinstance(result, (tuple, list)) and len(result) == 2:
@@ -802,8 +880,14 @@ def apply_patch() -> None:
             trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
         )
 
+        decoder_layer_classes = _resolve_hf_decoder_layer_classes(
+            pretrained_model_name_or_path,
+            anymodel_descriptor,
+            trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
+        )
+
         stack = _get_ctx_stack()
-        stack.append((block_configs, anymodel_descriptor))
+        stack.append((block_configs, anymodel_descriptor, decoder_layer_classes))
         adapter_context = nullcontext()
         if (
             block_configs is not None

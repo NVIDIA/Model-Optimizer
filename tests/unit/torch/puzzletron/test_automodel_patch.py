@@ -21,16 +21,20 @@ in-container GPU integration check (see the plan, P2).
 """
 
 import json
+import sys
 from types import SimpleNamespace
+from types import ModuleType
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from modelopt.torch.puzzletron.anymodel.automodel import (
     AutoModelDescriptor,
     AutoModelDescriptorFactory,
     automodel_patcher,
 )
+from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -40,10 +44,77 @@ from modelopt.torch.puzzletron.block_config import (
 from modelopt.torch.puzzletron.plugins.automodel.load import validate_force_hf_ep
 from modelopt.torch.puzzletron.plugins.automodel.patch import (
     _cast_stage_local_model_to_dtype,
+    _ensure_hf_nemotron_h_pipeline_alias,
     _native_checkpoint_requires_heterogeneous_adapter,
+    _resolve_hf_decoder_layer_classes,
     auto_detect_block_configs,
     load_block_configs,
 )
+
+
+def test_nemotron_h_resolves_decoder_class_from_checkpoint_auto_map(tmp_path, monkeypatch):
+    module_name = "test_dynamic_nemotron_h"
+    module = ModuleType(module_name)
+    model_cls = type("NemotronHForCausalLM", (), {"__module__": module_name})
+    decoder_cls = type("NemotronHBlock", (), {"__module__": module_name})
+    module.NemotronHForCausalLM = model_cls
+    module.NemotronHBlock = decoder_cls
+    monkeypatch.setitem(sys.modules, module_name, module)
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_reference, checkpoint_dir: model_cls,
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps({"auto_map": {"AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM"}})
+    )
+
+    classes = _resolve_hf_decoder_layer_classes(
+        tmp_path, "nemotron_h", trust_remote_code=True
+    )
+
+    assert classes == [decoder_cls]
+
+
+def test_deci_x_patcher_uses_explicit_dynamic_decoder_class():
+    class UnrelatedNemotronHBlock:
+        def __init__(self, config, layer_idx):
+            self.n_routed_experts = config.n_routed_experts
+
+    class TargetNemotronHBlock:
+        def __init__(self, config, layer_idx):
+            self.n_routed_experts = config.n_routed_experts
+
+    class Descriptor:
+        @staticmethod
+        def decoder_layer_cls():
+            return [UnrelatedNemotronHBlock]
+
+        @staticmethod
+        def block_config_to_layer_overrides(block_config):
+            return {"n_routed_experts": block_config.get_subblock("moe").num_experts}
+
+        @staticmethod
+        def patch_layer_config(config, block_config, layer_idx):
+            del config, block_config, layer_idx
+
+    block_configs = [
+        BlockConfig(subblock_configs=(MoEConfig(num_experts=96),)),
+        BlockConfig(subblock_configs=(MoEConfig(num_experts=64),)),
+    ]
+    config = PretrainedConfig(
+        n_routed_experts=128,
+        is_heterogeneous=True,
+        per_layer_config={"0": {}, "1": {}},
+    )
+
+    with deci_x_patcher(
+        Descriptor(), block_configs, decoder_layer_classes=[TargetNemotronHBlock]
+    ):
+        first = TargetNemotronHBlock(config, 0)
+        second = TargetNemotronHBlock(config, 1)
+
+    assert [first.n_routed_experts, second.n_routed_experts] == [96, 64]
+    assert config.n_routed_experts == 128
 
 
 def test_stage_local_dtype_cast_preserves_protected_fp32_submodules():
@@ -59,6 +130,20 @@ def test_stage_local_dtype_cast_preserves_protected_fp32_submodules():
 
     assert model.projection.weight.dtype is torch.bfloat16
     assert model._fp32_params.weight.dtype is torch.float32
+
+
+def test_hf_nemotron_h_pipeline_alias_uses_backbone_without_duplicate_module_registration():
+    class NemotronHForCausalLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = torch.nn.Linear(2, 2, bias=False)
+
+    model = NemotronHForCausalLM()
+
+    _, aliased = _ensure_hf_nemotron_h_pipeline_alias((False, model))
+
+    assert aliased.model is aliased.backbone
+    assert "model" not in aliased._modules
 
 
 def test_load_block_configs_wrapped_dict(tmp_path):

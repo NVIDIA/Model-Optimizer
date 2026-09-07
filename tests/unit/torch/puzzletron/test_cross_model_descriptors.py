@@ -241,6 +241,26 @@ def test_nemotron_nano_capabilities_exclude_absent_latent_axis() -> None:
     assert "moe_latent_dim" in super_axes
 
 
+def test_nemotron_h_hf_pipeline_fqns_use_registered_backbone_modules() -> None:
+    config = SimpleNamespace(num_hidden_layers=4)
+
+    stages = NemotronHModelDescriptor.pipeline_module_fqns_per_model_part(
+        config,
+        pp_size=2,
+        pipeline_config={"_puzzletron_force_hf": True},
+    )
+
+    assert stages == [
+        ["backbone.embeddings", "backbone.layers.0", "backbone.layers.1"],
+        [
+            "backbone.layers.2",
+            "backbone.layers.3",
+            "backbone.norm_f",
+            "lm_head",
+        ],
+    ]
+
+
 def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
     monkeypatch, tmp_path
 ) -> None:

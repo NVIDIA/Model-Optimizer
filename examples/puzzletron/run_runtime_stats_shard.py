@@ -11,11 +11,12 @@ import os
 from pathlib import Path
 
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
+from modelopt.torch.puzzletron.manifest import stage_manifest_from_config
 from modelopt.torch.puzzletron.pipeline_config import (
     load_runtime_hydra_config,
     pipeline_config_from_path,
 )
-from modelopt.torch.puzzletron.stages.common import experiment_dir
+from modelopt.torch.puzzletron.stages.common import complete_stage, experiment_dir
 from modelopt.torch.puzzletron.stages.pipeline import (
     configure_vllm_stats_widths,
     finalize_vllm_measurements,
@@ -63,6 +64,24 @@ def _require_runtime_subblock_library(config: dict) -> Path:
     )
 
 
+def _finalize_vllm_stage(config: dict) -> None:
+    """Publish aggregate runtime statistics and their terminal stage manifest."""
+
+    _inject_runtime_descriptor(config)
+    report = finalize_vllm_measurements(config)
+    stats_name = config["vllm_stats"].get("subblock_stats_filename", "subblock_stats.json")
+    stats_path = Path(config["puzzle_dir"]) / stats_name
+    manifest = stage_manifest_from_config("vllm_stats", config, effective_config=config)
+    complete_stage(
+        config,
+        manifest,
+        outputs={
+            "subblock_stats_path": str(stats_path),
+            "report": report,
+        },
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -72,8 +91,7 @@ def main() -> None:
     args = parser.parse_args()
     plain = pipeline_config_from_path(args.config, overrides=args.override)
     if args.merge:
-        _inject_runtime_descriptor(plain)
-        finalize_vllm_measurements(plain)
+        _finalize_vllm_stage(plain)
         return
     shard_index = os.environ.get(
         "PUZZLETRON_RUNTIME_SHARD_INDEX",

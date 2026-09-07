@@ -17,6 +17,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -113,6 +115,34 @@ def test_vllm_adapter_exports_per_layer_mla_ranks() -> None:
     assert config.per_layer_config == {
         "0": {"num_attention_heads": 8, "q_lora_rank": 384, "kv_lora_rank": 256}
     }
+
+
+def test_vllm_adapter_can_replace_stale_derived_per_layer_config() -> None:
+    config = SimpleNamespace(
+        base_architecture="LlamaForCausalLM",
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=32,
+        per_layer_config={"0": {"intermediate_size": 64}},
+        block_configs=[
+            BlockConfig(
+                subblock_configs=(
+                    AttentionConfig(num_query_heads=4, num_kv_heads=2),
+                )
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="not equivalent"):
+        convert_block_configs_to_per_layer_config(config, keep_block_configs=True)
+
+    assert not convert_block_configs_to_per_layer_config(
+        config,
+        keep_block_configs=True,
+        replace_existing=True,
+    )
+    assert config.per_layer_config == {"0": {}}
 
 
 def test_gpt_oss_window_axis_respects_each_parent_layers_attention_scope() -> None:

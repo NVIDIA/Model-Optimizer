@@ -56,6 +56,25 @@ def test_global_kd_pp_shape_reset_uses_pipeline_activation_dtype(monkeypatch):
     assert kwargs == {"tensor_dtype": torch.bfloat16}
 
 
+def test_global_kd_force_hf_omits_zero_mtp_layers(tmp_path):
+    from modelopt.torch.puzzletron.distillation.global_automodel import _model_recipe
+
+    common = {
+        "teacher_dir": tmp_path / "teacher",
+        "student_dir": tmp_path / "student",
+        "output_dir": tmp_path / "output",
+        "descriptor": "nemotron_h",
+    }
+
+    hf_recipe = _model_recipe(GlobalKDConfig(**common, force_hf=True), teacher=False, domain="llm")
+    native_recipe = _model_recipe(
+        GlobalKDConfig(**common, force_hf=False), teacher=False, domain="llm"
+    )
+
+    assert "num_nextn_predict_layers" not in hf_recipe
+    assert native_recipe["num_nextn_predict_layers"] == 0
+
+
 def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
     monkeypatch,
 ):

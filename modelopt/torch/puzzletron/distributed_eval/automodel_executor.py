@@ -83,7 +83,11 @@ class AutoModelReplaceBlockExecutor:
         import modelopt.torch.utils.distributed as dist
 
         from ..block_config import maybe_cast_block_configs
-        from ..plugins.automodel.config import build_solution_recipe_config, solution_scoring_params
+        from ..plugins.automodel.config import (
+            build_solution_recipe_config,
+            configure_sdpa_backends,
+            solution_scoring_params,
+        )
         from ..plugins.automodel.launch import _free_scoring_memory
         from ..plugins.automodel.load import validate_force_hf_ep
         from ..plugins.automodel.patch import apply_patch
@@ -95,6 +99,7 @@ class AutoModelReplaceBlockExecutor:
         params = solution_scoring_params(self.cfg)
         self.params = params
         apply_patch()
+        configure_sdpa_backends(self.cfg.scoring.get("automodel", None))
         teacher_dir = Path(
             scoring.get("teacher_dir", None) or f"{self.cfg.puzzle_dir}/ckpts/teacher"
         )

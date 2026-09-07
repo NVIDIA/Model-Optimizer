@@ -48,6 +48,8 @@ run_lmms_eval_checkpoint = _load_runner()
 DEFAULT_TASKS = "ifeval,gsm8k"
 _TASK_ALIASES = {"gsm8k": "modelopt_gsm8k"}
 _QWEN_3_5_MODEL_TYPES = frozenset({"qwen3_5", "qwen3_5_text"})
+_NEMOTRON_H_MODEL_TYPES = frozenset({"nemotron_h"})
+_NEMOTRON_H_MAX_NUM_SEQS = 256
 DEFAULT_SMOKE_TIMEOUT_SECONDS = 3_000.0
 DEFAULT_FULL_TIMEOUT_SECONDS = 24 * 60 * 60.0
 
@@ -105,9 +107,14 @@ def _automatic_model_args(checkpoint: Path) -> dict[str, object]:
     text_config = config.get("text_config")
     if isinstance(text_config, dict) and isinstance(text_config.get("model_type"), str):
         model_types.add(text_config["model_type"])
+    model_args = {}
     if model_types & _QWEN_3_5_MODEL_TYPES:
-        return {"reasoning_parser": "qwen3"}
-    return {}
+        model_args["reasoning_parser"] = "qwen3"
+    if model_types & _NEMOTRON_H_MODEL_TYPES:
+        # vLLM's default max_num_seqs can exceed the available Mamba cache
+        # blocks on a single GPU before this checkpoint serves any requests.
+        model_args["max_num_seqs"] = _NEMOTRON_H_MAX_NUM_SEQS
+    return model_args
 
 
 def _lmms_eval_gsm8k_config() -> Path:
@@ -192,13 +199,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-model-len", type=_positive_int, default=8192)
     parser.add_argument(
+        "--max-num-seqs",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Maximum vLLM scheduler sequences; overrides the model-profile default. "
+            "Lower this when a Mamba cache-capacity error is reported."
+        ),
+    )
+    parser.add_argument(
         "--model-profile",
         choices=("auto", "none"),
         default="auto",
         help=(
             "Apply narrow vLLM compatibility defaults inferred from config.json; "
-            "auto currently maps Qwen 3.5 to reasoning_parser=qwen3, while none "
-            "leaves all model-specific arguments explicit."
+            "auto configures Qwen 3.5 reasoning and a safe Nemotron-H Mamba "
+            "scheduler limit, while none leaves all model-specific arguments explicit."
         ),
     )
     parser.add_argument(
@@ -252,6 +268,8 @@ def _settings(
         if automatic_model_args is None:
             automatic_model_args = _automatic_model_args(args.checkpoint)
         model_args.update(automatic_model_args)
+    if args.max_num_seqs is not None:
+        model_args["max_num_seqs"] = args.max_num_seqs
     if args.reasoning_parser is not None:
         model_args["reasoning_parser"] = args.reasoning_parser
     settings = {
@@ -302,8 +320,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{key}={value}" for key, value in sorted(automatic_model_args.items())
             )
             print(
-                f"Detected Qwen 3.5 checkpoint; applying vLLM model argument {rendered}. "
-                "Override with --reasoning-parser or disable with --model-profile none.",
+                f"Detected checkpoint profile; applying vLLM model argument {rendered}. "
+                "Override with the matching CLI option or disable with --model-profile none.",
                 file=sys.stderr,
             )
         result = run_lmms_eval_checkpoint(

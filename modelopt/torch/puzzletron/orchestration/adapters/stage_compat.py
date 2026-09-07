@@ -623,10 +623,16 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
             expected_semantic_config=semantic_stage_config(config, stage_id),
             stable_hash=stable_hash,
         )
+    if stage_id == "tokenize_data":
+        # Token caches are self-describing: their receipts bind the dataset,
+        # tokenizer, content field, sample count, sequence length, seed, and
+        # trust-remote-code setting.  Prefer that direct proof over the broad
+        # historical stage semantic projection, which includes downstream
+        # consumer sections and can otherwise force unnecessary retokenization
+        # after an unrelated scoring or runtime setting changes.
+        return _token_caches_are_complete(config, manifest)
     if not _successful_manifest_is_current(config, stage_id, manifest):
         return False
-    if stage_id == "tokenize_data":
-        return _token_caches_are_complete(config, manifest)
     if stage_id == "depth_importance":
         return _depth_trajectory_is_complete(config, puzzle_dir)
     if stage_id == "width_importance":

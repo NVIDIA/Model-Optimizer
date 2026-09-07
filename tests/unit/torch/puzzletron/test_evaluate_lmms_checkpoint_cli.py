@@ -150,6 +150,55 @@ def test_cli_auto_configures_qwen_3_5_and_reports_the_choice(monkeypatch, tmp_pa
     assert "reasoning_parser=qwen3" in captured_streams.err
 
 
+def test_cli_auto_configures_nemotron_h_mamba_cache_capacity(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "nemotron"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(json.dumps({"model_type": "nemotron_h"}))
+    captured = {}
+
+    def fake_run(_checkpoint_path, *, output_root, settings):
+        captured["settings"] = settings
+        return {"result_path": str(output_root / "summary.json"), "metrics": {}}
+
+    monkeypatch.setattr(evaluate_lmms_checkpoint, "run_lmms_eval_checkpoint", fake_run)
+
+    assert (
+        evaluate_lmms_checkpoint.main(
+            ["--checkpoint", str(checkpoint), "--output-dir", str(tmp_path / "results")]
+        )
+        == 0
+    )
+    assert captured["settings"]["model_args"]["max_num_seqs"] == 256
+
+
+def test_cli_max_num_seqs_overrides_model_profile(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "nemotron"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(json.dumps({"model_type": "nemotron_h"}))
+    captured = {}
+
+    def fake_run(_checkpoint_path, *, output_root, settings):
+        captured["settings"] = settings
+        return {"result_path": str(output_root / "summary.json"), "metrics": {}}
+
+    monkeypatch.setattr(evaluate_lmms_checkpoint, "run_lmms_eval_checkpoint", fake_run)
+
+    assert (
+        evaluate_lmms_checkpoint.main(
+            [
+                "--checkpoint",
+                str(checkpoint),
+                "--output-dir",
+                str(tmp_path / "results"),
+                "--max-num-seqs",
+                "128",
+            ]
+        )
+        == 0
+    )
+    assert captured["settings"]["model_args"]["max_num_seqs"] == 128
+
+
 def test_cli_full_run_and_runtime_overrides_are_wired(tmp_path):
     checkpoint = tmp_path / "teacher"
     checkpoint.mkdir()

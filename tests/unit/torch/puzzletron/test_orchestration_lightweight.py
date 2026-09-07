@@ -510,6 +510,52 @@ def test_tokenize_data_completeness_requires_exact_receipts_and_cache_set(
     assert not stage_is_complete(config, "tokenize_data")
 
 
+def test_tokenize_data_reuses_verified_caches_after_downstream_config_changes(
+    tmp_path: Path, write_terminal_manifest, write_token_cache
+) -> None:
+    caches = [
+        {
+            "output": str(tmp_path / "dataset_cache" / "train.tokens"),
+            "split": "train",
+            "num_samples": 2,
+            "seq_length": 3,
+            "shuffle_seed": 100,
+        },
+        {
+            "output": str(tmp_path / "dataset_cache" / "validation.tokens"),
+            "split": "validation",
+            "num_samples": 1,
+            "seq_length": 3,
+            "shuffle_seed": 101,
+        },
+    ]
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "dataset_path": str(tmp_path / "dataset"),
+        "convert": {"teacher_dir": str(tmp_path / "ckpts" / "teacher")},
+        "tokenize_data": {"enabled": True, "caches": caches},
+        "replacement_scoring": {"automodel": {"sdpa_method": ["CUDNN_ATTENTION"]}},
+    }
+    receipts = [write_token_cache(config, cache) for cache in caches]
+    write_terminal_manifest(
+        tmp_path,
+        "tokenize_data",
+        config=config,
+        outputs={"caches": receipts},
+    )
+
+    changed = {
+        **config,
+        "replacement_scoring": {
+            "automodel": {"sdpa_method": ["FLASH_ATTENTION", "MATH"]}
+        },
+    }
+    assert stage_is_complete(changed, "tokenize_data")
+
+    changed["dataset_path"] = str(tmp_path / "another_dataset")
+    assert not stage_is_complete(changed, "tokenize_data")
+
+
 def test_stage_completeness_rejects_skip_without_reason(
     tmp_path: Path, write_terminal_manifest
 ) -> None:

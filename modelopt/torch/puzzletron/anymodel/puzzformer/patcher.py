@@ -49,6 +49,7 @@ def _get_variable_from_stack(names: list[str]) -> Any:
 def deci_x_patcher(
     model_descriptor: ModelDescriptor,
     block_configs: List[BlockConfig | dict] | None = None,
+    decoder_layer_classes: List[type] | None = None,
 ):
     """Context manager that patches decoder layer __init__ for heterogeneous per-layer configs.
 
@@ -58,15 +59,18 @@ def deci_x_patcher(
 
     Args:
         model_descriptor: The model descriptor that defines which classes to patch
-            and how to map block_configs to layer overrides.
+        and how to map block_configs to layer overrides.
         block_configs: Optional list of BlockConfig (one per layer). If not provided,
             will try to read from config.block_configs during model initialization.
+        decoder_layer_classes: Optional exact decoder-layer classes to patch. This is
+            needed for trust-remote-code models whose cache can contain multiple
+            classes with the same name.
 
     Example:
         >>> with deci_x_patcher(LlamaModelDescriptor, block_configs):
         ...     model = AutoModelForCausalLM.from_config(config)
     """
-    decoder_layer_classes = model_descriptor.decoder_layer_cls()  # Now a list of classes
+    decoder_layer_classes = decoder_layer_classes or model_descriptor.decoder_layer_cls()
     if not isinstance(decoder_layer_classes, list):
         decoder_layer_classes = [decoder_layer_classes]
 
@@ -148,8 +152,14 @@ def deci_x_patcher(
 def override_config_with_block_configs(
     config: PretrainedConfig, block_configs: Dict[str, Any]
 ) -> PretrainedConfig:
-    """Create a copy of config with block_config overrides applied."""
+    """Create a layer-local config copy with block-config overrides applied."""
     _config = copy.deepcopy(config)
+    # A block constructor needs a single, concrete geometry. Keeping the
+    # heterogeneous view on this copy makes HF reject reads such as
+    # ``config.n_routed_experts`` even after the corresponding layer override
+    # has been applied below.
+    if getattr(_config, "is_heterogeneous", False):
+        _config.per_layer_config = None
     # Model initialization requires fails with None in case of no-ops
     _config_overrides = {k: v for k, v in block_configs.items() if v is not None}
     _config.update(_config_overrides)

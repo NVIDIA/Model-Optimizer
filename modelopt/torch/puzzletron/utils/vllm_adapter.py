@@ -519,12 +519,17 @@ def _derive_per_layer_config(
 
 
 def convert_block_configs_to_per_layer_config(
-    hf_config: Any, *, keep_block_configs: bool = False
+    hf_config: Any,
+    *,
+    keep_block_configs: bool = False,
+    replace_existing: bool = False,
 ) -> bool:
     """In-place: convert typed ``block_configs`` to ``per_layer_config``.
 
     Returns ``True`` if a conversion happened, ``False`` if there was
-    nothing to convert. If both representations exist, they must match.
+    nothing to convert. If both representations exist, they must match unless
+    ``replace_existing`` is requested by a caller that has just regenerated
+    the canonical ``block_configs`` representation.
 
     ``keep_block_configs`` is intended for canonical realized checkpoints that
     must be consumable by both Puzzletron's patched HF model constructors and
@@ -548,11 +553,13 @@ def convert_block_configs_to_per_layer_config(
     existing = _get(text_config, "per_layer_config")
     if existing:
         if existing != per_layer_config:
-            raise ValueError(
-                "AnyModel config carries both block_configs and per_layer_config, "
-                "but they are not equivalent. Keep only one canonical Puzzletron "
-                "representation before exporting to vLLM."
-            )
+            if not replace_existing:
+                raise ValueError(
+                    "AnyModel config carries both block_configs and per_layer_config, "
+                    "but they are not equivalent. Keep only one canonical Puzzletron "
+                    "representation before exporting to vLLM."
+                )
+            _set(text_config, "per_layer_config", per_layer_config)
         if not keep_block_configs:
             _delete(hf_config, "block_configs")
         return layer_types_updated

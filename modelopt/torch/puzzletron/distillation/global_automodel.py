@@ -395,7 +395,7 @@ def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> d
         "trust_remote_code": kd_config.trust_remote_code,
     }
     model.update(kd_config.teacher_model_kwargs if teacher else kd_config.student_model_kwargs)
-    if kd_config.mtp_ce_weight <= 0 and kd_config.mtp_kd_weight <= 0:
+    if not force_hf and kd_config.mtp_ce_weight <= 0 and kd_config.mtp_kd_weight <= 0:
         model.setdefault("num_nextn_predict_layers", 0)
     if kd_config.attn_implementation:
         model.setdefault("attn_implementation", kd_config.attn_implementation)

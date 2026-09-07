@@ -25,9 +25,10 @@ from safetensors import safe_open
 pytest.importorskip("transformers")
 
 from _test_utils.torch.transformers_models import create_tiny_qwen3_5vl_dir, create_tiny_qwen3_dir
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 import modelopt.torch.puzzletron as mtpz
+from modelopt.torch.puzzletron.anymodel.puzzformer.patcher import override_config_with_block_configs
 import modelopt.torch.puzzletron.stages.convert as convert_stage_module
 from modelopt.torch.puzzletron.stages.convert import (
     _conversion_source_matches,
@@ -397,6 +398,18 @@ def test_convert_anymodel(tmp_path):
     descriptor = mtpz.anymodel.ModelDescriptorFactory.get("qwen3")
     with mtpz.anymodel.deci_x_patcher(descriptor):
         _ = AutoModelForCausalLM.from_pretrained(output_dir)
+
+
+def test_override_config_projects_a_heterogeneous_config_to_one_layer():
+    """Layer-local overrides remove the heterogeneous view from the config copy."""
+    config = PretrainedConfig()
+    config.is_heterogeneous = True
+    config.per_layer_config = {"0": {"n_routed_experts": 8}}
+
+    overridden = override_config_with_block_configs(config, {"n_routed_experts": 8})
+
+    assert overridden.n_routed_experts == 8
+    assert overridden.per_layer_config is None
 
 
 def test_conversion_resume_rejects_partial_hf_checkpoint_without_block_configs(tmp_path):

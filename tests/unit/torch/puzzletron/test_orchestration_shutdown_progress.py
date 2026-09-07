@@ -662,6 +662,40 @@ def test_controller_ignores_failed_record_from_stale_stage_execution(tmp_path: P
     assert executor.submitted_stage_ids == ["convert"]
 
 
+def test_controller_retries_vllm_stats_finalization_after_validation_timeout(tmp_path: Path):
+    plan = _compile_test_plan(tmp_path, stage_filter="vllm_stats")
+    node = next(node for node in plan.stages if node.stage_id == "vllm_stats")
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    _record_completed_attempt(controller, node)
+    failed_attempts = [
+        replace(
+            attempt,
+            metadata={
+                **dict(attempt.metadata or {}),
+                "stage_finalization_failure": {
+                    "phase": "validation",
+                    "reason": "aggregate stage outputs missing",
+                    "exception_type": None,
+                },
+            },
+        )
+        for attempt in controller._persisted_stage_attempts(node)
+    ]
+    controller.store.write_stage_record(
+        StageRunRecord(
+            stage_id=node.stage_id,
+            status=JobState.FAILED.value,
+            attempts=failed_attempts,
+            aggregated=False,
+        )
+    )
+
+    controller._recover_failed_stages()
+
+    assert controller._failed_stages == set()
+    assert controller._finalization_failures[node.stage_id].phase == "validation"
+
+
 def test_controller_aggregates_completed_work_before_resubmitting(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):

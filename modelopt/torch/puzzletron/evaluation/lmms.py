@@ -43,6 +43,7 @@ _MODEL_ARG_FIELDS = frozenset(
         "dtype",
         "gpu_memory_utilization",
         "max_model_len",
+        "max_num_seqs",
         "trust_remote_code",
         "tokenizer",
         "tokenizer_mode",
