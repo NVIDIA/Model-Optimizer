@@ -193,9 +193,14 @@ def run_reusable_allocation(
                 "an incompatible reusable allocation is still active for this run root"
             )
         completed = store.load_allocation_result(plan_identity=plan_identity)
-        if not active and completed is not None:
+        if not active and _result_is_complete(plan, completed):
+            assert completed is not None
             terminal_result = dict(completed)
         elif not active:
+            if completed is not None:
+                logger.warning(
+                    "previous reusable allocation did not complete; submitting a replacement"
+                )
             prior_plan_identity = record.get("plan_identity")
             prior_job_id = handle.metadata.get("job_id") if handle is not None else None
             if isinstance(prior_plan_identity, str) and prior_job_id:
@@ -236,10 +241,7 @@ def run_reusable_allocation(
         release_controller_lease(lease)
 
     if terminal_result is not None:
-        if _result_is_complete(plan, terminal_result):
-            logger.success("campaign is already complete; no allocation submitted")
-        else:
-            logger.warning("returning the terminal result from the previous allocation")
+        logger.success("campaign is already complete; no allocation submitted")
         return terminal_result
     assert handle is not None and status is not None
     if once:

@@ -445,6 +445,22 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
         result={"halted": True, "reason": "worker failure"},
     )
     FakeSlurmExecutor.state = JobState.FAILED
+    retry = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+    assert retry["allocation_status"] == JobState.PENDING.value
+    assert FakeSlurmExecutor.submits == 3
+    assert "previous reusable allocation did not complete" in log_stream.getvalue()
+
+    store.write_allocation_result(
+        plan_identity=reusable_module.reusable_plan_identity(plan),
+        result={"halted": False, "completed": []},
+    )
+    FakeSlurmExecutor.state = JobState.COMPLETED
     terminal = run_reusable_allocation(
         plan,
         ("python", "worker.py"),
@@ -452,8 +468,8 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
         poll_interval_seconds=0,
         once=True,
     )
-    assert terminal["reason"] == "worker failure"
-    assert FakeSlurmExecutor.submits == 2
+    assert terminal == {"halted": False, "completed": []}
+    assert FakeSlurmExecutor.submits == 3
 
     foreign_attempt = AttemptSpec(
         attempt_id="foreign-attempt",
@@ -481,16 +497,14 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
         foreign_attempt.attempt_id,
         JobStatus(handle=foreign_handle, state=JobState.COMPLETED),
     )
-    assert (
-        run_reusable_allocation(
-            plan,
-            ("python", "worker.py"),
-            logger=logger,
-            poll_interval_seconds=0,
-            once=True,
-        )["reason"]
-        == "worker failure"
-    )
+    assert run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    ) == {"halted": False, "completed": []}
+    assert FakeSlurmExecutor.submits == 3
 
 
 def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
