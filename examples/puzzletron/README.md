@@ -20,7 +20,9 @@ Start with the maintained Qwen 3.5 0.8B VLM smoke. It exercises the complete
 image-text lifecycle with bounded workloads and at most one GPU per stage. Once
 it succeeds, the optional longer example campaign uses the same environment,
 runner, orchestrator, progress display, report, and resume command. That larger
-campaign is a scheduled, multi-hour example, not a routine smoke or presubmit.
+campaign takes longer than the smoke; its duration depends on worker hardware,
+scheduler availability, cache state, and the execution profile. It is intended
+for scheduled integration validation, not routine smoke or presubmit use.
 
 ### 1. Create the controller environment
 
@@ -138,7 +140,7 @@ report. For a failed or interrupted run, follow the actionable checks in
 The [Qwen VLM example guide](docs/qwen3p5_0p8b_vlm_smoke.md) lists the smoke's
 expected lifecycle checks and explains how to interpret its bounded results.
 
-### 6. Optional: run the longer multi-hour example
+### 6. Optional: run the longer example
 
 After the smoke succeeds, keep the controller venv and runner and select a new
 run root plus the longer example files:

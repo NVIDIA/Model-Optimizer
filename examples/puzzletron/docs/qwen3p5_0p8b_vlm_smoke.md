@@ -5,7 +5,13 @@ The Qwen 3.5 0.8B VLM example has two experiment files with distinct jobs:
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
 | `full_vlm_smoke.yaml` | Check the complete lifecycle on one GPU | `execution.single_gpu.yaml` |
-| `vlm_campaign.yaml` | Run a scheduled, multi-hour multi-axis example | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+
+Both recipes select vLLM's Triton GDN prefill backend. On a fresh worker, the
+FlashInfer GDN kernels can still be compiling when the server readiness check
+expires. Selecting Triton avoids that cold-start failure and makes startup
+predictable in the reviewed worker image; it is not a general performance
+recommendation.
 
 Start with `full_vlm_smoke.yaml`. It uses small workloads to check dataset
 preparation, pruning, MIP, materialization, checkpoint evaluation, serving,
@@ -99,7 +105,7 @@ After completion, inspect the campaign report and verify that:
 The smoke deliberately uses tiny workloads. Run a separate benchmark with
 representative requests before drawing performance conclusions.
 
-## Run the longer multi-hour illustrative campaign
+## Run the longer illustrative campaign
 
 The campaign enables hidden width (the model's shared transformer hidden size),
 heterogeneous FFN width (per-block feed-forward intermediate sizes), depth,
