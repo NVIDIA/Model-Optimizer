@@ -98,6 +98,10 @@ def run_autotune() -> int:
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
 
+    if not 1 <= args.remote_connection_retries <= 10:
+        logger.error("--remote_connection_retries must be between 1 and 10")
+        return 1
+
     log_benchmark_config(args)
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
     if trtexec_args and isinstance(trtexec_args, str):
@@ -109,6 +113,7 @@ def run_autotune() -> int:
         warmup_runs=args.warmup_runs,
         timing_runs=args.timing_runs,
         trtexec_args=trtexec_args,
+        remote_connection_retries=args.remote_connection_retries,
     )
 
     if benchmark_instance is None:
@@ -313,6 +318,13 @@ Examples:
         default=None,
         help="Additional command-line arguments to pass to trtexec as a single quoted string. "
         "Example: --trtexec_benchmark_args '--fp16 --workspace=4096 --verbose'",
+    )
+    trt_group.add_argument(
+        "--remote_connection_retries",
+        type=int,
+        default=3,
+        help="Number of TCP connection attempts to the remote board before aborting (1-10). "
+        "Only relevant when --remoteAutoTuningConfig is present in trtexec args (default: 3)",
     )
 
     # Logging

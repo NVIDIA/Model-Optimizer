@@ -31,8 +31,10 @@ import importlib.util
 import os
 import re
 import shutil
+import socket
 import tempfile
 import time
+import urllib.parse
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,7 @@ import numpy as np
 import torch
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.autotune.common import RemoteConnectionError
 from modelopt.onnx.quantization.ort_utils import _check_for_trtexec, _run_trtexec
 
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
@@ -48,6 +51,80 @@ if TRT_AVAILABLE:
     import tensorrt as trt
 
 TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
+
+
+_DEFAULT_PORTS = {"ssh": 22, "http": 80, "https": 443}
+
+
+def _check_remote_connectivity(trtexec_args: list[str], retries: int = 3) -> None:
+    """Test TCP connectivity to the remote autotuning board before running trtexec.
+
+    Scans trtexec_args for --remoteAutoTuningConfig, parses the URI to extract
+    hostname and port, then attempts a TCP connection with a 5-second timeout.
+    Retries up to `retries` times before raising an error.
+
+    Args:
+        trtexec_args: List of trtexec command-line arguments.
+        retries: Number of connection attempts before giving up (default: 3).
+
+    Raises:
+        RemoteConnectionError: If the remote board is unreachable after all retries.
+    """
+    config_value = None
+    for i, arg in enumerate(trtexec_args):
+        if arg.startswith("--remoteAutoTuningConfig="):
+            config_value = arg.split("=", 1)[1]
+            break
+        elif arg == "--remoteAutoTuningConfig" and i + 1 < len(trtexec_args):
+            config_value = trtexec_args[i + 1]
+            break
+
+    if config_value is None:
+        return
+
+    config_value = config_value.strip("'\"")
+
+    parsed = urllib.parse.urlparse(config_value)
+    hostname = parsed.hostname
+    if not hostname:
+        raise RemoteConnectionError(
+            f"Missing hostname in remote autotuning URI (scheme={parsed.scheme!r})"
+        )
+
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise RemoteConnectionError(
+            f"Invalid port in remote autotuning URI: {parsed.scheme}://{hostname} - {e}"
+        ) from e
+    if port is None:
+        port = _DEFAULT_PORTS.get(parsed.scheme, 22)
+
+    last_error = _try_connect(hostname, port, retries)
+    if last_error is not None:
+        raise RemoteConnectionError(
+            f"Cannot reach remote autotuning board at {hostname}:{port} after {retries} attempts - "
+            f"{last_error}. Exiting to avoid marking schemes as errors in state file."
+        ) from last_error
+
+
+def _try_connect(hostname: str, port: int, retries: int) -> Exception | None:
+    """Attempt TCP connection with retries. Returns None on success, last error on failure."""
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            conn = socket.create_connection((hostname, port), timeout=5)
+            conn.close()
+            return None
+        except (TimeoutError, OSError) as e:  # noqa: PERF203
+            last_error = e
+            if attempt < retries:
+                logger.warning(
+                    f"Remote board connection attempt {attempt}/{retries} failed "
+                    f"({hostname}:{port}): {e}. Retrying..."
+                )
+                time.sleep(2)
+    return last_error
 
 
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
@@ -159,6 +236,7 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
+        remote_connection_retries: int = 3,
     ):
         """Initialize the trtexec benchmark.
 
@@ -170,8 +248,12 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
+            remote_connection_retries: Number of TCP connection attempts to the remote
+                         board before giving up (default: 3). Only used when
+                         --remoteAutoTuningConfig is present in trtexec_args.
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
+        self._remote_connection_retries = remote_connection_retries
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
         self.engine_path = os.path.join(self.temp_dir, "engine.trt")
@@ -253,6 +335,8 @@ class TrtExecBenchmark(Benchmark):
         if not os.path.exists(self.timing_cache_file):
             self.logger.debug(f"Will create timing cache: {self.timing_cache_file}")
 
+        _check_remote_connectivity(self._base_cmd, retries=self._remote_connection_retries)
+
         try:
             model_path = path_or_bytes
             if isinstance(model_path, bytes):
@@ -286,15 +370,17 @@ class TrtExecBenchmark(Benchmark):
             if result.returncode != 0:
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
-                return float("inf")
+                return self._benchmark_failed()
 
             if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
                 self.logger.warning("Could not parse median latency from trtexec output")
                 self.logger.debug(f"trtexec stdout:\n{result.stdout}")
-                return float("inf")
+                return self._benchmark_failed()
             latency = float(match.group(1))
             self.logger.info(f"TrtExec benchmark (median): {latency:.2f} ms")
             return latency
+        except RemoteConnectionError:
+            raise
         except FileNotFoundError:
             self.logger.error(
                 "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
@@ -302,7 +388,24 @@ class TrtExecBenchmark(Benchmark):
             return float("inf")
         except Exception as e:
             self.logger.error(f"Benchmark failed: {e}")
-            return float("inf")
+            return self._benchmark_failed()
+
+    def _benchmark_failed(self) -> float:
+        """Classify a trtexec failure as transient (board lost) or genuine.
+
+        The pre-check in run() passed, but the board can drop while trtexec is
+        running. Re-test connectivity: if the board is gone the failure is a
+        network event, not a property of the scheme, and must not be recorded
+        as an error in the state file.
+
+        Returns:
+            float('inf') if the board is still reachable (genuine scheme failure).
+
+        Raises:
+            RemoteConnectionError: If the remote board is no longer reachable.
+        """
+        _check_remote_connectivity(self._base_cmd, retries=self._remote_connection_retries)
+        return float("inf")
 
 
 class TensorRTPyBenchmark(Benchmark):
