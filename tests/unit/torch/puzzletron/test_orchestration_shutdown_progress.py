@@ -43,11 +43,17 @@ from puzzletron_orchestrator.executors.local import LocalExecutor
 from puzzletron_orchestrator.progress import summarize_stage_artifacts
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
+    CommandSpec,
     ExecutionMode,
+    ExecutionStrategy,
     JobHandle,
     JobState,
     JobStatus,
+    ResumeDecision,
+    TaskTopology,
     ValidatedResult,
+    WorkItem,
+    WorkPlan,
 )
 from puzzletron_orchestrator.state import PersistedAttempt, StageRunRecord
 
@@ -437,10 +443,11 @@ def test_controller_waits_for_parent_job_after_artifact_appears(tmp_path: Path, 
     assert controller._parents_ready(child)
 
 
-def test_reusable_controller_defers_then_revisits_work_when_capacity_returns(
+def test_reusable_controller_admits_a_multi_attempt_stage_atomically(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    per_attempt = _compile_test_plan(tmp_path, stage_filter="vllm_stats")
+    per_attempt = _compile_test_plan(tmp_path, stage_filter="convert")
     assert per_attempt.runner.slurm is not None
     per_attempt = replace(
         per_attempt,
@@ -452,21 +459,75 @@ def test_reusable_controller_defers_then_revisits_work_when_capacity_returns(
     assert CampaignController(per_attempt, executor=LocalExecutor())._available_nodes() == 1
     plan = replace(per_attempt, execution_mode=ExecutionMode.REUSABLE_ALLOCATION)
 
+    items = tuple(
+        WorkItem(
+            work_id=f"convert:{index}",
+            stage_id="convert",
+            shard_index=index,
+            shard_count=3,
+            gpus_per_instance=gpus,
+        )
+        for index, gpus in enumerate((3, 3, 2))
+    )
+
+    class _BatchAdapter:
+        def prepare_execution_identity_projection(self, **_kwargs):
+            pass
+
+        def execution_identity_projection(self, **_kwargs):
+            return {}
+
+        def plan(self, _plan, _node):
+            return WorkPlan(
+                stage_id="convert",
+                strategy=ExecutionStrategy.SHARDED,
+                items=items,
+                aggregate_required=False,
+            )
+
+        def inspect_resume(self, **_kwargs):
+            return ResumeDecision(action="run", reason="not complete")
+
+        def command(self, *, item, attempt_id, **_kwargs):
+            return AttemptSpec(
+                attempt_id=attempt_id,
+                work_id=item.work_id,
+                stage_id=item.stage_id,
+                command=CommandSpec(argv=("true",)),
+                allocation_gpus=item.gpus_per_instance,
+                metadata={"gpus_per_node": item.gpus_per_instance},
+                task_topology=TaskTopology(
+                    task_count=item.gpus_per_instance,
+                    gpus_per_task=1,
+                ),
+            )
+
+    adapter = _BatchAdapter()
+    monkeypatch.setattr(controller_module, "adapter_for_stage", lambda _node: adapter)
+
     class _CapacityExecutor(_FakeExecutor):
         backend = "local"
-        available = False
+        capacity = 7
 
-        def can_submit(self, attempt):
-            return self.available
+        def __init__(self):
+            super().__init__()
+            self.submitted_attempts: list[AttemptSpec] = []
+
+        def can_submit_all(self, attempts):
+            return sum(attempt.allocation_gpus for attempt in attempts) <= self.capacity
+
+        def submit(self, attempt):
+            self.submitted_attempts.append(attempt)
+            return super().submit(attempt)
 
     executor = _CapacityExecutor()
     controller = CampaignController(plan, executor=executor)
 
     assert not controller._submit_stage(plan.stages[0])
-    assert executor._handles == {}
-    executor.available = True
+    assert executor.submitted_attempts == []
+    executor.capacity = 8
     assert controller._submit_stage(plan.stages[0])
-    assert len(executor._handles) == 1
+    assert [attempt.allocation_gpus for attempt in executor.submitted_attempts] == [3, 3, 2]
 
 
 @pytest.mark.parametrize("allocation_state", [JobState.RUNNING, JobState.COMPLETED])

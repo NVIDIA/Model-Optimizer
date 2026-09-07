@@ -36,6 +36,11 @@ class Executor(ABC):
 
         return True
 
+    def can_submit_all(self, attempts: Sequence[AttemptSpec]) -> bool:
+        """Return whether ``attempts`` can be admitted as one stage batch."""
+
+        return all(self.can_submit(attempt) for attempt in attempts)
+
     @abstractmethod
     def submit(self, attempt: AttemptSpec) -> JobHandle:
         raise NotImplementedError

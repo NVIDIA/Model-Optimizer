@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Compact lifecycle smoke inside one reusable eight-GPU Slurm allocation. Each
+# Compact lifecycle smoke inside one reusable two-GPU Slurm allocation. Each
 # logical stage keeps its own attempt and log; independent work may share the
 # configured GPU capacity without additional scheduler submissions.
 execution:
@@ -9,7 +9,7 @@ execution:
   defaults:
     failure_policy: strict
     halt_policy: drain
-    gpus_per_node: 8
+    gpus_per_node: 2
   stages:
     prepare_dataset: {strategy: single, resource: cpu}
     mip: {strategy: single, resource: cpu}

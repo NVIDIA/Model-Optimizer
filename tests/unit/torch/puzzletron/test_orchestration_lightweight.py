@@ -236,7 +236,13 @@ def test_orchestrator_cli_reports_config_errors_without_traceback(tmp_path: Path
     assert "Traceback" not in result.stderr
 
 
-def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) -> None:
+def _write_reusable_cli_configs(
+    tmp_path: Path,
+    *,
+    repository: str = "/repo",
+    venv: str = "/venv",
+    gpus_per_node: int = 6,
+) -> tuple[Path, Path, Path]:
     experiment = tmp_path / "experiment.yaml"
     runner = tmp_path / "runner.yaml"
     execution = tmp_path / "execution.yaml"
@@ -254,7 +260,7 @@ def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) ->
                 "runner": {
                     "kind": "slurm",
                     "slurm": {"account": "test", "partition": "gpu"},
-                    "execution_contract": {"repository": "/repo", "venv": "/venv"},
+                    "execution_contract": {"repository": repository, "venv": venv},
                 }
             }
         )
@@ -264,12 +270,17 @@ def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) ->
             {
                 "execution": {
                     "mode": "reusable_allocation",
-                    "defaults": {"gpus_per_node": 6},
+                    "defaults": {"gpus_per_node": gpus_per_node},
                     "stages": {"width_importance": {"strategy": "single"}},
                 }
             }
         )
     )
+    return experiment, runner, execution
+
+
+def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) -> None:
+    experiment, runner, execution = _write_reusable_cli_configs(tmp_path)
 
     result = subprocess.run(
         [
@@ -303,41 +314,11 @@ def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) ->
 
 
 def test_orchestrator_local_override_does_not_submit_reusable_allocation(tmp_path: Path) -> None:
-    experiment = tmp_path / "experiment.yaml"
-    runner = tmp_path / "runner.yaml"
-    execution = tmp_path / "execution.yaml"
-    experiment.write_text(
-        yaml.safe_dump(
-            {
-                "puzzle_dir": str(tmp_path / "run"),
-                "width_importance": {"enabled": True},
-            }
-        )
-    )
-    runner.write_text(
-        yaml.safe_dump(
-            {
-                "runner": {
-                    "kind": "slurm",
-                    "slurm": {"account": "test"},
-                    "execution_contract": {
-                        "repository": str(REPOSITORY_ROOT),
-                        "venv": sys.prefix,
-                    },
-                }
-            }
-        )
-    )
-    execution.write_text(
-        yaml.safe_dump(
-            {
-                "execution": {
-                    "mode": "reusable_allocation",
-                    "defaults": {"gpus_per_node": 1},
-                    "stages": {"width_importance": {"strategy": "single"}},
-                }
-            }
-        )
+    experiment, runner, execution = _write_reusable_cli_configs(
+        tmp_path,
+        repository=str(REPOSITORY_ROOT),
+        venv=sys.prefix,
+        gpus_per_node=1,
     )
 
     result = subprocess.run(

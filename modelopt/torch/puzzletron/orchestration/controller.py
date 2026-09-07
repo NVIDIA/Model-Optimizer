@@ -59,6 +59,7 @@ from .schema import (
     JobStatus,
     StagePlanNode,
     ValidatedResult,
+    WorkItem,
     WorkPlan,
 )
 from .stages import semantic_stage_config, stage_display_name
@@ -733,6 +734,7 @@ class CampaignController:
             f"{node.stage_id}: {node.strategy.value}, {len(work_plan.items)} work item(s), "
             f"{node.gpus_per_instance} GPU(s)/instance"
         )
+        pending: list[tuple[WorkItem, AttemptSpec]] = []
         for item in work_plan.items:
             prior: list[Mapping[str, Any]] = [
                 attempt
@@ -761,19 +763,22 @@ class CampaignController:
                     overrides=list(self.plan.overrides),
                 ),
             )
+            pending.append((item, attempt))
+        if not self.executor.can_submit_all([attempt for _, attempt in pending]):
+            self.logger.wait(
+                f"{node.stage_id}: reusable allocation capacity exhausted; "
+                "the complete stage will be submitted later"
+            )
+            return False
+        for item, attempt in pending:
             if available_nodes is not None and attempt.allocation_nodes > available_nodes:
                 self.logger.wait(
                     f"{node.stage_id}: node budget exhausted; "
                     "remaining work will be submitted later"
                 )
                 break
-            if not self.executor.can_submit(attempt):
-                self.logger.wait(
-                    f"{node.stage_id}: reusable allocation capacity exhausted; "
-                    "remaining work will be submitted later"
-                )
-                break
             handle = self.executor.submit(attempt)
+            attempt_id = attempt.attempt_id
             tracked = JobHandle(
                 backend=handle.backend,
                 handle_id=handle.handle_id,
@@ -1538,6 +1543,7 @@ class CampaignController:
             )
             if lease is None:
                 raise RuntimeError("another controller holds the campaign lease")
+            lease.start_heartbeat()
 
             self._campaign_started_monotonic = time.monotonic()
             self._reject_conflicting_reusable_allocation()

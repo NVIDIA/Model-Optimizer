@@ -17,8 +17,10 @@ resolved topology requires more than one. `execution.defaults.gpus_per_node`
 sets the outer allocation capacity; logical attempts lease disjoint subsets of
 the GPUs visible inside that allocation. Stage `instances` and task topology
 control how much of that capacity each ready stage can use. Capacity is not
-hard-coded to eight, although the maintained Qwen 3.5 0.8B profiles have only
-been validated on an eight-GPU node.
+hard-coded to eight. The maintained Qwen 3.5 0.8B smoke reserves two GPUs on
+one node, while the representative campaign reserves one eight-GPU node. Both
+profiles have been qualified only in the documented eight-GPU node
+environment.
 
 This mode assumes a Slurm site where one containerized task can see the full
 node allocation, shared campaign paths are mounted identically, and runtime

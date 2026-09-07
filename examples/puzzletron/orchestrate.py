@@ -128,19 +128,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _worker_path(path: str | Path, *, repository: str) -> str:
-    resolved = Path(path).resolve()
-    try:
-        relative = resolved.relative_to(REPOSITORY_ROOT)
-    except ValueError:
-        return str(resolved)
-    return str(Path(repository) / relative)
-
-
 def _reusable_worker_command(
     args: argparse.Namespace, plan: CampaignPlan, plan_identity: str
 ) -> tuple[str, ...]:
-    repository = plan.runner.contract.repository
     inputs = plan.puzzle_dir / "orchestration" / "reusable_inputs" / plan_identity
     command = [
         "python",
@@ -163,8 +153,6 @@ def _reusable_worker_command(
         command.extend(("--override", override))
     if args.max_iterations is not None:
         command.extend(("--max-iterations", str(args.max_iterations)))
-    if args.expect is not None:
-        command.extend(("--expect", _worker_path(args.expect, repository=repository)))
     return tuple(command)
 
 
@@ -296,10 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             once=args.once,
             max_iterations=args.max_iterations,
         )
-    verify_expectation_here = (
-        plan.execution_mode is not ExecutionMode.REUSABLE_ALLOCATION
-        or allocation_identity is not None
-    )
+    verify_expectation_here = allocation_identity is None and not result.get("detached")
     if args.expect is not None and verify_expectation_here:
         if result.get("report_status") == "completed":
             expectation = verify_expected_results(args.expect, puzzle_dir=plan.puzzle_dir)
@@ -332,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     expectation_exit_code = result.get("expectation_exit_code")
     if expectation_exit_code is not None:
         return int(expectation_exit_code)
-    return 0 if not result.get("halted") else 1
+    return 0 if not result.get("halted") and result.get("report_status") != "failed" else 1
 
 
 if __name__ == "__main__":

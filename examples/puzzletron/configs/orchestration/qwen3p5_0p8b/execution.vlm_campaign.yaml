@@ -13,7 +13,8 @@ execution:
     convert: {strategy: single, resource: cpu}
     mip: {strategy: single, resource: cpu}
     depth_importance: {strategy: single}
-    # Split eight resident workers across the three embedding widths (3/3/2).
+    # Keep the available GPUs busy while scoring the configured width scenarios.
+    # The adapter distributes this configurable worker count across those scenarios.
     replacement_scoring: {strategy: persistent_pool, instances: 8}
     # Five shards let the retained candidates use disjoint GPUs concurrently.
     # Lower this value when a site provides fewer GPUs or memory is constrained.

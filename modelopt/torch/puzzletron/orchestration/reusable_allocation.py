@@ -85,7 +85,7 @@ def build_reusable_allocation_attempt(
     if plan.runner.slurm is None:
         raise ValueError("reusable allocation attempt requires a Slurm runner")
     capacity = int(plan.execution_defaults.get("gpus_per_node", 8))
-    attempt_id = attempt_id or str(uuid.uuid4())
+    attempt_id = attempt_id or reusable_plan_identity(plan).rsplit("_", 1)[-1]
     return AttemptSpec(
         attempt_id=attempt_id,
         work_id="campaign:reusable-allocation",
@@ -104,6 +104,7 @@ def build_reusable_allocation_attempt(
             "gpus_per_node": capacity,
             "partition": plan.execution_defaults.get("partition"),
             "reusable_allocation": True,
+            "idempotent_submit": True,
         },
         task_topology=TaskTopology(task_count=1, gpus_per_task=capacity),
     )
@@ -126,8 +127,21 @@ def _handle_from_payload(payload: Mapping[str, Any] | None) -> JobHandle | None:
 def _result_is_complete(plan: CampaignPlan, result: Mapping[str, Any] | None) -> bool:
     if result is None:
         return False
-    return not result.get("halted") and all(
-        stage_is_complete(plan.experiment_config, node.stage_id) for node in plan.stages
+    return (
+        result.get("report_status") == "completed"
+        and not result.get("halted")
+        and all(stage_is_complete(plan.experiment_config, node.stage_id) for node in plan.stages)
+    )
+
+
+def _result_is_terminal_failure(result: Mapping[str, Any] | None) -> bool:
+    """Return whether retrying the same plan would only repeat a strict failure."""
+
+    return bool(
+        result
+        and result.get("halted")
+        and result.get("failed_stages")
+        and not result.get("cancelled")
     )
 
 
@@ -193,7 +207,9 @@ def run_reusable_allocation(
                 "an incompatible reusable allocation is still active for this run root"
             )
         completed = store.load_allocation_result(plan_identity=plan_identity)
-        if not active and _result_is_complete(plan, completed):
+        if not active and (
+            _result_is_complete(plan, completed) or _result_is_terminal_failure(completed)
+        ):
             assert completed is not None
             terminal_result = dict(completed)
         elif not active:
@@ -213,6 +229,15 @@ def run_reusable_allocation(
             store.clear_allocation_result()
             plan.log_dir.mkdir(parents=True, exist_ok=True)
             attempt = build_reusable_allocation_attempt(plan, command)
+            store.write_allocation(
+                {
+                    "schema_version": 1,
+                    "plan_identity": plan_identity,
+                    "submitting_at": time.time(),
+                    "attempt": asdict(attempt),
+                    "handle": None,
+                }
+            )
             handle = executor.submit(attempt)
             status = JobStatus(
                 handle=handle,
@@ -241,7 +266,10 @@ def run_reusable_allocation(
         release_controller_lease(lease)
 
     if terminal_result is not None:
-        logger.success("campaign is already complete; no allocation submitted")
+        if _result_is_complete(plan, terminal_result):
+            logger.success("campaign is already complete; no allocation submitted")
+        else:
+            logger.error("campaign already has a terminal failure; no allocation submitted")
         return terminal_result
     assert handle is not None and status is not None
     if once:
@@ -266,6 +294,9 @@ def run_reusable_allocation(
                         f"reusable allocation {handle.handle_id} completed without a result"
                     )
                 logger.success(f"reusable allocation {handle.handle_id} completed")
+                return result
+            result = store.load_allocation_result(plan_identity=plan_identity)
+            if result is not None:
                 return result
             return {
                 "allocation_status": status.state.value,

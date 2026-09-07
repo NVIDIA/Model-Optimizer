@@ -287,7 +287,11 @@ def test_orchestrator_returns_expectation_regression_exit_code(
     )
     run = tmp_path / "run"
     _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 5, "timing_ms": 1})
-    plan = SimpleNamespace(puzzle_dir=run, stages=())
+    plan = SimpleNamespace(
+        puzzle_dir=run,
+        stages=(),
+        execution_mode=orchestrate.ExecutionMode.PER_ATTEMPT,
+    )
 
     monkeypatch.setattr(orchestrate, "load_runner_config", lambda _path: object())
     monkeypatch.setattr(orchestrate, "validate_runner_ready", lambda _runner: None)
@@ -322,6 +326,103 @@ def test_orchestrator_returns_expectation_regression_exit_code(
     )
 
     assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["expectation_status"] == "regression"
+
+
+def test_orchestrator_returns_failure_when_final_report_fails(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    plan = SimpleNamespace(
+        puzzle_dir=tmp_path / "run",
+        stages=(),
+        execution_mode=orchestrate.ExecutionMode.PER_ATTEMPT,
+    )
+    monkeypatch.setattr(orchestrate, "load_runner_config", lambda _path: object())
+    monkeypatch.setattr(orchestrate, "validate_runner_ready", lambda _runner: None)
+    monkeypatch.setattr(orchestrate, "load_execution_config", lambda _path: {})
+    monkeypatch.setattr(orchestrate, "compile_campaign_plan", lambda **_kwargs: plan)
+
+    class _Controller:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"failed_stages": [], "halted": False, "report_status": "failed"}
+
+    monkeypatch.setattr(orchestrate, "CampaignController", _Controller)
+
+    assert (
+        orchestrate.main(
+            [
+                "--experiment",
+                "experiment.yaml",
+                "--runner",
+                "runner.yaml",
+                "--execution",
+                "execution.yaml",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out)["report_status"] == "failed"
+
+
+def test_reusable_orchestrator_verifies_expectation_after_worker_completion(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    contract = _contract(tmp_path)
+    _write(
+        contract.with_name("observation.json"),
+        {
+            "schema": "modelopt.puzzletron-reference-observation/v1",
+            "contract_id": "smoke-v1",
+            "values": {"identity": {}, "correct_rows": 7},
+        },
+    )
+    run = tmp_path / "run"
+    _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 5, "timing_ms": 1})
+    plan = SimpleNamespace(
+        puzzle_dir=run,
+        stages=(),
+        execution_mode=orchestrate.ExecutionMode.REUSABLE_ALLOCATION,
+        runner=SimpleNamespace(contract=SimpleNamespace(repository="/repo")),
+        experiment_config_path="experiment.yaml",
+        overrides=(),
+    )
+    worker_commands: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(orchestrate, "load_runner_config", lambda _path: object())
+    monkeypatch.setattr(orchestrate, "validate_runner_ready", lambda _runner: None)
+    monkeypatch.setattr(orchestrate, "load_execution_config", lambda _path: {})
+    monkeypatch.setattr(orchestrate, "compile_campaign_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(orchestrate, "reusable_plan_identity", lambda _plan: "identity")
+    monkeypatch.setattr(orchestrate, "_write_reusable_inputs", lambda *_args: None)
+
+    def _run_reusable(_plan, command, **_kwargs):
+        worker_commands.append(tuple(command))
+        return {"halted": False, "report_status": "completed"}
+
+    monkeypatch.setattr(orchestrate, "run_reusable_allocation", _run_reusable)
+
+    exit_code = orchestrate.main(
+        [
+            "--experiment",
+            "experiment.yaml",
+            "--runner",
+            "runner.yaml",
+            "--execution",
+            "execution.yaml",
+            "--expect",
+            str(contract),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--expect" not in worker_commands[0]
     assert json.loads(capsys.readouterr().out)["expectation_status"] == "regression"
 
 

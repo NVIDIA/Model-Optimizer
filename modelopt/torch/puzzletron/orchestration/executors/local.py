@@ -23,6 +23,7 @@ import signal
 import socket
 import subprocess  # nosec B404
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Sequence
@@ -73,6 +74,16 @@ class LocalExecutor(Executor):
         if topology.gpus_per_task == 0:
             return True
         required = topology.task_count * topology.gpus_per_task
+        leased = {gpu for lease in self._gpu_leases.values() for gpu in lease}
+        return len([gpu for gpu in self._managed_gpus if gpu not in leased]) >= required
+
+    def can_submit_all(self, attempts: Sequence[AttemptSpec]) -> bool:
+        if self._gpu_capacity is None:
+            return True
+        required = sum(
+            topology.task_count * topology.gpus_per_task
+            for topology in (resolve_task_topology(attempt) for attempt in attempts)
+        )
         leased = {gpu for lease in self._gpu_leases.values() for gpu in lease}
         return len([gpu for gpu in self._managed_gpus if gpu not in leased]) >= required
 
@@ -162,18 +173,62 @@ class LocalExecutor(Executor):
 
     @staticmethod
     def _terminate_processes(processes: Sequence[subprocess.Popen[str]]) -> None:
+        processes = tuple(processes)
+        if all(process.poll() is not None for process in processes):
+            return
+        process_groups = {process.pid for process in processes}
         for process in processes:
-            if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                process_groups.discard(process.pid)
+
+        deadline = time.monotonic() + 30
+        while process_groups and time.monotonic() < deadline:
+            for process in processes:
+                process.poll()
+            for process_group in tuple(process_groups):
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(process_group, 0)
                 except ProcessLookupError:
-                    pass
+                    process_groups.remove(process_group)
+                except PermissionError:
+                    # No signalable process remains in the group. This can be
+                    # reported for an already-terminated group on macOS.
+                    process_groups.remove(process_group)
+            if process_groups:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         for process in processes:
             if process.poll() is None:
                 try:
-                    process.wait(timeout=30)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    raise RuntimeError(
+                        f"local task process {process.pid} survived process-group termination"
+                    ) from None
+
+        kill_deadline = time.monotonic() + 5
+        while process_groups and time.monotonic() < kill_deadline:
+            for process_group in tuple(process_groups):
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    process_groups.remove(process_group)
+                except PermissionError:
+                    process_groups.remove(process_group)
+            if process_groups:
+                time.sleep(min(0.05, max(0.0, kill_deadline - time.monotonic())))
+        if process_groups:
+            raise RuntimeError(
+                "local task process group(s) survived termination: "
+                + ", ".join(str(process_group) for process_group in sorted(process_groups))
+            )
 
     @staticmethod
     def _close_log_files(processes: Sequence[subprocess.Popen[str]]) -> None:

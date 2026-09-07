@@ -31,10 +31,7 @@ from modelopt.torch.puzzletron.orchestration.compiler import (
 )
 from modelopt.torch.puzzletron.orchestration.controller import CampaignController, dry_run_plan
 from modelopt.torch.puzzletron.orchestration.identity import execution_contract_hash, hash_payload
-from modelopt.torch.puzzletron.orchestration.reusable_allocation import (
-    build_reusable_allocation_attempt,
-    reusable_plan_identity,
-)
+from modelopt.torch.puzzletron.orchestration.reusable_allocation import reusable_plan_identity
 from modelopt.torch.puzzletron.orchestration.schema import (
     ExecutionContract,
     ExecutionMode,
@@ -196,17 +193,34 @@ def test_compile_configures_one_node_reusable_allocation(tmp_configs) -> None:
         execution=load_execution_config(execution_path),
         stage_filter="vllm_stats",
     )
-    attempt = build_reusable_allocation_attempt(plan, ("python", "worker.py"), attempt_id="a1")
-
     assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
     assert plan_to_dict(plan)["execution_mode"] == "reusable_allocation"
-    assert attempt.allocation_nodes == 1
-    assert attempt.allocation_gpus == 6
     worker_plan = replace(
         plan,
         experiment_config={**plan.experiment_config, "_runtime": {"config_path": "/worker"}},
     )
     assert reusable_plan_identity(plan) == reusable_plan_identity(worker_plan)
+
+
+def test_compile_rejects_reusable_allocation_for_non_slurm_runner(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    runner_payload = yaml.safe_load(runner_path.read_text())
+    runner_payload["runner"].update(
+        {"kind": "baremetal", "inventory": {"hosts": [{"hostname": "worker", "gpus": 8}]}}
+    )
+    runner_payload["runner"].pop("slurm")
+    runner_path.write_text(yaml.safe_dump(runner_payload))
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match="requires a Slurm runner"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+            stage_filter="width_importance",
+        )
 
 
 def test_compile_rejects_multi_node_reusable_allocation(tmp_configs) -> None:

@@ -79,11 +79,13 @@ The reusable-allocation watcher has a narrower interruption contract: Ctrl-C
 detaches and leaves the outer Slurm job running. Rerun the identical command to
 reattach. Cancel the outer job with the site's normal Slurm command only when
 you intend to stop all work in that allocation. After Slurm reports the outer
-job cancelled or failed, rerunning starts a replacement allocation; this also
-applies when the worker wrote a terminal failure result. Completed logical
-stages remain skipped, and in-flight local attempts from that allocation are
-recorded as cancelled before unfinished work is resubmitted. A successful
-terminal result remains a no-op.
+job cancelled or failed, rerunning starts a replacement allocation when no
+terminal worker result was recorded. Completed logical stages remain skipped,
+and in-flight local attempts from that allocation are recorded as cancelled
+before unfinished work is resubmitted. A worker-authored terminal success or
+strict stage failure remains a no-op for the same plan; change its configuration
+or use a fresh run root before rerunning a failed campaign. A final-report
+failure remains retryable because the logical stages are already complete.
 
 Redirect stderr before piping through `tee` (for example, append
 `2>&1 | tee run.log`) so progress output is captured. Use `--color always` for

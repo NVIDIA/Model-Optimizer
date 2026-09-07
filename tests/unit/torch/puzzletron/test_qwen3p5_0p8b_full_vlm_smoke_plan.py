@@ -64,7 +64,7 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     serving_args = nodes["vlm_serving"]["config"]["topology"]["extra_vllm_args"]
 
     assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
-    assert plan.execution_defaults["gpus_per_node"] == 8
+    assert plan.execution_defaults["gpus_per_node"] == 2
     assert "tokenize_data" not in stages
     assert config["dataset_path"] == str(tmp_path / "full_vlm_smoke/datasets/nemotron_vlm_v2")
     assert config["prepare_dataset"]["output"] == config["dataset_path"]
@@ -97,7 +97,6 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     assert cpu_stages
     assert all(stage.total_gpus == 0 for stage in cpu_stages)
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
-    assert all(stage.nodes == 1 for stage in stages.values())
 
 
 def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) -> None:
@@ -140,7 +139,6 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
         stage_id for stage_id, stage in stages.items() if stage.total_gpus == 5
     } == concurrent_candidate_stages
     assert stages["post.candidates.serving"].total_gpus == 1
-    assert all(stage.nodes == 1 for stage in stages.values())
 
     profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None

@@ -4,8 +4,8 @@ The Qwen 3.5 0.8B VLM example has two experiment files with distinct purposes:
 
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
-| `full_vlm_smoke.yaml` | Check the complete lifecycle in one reusable node allocation | `qwen3p5_0p8b/execution.vlm_smoke.yaml` |
-| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `full_vlm_smoke.yaml` | Check the complete lifecycle in one reusable two-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_smoke.yaml` |
+| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example in one reusable eight-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
 
 Both recipes select vLLM's Triton GDN prefill backend. On a fresh worker, the
 FlashInfer GDN kernels can still be compiling when the server readiness check
@@ -42,8 +42,10 @@ If workers cannot access the network, populate those caches before launch and
 mount them through the runner. Keep the experiment's public model repository
 and revision unchanged; a local cache is only where workers obtain those files.
 
-The accelerated profiles are qualified for the documented one-node/eight-GPU
-environment. Other Slurm sites may need adaptation; see [Slurm
+The accelerated profiles are qualified for a Slurm environment with eight-GPU
+nodes. The smoke reserves two GPUs on one node, while the representative
+campaign reserves all eight GPUs on one node. Other Slurm sites may need
+adaptation; see [Slurm
 configuration](slurm_configuration.md#reusable-single-node-allocations).
 
 ## Run the lifecycle smoke
@@ -79,8 +81,8 @@ Unlike the text-only example, this VLM route does not publish a separate
 tokenized-dataset artifact. It keeps the image conversations in their native
 format so the model processor can construct text and image inputs together.
 
-Use the maintained experiment with its reusable eight-GPU execution profile
-and a site-specific runner:
+Use the maintained experiment with its reusable two-GPU, single-node execution
+profile and a site-specific runner:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
@@ -126,12 +128,13 @@ The flow is intentionally compact:
 5. Apply the configured aggregate-rank rule to the searched candidates and
    measure serving for the selected result.
 
-The execution profile splits replacement scoring into eight resident workers
-across the three embedding widths. It shards initial image evaluation across
-five tasks, then runs materialization, pre-KD evaluation, KD, and post-KD
-evaluation for the five retained candidates across disjoint GPUs. Each stage
-runs concurrently up to the configured capacity; final serving measures only
-the selected candidate, and individual stages do not all consume eight GPUs.
+The execution profile uses up to eight resident workers for replacement
+scoring, distributed across the configured width scenarios. It shards initial
+image evaluation across five tasks, then runs materialization, pre-KD
+evaluation, KD, and post-KD evaluation for the five retained candidates across
+disjoint GPUs. Each stage runs concurrently up to the configured capacity;
+final serving measures only the selected candidate, and individual stages do
+not all consume eight GPUs.
 
 The 128-step value demonstrates the integration. It is not a convergence
 criterion or recommended training duration. The aggregate-rank rule is also an

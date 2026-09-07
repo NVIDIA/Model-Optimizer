@@ -49,6 +49,7 @@ _POOL_STAGES = {
         "worker": "examples/puzzletron/distributed_eval/run_worker.sh",
     },
 }
+_REPLACEMENT_WORKER_PORT_BASE = 6010
 
 
 def _replacement_widths(plan: CampaignPlan) -> tuple[int | None, ...]:
@@ -145,6 +146,8 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
         f"replacement_scoring.solutions_path={puzzle_dir / f'{stem}.json'}",
         f"replacement_scoring.output_dir={puzzle_dir / f'{stem}--validation'}",
     ]
+    if dataset_path := plan.experiment_config.get("dataset_path"):
+        overrides.append(f"dataset_path={dataset_path}")
     if scoring.get("bypass_checkpoint_dir") is not None:
         overrides.append(
             f"replacement_scoring.bypass_checkpoint_dir={puzzle_dir / 'ckpts' / 'bypass_overlay'}"
@@ -198,7 +201,8 @@ class PersistentPoolAdapter(WorkAdapter):
                         "worker_count": worker_counts[index],
                         # Width gangs can share one reusable node. Give each gang
                         # a disjoint HTTP port range for its resident workers.
-                        "worker_port_base": 5010 + sum(worker_counts[:index]),
+                        "worker_port_base": _REPLACEMENT_WORKER_PORT_BASE
+                        + sum(worker_counts[:index]),
                         **({"width": int(width)} if width is not None else {}),
                     },
                 )
@@ -300,7 +304,9 @@ class PersistentPoolAdapter(WorkAdapter):
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
                 env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
-                env["WORKER_PORT_BASE"] = str(item.metadata.get("worker_port_base", 5010))
+                env["WORKER_PORT_BASE"] = str(
+                    item.metadata.get("worker_port_base", _REPLACEMENT_WORKER_PORT_BASE)
+                )
                 replacement_widths = _replacement_widths(plan)
                 if len(replacement_widths) > 1:
                     width = int(item.metadata["width"])

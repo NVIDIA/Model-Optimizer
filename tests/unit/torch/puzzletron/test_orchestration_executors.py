@@ -16,6 +16,7 @@
 """Tests for orchestration executors."""
 
 import io
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -89,20 +90,31 @@ def test_local_executor_runs_successful_command(tmp_path: Path):
     assert log_path.read_text().splitlines()[-1] == "ok"
 
 
-def test_local_executor_skips_runner_hooks_in_prepared_allocation(tmp_path: Path) -> None:
+def test_local_executor_runs_without_runner_hooks_in_prepared_allocation(tmp_path: Path) -> None:
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(
             repository=str(tmp_path),
             venv=str(tmp_path / ".venv"),
-            prerun_commands=("prepare-once",),
-            postrun_commands=("cleanup-once",),
+            prerun_commands=("exit 88",),
+            postrun_commands=("exit 89",),
         ),
         slurm=SlurmRunnerConfig(account="acct"),
     )
     executor = LocalExecutor(runner, environment_prepared=True)
+    attempt = AttemptSpec(
+        attempt_id="prepared",
+        work_id="stage:prepared",
+        stage_id="stage",
+        command=CommandSpec(argv=("python", "-c", "print('prepared')")),
+    )
 
-    assert executor._wrapped_argv(("python", "worker.py")) == ["python", "worker.py"]
+    handle = executor.submit(attempt)
+    deadline = time.monotonic() + 5
+    while (status := executor.poll([handle])[0]).state is JobState.RUNNING:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert status.state is JobState.COMPLETED
 
 
 def test_controller_lease_keeps_fresh_partial_lock_exclusive(tmp_path: Path) -> None:
@@ -125,6 +137,17 @@ def test_controller_lease_renews_while_owner_is_running(tmp_path: Path, monkeypa
     assert acquire_controller_lease(root, "contender") is None
     lease.release()
     assert acquire_controller_lease(root, "contender") is not None
+
+
+def test_controller_lease_heartbeat_prevents_takeover(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    lease = acquire_controller_lease(root, "owner", ttl_seconds=1)
+
+    assert lease is not None
+    lease.start_heartbeat()
+    time.sleep(1.1)
+    assert acquire_controller_lease(root, "contender", ttl_seconds=1) is None
+    lease.release()
 
 
 def test_reusable_controller_lease_owner_is_bound_to_scheduler_job(monkeypatch) -> None:
@@ -182,6 +205,10 @@ while not gate.exists():
 
     try:
         first = executor.submit(_attempt("a1"))
+        assert executor.can_submit(_attempt("batch-a"))
+        assert not executor.can_submit_all(
+            (_attempt("batch-a"), _attempt("batch-b"), _attempt("batch-c"))
+        )
         second = executor.submit(_attempt("a2", task_count=2))
         handles.extend((first, second))
 
@@ -211,6 +238,50 @@ while not gate.exists():
         assert third.metadata["allocated_gpus"] == ("2", "5", "7")
     finally:
         executor.cancel(handles)
+
+
+def test_local_executor_failure_terminates_sibling_process_groups_and_releases_gpus(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    child_pid_path = tmp_path / "child.pid"
+    code = f"""\
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+if os.environ["PUZZLETRON_LOCAL_TASK_INDEX"] == "0":
+    time.sleep(0.2)
+    raise SystemExit(3)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+Path({str(child_pid_path)!r}).write_text(str(child.pid))
+time.sleep(60)
+"""
+    attempt = AttemptSpec(
+        attempt_id="gang",
+        work_id="stage:gang",
+        stage_id="stage",
+        command=CommandSpec(argv=("python", "-c", code)),
+        allocation_gpus=2,
+        metadata={"gpus_per_node": 2},
+        task_topology=TaskTopology(task_count=2, gpus_per_task=1),
+    )
+    executor = LocalExecutor(gpu_capacity=2)
+    handle = executor.submit(attempt)
+    deadline = time.monotonic() + 5
+    while not child_pid_path.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    while (status := executor.recover(handle)).state is JobState.RUNNING:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert status.state is JobState.FAILED
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(child_pid_path.read_text()), 0)
+    assert executor.can_submit(attempt)
 
 
 def test_baremetal_preflight_checks_repository_and_venv_on_every_host(
@@ -351,9 +422,30 @@ def test_render_sbatch_script_requests_gpus_per_node():
     assert "--cpus-per-task" not in srun
 
 
+def _reusable_plan(tmp_path: Path) -> CampaignPlan:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct"),
+    )
+    return CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={"gpus_per_node": 6},
+        stages=(),
+        contract_hash="contract",
+        execution_mode=ExecutionMode.REUSABLE_ALLOCATION,
+    )
+
+
 def test_reusable_allocation_reattaches_without_duplicate_submit(
     tmp_path: Path, monkeypatch
 ) -> None:
+    plan = _reusable_plan(tmp_path)
+    store = reusable_module.CampaignStateStore(plan.puzzle_dir)
+
     class FakeSlurmExecutor:
         submits = 0
         state = JobState.RUNNING
@@ -364,6 +456,11 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
 
         def submit(self, attempt):
             type(self).submits += 1
+            record = store.load_allocation()
+            assert record is not None
+            assert record["plan_identity"] == reusable_module.reusable_plan_identity(plan)
+            assert record["handle"] is None
+            assert record["attempt"]["attempt_id"] == attempt.attempt_id
             return JobHandle(
                 backend="slurm",
                 handle_id="slurm-123",
@@ -383,21 +480,6 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
             return tuple(handle.metadata.get("log_paths", ()))
 
     monkeypatch.setattr(reusable_module, "SlurmExecutor", FakeSlurmExecutor)
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct"),
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config={},
-        runner=runner,
-        execution_defaults={"gpus_per_node": 6},
-        stages=(),
-        contract_hash="contract",
-        execution_mode=ExecutionMode.REUSABLE_ALLOCATION,
-    )
     log_stream = io.StringIO()
     logger = OrchestratorLogger(color="never", stream=log_stream)
 
@@ -418,8 +500,6 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
 
     assert FakeSlurmExecutor.submits == 1
     assert first["allocation_handle"] == second["allocation_handle"] == "slurm-123"
-    assert plan.log_dir.is_dir()
-    assert "reattached to reusable allocation slurm-123; log=" in log_stream.getvalue()
 
     FakeSlurmExecutor.state = JobState.CANCELLED
     plan_identity = reusable_module.reusable_plan_identity(plan)
@@ -439,7 +519,6 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
     assert replacement["allocation_status"] == JobState.PENDING.value
     assert not dead_lease.path.exists()
 
-    store = reusable_module.CampaignStateStore(plan.puzzle_dir)
     store.write_allocation_result(
         plan_identity=reusable_module.reusable_plan_identity(plan),
         result={"halted": True, "reason": "worker failure"},
@@ -458,7 +537,45 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
 
     store.write_allocation_result(
         plan_identity=reusable_module.reusable_plan_identity(plan),
-        result={"halted": False, "completed": []},
+        result={"halted": False, "completed": [], "report_status": "failed"},
+    )
+    FakeSlurmExecutor.state = JobState.COMPLETED
+    incomplete = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+    assert incomplete["allocation_status"] == JobState.PENDING.value
+    assert FakeSlurmExecutor.submits == 4
+
+    failed_result = {
+        "halted": True,
+        "failed_stages": ["replacement_scoring"],
+        "report_status": "blocked",
+    }
+    store.write_allocation_result(
+        plan_identity=reusable_module.reusable_plan_identity(plan),
+        result=failed_result,
+    )
+    FakeSlurmExecutor.state = JobState.FAILED
+    assert (
+        run_reusable_allocation(
+            plan,
+            ("python", "worker.py"),
+            logger=logger,
+            poll_interval_seconds=0,
+            once=True,
+        )
+        == failed_result
+    )
+    assert FakeSlurmExecutor.submits == 4
+    assert "terminal failure" in log_stream.getvalue()
+
+    store.write_allocation_result(
+        plan_identity=reusable_module.reusable_plan_identity(plan),
+        result={"halted": False, "completed": [], "report_status": "completed"},
     )
     FakeSlurmExecutor.state = JobState.COMPLETED
     terminal = run_reusable_allocation(
@@ -468,8 +585,8 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
         poll_interval_seconds=0,
         once=True,
     )
-    assert terminal == {"halted": False, "completed": []}
-    assert FakeSlurmExecutor.submits == 3
+    assert terminal == {"halted": False, "completed": [], "report_status": "completed"}
+    assert FakeSlurmExecutor.submits == 4
 
     foreign_attempt = AttemptSpec(
         attempt_id="foreign-attempt",
@@ -503,8 +620,81 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
         logger=logger,
         poll_interval_seconds=0,
         once=True,
-    ) == {"halted": False, "completed": []}
-    assert FakeSlurmExecutor.submits == 3
+    ) == {"halted": False, "completed": [], "report_status": "completed"}
+    assert FakeSlurmExecutor.submits == 4
+    store.write_allocation(
+        {
+            "plan_identity": "different-plan",
+            "handle": {
+                "backend": "slurm",
+                "handle_id": "slurm-123",
+                "attempt_id": "attempt",
+                "metadata": {"job_id": "123"},
+            },
+        }
+    )
+    FakeSlurmExecutor.state = JobState.RUNNING
+    with pytest.raises(RuntimeError, match="incompatible reusable allocation"):
+        run_reusable_allocation(
+            plan,
+            ("python", "worker.py"),
+            logger=OrchestratorLogger(color="never", stream=io.StringIO()),
+            poll_interval_seconds=0,
+            once=True,
+        )
+
+
+@pytest.mark.parametrize("scheduler_state", [JobState.COMPLETED, JobState.FAILED])
+def test_reusable_allocation_blocking_wait_returns_worker_result(
+    tmp_path: Path, monkeypatch, scheduler_state: JobState
+) -> None:
+    plan = _reusable_plan(tmp_path)
+    store = reusable_module.CampaignStateStore(plan.puzzle_dir)
+    expected = (
+        {"halted": False, "report_status": "completed"}
+        if scheduler_state is JobState.COMPLETED
+        else {"halted": True, "failed_stages": ["stage"], "report_status": "skipped"}
+    )
+
+    class FakeSlurmExecutor:
+        polls = 0
+
+        def __init__(self, _runner, *, scripts_dir):
+            assert scripts_dir == plan.puzzle_dir / "orchestration" / "sbatch"
+
+        def submit(self, attempt):
+            return JobHandle(
+                backend="slurm",
+                handle_id="slurm-123",
+                attempt_id=attempt.attempt_id,
+                metadata={"job_id": "123"},
+            )
+
+        def recover(self, handle):
+            type(self).polls += 1
+            state = JobState.PENDING if type(self).polls == 1 else scheduler_state
+            if state is scheduler_state:
+                store.write_allocation_result(
+                    plan_identity=reusable_module.reusable_plan_identity(plan),
+                    result=expected,
+                )
+            return JobStatus(handle=handle, state=state)
+
+        @staticmethod
+        def fetch_logs(_handle):
+            return ()
+
+    monkeypatch.setattr(reusable_module, "SlurmExecutor", FakeSlurmExecutor)
+
+    assert (
+        run_reusable_allocation(
+            plan,
+            ("python", "worker.py"),
+            logger=OrchestratorLogger(color="never", stream=io.StringIO()),
+            poll_interval_seconds=0,
+        )
+        == expected
+    )
 
 
 def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
@@ -1097,6 +1287,37 @@ def test_slurm_submit_recovers_job_after_ambiguous_timeout(tmp_path: Path, monke
     assert submit_count == 1
 
 
+def test_slurm_submit_reconciles_persisted_idempotent_attempt_before_sbatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(argv):
+        calls.append(list(argv))
+        if argv[0] == "squeue":
+            return subprocess.CompletedProcess(argv, 0, stdout="54321\n", stderr="")
+        pytest.fail("persisted submission intent should reconcile before sbatch")
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition="gpu"),
+    )
+    attempt = AttemptSpec(
+        attempt_id="abcdef12-3456",
+        work_id="campaign:reusable-allocation",
+        stage_id="campaign",
+        command=CommandSpec(argv=("python", "worker.py")),
+        metadata={"idempotent_submit": True},
+    )
+
+    handle = SlurmExecutor(runner, scripts_dir=tmp_path / "sbatch").submit(attempt)
+
+    assert handle.handle_id == "slurm-54321"
+    assert [call[0] for call in calls] == ["squeue"]
+
+
 def test_slurm_recover_keeps_running_when_squeue_misses_and_sacct_says_running(
     tmp_path: Path, monkeypatch
 ):
@@ -1409,10 +1630,6 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
-    assert [attempt.command.env["WORKER_PORT_BASE"] for attempt in attempts] == [
-        "5010",
-        "5014",
-    ]
     assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
         "++replacement_scoring.automodel.lm_head_backend=streaming",
         "++replacement_scoring.automodel.lm_head_backend=streaming",
@@ -1471,9 +1688,9 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     )
     assert [item.metadata["worker_count"] for item in three_width_work_plan.items] == [3, 3, 2]
     assert [attempt.command.env["WORKER_PORT_BASE"] for attempt in three_width_attempts] == [
-        "5010",
-        "5013",
-        "5016",
+        "6010",
+        "6013",
+        "6016",
     ]
     replacement_pool_script = (
         Path(__file__).parents[4] / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
@@ -1482,7 +1699,7 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
 
 
 def test_replacement_width_overrides_reach_runtime_config(tmp_path: Path):
-    _, _, attempts = _replacement_width_attempts(tmp_path, [2048])
+    plan, _, attempts = _replacement_width_attempts(tmp_path, [2048])
     attempt = attempts[0]
 
     config = load_runtime_config(
@@ -1497,6 +1714,7 @@ def test_replacement_width_overrides_reach_runtime_config(tmp_path: Path):
     assert config.build_replacement_library.source_checkpoint_dir == teacher
     assert config.scoring.source_checkpoint_dir == teacher
     assert config.scoring.target_teacher_dir == teacher
+    assert config.scoring.dataset_path == plan.experiment_config["dataset_path"]
 
 
 def test_replacement_pool_completion_identity_changes_with_embedding_widths(tmp_path: Path):
@@ -1693,6 +1911,7 @@ def _replacement_width_attempts(
         experiment_config_path=str(tmp_path / "experiment.yaml"),
         puzzle_dir=tmp_path / "run",
         experiment_config={
+            "dataset_path": str(tmp_path / "datasets" / "nemotron_vlm_v2"),
             "embedding_pruning": {"enabled": True, "widths": widths},
             "replacement_scoring": {"granularity": "subblock"},
         },

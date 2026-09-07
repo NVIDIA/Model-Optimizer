@@ -16,15 +16,15 @@ the model guide remains their canonical reference.
 ## Start here: lifecycle smoke
 
 Start with the maintained Qwen 3.5 0.8B VLM smoke. It exercises the complete
-image-text lifecycle with bounded workloads inside one reusable eight-GPU Slurm
-allocation. Logical stages still have separate attempts, logs, artifacts, and
-resume checks. Once it succeeds, the optional longer example campaign uses the
-same environment, runner, orchestrator, progress display, report, and resume
-command. Logical stage progress is emitted in the reusable allocation log. That
-larger campaign takes longer than the smoke; its duration depends on worker
-hardware, scheduler availability, cache state, and the execution profile. It is
-intended for scheduled integration validation, not routine smoke or presubmit
-use.
+image-text lifecycle with bounded workloads inside one reusable Slurm allocation
+that reserves two GPUs on a single node. Logical stages still have separate
+attempts, logs, artifacts, and resume checks. Once it succeeds, the optional
+longer example campaign uses the same environment, runner, orchestrator,
+progress display, report, and resume command. Logical stage progress is emitted
+in the reusable allocation log. That larger campaign takes longer than the
+smoke; its duration depends on worker hardware, scheduler availability, cache
+state, and the execution profile. It is intended for scheduled integration
+validation, not routine smoke or presubmit use.
 
 ### 1. Create the controller environment
 
@@ -61,8 +61,10 @@ Python paths must exist inside the worker image. See [environment
 setup](docs/environment_setup.md) for the worker contract and [Slurm
 configuration](docs/slurm_configuration.md) for each runner field.
 
-This accelerated route is qualified for the documented one-node/eight-GPU
-environment, not for arbitrary Slurm sites. See [Slurm
+These accelerated profiles are qualified for a Slurm environment with
+eight-GPU nodes: the smoke reserves two GPUs on one node, while the
+representative campaign reserves all eight GPUs on one node. They are not
+qualified for arbitrary Slurm sites. See [Slurm
 configuration](docs/slurm_configuration.md#reusable-single-node-allocations)
 for the assumptions and settings another site may need to adapt.
 
@@ -128,10 +130,14 @@ python examples/puzzletron/orchestrate.py \
 Run the launch command above again to recover an interrupted smoke or verify a
 completed one. It reattaches to a compatible active outer allocation. After
 Slurm reports that allocation failed or was cancelled, it starts a replacement
-and reruns only unfinished compatible work, including after a worker-authored
-terminal failure. A successful terminal result remains a no-op, and compatible
-completed stages are not submitted again. Puzzletron stores its structured
-runtime state under `$PUZZLETRON_RUN_ROOT/orchestration/`.
+and reruns only unfinished compatible work when no terminal worker result was
+recorded. A worker-authored completion or strict stage failure remains a no-op
+for the same plan, which prevents an unchanged failing campaign from consuming
+another allocation. A final-report failure remains retryable because its
+logical stages are already complete. Changing the configuration or run root
+creates a new plan identity; compatible completed stages in the same run root
+are still not submitted again. Puzzletron stores its structured runtime state
+under `$PUZZLETRON_RUN_ROOT/orchestration/`.
 
 The reusable-allocation watcher shows the outer Slurm state and allocation log
 path. Follow that log to see the inner controller's completed/total stages,
@@ -143,7 +149,8 @@ throughput; otherwise it says `ETA unavailable`.
 After the selected plan completes cleanly, `orchestrate.py` attempts to write the
 final report to
 `<puzzle-dir>/artifacts/campaign_report/campaign_report.html`. A report failure
-does not fail the completed campaign and is recorded in the run result. See
+does not invalidate completed logical stages, but it is recorded in the run
+result and the command exits nonzero so the report can be retried. See
 [run and recovery options](docs/orchestration_operations.md) for individual
 stages, `--once`, logging controls, security options, and recovery details, or
 [campaign reports](docs/campaign_reports.md) to regenerate and interpret a
@@ -174,10 +181,10 @@ python examples/puzzletron/orchestrate.py \
 Inspect the larger plan, then remove `--dry-run` to launch it. Use that same
 launch command for every resume. The example increases sample counts,
 candidate coverage, and distillation work. Its execution profile uses
-configured within-node candidate concurrency when dependencies are ready, but
-does not introduce another operational path. Use focused tests and the
-lifecycle smoke for routine development; reserve this campaign for scheduled
-integration validation.
+one eight-GPU node and configured within-node candidate concurrency when
+dependencies are ready, but does not introduce another operational path. Use
+focused tests and the lifecycle smoke for routine development; reserve this
+campaign for scheduled integration validation.
 
 ## Choose the next task
 
