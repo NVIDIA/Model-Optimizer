@@ -131,7 +131,7 @@ post_mip:
           mode: top_k
           metric: image_eval.lm_loss
           direction: minimize
-          top_k: 4
+          top_k: 5
         materialized:
           type: materialize
           input: best_image_loss

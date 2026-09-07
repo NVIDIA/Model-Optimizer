@@ -96,7 +96,7 @@ same frozen evaluator rows, teacher checkpoint, and 128-step example KD budget.
 The flow is intentionally compact:
 
 1. Generate parameter-constrained multi-axis candidates.
-2. Retain four searched candidates by image-text LM loss.
+2. Retain five searched candidates by image-text LM loss.
 3. Materialize and evaluate every retained checkpoint before KD.
 4. Run 128 KD steps and evaluate again on the same 344 rows.
 5. Apply the configured aggregate-rank rule to the searched candidates and
