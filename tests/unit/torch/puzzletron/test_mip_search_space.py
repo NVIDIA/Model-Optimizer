@@ -18,7 +18,12 @@ import json
 import pytest
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, MoEConfig
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    MambaConfig,
+    MoEConfig,
+)
 from modelopt.torch.puzzletron.mip.mip_with_multi_layer_replacements import run_mip
 from modelopt.torch.puzzletron.mip.run_puzzle import PuzzleConstraints, run_single_puzzle_config
 from modelopt.torch.puzzletron.mip.search_space import (
@@ -109,6 +114,40 @@ def test_axis_filter_binds_a_nonteacher_value_to_one_layer():
     )
 
     assert set(filtered) == {"l0-teacher", "l1-kv-small"}
+
+
+def test_axis_filter_supports_mamba_num_groups():
+    metrics = {
+        "teacher": _replacement(
+            0,
+            _block(MambaConfig(num_heads=4, num_groups=2, head_dim=8, state_dim=16)),
+            0.1,
+            100,
+            teacher=True,
+        ),
+        "small": _replacement(
+            0,
+            _block(MambaConfig(num_heads=4, num_groups=1, head_dim=8, state_dim=16)),
+            0.2,
+            90,
+        ),
+    }
+
+    filtered = filter_replacements_by_axes(
+        metrics,
+        axis_options={"mamba.num_groups": [1]},
+    )
+
+    assert set(filtered) == {"small"}
+
+
+def test_axis_filter_supports_range_selector():
+    filtered = filter_replacements_by_axes(
+        _metrics(),
+        axis_options={"moe.top_k": {"range": [1, 2]}},
+    )
+
+    assert set(filtered) == {"l0-small", "l1-small"}
 
 
 def test_axis_filter_rejects_layer_scope_where_axis_is_absent():

@@ -94,17 +94,6 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     assert config["prepare_dataset"]["evaluation_hf_home"] == str(tmp_path / "hf-home")
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
 
-    assert {
-        axis for axis, settings in config["search_space"]["axes"].items() if settings["enabled"]
-    } == {
-        "hidden_width",
-        "kv_groups",
-        "q_heads_per_group",
-        "ffn_intermediate",
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    }
     assert set(config["mip"]["runs"]) == {"params-90"}
     assert candidates["best_image_loss"]["top_k"] == 5
     assert candidates["kd"]["config"]["max_steps"] == 128

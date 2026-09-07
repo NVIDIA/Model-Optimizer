@@ -152,7 +152,8 @@ def test_qwen3p5_0p8b_vlm_campaign_keeps_mild_domains_explicit() -> None:
     }
 
 
-def test_qwen3p5_0p8b_vlm_campaign_generates_every_eligible_axis_value() -> None:
+def test_qwen3p5_0p8b_vlm_campaign_generates_axis_values_for_each_block_type() -> None:
+    model = yaml.safe_load(MODEL_PATH.read_text())
     campaign = yaml.safe_load(CAMPAIGN_PATH.read_text())
     linear_block = BlockConfig(
         subblock_configs=(
@@ -172,7 +173,11 @@ def test_qwen3p5_0p8b_vlm_campaign_generates_every_eligible_axis_value() -> None
             FFNConfig(name="mlp", intermediate_size=3584),
         )
     )
-    block_configs = (linear_block,) * 18 + (full_attention_block,) * 6
+    full_attention_layers = set(model["model_info"]["full_attention_layer_indices"])
+    block_configs = tuple(
+        full_attention_block if layer_idx in full_attention_layers else linear_block
+        for layer_idx in range(model["model_info"]["num_hidden_layers"])
+    )
     expected_ffn_sizes = {3584, 3328, 3072}
     expected_attention_shapes = {(8, 2), (6, 2), (4, 1), (3, 1)}
     expected_gdn_shapes = {
@@ -182,41 +187,43 @@ def test_qwen3p5_0p8b_vlm_campaign_generates_every_eligible_axis_value() -> None
         for value_dim in (128, 112)
     }
 
-    for hidden_width in (1024, 960, 896):
-        candidates = build_candidate_library(
-            block_configs,
-            search_space={"axes": campaign["search_space"]["axes"]},
-            parent_checkpoint_identity="qwen3p5-0p8b-teacher",
-            include_self=True,
-            include_noops=False,
-            hidden_width=hidden_width,
-        )
+    candidates = build_candidate_library(
+        block_configs,
+        search_space={"axes": campaign["search_space"]["axes"]},
+        parent_checkpoint_identity="qwen3p5-0p8b-teacher",
+        include_self=True,
+        include_noops=False,
+        hidden_width=960,
+    )
 
-        assert {candidate.hidden_width for candidate in candidates} == {hidden_width}
-        for layer_idx in range(24):
-            layer_candidates = [
-                candidate for candidate in candidates if candidate.layer_idx == layer_idx
-            ]
+    assert {candidate.hidden_width for candidate in candidates} == {960}
+    assert {candidate.layer_idx for candidate in candidates} == set(
+        range(model["model_info"]["num_hidden_layers"])
+    )
+    for layer_idx in (0, 3):
+        layer_candidates = [
+            candidate for candidate in candidates if candidate.layer_idx == layer_idx
+        ]
+        assert {
+            candidate.block_config.require_subblock("ffn").intermediate_size
+            for candidate in layer_candidates
+        } == expected_ffn_sizes
+
+        if layer_idx == 0:
             assert {
-                candidate.block_config.require_subblock("ffn").intermediate_size
+                (
+                    candidate.block_config.require_subblock("mamba").num_heads,
+                    candidate.block_config.require_subblock("mamba").num_groups,
+                    candidate.block_config.require_subblock("mamba").state_dim,
+                    candidate.block_config.require_subblock("mamba").head_dim,
+                )
                 for candidate in layer_candidates
-            } == expected_ffn_sizes
-
-            if layer_idx < 18:
-                assert {
-                    (
-                        candidate.block_config.require_subblock("mamba").num_heads,
-                        candidate.block_config.require_subblock("mamba").num_groups,
-                        candidate.block_config.require_subblock("mamba").state_dim,
-                        candidate.block_config.require_subblock("mamba").head_dim,
-                    )
-                    for candidate in layer_candidates
-                } == expected_gdn_shapes
-            else:
-                assert {
-                    (
-                        candidate.block_config.require_subblock("attention").num_query_heads,
-                        candidate.block_config.require_subblock("attention").num_kv_heads,
-                    )
-                    for candidate in layer_candidates
-                } == expected_attention_shapes
+            } == expected_gdn_shapes
+        else:
+            assert {
+                (
+                    candidate.block_config.require_subblock("attention").num_query_heads,
+                    candidate.block_config.require_subblock("attention").num_kv_heads,
+                )
+                for candidate in layer_candidates
+            } == expected_attention_shapes

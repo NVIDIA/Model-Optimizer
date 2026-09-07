@@ -642,3 +642,71 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
         "effective": 4,
         "source": "preset",
     }
+
+
+def _campaign_files(campaign_dir: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(campaign_dir): path.read_bytes()
+        for path in campaign_dir.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_build_keeps_generated_dry_run_snapshots_stable(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    build_bundles_v2(state.campaign_dir, state)
+    snapshots = {
+        budget: (state.campaign_dir / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+
+    build_bundles_v2(state.campaign_dir, WizardState.resume(state.campaign_dir))
+
+    assert snapshots == {
+        budget: (state.campaign_dir / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+    assert all(".puzzletron-v2-" not in snapshot for snapshot in snapshots.values())
+
+
+@pytest.mark.parametrize("failure_point", ["dry_run", "readme_publish"])
+def test_build_failure_restores_the_previous_bundle(
+    tmp_path: Path, monkeypatch, failure_point: str
+) -> None:
+    state = _campaign_state(tmp_path)
+    campaign = state.campaign_dir
+    build_bundles_v2(campaign, state)
+    state.set_field(
+        "infrastructure.runner.slurm.partition",
+        "replacement-gpu-partition",
+        source="user",
+    )
+    readme_path = campaign / "README.md"
+    readme_path.write_text(f"{readme_path.read_text()}\nrollback sentinel\n")
+    published_files = _campaign_files(campaign)
+
+    if failure_point == "dry_run":
+        render_plan = bundle_module.dry_run_bundle
+
+        def fail_production_plan(bundle):
+            if bundle.parent == campaign and bundle.name == "production":
+                raise RuntimeError("dry-run rendering failed")
+            return render_plan(bundle)
+
+        monkeypatch.setattr(bundle_module, "dry_run_bundle", fail_production_plan)
+        expected_error = "dry-run rendering failed"
+    else:
+        replace = bundle_module.os.replace
+
+        def fail_readme_publish(source, target):
+            if target == campaign / "README.md" and source.name == "README.md":
+                raise RuntimeError("README publication failed")
+            return replace(source, target)
+
+        monkeypatch.setattr(bundle_module.os, "replace", fail_readme_publish)
+        expected_error = "README publication failed"
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        build_bundles_v2(campaign, state)
+
+    assert _campaign_files(campaign) == published_files
