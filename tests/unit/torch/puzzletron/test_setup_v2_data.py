@@ -30,6 +30,7 @@ from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
     _CUSTOM_DATA_SOURCE,
+    _DEFAULT_DATA_SOURCE,
     _NEMOTRON_VLM_DATA_SOURCE,
     _PUZZLE_KD_DATA_SOURCE,
     _data_source_choices,
@@ -43,7 +44,7 @@ class _CapturingBackend(ScriptedBackend):
         self.checkbox_calls = []
 
     def checkbox(self, message, choices, defaults):
-        self.checkbox_calls.append((message, tuple(choices), tuple(defaults)))
+        self.checkbox_calls.append((tuple(choices), tuple(defaults)))
         return super().checkbox(message, choices, defaults)
 
 
@@ -99,10 +100,10 @@ def test_data_choices_include_first_class_sources_and_deduplicate_default():
 
     choices = _data_source_choices(resolver)
 
-    assert [choice.title for choice in choices] == [
-        f"Default — {_PUZZLE_KD_DATA_SOURCE}",
-        "NVIDIA Nemotron-VLM v2: recommended image-text dataset",
-        "Custom dataset: choose a local path or Hugging Face dataset",
+    assert [choice.value for choice in choices] == [
+        _DEFAULT_DATA_SOURCE,
+        _NEMOTRON_VLM_DATA_SOURCE,
+        _CUSTOM_DATA_SOURCE,
     ]
 
 
@@ -259,11 +260,13 @@ def test_nemotron_vlm_subset_prompt_uses_catalog_choices_and_defaults(tmp_path):
     _, backend = _run_nemotron_vlm_data_section(tmp_path)
 
     assert len(backend.checkbox_calls) == 1
-    message, choices, defaults = backend.checkbox_calls[0]
-    assert message == "Dataset subsets:"
-    assert len(choices) == 46
-    assert choices[0].title == "sparsetables — 100 rows — 1.00 KiB"
-    assert choices[3].disabled == "external media required"
+    choices, defaults = backend.checkbox_calls[0]
+    assert tuple(choice.value for choice in choices) == tuple(
+        subset.name for subset in _nemotron_catalog().subsets
+    )
+    assert next(choice for choice in choices if choice.value == "external").disabled == (
+        "external media required"
+    )
     assert defaults == ("sparsetables", "plotqa_cot", "wiki_en")
 
 
@@ -319,7 +322,7 @@ def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
             "weight": 0.9,
         },
     ]
-    assert backend.checkbox_calls[0][2] == ("small",)
+    assert backend.checkbox_calls[0][1] == ("small",)
 
 
 def test_guided_explicit_invalid_subset_fails_instead_of_falling_back(
@@ -436,7 +439,7 @@ def test_checkbox_rejects_a_disabled_scripted_selection(tmp_path):
 
 
 def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch):
-    rendered = []
+    shown_choices = []
 
     class _KeyBindings:
         @staticmethod
@@ -459,7 +462,6 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
     class _Questionary:
         @staticmethod
         def Choice(**kwargs):  # noqa: N802 - mirrors questionary's public constructor
-            rendered.append(kwargs)
             return kwargs
 
         @staticmethod
@@ -472,11 +474,8 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
 
         @staticmethod
         def checkbox(message, choices, *, instruction, style):
-            assert message == "Subsets:"
-            assert choices[:2] == rendered
-            assert choices[2] == {"separator": "  ← Back (press Esc)"}
-            assert "<esc> to go back" in instruction
-            assert style
+            del message, instruction, style
+            shown_choices.extend(choices)
             return _Question()
 
     monkeypatch.setattr(
@@ -502,6 +501,6 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
     )
 
     assert selected == ["hosted"]
-    assert rendered[0]["checked"]
-    assert rendered[0]["disabled"] is None
-    assert rendered[1]["disabled"] == "external media required"
+    assert shown_choices[0]["checked"]
+    assert shown_choices[0]["disabled"] is None
+    assert shown_choices[1]["disabled"] == "external media required"

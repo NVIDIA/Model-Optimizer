@@ -360,6 +360,70 @@ def test_resolved_sections_take_precedence_over_compatibility_overrides(tmp_path
     assert experiment["pruning"]["automodel"]["parallel"]["tp"] == 2
 
 
+def test_smoke_renderer_caps_bounded_work_without_changing_production(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    mip = deepcopy(state.collection("mip_config"))
+    run = mip["runs"]["params-90"]
+    run["solver"] = {"num_solutions": 8}
+    run["homogeneous"] = {"enabled": True, "keep": "all", "rank_by": "objective"}
+    state.set_collection("mip_config", mip)
+    nodes = {
+        "evaluation": {
+            "type": "evaluation",
+            "config": {"eval_samples": 128, "block_size": 2048},
+        },
+        "serving": {
+            "type": "aiperf",
+            "config": {
+                "input_tokens": 256,
+                "output_tokens": 160,
+                "request_count": 32,
+                "extra_inputs": {"min_tokens": 160},
+            },
+        },
+        "filter": {"type": "filter", "top_k": 5},
+        "kd": {
+            "type": "global_kd",
+            "config": {
+                "max_steps": 128,
+                "global_batch_size": 128,
+                "checkpoint_every_steps": 128,
+            },
+        },
+        "comparison": {"type": "downstream_evaluation", "config": {"limit": 64}},
+    }
+    state.set_collection(
+        "post_mip_flows",
+        {"selection": {"source": {"run": "params-90"}, "nodes": nodes}},
+    )
+
+    smoke = render_experiment_v2(state, "smoke")
+    production = render_experiment_v2(state, "production")
+    smoke_run = smoke["mip"]["runs"]["params-90"]
+    smoke_nodes = smoke["post_mip"]["flows"]["selection"]["nodes"]
+    production_run = production["mip"]["runs"]["params-90"]
+
+    assert smoke_run["solver"]["num_solutions"] == 2
+    assert smoke_run["homogeneous"]["keep"] == 2
+    assert smoke_nodes["evaluation"]["config"] == {"eval_samples": 2, "block_size": 512}
+    assert smoke_nodes["serving"]["config"] == {
+        "input_tokens": 100,
+        "output_tokens": 80,
+        "request_count": 1,
+        "extra_inputs": {"min_tokens": 80},
+    }
+    assert smoke_nodes["filter"]["top_k"] == 1
+    assert smoke_nodes["kd"]["config"] == {
+        "max_steps": 2,
+        "global_batch_size": 1,
+        "checkpoint_every_steps": 2,
+    }
+    assert smoke_nodes["comparison"]["config"]["limit"] == 8
+    assert production_run["solver"]["num_solutions"] == 8
+    assert production_run["homogeneous"]["keep"] == "all"
+    assert production["post_mip"]["flows"]["selection"]["nodes"] == nodes
+
+
 def test_stage_batches_update_shared_data_sections(tmp_path: Path) -> None:
     state = _campaign_state(tmp_path)
     state.set_collection(

@@ -168,19 +168,13 @@ def test_prepare_benchmark_datasets_dispatches_media_only_for_media_tasks(tmp_pa
     assert prepared == ["mvbench"]
 
 
-def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path):
+@pytest.mark.parametrize("dangling", [False, True])
+def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path, dangling):
     target = tmp_path / "target"
-    target.mkdir()
+    if not dangling:
+        target.mkdir()
     alias = tmp_path / "hf-home"
     alias.symlink_to(target, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="must not be a symlink"):
-        preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
-
-
-def test_prepare_benchmark_datasets_rejects_dangling_symlinked_hf_home(tmp_path):
-    alias = tmp_path / "hf-home"
-    alias.symlink_to(tmp_path / "missing", target_is_directory=True)
 
     with pytest.raises(ValueError, match="must not be a symlink"):
         preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
@@ -244,6 +238,8 @@ def test_prepared_media_reuse_tolerates_distributed_filesystem_mtime_skew(tmp_pa
     inventory[0]["mtime_ns"] += 1_000_000_000
 
     assert preparation._inventory_is_current(root, inventory)
+    inventory[0]["sha256"] = "0" * 64
+    assert not preparation._inventory_is_current(root, inventory)
 
 
 def test_prepared_media_reuse_reports_paths_from_the_current_mount(tmp_path):
@@ -590,7 +586,8 @@ def test_concurrent_media_preparation_is_task_locked_and_publishes_only_complete
     second.join(timeout=5)
 
     assert not errors
-    assert not first.is_alive() and not second.is_alive()
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert extraction_count == 1
     assert len(results) == 2
     assert all(result["status"] == "complete" for result in results)

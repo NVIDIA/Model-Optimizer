@@ -23,6 +23,12 @@ from puzzletron_setup import SetupError, inspection
 from puzzletron_setup.inspection import normalize_dataset_source, normalize_model_source
 
 
+class _OfflineApi:
+    def model_info(self, source, revision=None):
+        del source, revision
+        raise RuntimeError("offline")
+
+
 def test_normalizes_hugging_face_web_urls():
     assert normalize_model_source("https://huggingface.co/Qwen/Qwen3.5-0.8B") == (
         "Qwen/Qwen3.5-0.8B"
@@ -54,12 +60,7 @@ def test_inspect_model_uses_cached_config_when_hub_resolution_is_unavailable(tmp
     config_path.parent.mkdir(parents=True)
     config_path.write_text('{"model_type": "cached"}\n')
 
-    class OfflineApi:
-        def model_info(self, source, revision=None):
-            del source, revision
-            raise RuntimeError("offline")
-
-    monkeypatch.setattr(inspection, "HfApi", OfflineApi)
+    monkeypatch.setattr(inspection, "HfApi", _OfflineApi)
     monkeypatch.setattr(
         inspection,
         "try_to_load_from_cache",
@@ -95,6 +96,42 @@ def test_inspect_model_uses_cached_config_when_hub_resolution_is_unavailable(tmp
     assert model.resolved_revision == revision
     assert model.config == {"model_type": "cached"}
     assert model.inventory == "cached-inventory"
+
+
+def test_inspect_model_rejects_ambiguous_cached_revisions(tmp_path, monkeypatch):
+    revisions = ("a" * 40, "b" * 40)
+    snapshots = []
+    for revision in revisions:
+        snapshot = tmp_path / "snapshots" / revision
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}\n")
+        snapshots.append(SimpleNamespace(snapshot_path=snapshot, commit_hash=revision))
+
+    monkeypatch.setattr(inspection, "HfApi", _OfflineApi)
+    monkeypatch.setattr(inspection, "try_to_load_from_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        inspection,
+        "scan_cache_dir",
+        lambda: SimpleNamespace(
+            repos=[SimpleNamespace(repo_type="model", repo_id="Qwen/cached", revisions=snapshots)]
+        ),
+    )
+
+    with pytest.raises(SetupError, match="Cannot resolve Hugging Face model"):
+        inspection.inspect_model("Qwen/cached")
+
+
+def test_inspect_model_does_not_substitute_another_cached_revision(monkeypatch):
+    monkeypatch.setattr(inspection, "HfApi", _OfflineApi)
+    monkeypatch.setattr(inspection, "try_to_load_from_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        inspection,
+        "scan_cache_dir",
+        lambda: pytest.fail("an explicit revision miss must not scan other cached revisions"),
+    )
+
+    with pytest.raises(SetupError, match="Cannot resolve Hugging Face model"):
+        inspection.inspect_model("Qwen/cached", revision="requested")
 
 
 def test_cached_model_ref_preserves_snapshot_commit_across_blob_symlink(tmp_path, monkeypatch):

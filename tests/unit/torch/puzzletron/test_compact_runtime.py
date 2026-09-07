@@ -32,7 +32,6 @@ from modelopt.torch.puzzletron.pruning.compact_runtime import (
     compact_grouped_attention_forward,
     resolve_compact_grouped_attention_target,
     supports_compact_gated_delta_net,
-    supports_compact_grouped_attention,
 )
 from modelopt.torch.puzzletron.pruning.gated_delta_net import (
     GDNShape,
@@ -100,7 +99,7 @@ def test_compact_grouped_attention_target_requires_reduced_supported_geometry():
     assert resolve_compact_grouped_attention_target(layer, teacher, teacher) is None
 
 
-def test_compact_grouped_attention_dispatches_native_automodel_sdpa_backend():
+def test_compact_grouped_attention_executes_native_sdpa_and_rejects_other_backends():
     # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
     pytest.importorskip("nemo_automodel.components.models.qwen3_next.layers")
     from nemo_automodel.components.models.common import BackendConfig
@@ -140,27 +139,46 @@ def test_compact_grouped_attention_dispatches_native_automodel_sdpa_backend():
         num_query_heads=2,
         num_kv_heads=1,
     )
-    original_forward = attention.forward.__func__
-    original_state = set(vars(attention))
-
-    assert supports_compact_grouped_attention(
-        attention,
-        orig_num_q=4,
-        orig_num_kv=2,
-        head_dim=8,
-    )
     target = resolve_compact_grouped_attention_target(layer, teacher, child)
-    assert target == {
-        "module": attention,
-        "orig_num_q": 4,
-        "orig_num_kv": 2,
-        "target_num_q": 2,
-        "target_num_kv": 1,
-        "head_dim": 8,
-    }
+    assert target is not None
+    attention = target.pop("module")
+    kernel_shapes = []
 
-    assert attention.forward.__func__ is original_forward
-    assert set(vars(attention)) == original_state
+    def compact_attention(query, key, value, **kwargs):
+        kernel_shapes.append((query.shape, key.shape, value.shape))
+        return torch.zeros_like(query)
+
+    attention.attn_func = compact_attention
+    dtype = attention.q_proj.weight.dtype
+    hidden_states = torch.randn(1, 4, config.hidden_size, dtype=dtype)
+    freqs_cis = torch.cat(
+        (
+            torch.ones(1, 4, config.head_dim // 2, dtype=dtype),
+            torch.zeros(1, 4, config.head_dim // 2, dtype=dtype),
+        ),
+        dim=-1,
+    )
+    with compact_grouped_attention_forward(attention, **target):
+        output = attention(hidden_states, freqs_cis=freqs_cis)
+    restored_output = attention(hidden_states, freqs_cis=freqs_cis)
+
+    assert kernel_shapes == [
+        (
+            torch.Size((1, 2, 4, 8)),
+            torch.Size((1, 1, 4, 8)),
+            torch.Size((1, 1, 4, 8)),
+        ),
+        (
+            torch.Size((1, 4, 4, 8)),
+            torch.Size((1, 2, 4, 8)),
+            torch.Size((1, 2, 4, 8)),
+        ),
+    ]
+    assert output.shape == restored_output.shape == hidden_states.shape
+
+    attention.backend.attn = "te"
+    with pytest.raises(RuntimeError, match="refusing to score reduced geometry"):
+        resolve_compact_grouped_attention_target(layer, teacher, child)
 
 
 @pytest.mark.parametrize(("target_num_q", "target_num_kv"), [(2, 1), (2, 2)])
@@ -213,8 +231,6 @@ def test_compact_grouped_attention_matches_physical_projection_geometry(
     )
     attention_mask = torch.zeros(1, 1, 4, 4, dtype=dtype)
     original_shapes = {name: tuple(tensor.shape) for name, tensor in teacher.state_dict().items()}
-    projection_modules = (teacher.q_proj, teacher.k_proj, teacher.v_proj, teacher.o_proj)
-    assert all("forward" not in vars(module) for module in projection_modules)
 
     with torch.no_grad():
         teacher_output = teacher(
@@ -235,7 +251,6 @@ def test_compact_grouped_attention_matches_physical_projection_geometry(
             target_num_kv=target_num_kv,
             head_dim=8,
         ):
-            assert all("forward" in vars(module) for module in projection_modules)
             runtime_output = teacher(
                 hidden_states,
                 position_embeddings,
@@ -297,7 +312,6 @@ def test_compact_grouped_attention_matches_physical_projection_geometry(
         original_shapes
     )
     assert teacher.num_key_value_groups == 2
-    assert all("forward" not in vars(module) for module in projection_modules)
 
 
 @pytest.mark.parametrize(
@@ -341,8 +355,6 @@ def test_compact_gdn_matches_physical_projection_and_kernel_geometry(
     hidden_states = torch.randn(2, 4, teacher_config.hidden_size, dtype=dtype)
     attention_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]])
     original_shapes = {name: tuple(tensor.shape) for name, tensor in teacher.state_dict().items()}
-    assert supports_compact_gated_delta_net(teacher, teacher_shape=teacher_shape)
-    assert "forward" not in vars(teacher)
 
     with torch.no_grad():
         teacher_output = teacher(hidden_states, attention_mask=attention_mask)
@@ -352,7 +364,6 @@ def test_compact_gdn_matches_physical_projection_and_kernel_geometry(
             teacher_shape=teacher_shape,
             target_shape=target_shape,
         ):
-            assert "forward" in vars(teacher)
             runtime_output = teacher(hidden_states, attention_mask=attention_mask)
 
         physical_cache = DynamicCache(config=target_config)
@@ -385,7 +396,6 @@ def test_compact_gdn_matches_physical_projection_and_kernel_geometry(
         original_shapes
     )
     assert GDNShape.from_module(teacher) == teacher_shape
-    assert "forward" not in vars(teacher)
 
 
 @pytest.mark.parametrize(

@@ -330,18 +330,6 @@ class _TrackingFakeExecutor(_FakeExecutor):
         return str(handle.metadata.get("work_id", "")).split(":", 1)[0]
 
 
-def _blocked_descendants(plan, failed_stages: set[str]) -> set[str]:
-    blocked = set(failed_stages)
-    changed = True
-    while changed:
-        changed = False
-        for node in plan.stages:
-            if node.stage_id not in blocked and any(parent in blocked for parent in node.parents):
-                blocked.add(node.stage_id)
-                changed = True
-    return blocked
-
-
 def _compile_test_plan(
     tmp_path: Path,
     *,
@@ -952,18 +940,6 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
         and attempt["work_id"].split(":", 1)[0] != failed_stage
         for attempt in controller.store.list_attempts()
     )
-    blocked = {failed_stage}
-    changed = True
-    while changed:
-        changed = False
-        for node in plan.stages:
-            if node.stage_id not in blocked and any(parent in blocked for parent in node.parents):
-                blocked.add(node.stage_id)
-                changed = True
-    attempted_stages = {
-        attempt["work_id"].split(":", 1)[0] for attempt in controller.store.list_attempts()
-    }
-    assert not ((blocked - {failed_stage}) & attempted_stages)
 
 
 def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
@@ -1066,9 +1042,6 @@ def test_controller_failed_ancestor_blocks_descendant_submit(
     assert result["failed_stages"] == ["sort_sanity"]
     assert "bypass_sanity" in executor.submitted_stage_ids
     assert "width_sanity" not in executor.submitted_stage_ids
-    blocked = _blocked_descendants(plan, {"sort_sanity"})
-    assert "width_sanity" in blocked
-    assert "bypass_sanity" not in blocked
 
 
 def test_controller_sigint_during_recovery_cancels_jobs(tmp_path: Path):

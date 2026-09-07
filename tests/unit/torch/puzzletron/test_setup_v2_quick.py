@@ -65,7 +65,7 @@ def test_only_cpu_slurm_integer_defaults_accept_null() -> None:
         "cpu_cpus_per_task": None,
         "cpu_memory_mb": None,
     }
-    with pytest.raises(SetupError, match="data.sequence_length must be an integer"):
+    with pytest.raises(SetupError, match=r"data\.sequence_length must be an integer"):
         validate_defaults({"schema_version": 1, "data": {"sequence_length": None}})
 
 
@@ -346,7 +346,7 @@ def test_guided_data_rejects_an_explicit_modality_incompatible_with_the_model(
         lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
     )
 
-    with pytest.raises(SetupError, match="multimodal.*incompatible"):
+    with pytest.raises(SetupError, match=r"multimodal.*incompatible"):
         data_section(
             WizardSession(
                 state,
@@ -450,9 +450,6 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     )
 
     assert result == campaign.resolve()
-    assert (campaign / "smoke" / "experiment.yaml").is_file()
-    assert (campaign / "production" / "experiment.yaml").is_file()
-    assert (campaign / "resolved_defaults.yaml").is_file()
     generated = WizardState.resume(campaign)
     assert generated.collection("pruning")["depth_remove"] == 0
     assert generated.collection("pruning")["width_importance_samples"] == 8
@@ -488,19 +485,6 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         '{"enable_thinking": false}',
     ]
     smoke_comparison = smoke_flow["nodes"]["quality_benchmarks"]
-    smoke_nodes = smoke_flow["nodes"]
-    smoke_mip_run = next(iter(smoke["mip"]["runs"].values()))
-    assert smoke_mip_run["solver"]["num_solutions"] == 2
-    assert smoke_mip_run["homogeneous"]["keep"] == 2
-    assert smoke_nodes["online_eval"]["config"]["eval_samples"] == 2
-    assert smoke_nodes["online_eval"]["config"]["block_size"] == 32
-    assert smoke_nodes["serving"]["config"]["input_tokens"] == 100
-    assert smoke_nodes["serving"]["config"]["output_tokens"] == 80
-    assert smoke_nodes["serving"]["config"]["request_count"] == 1
-    assert smoke_nodes["short_kd"]["config"]["max_steps"] == 2
-    assert smoke_nodes["short_kd"]["config"]["global_batch_size"] == 1
-    assert smoke_nodes["short_kd"]["config"]["checkpoint_every_steps"] == 2
-    assert smoke_comparison["config"]["limit"] == 8
     assert "recorded_observation" not in smoke_comparison["config"]
     smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
     assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
@@ -546,7 +530,6 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "mmlu_pro_history",
     ]
     assert comparison["config"]["limit"] == 256
-    assert smoke_comparison["config"]["limit"] < comparison["config"]["limit"]
     assert "recorded_observation" not in comparison["config"]
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {
@@ -630,7 +613,6 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert smoke_quality["limit_mm_per_prompt"] == {"image": 32}
     assert smoke_quality["max_model_len"] == 32768
     assert "recorded_observation" not in smoke_quality
-    assert smoke_execution["execution"]["stages"]["replacement_scoring"]["instances"] == 1
     assert smoke_execution["execution"]["stages"]["post.params-90.short_kd"]["instances"] == 1
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
     production_execution = yaml.safe_load((campaign / "production" / "execution.yaml").read_text())

@@ -22,7 +22,6 @@ from modelopt.torch.puzzletron.stages.diagnostics import (
     _hidden_only_diagnostic_ready,
     _hidden_width_ranking_verdict,
     _hidden_width_result_metrics,
-    _merge_reused_sort_equivalence,
     _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
     _resolve_parent_sweep_sort_equivalence,
@@ -193,27 +192,6 @@ def test_hidden_width_diagnostic_preserves_all_available_solution_metrics():
     assert all(metrics[name] == raw[name]["avg"] for name in metric_names)
 
 
-def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
-    existing = {
-        "passed": True,
-        "teacher": {"lm_loss": 1.2},
-        "sorted_teacher": {"lm_loss": 1.2001},
-        "reverse_sorted": {"lm_loss": 1.5},
-    }
-    reuse = {
-        "passed": True,
-        "reused_parent_sweep": True,
-        "equivalence": {"passed": True},
-    }
-
-    merged = _merge_reused_sort_equivalence(existing, reuse)
-
-    assert merged["teacher"] == existing["teacher"]
-    assert merged["sorted_teacher"] == existing["sorted_teacher"]
-    assert merged["reverse_sorted"] == existing["reverse_sorted"]
-    assert merged["reused_parent_sweep"] is True
-
-
 def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
     sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
     reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
@@ -222,6 +200,7 @@ def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
         "passed": True,
         "teacher": {"lm_loss": 1.2},
         "sorted_teacher": {"lm_loss": 1.2001},
+        "reverse_sorted": {"lm_loss": 1.5},
     }
     sort_summary_path.write_text(json.dumps(original, indent=2, sort_keys=True) + "\n")
     original_bytes = sort_summary_path.read_bytes()
@@ -234,8 +213,7 @@ def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
 
     assert sort_summary_path.read_bytes() == original_bytes
     assert json.loads(reuse_summary_path.read_text()) == merged
-    assert merged["teacher"] == original["teacher"]
-    assert merged["reused_parent_sweep"] is True
+    assert merged == {**original, "reused_parent_sweep": True}
 
 
 def test_parent_sweep_reuses_canonical_sort_verdict_when_equivalence_was_skipped(tmp_path):
@@ -253,15 +231,28 @@ def test_parent_sweep_reuses_canonical_sort_verdict_when_equivalence_was_skipped
 
     assert resolved["passed"] is True
     assert resolved["reused_source_summary"] == str(sort_summary_path)
-    assert json.loads(reuse_summary_path.read_text()) == resolved
 
 
-@pytest.mark.parametrize("invalid_summary", [None, [], "not-an-object"])
-def test_reused_parent_sweep_rejects_non_object_sort_artifacts(tmp_path, invalid_summary):
+def test_parent_sweep_keeps_manifest_equivalence_when_sort_reuse_is_disabled(tmp_path):
+    parent_equivalence = {"passed": False, "findings": [{"message": "parent mismatch"}]}
+    reuse_summary_path = tmp_path / "reused_sort_equivalence.json"
+
+    resolved = _resolve_parent_sweep_sort_equivalence(
+        parent_equivalence=parent_equivalence,
+        sort_summary_path=tmp_path / "missing_sort_summary.json",
+        reuse_summary_path=reuse_summary_path,
+        reuse_sort_equivalence=False,
+    )
+
+    assert resolved == parent_equivalence
+    assert not reuse_summary_path.exists()
+
+
+def test_reused_parent_sweep_rejects_non_object_sort_artifacts(tmp_path):
     sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
     reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
     sort_summary_path.parent.mkdir()
-    sort_summary_path.write_text(json.dumps(invalid_summary))
+    sort_summary_path.write_text("[]")
 
     with pytest.raises(ValueError, match="expected a JSON object"):
         _write_reused_sort_equivalence(

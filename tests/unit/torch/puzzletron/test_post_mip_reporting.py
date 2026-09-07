@@ -91,11 +91,13 @@ def test_evaluation_report_compares_teacher_and_deduplicated_mip_origins(tmp_pat
     assert payload["observations"][0]["origin_kinds"] == ["heterogeneous", "homogeneous"]
     assert payload["observations"][1]["origin_kinds"] == []
     assert rendered.count("Reference checkpoint") == 1
-    assert "Teacher" in rendered
+    assert rendered.count("<td>Teacher</td>") == 1
     assert "Heterogeneous" in rendered
     assert "Homogeneous" in rendered
     assert "Top-1 token accuracy" in rendered
     assert "Top-10 token accuracy" in rendered
-    assert "0.95" in rendered
+    assert rendered.count("<td>0.8</td>") == 2
+    assert rendered.count("<td>0.9</td>") == 1
+    assert rendered.count("<td>0.95</td>") == 2
     assert "evaluation failed" in rendered
     assert rendered.count("Shared physical measurement (same architecture)") == 2

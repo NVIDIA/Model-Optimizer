@@ -239,7 +239,8 @@ def _render_experiment_v2(
                 run["solver"] = solver
                 homogeneous = _mapping(run.get("homogeneous"))
                 if homogeneous:
-                    homogeneous["keep"] = min(int(homogeneous.get("keep", 2) or 2), 2)
+                    keep = homogeneous.get("keep", 2) or 2
+                    homogeneous["keep"] = 2 if keep == "all" else min(int(keep), 2)
                     run["homogeneous"] = homogeneous
     flows = _plain(config.post_mip_flows)
     if config.post_mip_flows_configured:
