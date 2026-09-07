@@ -107,6 +107,7 @@ Ensure the following steps are verified:
             - *onnxruntime-trt-rtx* (TensorRT-RTX EP)
             - *onnxruntime-gpu* (CUDA EP)
             - *onnxruntime* (CPU EP)
+
         The *onnxruntime-ep-nv-tensorrt-rtx-cu13* plugin is installed alongside the selected
         ONNX Runtime package; it does not replace *onnxruntime-gpu*.
       - **CUDA Toolkit**: For CUDA workflows, verify that the selected Toolkit is found first and that ``nvcc`` reports the expected major version:
