@@ -28,6 +28,7 @@ import modelopt.torch.puzzletron.stages.future as future_stages
 import puzzletron_orchestrator.post_mip as orchestration_post_mip
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
+from modelopt.torch.puzzletron.post_mip.builtin import ResultManifestNode
 from modelopt.torch.puzzletron.post_mip.evidence import (
     collect_kd_exposure,
     exact_checkpoint_evidence,
@@ -79,6 +80,21 @@ def test_exception_diagnostics_preserve_traceback():
 
     assert diagnostics["error"] == "RuntimeError"
     assert "raise RuntimeError()" in diagnostics["traceback"]
+
+
+def test_result_manifest_config_does_not_require_unused_row_manifest():
+    ResultManifestNode.validate_config(
+        {
+            "type": "result_manifest",
+            "config": {
+                "pre_kd_source": "materialized",
+                "pre_kd_evaluation": "pre_kd_evaluation",
+                "profile": "evaluation_profile",
+                "reference_checkpoint": "/checkpoint",
+                "milestones": [{"steps": 64, "kd": "kd_64", "evaluation": "evaluation_64"}],
+            },
+        }
+    )
 
 
 def test_global_kd_lets_automodel_initialize_its_nccl_process_group():
