@@ -52,7 +52,8 @@ depth_importance:
   max_subblocks_to_remove: 2
 
 replacement_scoring:
-  eval_samples: 64
+  # Covers every replacement candidate while fitting the four-hour single-GPU stage contract.
+  eval_samples: 16
 
 search_space:
   axes:
@@ -94,6 +95,8 @@ vlm_campaign_aiperf:
     extra_vllm_args:
       - -cc.cudagraph_mode=NONE
       - --no-enable-flashinfer-autotune
+      - --gdn-prefill-backend
+      - triton
       - --gpu-memory-utilization
       - "0.5"
       - --reasoning-parser

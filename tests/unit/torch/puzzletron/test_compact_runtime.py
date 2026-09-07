@@ -100,7 +100,7 @@ def test_compact_grouped_attention_target_requires_reduced_supported_geometry():
     assert resolve_compact_grouped_attention_target(layer, teacher, teacher) is None
 
 
-def test_compact_grouped_attention_rejects_native_automodel_backend():
+def test_compact_grouped_attention_dispatches_native_automodel_sdpa_backend():
     # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
     pytest.importorskip("nemo_automodel.components.models.qwen3_next.layers")
     from nemo_automodel.components.models.common import BackendConfig
@@ -143,14 +143,21 @@ def test_compact_grouped_attention_rejects_native_automodel_backend():
     original_forward = attention.forward.__func__
     original_state = set(vars(attention))
 
-    assert not supports_compact_grouped_attention(
+    assert supports_compact_grouped_attention(
         attention,
         orig_num_q=4,
         orig_num_kv=2,
         head_dim=8,
     )
-    with pytest.raises(RuntimeError, match="refusing to score reduced geometry"):
-        resolve_compact_grouped_attention_target(layer, teacher, child)
+    target = resolve_compact_grouped_attention_target(layer, teacher, child)
+    assert target == {
+        "module": attention,
+        "orig_num_q": 4,
+        "orig_num_kv": 2,
+        "target_num_q": 2,
+        "target_num_kv": 1,
+        "head_dim": 8,
+    }
 
     assert attention.forward.__func__ is original_forward
     assert set(vars(attention)) == original_state

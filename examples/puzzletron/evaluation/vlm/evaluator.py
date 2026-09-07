@@ -83,6 +83,34 @@ def _completion_identity(
     }
 
 
+def _progress_tasks(report: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return exact task denominators when the selected profile provides them."""
+
+    source_tasks = report.get("source_tasks")
+    if not isinstance(source_tasks, list):
+        return []
+    denominators = report.get("quick_task_denominators")
+    field = "selected_rows"
+    if not isinstance(denominators, Mapping):
+        denominators = report.get("profile_population_rows")
+        field = ""
+    tasks = []
+    if isinstance(denominators, Mapping):
+        for task in source_tasks:
+            if not isinstance(task, str):
+                return []
+            entry = denominators.get(task)
+            total = entry.get(field) if field and isinstance(entry, Mapping) else entry
+            if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+                return []
+            tasks.append({"name": task, "total": total})
+        return tasks
+    limit = report.get("sample_limit")
+    if len(source_tasks) == 1 and isinstance(limit, int) and limit > 0:
+        return [{"name": source_tasks[0], "total": limit}]
+    return []
+
+
 def _file_identity(path: Path, *, root: Path) -> dict[str, object]:
     """Return a content identity for one checkpoint or evaluation artifact."""
     digest = sha256()
@@ -408,10 +436,11 @@ def evaluate(
             )
             run_result = _load_completed_run(output_root, identity=identity)
             if run_result is None:
+                runtime_settings = {**settings, "progress_tasks": _progress_tasks(report)}
                 run_result = checkpoint.run_lmms_eval_checkpoint(
                     args.checkpoint,
                     output_root=output_root,
-                    settings=settings,
+                    settings=runtime_settings,
                 )
                 if "mmmu_val" in prepared.source_tasks:
                     _attach_mmmu_parser_audit(run_result)

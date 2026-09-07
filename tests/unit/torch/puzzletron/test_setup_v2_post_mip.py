@@ -79,6 +79,7 @@ def test_recommended_multimodal_flow_uses_image_serving_and_vlm_selection():
             "concurrency": [1, 4],
             "request_count": 32,
             "image_batch_sizes": [1, 6, 12],
+            "topology": {"extra_vllm_args": ["--gdn-prefill-backend", "triton"]},
         },
         modality="multimodal",
         quality_comparison=comparison,
@@ -97,8 +98,12 @@ def test_recommended_multimodal_flow_uses_image_serving_and_vlm_selection():
     )
     assert flow.nodes["vlm_serving"].config["endpoint_type"] == "chat"
     assert flow.nodes["vlm_serving"].config["image_batch_sizes"] == [1, 6, 12]
+    assert flow.nodes["vlm_serving"].config["topology"]["extra_vllm_args"] == [
+        "--gdn-prefill-backend",
+        "triton",
+    ]
     assert flow.nodes["fastest_vlm"].selector["metric"] == (
-        "vlm_serving.images_12.concurrency_1.image_throughput"
+        "vlm_serving.images_12.image_throughput"
     )
     assert flow.nodes["quality_benchmarks"].input_id == "best"
     assert flow.nodes["quality_benchmarks"].config == comparison

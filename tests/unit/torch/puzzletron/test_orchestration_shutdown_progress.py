@@ -36,7 +36,9 @@ from puzzletron_orchestrator.compiler import (
     load_runner_config,
 )
 from puzzletron_orchestrator.controller import CampaignController
+from puzzletron_orchestrator.dashboard import format_eta
 from puzzletron_orchestrator.executors.base import Executor
+from puzzletron_orchestrator.progress import summarize_stage_artifacts
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
     JobHandle,
@@ -48,6 +50,69 @@ from puzzletron_orchestrator.state import PersistedAttempt, StageRunRecord
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+def _seed_evaluation_progress(
+    run_dir: Path,
+    *,
+    current: int,
+    total: int | None,
+    task: dict[str, object] | None,
+) -> dict[str, object]:
+    input_root = run_dir / "artifacts/post_mip/nodes/selected"
+    (input_root / "executions/input-1").mkdir(parents=True)
+    (input_root / "current.json").write_text(json.dumps({"execution_identity": "input-1"}))
+    (input_root / "executions/input-1/candidate_set.json").write_text(
+        json.dumps({"revision_ids": ["candidate-1"]})
+    )
+    progress_root = (
+        run_dir
+        / "artifacts/post_mip/nodes/eval/executions/post_mip_execution_1"
+        / "raw/candidate-1/lmms_eval/attempt_1"
+    )
+    progress_root.mkdir(parents=True)
+    payload: dict[str, object] = {
+        "schema": "modelopt.puzzletron.evaluation-progress/v1",
+        "status": "running",
+        "unit": "samples",
+        "current": current,
+        "total": total,
+        "rate_per_second": 3.8,
+    }
+    if task is not None:
+        payload["task"] = task
+    (progress_root / "progress.json").write_text(json.dumps(payload))
+    return {
+        "post_mip": {
+            "flows": {
+                "quality": {
+                    "nodes": {"eval": {"type": "downstream_evaluation", "input": "selected"}}
+                }
+            }
+        }
+    }
+
+
+def test_evaluation_progress_uses_structured_task_samples(tmp_path):
+    config = _seed_evaluation_progress(
+        tmp_path,
+        current=38,
+        total=184,
+        task={"name": "realworldqa", "current": 38, "total": 64},
+    )
+
+    detail = summarize_stage_artifacts(tmp_path, "post.quality.eval", config=config)
+
+    assert detail == "evaluation realworldqa 38/64 samples at 3.80 samples/s"
+
+
+def test_evaluation_progress_preserves_unknown_denominator(tmp_path):
+    config = _seed_evaluation_progress(tmp_path, current=38, total=None, task=None)
+
+    detail = summarize_stage_artifacts(tmp_path, "post.quality.eval", config=config)
+
+    assert detail == "evaluation 38 samples (total unavailable) at 3.80 samples/s"
+    assert format_eta(None) == "unavailable"
 
 
 class _FakeExecutor(Executor):

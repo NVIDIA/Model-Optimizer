@@ -409,6 +409,9 @@ def test_bundle_readme_emits_bounded_vlm_materialization_command(tmp_path):
     assert "--revision sha" in document
     assert "--num-samples 64" in document
     assert "--max-shards-per-subset 2" in document
+    assert "Python 3.10+ controller venv" in document
+    assert "This is a worker command" in document
+    assert "vlm_checkpoint_evaluation.md" in document
 
 
 def test_checkbox_rejects_a_disabled_scripted_selection(tmp_path):

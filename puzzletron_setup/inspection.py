@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Configuration-only model and dataset inspection for Puzzletron setup."""
 
@@ -13,7 +25,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import yaml
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, scan_cache_dir, try_to_load_from_cache
 from transformers import AutoConfig, PretrainedConfig
 
 from . import SetupError
@@ -39,7 +51,6 @@ _HUGGING_FACE_HOSTS = {
 
 def _normalize_source(source: str, *, kind: str, url_prefix: str | None = None) -> str:
     """Normalize an existing local path or Hugging Face web URL."""
-
     source = source.strip()
     if not source:
         raise SetupError(f"Enter a {kind} path or Hugging Face URL.")
@@ -80,13 +91,11 @@ def _normalize_source(source: str, *, kind: str, url_prefix: str | None = None) 
 
 def normalize_model_source(source: str) -> str:
     """Normalize an existing model path or Hugging Face model web URL."""
-
     return _normalize_source(source, kind="model")
 
 
 def normalize_dataset_source(source: str) -> str:
     """Normalize an existing dataset path or Hugging Face dataset web URL."""
-
     return _normalize_source(source, kind="dataset", url_prefix="datasets")
 
 
@@ -144,9 +153,30 @@ def _load_config_dict(source: str, *, revision: str | None, local: bool) -> dict
         return dict(config)
 
 
+def _cached_remote_config(source: str, revision: str | None) -> tuple[Path, str] | None:
+    cached = try_to_load_from_cache(source, "config.json", revision=revision or "main")
+    if isinstance(cached, str) and Path(cached).is_file():
+        # Preserve the snapshots/<commit>/config.json path. Resolving its blob
+        # symlink would discard the commit directory needed for provenance.
+        path = Path(cached).expanduser().absolute()
+        return path, path.parent.name
+    if revision is not None:
+        return None
+    try:
+        matching = [
+            (Path(item.snapshot_path).expanduser().absolute() / "config.json", item.commit_hash)
+            for repo in scan_cache_dir().repos
+            if repo.repo_type == "model" and repo.repo_id == source
+            for item in repo.revisions
+        ]
+    except Exception:
+        return None
+    available = [(path, commit) for path, commit in matching if path.is_file()]
+    return available[0] if len(available) == 1 else None
+
+
 def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
     """Inspect a local path or Hugging Face URL without loading model weights."""
-
     source = normalize_model_source(source)
     expanded = Path(source).expanduser()
     is_local = expanded.exists()
@@ -161,12 +191,21 @@ def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
         try:
             resolved_revision = HfApi().model_info(config_source, revision=revision).sha
         except Exception as error:
-            raise SetupError(f"Cannot resolve Hugging Face model {source!r}: {error}") from error
-    config = _load_config_dict(
-        config_source,
-        revision=resolved_revision or revision,
-        local=is_local,
-    )
+            cached = _cached_remote_config(config_source, revision)
+            if cached is None:
+                raise SetupError(
+                    f"Cannot resolve Hugging Face model {source!r}: {error}"
+                ) from error
+            cached_path, resolved_revision = cached
+            config = _load_config_dict(str(cached_path), revision=None, local=True)
+        else:
+            config = _load_config_dict(
+                config_source,
+                revision=resolved_revision,
+                local=False,
+            )
+    else:
+        config = _load_config_dict(config_source, revision=revision, local=True)
     profile = resolve_profile(config)
     return InspectedModel(
         source=effective_source,
@@ -216,7 +255,6 @@ def _local_dataset_metadata(path: Path) -> Any:
 
 def infer_dataset_modality(source: str) -> ModalityFinding:
     """Infer text versus multimodal data and return explicit evidence."""
-
     source = normalize_dataset_source(source)
     path = Path(source).expanduser()
     if path.exists():

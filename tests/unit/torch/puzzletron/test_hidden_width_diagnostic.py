@@ -25,6 +25,7 @@ from modelopt.torch.puzzletron.stages.diagnostics import (
     _merge_reused_sort_equivalence,
     _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
+    _resolve_parent_sweep_sort_equivalence,
     _select_layers,
     _write_hidden_only_diagnostic_artifacts,
     _write_reused_sort_equivalence,
@@ -235,6 +236,24 @@ def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
     assert json.loads(reuse_summary_path.read_text()) == merged
     assert merged["teacher"] == original["teacher"]
     assert merged["reused_parent_sweep"] is True
+
+
+def test_parent_sweep_reuses_canonical_sort_verdict_when_equivalence_was_skipped(tmp_path):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    sort_summary_path.write_text(json.dumps({"passed": True, "findings": []}))
+
+    resolved = _resolve_parent_sweep_sort_equivalence(
+        parent_equivalence={},
+        sort_summary_path=sort_summary_path,
+        reuse_summary_path=reuse_summary_path,
+        reuse_sort_equivalence=True,
+    )
+
+    assert resolved["passed"] is True
+    assert resolved["reused_source_summary"] == str(sort_summary_path)
+    assert json.loads(reuse_summary_path.read_text()) == resolved
 
 
 @pytest.mark.parametrize("invalid_summary", [None, [], "not-an-object"])

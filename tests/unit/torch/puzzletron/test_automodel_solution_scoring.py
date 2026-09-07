@@ -21,8 +21,10 @@ import types
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 import torch
+from omegaconf import OmegaConf
 from safetensors.torch import save_file
 from torch import nn
 
@@ -33,7 +35,7 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MoEConfig,
 )
-from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
+from modelopt.torch.puzzletron.plugins.automodel import solution_launch, solution_recipe
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
     _candidate_execution_context,
     _quarantine_failed_realization,
@@ -51,11 +53,10 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import (
 )
 from modelopt.torch.puzzletron.pruning.gated_delta_net import GDNShape
 from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
+from modelopt.torch.puzzletron.scoring import find_missing_solutions
 
 
 def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
-    from modelopt.torch.puzzletron.plugins.automodel import solution_launch
-
     solutions, pending_ids = solution_launch._load_solution_work(
         {"baseline_only": True},
         tmp_path,
@@ -65,7 +66,47 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
     assert pending_ids == []
 
 
-def test_native_automodel_gdn_rejects_compact_runtime_candidate():
+def test_solution_work_reuses_only_matching_config_and_identity(monkeypatch, tmp_path):
+    scoring_args = {
+        "solutions_path": str(tmp_path / "solutions.json"),
+        "eval_samples": 16,
+        "skip_existing_solutions": True,
+        "solutions_to_validate": None,
+    }
+    scoring = OmegaConf.create(scoring_args)
+    solutions = [{"width": 1}, {"width": 2}, {"width": 3}]
+    monkeypatch.setattr(solution_launch, "load_puzzle_solutions", lambda *args: solutions)
+    recorded = {**scoring_args, "solutions_to_validate": [0, 1]}
+    (tmp_path / "solution_0.json").write_text(
+        json.dumps({"args": recorded, "puzzle_solution": solutions[0]})
+    )
+    stale = {**scoring_args, "eval_samples": 64}
+    (tmp_path / "solution_1.json").write_text(
+        json.dumps({"args": stale, "puzzle_solution": solutions[1]})
+    )
+    (tmp_path / "solution_2.json").write_text(
+        json.dumps({"args": recorded, "puzzle_solution": {"width": 4}})
+    )
+
+    solutions, pending_ids = solution_launch._load_solution_work(scoring, tmp_path)
+
+    assert pending_ids == [1, 2]
+
+    assert find_missing_solutions(pd.DataFrame(solutions), tmp_path, scoring) == [1, 2]
+
+    parent_identity = {"parent_role": "sorted", "checkpoint_dir": "/checkpoints/sorted"}
+    (tmp_path / "parent.json").write_text(json.dumps({"args": recorded, **parent_identity}))
+    assert solution_launch.scoring_result_matches(
+        tmp_path / "parent.json", scoring, expected_payload=parent_identity
+    )
+    assert not solution_launch.scoring_result_matches(
+        tmp_path / "parent.json",
+        scoring,
+        expected_payload={**parent_identity, "checkpoint_dir": "/checkpoints/changed"},
+    )
+
+
+def test_native_automodel_gdn_supports_single_device_compact_runtime_candidate():
     # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
     pytest.importorskip("nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn")
     from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
@@ -107,7 +148,7 @@ def test_native_automodel_gdn_rejects_compact_runtime_candidate():
     child = BlockConfig(
         subblock_configs=(
             MambaConfig(
-                num_heads=shape.num_value_heads,
+                num_heads=shape.num_value_heads // 2,
                 head_dim=shape.value_head_dim,
                 num_groups=shape.num_key_heads // 2,
                 state_dim=shape.key_head_dim,
@@ -117,9 +158,14 @@ def test_native_automodel_gdn_rejects_compact_runtime_candidate():
     original_forward = gdn.forward.__func__
     original_state = set(vars(gdn))
     original_forward_hooks = dict(gdn._forward_hooks)
+    hidden_states = torch.randn(1, 4, config.hidden_size)
 
-    with pytest.raises(RuntimeError, match="refusing to score reduced geometry"):
-        apply_runtime_candidate(layer, teacher, child)
+    handle = apply_runtime_candidate(layer, teacher, child)
+    assert "forward" in vars(gdn)
+    with torch.no_grad():
+        output = gdn(hidden_states, qkv_format="bshd")
+    assert output.shape == hidden_states.shape
+    handle.remove()
 
     assert gdn.forward.__func__ is original_forward
     assert set(vars(gdn)) == original_state

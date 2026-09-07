@@ -66,6 +66,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
             "batch_size": 1,
             "timeout_seconds": 900,
             "dtype": "bfloat16",
+            "gdn_prefill_backend": "triton",
             "topology": {"tensor_parallel_size": 1},
         },
     )
@@ -76,6 +77,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     assert captured["settings"]["limit"] == 2
     assert captured["settings"]["timeout_seconds"] == 900
     assert captured["settings"]["dtype"] == "bfloat16"
+    assert captured["settings"]["gdn_prefill_backend"] == "triton"
     assert captured["settings"]["topology"] == {"tensor_parallel_size": 1}
     assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
     assert result["profile_path"] == str(output / "profile.json")
@@ -83,6 +85,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     assert result["contract"]["model_backend"] == "vllm"
     assert result["contract"]["post_mip_runner_overrides"] == {
         "dtype": "bfloat16",
+        "gdn_prefill_backend": "triton",
         "topology": {"tensor_parallel_size": 1},
     }
 

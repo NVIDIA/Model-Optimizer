@@ -64,6 +64,7 @@ vlm_full_smoke_evaluation:
   batch_size: ${vlm_smoke_evaluation.batch_size}
   timeout_seconds: ${vlm_smoke_evaluation.timeout_seconds}
   dtype: bfloat16
+  gdn_prefill_backend: triton
   gpu_memory_utilization: 0.5
   max_model_len: 16384
   limit_mm_per_prompt: {image: 32}

@@ -31,6 +31,8 @@ import modelopt.torch.utils.distributed as dist
 from .granularity import resolve_granularity
 from .tools.hydra_utils import register_hydra_resolvers
 from .tools.logger import mprint
+from .tools.validate_puzzle_with_multi_replacements import load_puzzle_solutions
+from .tools.validation_utils import scoring_result_matches
 
 __all__ = ["launch_scoring", "resolve_scoring_output_dir", "resolve_scoring_paths"]
 
@@ -46,16 +48,27 @@ def extract_solution_id(filename):
         mprint(f"Couldn't extract solutions_id from file {filename}")
 
 
-def find_missing_solutions(solutions_df, validation_dir):
-    all_solutions = np.arange(solutions_df.shape[0])
+def find_missing_solutions(solutions, validation_dir, scoring_args=None):
+    candidate_solutions = (
+        solutions.to_dict(orient="records") if isinstance(solutions, pd.DataFrame) else solutions
+    )
+    all_solutions = np.arange(len(candidate_solutions))
 
     benchmarked_solutions = list(glob(f"{validation_dir}/solution*.json"))
-    benchmarked_solutions = [
-        extract_solution_id(os.path.basename(s)) for s in benchmarked_solutions
-    ]
-    benchmarked_solutions = [s for s in benchmarked_solutions if s is not None]
+    matching_solutions = []
+    for result_path in benchmarked_solutions:
+        solution_id = extract_solution_id(os.path.basename(result_path))
+        if solution_id is None or solution_id >= len(candidate_solutions):
+            continue
+        if scoring_args is not None and not scoring_result_matches(
+            result_path,
+            scoring_args,
+            expected_payload={"puzzle_solution": candidate_solutions[solution_id]},
+        ):
+            continue
+        matching_solutions.append(solution_id)
 
-    unbenchmarked_solutions = np.setdiff1d(all_solutions, benchmarked_solutions)
+    unbenchmarked_solutions = np.setdiff1d(all_solutions, matching_solutions)
     return unbenchmarked_solutions.tolist()
 
 
@@ -103,13 +116,19 @@ def get_solutions_to_validate(cfg: DictConfig, num_nodes: int = 1, node_index: i
     _solutions_to_validate = cfg.scoring.solutions_to_validate
     if _solutions_to_validate is None:
         solutions_path, _ = resolve_scoring_paths(cfg)
-        single_block_replacement_solutions = pd.read_json(solutions_path)
+        single_block_replacement_solutions = load_puzzle_solutions(
+            solutions_path,
+            cfg.scoring.get("sort_solutions_by", None),
+            cfg.scoring.get("bigger_is_better", False),
+        )
         if cfg.scoring.skip_existing_solutions:
             _solutions_to_validate = find_missing_solutions(
-                single_block_replacement_solutions, resolve_scoring_output_dir(cfg)
+                single_block_replacement_solutions,
+                resolve_scoring_output_dir(cfg),
+                cfg.scoring,
             )
         else:
-            _solutions_to_validate = np.arange(single_block_replacement_solutions.shape[0]).tolist()
+            _solutions_to_validate = np.arange(len(single_block_replacement_solutions)).tolist()
     return partition_for_node(_solutions_to_validate, num_nodes, node_index)
 
 

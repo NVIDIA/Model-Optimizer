@@ -47,9 +47,12 @@ online even when the surrounding campaign is configured for offline loading.
 ## Progress and interruption
 
 Interactive terminals show a live stage table with status, resources, elapsed
-time, and a best-effort ETA when a stage reports progress. Completed stages,
-dependency waits, failures, and descendants blocked by failures remain visible.
-Redirected output uses timestamped one-line updates instead.
+time, the active log path, and a best-effort ETA after the controller measures
+item throughput. Completed stages, dependency waits, failures, and descendants
+blocked by failures remain visible. Redirected output emits a heartbeat every
+30 seconds with completed/total stages, queued/running jobs, elapsed time, each
+active stage's state and progress, its log path, and a measured ETA. It says
+`ETA unavailable` until it has enough progress evidence to estimate one.
 
 Press `q` or Ctrl-C in an interactive terminal to cancel active jobs and quit,
 detach while leaving jobs running, or continue. Non-interactive Ctrl-C and

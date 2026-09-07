@@ -22,10 +22,12 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shlex
 import signal
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,7 @@ __all__ = [
 _MODEL_ARG_FIELDS = frozenset(
     {
         "dtype",
+        "gdn_prefill_backend",
         "gpu_memory_utilization",
         "attention_config",
         "chat_template",
@@ -90,6 +93,18 @@ DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 _PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
 _TIMEOUT_ERRORS = (TimeoutError, asyncio.TimeoutError)
+_PROGRESS_PATH_ENV = "PUZZLETRON_EVALUATION_PROGRESS_PATH"
+_PROGRESS_TASKS_ENV = "PUZZLETRON_EVALUATION_PROGRESS_TASKS"
+_MODEL_RESPONDING = re.compile(
+    r"Model Responding:.*?(?P<current>\d+)/(?P<total>\d+)\s*"
+    r"\[(?P<elapsed>[^<\],]+)<(?P<remaining>[^,\]]+),\s*"
+    r"(?P<rate>\d+(?:\.\d+)?)(?P<rate_unit>it/s|s/it)\]"
+)
+_MODEL_RESPONDING_WITHOUT_TOTAL = re.compile(
+    r"Model Responding:\s*(?P<current>\d+)it\s*"
+    r"\[(?P<elapsed>[^,\]]+),\s*(?P<rate>\d+(?:\.\d+)?)"
+    r"(?P<rate_unit>it/s|s/it)\]"
+)
 _COMPATIBILITY_TASKS: dict[str, dict[str, Any]] = {
     "gsm8k": {
         "alias": "modelopt_gsm8k",
@@ -623,6 +638,166 @@ def _stream_text(value: str | bytes | None) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
 
 
+def _live_stream_bytes(stream: Any, data: bytes) -> None:
+    try:
+        target = getattr(stream, "buffer", None)
+        if target is not None:
+            target.write(data)
+            target.flush()
+            return
+        stream.write(data.decode(errors="replace"))
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _sample_rate_per_second(value: str, unit: str) -> float | None:
+    rate = float(value)
+    if rate <= 0:
+        return None
+    return rate if unit == "it/s" else 1.0 / rate
+
+
+def _task_progress(
+    current: int,
+    total: int | None,
+    tasks: object,
+) -> dict[str, object] | None:
+    if total is None or not isinstance(tasks, list):
+        return None
+    parsed: list[tuple[str, int]] = []
+    for entry in tasks:
+        if not isinstance(entry, Mapping):
+            return None
+        name = entry.get("name")
+        task_total = entry.get("total")
+        if not isinstance(name, str) or not isinstance(task_total, int) or task_total <= 0:
+            return None
+        parsed.append((name, task_total))
+    if not parsed or sum(task_total for _name, task_total in parsed) != total:
+        return None
+    offset = current
+    for name, task_total in parsed:
+        if offset <= task_total:
+            return {"name": name, "current": offset, "total": task_total}
+        offset -= task_total
+    name, task_total = parsed[-1]
+    return {"name": name, "current": task_total, "total": task_total}
+
+
+def _set_evaluation_progress_status(
+    path: Path,
+    status: str,
+    *,
+    sample_counts: Mapping[str, float] | None = None,
+    tasks: object = None,
+) -> None:
+    """Best-effort terminal update for the evaluator progress sidecar."""
+
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, Mapping):
+        return
+    updated = dict(payload)
+    updated["status"] = status
+    updated["updated_at"] = time.time()
+    if status == "completed" and sample_counts:
+        sample_total = float(sum(sample_counts.values()))
+        if math.isfinite(sample_total) and sample_total > 0 and sample_total.is_integer():
+            total = int(sample_total)
+            updated["current"] = total
+            updated["total"] = total
+            task = _task_progress(total, total, tasks)
+            if task is None:
+                updated.pop("task", None)
+            else:
+                updated["task"] = task
+    try:
+        _atomic_json(path, updated)
+    except OSError:
+        pass
+
+
+def _evaluation_progress_payload(text: str, tasks: object) -> dict[str, object] | None:
+    matches = list(_MODEL_RESPONDING.finditer(text))
+    total: int | None
+    if matches:
+        match = matches[-1]
+        total = int(match.group("total"))
+    else:
+        fallback = list(_MODEL_RESPONDING_WITHOUT_TOTAL.finditer(text))
+        if not fallback:
+            return None
+        match = fallback[-1]
+        total = None
+    current = int(match.group("current"))
+    payload: dict[str, object] = {
+        "schema": "modelopt.puzzletron.evaluation-progress/v1",
+        "status": "running",
+        "unit": "samples",
+        "current": current,
+        "total": total,
+        "rate_per_second": _sample_rate_per_second(match.group("rate"), match.group("rate_unit")),
+        "updated_at": time.time(),
+    }
+    task = _task_progress(current, total, tasks)
+    if task is not None:
+        payload["task"] = task
+    return payload
+
+
+async def _pump_process_stream(
+    reader: asyncio.StreamReader,
+    capture: Any,
+    live_stream: Any,
+    *,
+    progress_path: Path | None = None,
+    progress_tasks: object = None,
+) -> None:
+    progress_text = ""
+    while data := await reader.read(65536):
+        capture.write(data)
+        capture.flush()
+        _live_stream_bytes(live_stream, data)
+        if progress_path is None:
+            continue
+        progress_text = (progress_text + data.decode(errors="replace"))[-131072:]
+        payload = _evaluation_progress_payload(progress_text, progress_tasks)
+        if payload is not None:
+            try:
+                _atomic_json(progress_path, payload)
+            except OSError:
+                pass
+
+
+async def _drain_process_pumps(
+    process: asyncio.subprocess.Process,
+    pumps: tuple[asyncio.Task[None], ...],
+    *,
+    suppress_errors: bool,
+) -> None:
+    done, pending = await asyncio.wait(pumps, timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    for pump in pending:
+        pump.cancel()
+    if pending:
+        # asyncio Process has no public stream-close API. Closing its transport
+        # releases inherited pipe readers after a descendant outlives the parent.
+        process_transport = getattr(process, "_transport", None)
+        if process_transport is not None:
+            try:
+                process_transport.close()
+            except (OSError, RuntimeError):
+                pass
+    results = await asyncio.gather(*pumps, return_exceptions=True)
+    if suppress_errors:
+        return
+    for pump, result in zip(pumps, results):
+        if pump in done and isinstance(result, BaseException):
+            raise result
+
+
 def _output_tail(result: _ProcessResult, *, max_lines: int = 20) -> str:
     sections = []
     for stream_name, text in (("stderr", result.stderr), ("stdout", result.stdout)):
@@ -666,6 +841,18 @@ async def _wait_for_process_group_exit(
         await asyncio.sleep(min(_PROCESS_GROUP_POLL_INTERVAL_SECONDS, remaining))
 
 
+async def _wait_for_process_returncode(
+    process: asyncio.subprocess.Process, *, timeout: float
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while process.returncode is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        await asyncio.sleep(min(_PROCESS_GROUP_POLL_INTERVAL_SECONDS, remaining))
+
+
 async def _run_process_async(
     argv: list[str],
     *,
@@ -675,17 +862,39 @@ async def _run_process_async(
 ) -> _ProcessResult:
     # lmms-eval needs process isolation for bounded GPU-worker cleanup. The argument
     # vector is passed directly; no shell interprets checkpoint or configuration values.
+    child_env = dict(env)
+    raw_progress_path = child_env.pop(_PROGRESS_PATH_ENV, None)
+    raw_progress_tasks = child_env.pop(_PROGRESS_TASKS_ENV, None)
+    progress_path = Path(raw_progress_path) if raw_progress_path else None
+    try:
+        progress_tasks = json.loads(raw_progress_tasks) if raw_progress_tasks else None
+    except json.JSONDecodeError:
+        progress_tasks = None
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
-            env=env,
-            stdout=stdout_file,
-            stderr=stderr_file,
+            env=child_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             start_new_session=os.name == "posix",
         )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        pumps = (
+            asyncio.create_task(_pump_process_stream(process.stdout, stdout_file, sys.stdout)),
+            asyncio.create_task(
+                _pump_process_stream(
+                    process.stderr,
+                    stderr_file,
+                    sys.stderr,
+                    progress_path=progress_path,
+                    progress_tasks=progress_tasks,
+                )
+            ),
+        )
         try:
-            await asyncio.wait_for(process.wait(), timeout)
+            await _wait_for_process_returncode(process, timeout=timeout)
         except _TIMEOUT_ERRORS as error:
             _signal_process_group(process, signal.SIGTERM)
             try:
@@ -702,6 +911,7 @@ async def _run_process_async(
                     process,
                     deadline=asyncio.get_running_loop().time() + _PROCESS_CLEANUP_TIMEOUT_SECONDS,
                 )
+            await _drain_process_pumps(process, pumps, suppress_errors=True)
             stdout_file.seek(0)
             stderr_file.seek(0)
             raise LmmsEvalTimeoutError(
@@ -710,6 +920,7 @@ async def _run_process_async(
                 output=_stream_text(stdout_file.read()),
                 stderr=_stream_text(stderr_file.read()),
             ) from error
+        await _drain_process_pumps(process, pumps, suppress_errors=False)
         stdout_file.seek(0)
         stderr_file.seek(0)
         return _ProcessResult(
@@ -777,6 +988,38 @@ def run_lmms_eval_checkpoint(
         "timeout": timeout,
     }
     command_path = _atomic_json(output / "command.json", command_payload)
+    progress_tasks = settings.get("progress_tasks")
+    if not isinstance(progress_tasks, list) or not all(
+        isinstance(task, Mapping)
+        and isinstance(task.get("name"), str)
+        and isinstance(task.get("total"), int)
+        and not isinstance(task.get("total"), bool)
+        and int(task["total"]) > 0
+        for task in progress_tasks
+    ):
+        progress_tasks = []
+    try:
+        progress_tasks_json = json.dumps(progress_tasks, separators=(",", ":"))
+    except (TypeError, ValueError):
+        progress_tasks = []
+        progress_tasks_json = "[]"
+    progress_path = output / "progress.json"
+    progress_total = sum(int(task["total"]) for task in progress_tasks)
+    initial_progress: dict[str, object] = {
+        "schema": "modelopt.puzzletron.evaluation-progress/v1",
+        "status": "starting",
+        "unit": "samples",
+        "current": 0,
+        "total": progress_total or None,
+        "rate_per_second": None,
+        "updated_at": time.time(),
+    }
+    initial_task = _task_progress(0, progress_total or None, progress_tasks)
+    if initial_task is not None:
+        initial_progress["task"] = initial_task
+    _atomic_json(progress_path, initial_progress)
+    env[_PROGRESS_PATH_ENV] = str(progress_path)
+    env[_PROGRESS_TASKS_ENV] = progress_tasks_json
     try:
         result = _run_process(argv, cwd=str(output), env=env, timeout=timeout)
     except LmmsEvalTimeoutError as error:
@@ -785,6 +1028,10 @@ def run_lmms_eval_checkpoint(
         captured = _ProcessResult(argv, -1, error.output, error.stderr)
         stream_paths = _write_streams(output, captured)
         _annotate_error(error, command_path=command_path, stream_paths=stream_paths)
+        _set_evaluation_progress_status(progress_path, "timed_out")
+        raise
+    except OSError:
+        _set_evaluation_progress_status(progress_path, "failed")
         raise
 
     stream_paths = _write_streams(output, result)
@@ -794,6 +1041,7 @@ def run_lmms_eval_checkpoint(
             f"lmms-eval failed with exit code {result.returncode}" + (f": {tail}" if tail else "")
         )
         _annotate_error(failure, command_path=command_path, stream_paths=stream_paths)
+        _set_evaluation_progress_status(progress_path, "failed")
         raise failure
 
     try:
@@ -806,9 +1054,11 @@ def run_lmms_eval_checkpoint(
         tail = _output_tail(result)
         failure = FileNotFoundError(f"{error}: {tail}" if tail else str(error))
         _annotate_error(failure, command_path=command_path, stream_paths=stream_paths)
+        _set_evaluation_progress_status(progress_path, "failed")
         raise failure from error
     except RuntimeError as error:
         _annotate_error(error, command_path=command_path, stream_paths=stream_paths)
+        _set_evaluation_progress_status(progress_path, "failed")
         raise
 
     summary = {
@@ -817,7 +1067,17 @@ def run_lmms_eval_checkpoint(
         "raw_result_path": str(result_path),
         "sample_counts": sample_counts,
     }
-    summary_path = _atomic_json(output / "summary.json", summary)
+    try:
+        summary_path = _atomic_json(output / "summary.json", summary)
+    except OSError:
+        _set_evaluation_progress_status(progress_path, "failed")
+        raise
+    _set_evaluation_progress_status(
+        progress_path,
+        "completed",
+        sample_counts=sample_counts,
+        tasks=progress_tasks,
+    )
     return {
         "metrics": metrics,
         "result_path": str(summary_path),

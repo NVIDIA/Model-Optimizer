@@ -13,7 +13,9 @@ execution:
     mip: {strategy: single, resource: cpu}
     depth_importance: {strategy: single}
     replacement_scoring: {strategy: single}
-    post.candidates.image_eval: &candidates {instances: 2}
+    # The documented default runner reserves one GPU at a time. One shard still
+    # evaluates every candidate sequentially and can resume between candidates.
+    post.candidates.image_eval: &candidates {instances: 1}
     post.candidates.best_image_loss: {strategy: single, resource: cpu}
     post.candidates.materialized: *candidates
     post.candidates.pre_kd_eval: *candidates

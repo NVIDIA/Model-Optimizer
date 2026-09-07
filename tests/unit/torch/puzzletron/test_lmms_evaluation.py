@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,6 +169,7 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
             },
             "model_args": {"dtype": "bfloat16"},
             "chat_template": "/templates/qwen35_no_thinking.jinja",
+            "gdn_prefill_backend": "triton",
         },
         checkpoint="/ckpts/candidate",
         output_path=tmp_path / "results",
@@ -182,6 +184,7 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert "tensor_parallel_size=4" in model_args
     assert "pipeline_parallel_size=2" in model_args
     assert "chat_template=/templates/qwen35_no_thinking.jinja" in model_args
+    assert "gdn_prefill_backend=triton" in model_args
     assert "gpu_group_size" not in model_args
     assert env["LMMS_EVAL_HOME"] == str(tmp_path / "cache")
     assert timeout == 123
@@ -357,24 +360,82 @@ def test_command_rejects_unsupported_backend_contract(tmp_path, settings, expect
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
 def test_timeout_kills_ignored_process_group_members(monkeypatch, tmp_path):
     script = (
-        "import signal,time; "
+        "import signal,subprocess,sys,time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "print('partial stdout', flush=True); "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(4)'], "
+        "start_new_session=True); "
         "time.sleep(60)"
     )
     monkeypatch.setattr(lmms, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.1)
 
+    started = time.monotonic()
     with pytest.raises(lmms.LmmsEvalTimeoutError) as exc_info:
         lmms._run_process(
             [sys.executable, "-c", script],
             cwd=str(tmp_path),
             env=os.environ.copy(),
-            timeout=1.0,
+            timeout=0.5,
         )
 
-    assert exc_info.value.timeout == 1.0
+    assert time.monotonic() - started < 2.0
+    assert exc_info.value.timeout == 0.5
     assert exc_info.value.output == "partial stdout\n"
     assert exc_info.value.stderr == ""
+
+
+def test_run_process_streams_progress_and_bounds_inherited_pipes(monkeypatch, tmp_path, capsys):
+    progress_path = tmp_path / "progress.json"
+    env = {
+        **os.environ,
+        lmms._PROGRESS_PATH_ENV: str(progress_path),
+        lmms._PROGRESS_TASKS_ENV: json.dumps(
+            [{"name": "realworldqa", "total": 64}, {"name": "mmmu_val", "total": 120}]
+        ),
+    }
+    script = (
+        "import subprocess,sys; "
+        "print('evaluator started', flush=True); "
+        "print('Model Responding:  21%|##| 38/184 [00:10<00:40, 3.80it/s]', "
+        "file=sys.stderr, flush=True); "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(4)'], "
+        "start_new_session=sys.platform != 'win32')"
+    )
+    monkeypatch.setattr(lmms, "_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.1)
+
+    started = time.monotonic()
+    result = lmms._run_process(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path),
+        env=env,
+        timeout=5.0,
+    )
+
+    assert time.monotonic() - started < 2.0
+    captured = capsys.readouterr()
+    progress = json.loads(progress_path.read_text())
+    assert captured.out == "evaluator started\n"
+    assert "38/184" in captured.err
+    assert result.stdout == captured.out
+    assert result.stderr == captured.err
+    assert progress["unit"] == "samples"
+    assert progress["current"] == 38
+    assert progress["total"] == 184
+    assert progress["rate_per_second"] == 3.8
+    assert progress["task"] == {"name": "realworldqa", "current": 38, "total": 64}
+
+
+def test_evaluation_progress_without_denominator_does_not_invent_one():
+    progress = lmms._evaluation_progress_payload(
+        "Model Responding: 38it [00:45, 1.20s/it]",
+        [{"name": "realworldqa", "total": 64}],
+    )
+
+    assert progress is not None
+    assert progress["current"] == 38
+    assert progress["total"] is None
+    assert progress["rate_per_second"] == pytest.approx(1 / 1.2)
+    assert "task" not in progress
 
 
 def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tmp_path):
@@ -401,7 +462,14 @@ def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tm
     result = lmms.run_lmms_eval_checkpoint(
         checkpoint,
         output_root=tmp_path / "results",
-        settings={**_settings("ifeval", "gsm8k"), "limit": 4},
+        settings={
+            **_settings("ifeval", "gsm8k"),
+            "limit": 4,
+            "progress_tasks": [
+                {"name": "ifeval", "total": 4},
+                {"name": "gsm8k", "total": 4},
+            ],
+        },
     )
 
     assert result["metrics"] == {
@@ -416,6 +484,10 @@ def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tm
     assert summary["raw_result_path"] == result["raw_result_path"]
     assert "result_path" not in summary
     assert summary["sample_counts"] == {"gsm8k": 4.0, "ifeval": 4.0}
+    progress = json.loads((Path(result["result_path"]).parent / "progress.json").read_text())
+    assert progress["status"] == "completed"
+    assert progress["current"] == progress["total"] == 8
+    assert progress["task"] == {"name": "gsm8k", "current": 4, "total": 4}
 
 
 def test_run_checkpoint_executes_real_process(tmp_path):
@@ -472,6 +544,8 @@ def test_run_checkpoint_preserves_failure_artifacts(monkeypatch, tmp_path):
     assert Path(error.command_path).is_file()
     assert Path(error.stdout_path).read_text() == "partial evaluator output\n"
     assert Path(error.stderr_path).read_text() == "backend failed\n"
+    progress = json.loads((Path(error.stderr_path).parent / "progress.json").read_text())
+    assert progress["status"] == "failed"
 
 
 def test_run_checkpoint_preserves_timeout_artifacts(monkeypatch, tmp_path):
@@ -499,6 +573,8 @@ def test_run_checkpoint_preserves_timeout_artifacts(monkeypatch, tmp_path):
     assert Path(error.command_path).is_file()
     assert Path(error.stdout_path).read_text() == "partial evaluator output\n"
     assert Path(error.stderr_path).read_text() == "evaluation timed out\n"
+    progress = json.loads((Path(error.stderr_path).parent / "progress.json").read_text())
+    assert progress["status"] == "timed_out"
 
 
 def test_run_checkpoint_preserves_timeout_artifacts_if_attempt_directory_disappears(

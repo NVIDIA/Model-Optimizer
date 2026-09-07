@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
+import puzzletron_setup.v2.bundle as bundle_module
 import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_orchestrator.compiler import (
@@ -469,7 +471,36 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     )
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
+    assert (
+        smoke_flow["nodes"]["serving"]["config"]["topology"]["server_context_overhead_tokens"]
+        == 16384
+    )
+    assert smoke_flow["nodes"]["serving"]["config"]["topology"]["extra_vllm_args"] == [
+        "-cc.cudagraph_mode=NONE",
+        "--no-enable-flashinfer-autotune",
+        "--gdn-prefill-backend",
+        "triton",
+        "--gpu-memory-utilization",
+        "0.5",
+        "--reasoning-parser",
+        "qwen3",
+        "--default-chat-template-kwargs",
+        '{"enable_thinking": false}',
+    ]
     smoke_comparison = smoke_flow["nodes"]["quality_benchmarks"]
+    smoke_nodes = smoke_flow["nodes"]
+    smoke_mip_run = next(iter(smoke["mip"]["runs"].values()))
+    assert smoke_mip_run["solver"]["num_solutions"] == 2
+    assert smoke_mip_run["homogeneous"]["keep"] == 2
+    assert smoke_nodes["online_eval"]["config"]["eval_samples"] == 2
+    assert smoke_nodes["online_eval"]["config"]["block_size"] == 32
+    assert smoke_nodes["serving"]["config"]["input_tokens"] == 100
+    assert smoke_nodes["serving"]["config"]["output_tokens"] == 80
+    assert smoke_nodes["serving"]["config"]["request_count"] == 1
+    assert smoke_nodes["short_kd"]["config"]["max_steps"] == 2
+    assert smoke_nodes["short_kd"]["config"]["global_batch_size"] == 1
+    assert smoke_nodes["short_kd"]["config"]["checkpoint_every_steps"] == 2
+    assert smoke_comparison["config"]["limit"] == 8
     assert "recorded_observation" not in smoke_comparison["config"]
     smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
     assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
@@ -570,7 +601,7 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
                     "sequence_length": 512,
                 },
                 "infrastructure": {
-                    "gpus_per_node": 1,
+                    "gpus_per_node": 8,
                     "execution_contract": {
                         "repository": "/worker/modelopt",
                         "venv": "/worker/venv",
@@ -586,19 +617,23 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
         defaults_path=defaults,
         backend=NonInteractiveBackend(),
         campaign_dir=campaign,
-        setup_profile="smoke",
+        setup_profile="balanced",
     )
 
     assert result == campaign.resolve()
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
+    smoke_execution = yaml.safe_load((campaign / "smoke" / "execution.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
     smoke_quality = smoke_flow["nodes"]["quality_benchmarks"]["config"]
     assert smoke_quality["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
-    assert smoke_quality["limit"] == 8
+    assert "limit" not in smoke_quality
     assert smoke_quality["limit_mm_per_prompt"] == {"image": 32}
     assert smoke_quality["max_model_len"] == 32768
     assert "recorded_observation" not in smoke_quality
+    assert smoke_execution["execution"]["stages"]["replacement_scoring"]["instances"] == 1
+    assert smoke_execution["execution"]["stages"]["post.params-90.short_kd"]["instances"] == 1
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    production_execution = yaml.safe_load((campaign / "production" / "execution.yaml").read_text())
     flow_id, flow = next(iter(production["post_mip"]["flows"].items()))
     assert flow_id == "params-90"
     nodes = flow["nodes"]
@@ -611,6 +646,8 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert "model" not in quality["config"]
     assert "log_samples" not in quality["config"]
     assert "recorded_observation" not in quality["config"]
+    assert production_execution["execution"]["stages"]["replacement_scoring"]["instances"] == 8
+    assert production_execution["execution"]["stages"]["post.params-90.short_kd"]["instances"] == 8
     assert production["global_distillation"]["domain"] == "vlm"
     assert production["global_distillation"]["freeze_policy"] == "train_all"
     assert production["tokenize_data"]["enabled"] is False
@@ -628,7 +665,70 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert f"post.{flow_id}.vlm_serving" in stage_ids
     assert f"post.{flow_id}.short_kd" in stage_ids
     assert stage_ids[-1] == f"post.{flow_id}.quality_benchmarks"
-    assert all(stage.total_gpus <= 1 for stage in plan.stages)
+    mip = next(stage for stage in plan.stages if stage.stage_id == "mip")
+    assert mip.resource == "cpu"
+    assert mip.total_gpus == 0
+    dry_run = (campaign / "production" / "dry-run-plan.txt").read_text()
+    assert "mip: 1 submission(s), strategy=single, resource=cpu" in dry_run
+    assert '"resource": "cpu"' in dry_run
+    assert "scheduler_script" in dry_run
+    assert str(campaign / "production" / "experiment.yaml") in dry_run
+    assert ".puzzletron-v2-" not in dry_run
+    readme = (campaign / "README.md").read_text()
+    assert "generation-time snapshot" in readme
+    snapshots = {
+        budget: (campaign / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+    wizard_module.build_bundles_v2(campaign, WizardState.resume(campaign))
+    assert snapshots == {
+        budget: (campaign / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+
+    changed_state = WizardState.resume(campaign)
+    changed_state.set_field(
+        "infrastructure.runner.slurm.partition",
+        "replacement-gpu-partition",
+        source="user",
+    )
+    readme_path = campaign / "README.md"
+    readme_path.write_text(f"{readme_path.read_text()}\nrollback sentinel\n")
+
+    def campaign_files():
+        return {
+            path.relative_to(campaign): path.read_bytes()
+            for path in campaign.rglob("*")
+            if path.is_file()
+        }
+
+    published_files = campaign_files()
+    assert b"replacement-gpu-partition" not in published_files[Path("smoke/runner.yaml")]
+
+    render_plan = bundle_module.dry_run_bundle
+
+    def fail_production_plan(bundle):
+        if bundle.parent == campaign and bundle.name == "production":
+            raise RuntimeError("dry-run rendering failed")
+        return render_plan(bundle)
+
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", fail_production_plan)
+    with pytest.raises(RuntimeError, match="dry-run rendering failed"):
+        wizard_module.build_bundles_v2(campaign, changed_state)
+    assert campaign_files() == published_files
+
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", render_plan)
+    replace = bundle_module.os.replace
+
+    def fail_readme_publish(source, target):
+        if target == campaign / "README.md" and source.name == "README.md":
+            raise RuntimeError("README publication failed")
+        return replace(source, target)
+
+    monkeypatch.setattr(bundle_module.os, "replace", fail_readme_publish)
+    with pytest.raises(RuntimeError, match="README publication failed"):
+        wizard_module.build_bundles_v2(campaign, changed_state)
+    assert campaign_files() == published_files
 
 
 # Interactive prompt navigation

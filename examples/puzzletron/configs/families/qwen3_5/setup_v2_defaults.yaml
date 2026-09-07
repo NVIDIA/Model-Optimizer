@@ -87,6 +87,25 @@ model_overrides:
         bypass:
           enabled: false
       post_mip:
+        serving:
+          # Qwen3.5 GDN FlashInfer kernels may JIT for longer than the server
+          # readiness window on a fresh worker. The vLLM-supported Triton
+          # backend starts deterministically in the reviewed worker image.
+          topology:
+            # Reserve room for visual tokens when AIPerf derives the vLLM
+            # context limit for generated multimodal workloads.
+            server_context_overhead_tokens: 16384
+            extra_vllm_args:
+              - -cc.cudagraph_mode=NONE
+              - --no-enable-flashinfer-autotune
+              - --gdn-prefill-backend
+              - triton
+              - --gpu-memory-utilization
+              - "0.5"
+              - --reasoning-parser
+              - qwen3
+              - --default-chat-template-kwargs
+              - '{"enable_thinking": false}'
         quality_comparison:
           by_modality:
             text:
@@ -154,6 +173,12 @@ model_overrides:
         stages:
           replacement_scoring:
             instances: 1
+        mip:
+          goal_value: 90%
+      balanced:
+        # With the maintained 0.8B search space, 75% is infeasible when the
+        # teacher embedding and depth are fixed. Keep the first-run profile at
+        # the validated 90% target used by the checked-in lifecycle recipes.
         mip:
           goal_value: 90%
 

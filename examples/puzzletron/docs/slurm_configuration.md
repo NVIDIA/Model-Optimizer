@@ -117,3 +117,11 @@ not persisted. Inherit credentials from the launch environment, require an
 existing variable such as `${API_KEY:?set API_KEY}`, retrieve it from a secret
 command, or source a permission-protected `setup_env` file. This check catches
 common mistakes but is not a shell parser or a complete credential scanner.
+
+The setup defaults keep `TMPDIR` at the short worker-local `/tmp` path and put
+the vLLM, FlashInfer, Triton, and PyTorch kernel caches in explicit writable
+directories there.
+Preserve those commands for containerized workers: vLLM uses Unix-domain
+sockets with a platform path limit, and a read-only container home prevents
+the runtime caches from being initialized. Another short, worker-local writable
+directory is also valid.

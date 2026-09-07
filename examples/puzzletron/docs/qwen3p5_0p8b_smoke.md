@@ -16,6 +16,14 @@ conversion.
 These small budgets check that the complete workflow runs and resumes
 correctly. They do not establish model quality or production throughput.
 
+## Before you start
+
+Prepare the controller venv and worker environment described in
+[environment setup](environment_setup.md). The worker environment must provide
+the [pinned evaluator installation](checkpoint_evaluation.md#quick-start).
+IFEval task data must be fetchable from each worker or already present in its
+Hugging Face cache.
+
 ## Generate a complete bundle with the setup wizard
 
 For a new run, start with the [setup wizard](setup_wizard.md) and select Qwen
@@ -74,9 +82,6 @@ The flow deliberately uses two candidate-evaluation samples, two
 IFEval samples, four AIPerf requests per serving candidate, and two
 distillation steps. These budgets validate workflow correctness, comparative
 serving selection, and resumability; they are not quality or throughput claims.
-The worker environment must provide the [pinned evaluator
-installation](checkpoint_evaluation.md#quick-start). IFEval task data must be
-fetchable from each worker or already present in its Hugging Face cache.
 
 After completion, inspect the `checkpoint_eval` and `post_kd_checkpoint_eval`
 nodes under `artifacts/post_mip/nodes`. Their summaries must name the corresponding

@@ -7,164 +7,123 @@ evaluate, benchmark, materialize, or distill those candidates.
 
 ## Table of contents
 
-- [Start here: first campaign](#start-here-first-campaign)
+- [Start here: lifecycle smoke](#start-here-lifecycle-smoke)
 - [Understand the campaign stages](#understand-the-campaign-stages)
 - [Evaluate a checkpoint](#evaluate-a-checkpoint)
 - [Configure a campaign](#configure-a-campaign)
 - [Operate and recover a campaign](#operate-and-recover-a-campaign)
 - [Extend Puzzletron](#extend-puzzletron)
 
-## Start here: first campaign
+## Start here: lifecycle smoke
 
-A first Puzzletron run consists of preparing the environments, generating a
-campaign, preparing its data, inspecting a dry run, and launching it. The same
-launch command resumes compatible work.
+Start with the maintained Qwen 3.5 0.8B VLM smoke. It exercises the complete
+image-text lifecycle with bounded workloads and at most one GPU per stage. Once
+it succeeds, the optional longer example campaign uses the same environment,
+runner, orchestrator, progress display, report, and resume command. That larger
+campaign is a scheduled, multi-hour example, not a routine smoke or presubmit.
 
-For a maintained image-text example using Qwen 3.5 0.8B and Nemotron-VLM,
-follow the
-[Qwen VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md).
-For a larger, FFN-only example that keeps evaluation and distillation opt-in,
-see the [Qwen 3.5 4B VLM example](docs/qwen3p5_4b_vlm_example.md).
+### 1. Create the controller environment
 
-### 1. Prepare the environments
-
-Create one lightweight Python environment for the setup wizard and the command
-that launches campaigns:
+From the ModelOpt checkout, use Python 3.10 through 3.14 to create a lightweight
+virtual environment for the command that plans, launches, and resumes the
+smoke:
 
 ```bash
+python3 --version  # must report Python 3.10 through 3.14
 python3 -m venv .venv-puzzletron
 source .venv-puzzletron/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r examples/puzzletron/requirements-setup.txt
 ```
 
-This environment creates campaign files and runs `orchestrate.py`. Model
-conversion, training, evaluation, and benchmarking run in the worker
-environment or container selected during setup. Prepare the
-[worker environment](docs/environment_setup.md) before launching a campaign.
+This controller environment does not need PyTorch or model weights. Model
+conversion, evaluation, serving, and distillation run in the worker environment
+selected by the runner.
 
-### Worker image
+### 2. Configure the worker runner
 
-The repository includes a Dockerfile and build command for Puzzletron workers.
-Follow the [image guide](docs/worker_image.md) to build, check, or export an
-Enroot/Pyxis SquashFS image.
-
-### 2. Generate a campaign
-
-Start the guided setup with the repository defaults:
+Use a reviewed Puzzletron worker image supplied by your site. Create one runner
+file from the template if your site does not already provide one:
 
 ```bash
-python examples/puzzletron/puzzletron_setup_v2.py \
-  --defaults examples/puzzletron/configs/setup/defaults.example.yaml
+cp examples/puzzletron/configs/orchestration/runner.slurm.example.yaml \
+  runner.slurm.yaml
 ```
 
-Choose **Balanced pruning** for a first-generated text campaign. For the
-maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the Puzzle-KD v2
-text dataset or an existing worker-visible dataset. For VLM, select the same
-model and the Nemotron-VLM v2 image-text dataset.
-The generated post-MIP flow follows the detected modality, including image
-serving, VLM distillation, and the pinned RealWorldQA/MMMU comparison.
-Review the detected model, data modality, worker and scheduler settings, and
-output directory.
+Set the Slurm account and partitions, worker image, and any shared-storage
+mounts in `runner.slurm.yaml`. Cache, dataset, and run-root paths must be
+worker-visible at their configured locations. The runner's repository and
+Python paths must exist inside the worker image. See [environment
+setup](docs/environment_setup.md) for the worker contract and [Slurm
+configuration](docs/slurm_configuration.md) for each runner field.
 
-The wizard reads model configuration, not model weights, and does not submit
-jobs. It writes a smoke bundle under `smoke/`, a campaign bundle
-under `production/`, and a generated `README.md` with the commands for both.
-Users do not need to assemble or edit a separate smoke configuration. Named MIP
-bundles derive the teacher embedding width and layer depth from the inspected
-model configuration. Setup stops with
-a model-inspection error instead of emitting values that require hand edits.
-For Qwen 3.5 0.8B, both bundles include
-a final pinned student-versus-teacher downstream comparison that records
-results without enforcing a minimum score. See the
-[setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
-configuration mode, generated files, and setup resume.
+The three campaign inputs have separate jobs:
 
-The checked-in Qwen 3.5 0.8B recipes provide one complete integration check per
-modality and one illustrative VLM campaign:
+- The experiment file defines the model, data, and bounded smoke workload. Do
+  not edit it for this first run.
+- The runner file contains the site-specific scheduler and worker settings.
+- The execution file maps the smoke stages onto one GPU or a CPU worker.
 
-| Scope | Recipe |
-| --- | --- |
-| Text lifecycle smoke | `full_smoke.yaml` |
-| VLM lifecycle smoke | `full_vlm_smoke.yaml` |
-| VLM campaign | `vlm_campaign.yaml` |
+### 3. Select shared paths
 
-The smoke recipes use the shared `execution.single_gpu.yaml` profile. The VLM
-campaign uses its model-specific execution profile. See the
-[Qwen VLM example](docs/qwen3p5_0p8b_vlm_smoke.md) for the runnable commands.
-
-Unit tests compile every listed recipe and verify its stage and resource
-contract. This is plan-level validation: it detects configuration and
-orchestration drift, but it does not prove that the current model, data,
-evaluator, and GPU runtime complete successfully together. Treat a recipe as
-runtime-validated only when a recent end-to-end run is available for the same
-dependencies.
-
-### 3. Prepare datasets and caches
-
-Run the dataset-preparation command in the generated `README.md` from the
-[worker environment](docs/environment_setup.md#worker-environment). The command
-writes into the dataset and cache paths selected during setup and can be rerun
-to validate or resume preparation. For VLM evaluation caches prepared outside a
-campaign, follow [cache benchmark data](docs/vlm_checkpoint_evaluation.md#cache-benchmark-data).
-
-### 4. Validate the generated setup
-
-Activate `.venv-puzzletron` and inspect the generated smoke plan:
+Set a Hugging Face cache visible to workers and a new run root on shared
+storage:
 
 ```bash
-PUZZLETRON_BUNDLE=/path/to/generated/campaign/smoke
+export HF_HOME=/path/to/shared/huggingface-cache
+export PUZZLETRON_SOURCE_REVISION="$(git rev-parse HEAD)"
+export PUZZLETRON_DATASET_REVISION=51f4f4d219315c3283950994d4eb3d7fc30aa87b
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_smoke
+export PUZZLETRON_RUN_ROOT="$(python -c 'import os; print(os.path.realpath(os.environ["PUZZLETRON_RUN_ROOT"]))')"
+```
+
+The smoke's first stage downloads, validates, and caches its eight Nemotron-VLM
+image-conversation samples and the pinned evaluation rows. No PyTorch data
+command or separate cache script runs in the controller venv. Offline workers
+must use a cache prepared as described in the
+[VLM evaluation guide](docs/vlm_checkpoint_evaluation.md#cache-benchmark-data).
+
+### 4. Inspect and run the smoke
+
+Activate `.venv-puzzletron`, select the maintained files, and inspect the exact
+plan before it requests resources:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+RUNNER=runner.slurm.yaml
 
 python examples/puzzletron/orchestrate.py \
-  --experiment "$PUZZLETRON_BUNDLE/experiment.yaml" \
-  --runner "$PUZZLETRON_BUNDLE/runner.yaml" \
-  --execution "$PUZZLETRON_BUNDLE/execution.yaml" \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
   --stage full --dry-run
 ```
 
-Review the stage list, worker paths, resources, and output directory.
-`--stage full` runs every stage enabled by the generated validation experiment
-in dependency order. Remove `--dry-run` to launch it. This smoke run is the
-default setup check; detailed smoke limits and manually maintained smoke recipes
-are documented for advanced use and reproducibility in the
-[text](docs/qwen3p5_0p8b_smoke.md) and
-[VLM](docs/qwen3p5_0p8b_vlm_smoke.md) guides.
-
-### 5. Launch the campaign
-
-After validation succeeds, inspect and launch the production bundle:
-
-```bash
-PUZZLETRON_BUNDLE=/path/to/generated/campaign/production
-
-python examples/puzzletron/orchestrate.py \
-  --experiment "$PUZZLETRON_BUNDLE/experiment.yaml" \
-  --runner "$PUZZLETRON_BUNDLE/runner.yaml" \
-  --execution "$PUZZLETRON_BUNDLE/execution.yaml" \
-  --stage full --dry-run
-```
-
-Launch the inspected plan:
+Review the resolved paths, CPU and GPU requests, worker image, mounts, and log
+locations. Then run the same plan without `--dry-run`:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
-  --experiment "$PUZZLETRON_BUNDLE/experiment.yaml" \
-  --runner "$PUZZLETRON_BUNDLE/runner.yaml" \
-  --execution "$PUZZLETRON_BUNDLE/execution.yaml" \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
   --stage full
 ```
 
-The experiment file defines the model and algorithm choices, the runner file
-defines the worker environment, and the execution file says how each stage
-runs. Keep all three together when launching or resuming a generated campaign.
+### 5. Resume and inspect results
 
-### 6. Resume and inspect results
+Run the launch command above again to recover an interrupted smoke or verify a
+completed one. Compatible completed stages are not submitted again. Puzzletron
+stores its structured runtime state under
+`$PUZZLETRON_RUN_ROOT/orchestration/`.
 
-The experiment file calls the campaign output directory `puzzle_dir`.
-`orchestrate.py` shows live progress and stores resume information under
-`<puzzle-dir>/orchestration/`. Run the same command with the same three files to
-recover a detached or interrupted campaign; completed compatible stages are not
-submitted again. Use the production command above without `--dry-run` for both
-the first launch and every resume.
+While the command is running, it shows completed/total stages, queued and
+running stages, elapsed time, 30-second heartbeats, and the active log path.
+Stages expose their native inner unit when available, including evaluation
+samples and measured rate. An ETA appears only after progress provides a
+reliable denominator and the controller observes throughput; otherwise it says
+`ETA unavailable`.
 
 After the selected plan completes cleanly, `orchestrate.py` attempts to write the
 final report to
@@ -176,6 +135,33 @@ stages, `--once`, logging controls, security options, and recovery details, or
 report. For a failed or interrupted run, follow the actionable checks in
 [run and recovery options](docs/orchestration_operations.md#progress-and-interruption).
 
+The [Qwen VLM example guide](docs/qwen3p5_0p8b_vlm_smoke.md) lists the smoke's
+expected lifecycle checks and explains how to interpret its bounded results.
+
+### 6. Optional: run the longer multi-hour example
+
+After the smoke succeeds, keep the controller venv and runner and select a new
+run root plus the longer example files:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_campaign.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
+export PUZZLETRON_RUN_ROOT="$(python -c 'import os; print(os.path.realpath(os.environ["PUZZLETRON_RUN_ROOT"]))')"
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+Inspect the larger plan, then remove `--dry-run` to launch it. Use that same
+launch command for every resume. The example increases sample counts,
+candidate coverage, and distillation work, but does not introduce another
+operational path. Use focused tests and the lifecycle smoke for routine
+development; reserve this campaign for scheduled integration validation.
+
 ## Understand the campaign stages
 
 `--stage full` runs every stage enabled by the experiment in dependency order.
@@ -184,8 +170,9 @@ The complete pipeline is organized into these steps:
 
 1. **Prepare inputs.** Convert the source checkpoint and, when configured,
    tokenize the campaign dataset.
-2. **Measure pruning choices.** Collect width importance and optional depth
-   importance or vLLM runtime statistics, then sort the teacher checkpoint.
+2. **Measure pruning choices.** Collect importance for hidden width (the
+   model's transformer hidden size) and optional depth importance or vLLM
+   runtime statistics, then sort the teacher checkpoint.
 3. **Validate and score.** Run the enabled sorting, width, slicing, and bypass
    sanity checks; collect bypass observations; build the replacement library;
    and score individual replacements.
@@ -229,9 +216,21 @@ runtime constraints, results, and troubleshooting for their respective routes.
 
 ## Configure a campaign
 
-Generated bundles contain an experiment, runner, and execution file. The
-default route above is sufficient when their generated values match your model
-and infrastructure.
+Use the maintained smoke and longer example above to learn the workflow before
+creating a different campaign. The setup wizard is the customization path for
+another model, dataset, search profile, or execution environment:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults examples/puzzletron/configs/setup/defaults.example.yaml
+```
+
+The wizard is implemented by `puzzletron_setup_v2.py`. It inspects model
+configuration metadata and writes validated smoke and production bundles. Each
+bundle contains the same three inputs used above: experiment, runner, and
+execution. For named width and depth search, setup derives the teacher hidden
+size and layer count and stops on missing metadata instead of asking users to
+edit generated YAML.
 
 - Use [configuration and overrides](docs/configuration_overrides.md) to find
   the built-in configuration files, choose where campaign outputs are stored,
@@ -241,8 +240,8 @@ and infrastructure.
   at their teacher values.
 - Use [Slurm configuration](docs/slurm_configuration.md) to change partitions,
   CPU-routed stages, log locations, and accepted compatibility fields.
-- Use the [setup wizard guide](docs/setup_wizard.md) to change profiles,
-  datasets, generated files, or setup automation.
+- Use the [setup wizard guide](docs/setup_wizard.md) for profiles, generated
+  files, non-interactive setup, and setup resume.
 
 Run `--dry-run` after every configuration change. It resolves and validates
 the experiment, runner, and execution files before any job is submitted.
