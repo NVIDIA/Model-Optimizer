@@ -21,7 +21,7 @@ model either way, so the layout is imported from ``gemma4`` rather than restated
 the two must not drift apart.
 """
 
-from ..gemma4.specs import GEMMA4_MOE_VARIANTS
+from ..gemma4.specs import GEMMA4_MOE_LAYOUTS
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
 register(
@@ -29,6 +29,6 @@ register(
         model_type="gemma4_text",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
-        moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS),
+        moe_spec=MoESpec(moe_layouts=GEMMA4_MOE_LAYOUTS),
     )
 )

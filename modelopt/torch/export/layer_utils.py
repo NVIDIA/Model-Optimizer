@@ -103,7 +103,7 @@ def get_experts_list(
 
     # Per-model data first: the owning spec has to allow grouped export for this model.
     # That is modelopt's own validation state (ExportSpec.grouped_expert_export), kept
-    # apart from the architecture the variant describes -- qwen3_5_moe is built exactly
+    # apart from the architecture the layout describes -- qwen3_5_moe is built exactly
     # like qwen3_moe and is still excluded.
     spec = match_moe_model(module, model_type)
     export_spec = spec.export_spec if spec is not None else None
@@ -1007,7 +1007,7 @@ def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[s
     """Get the list of linear names for the experts.
 
     The model's own spec always wins where it has an answer for this module's layout.
-    That qualifier matters: a variant's names describe one layout, and the same model
+    That qualifier matters: a layout's names describe one layout, and the same model
     type materializes per-expert on transformers 4 and fused on 5, so naming from the
     wrong layout would be wrong rather than merely generic. The structural fallbacks
     below run only where the spec declines.
@@ -1048,7 +1048,7 @@ def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[s
 
     raise NotImplementedError(
         f"Cannot resolve expert linear names for MoE block {type(module).__name__!r} "
-        f"(model type: {model_type!r}). Register a ModelSpec with moe_variants for "
+        f"(model type: {model_type!r}). Register a ModelSpec with moe_layouts for "
         "this model under modelopt/torch/models/."
     )
 
@@ -1246,7 +1246,7 @@ def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> in
             continue
         if not hasattr(sub_module.experts, "__iter__"):
             continue
-        # The model's own spec gives the exact pair, and a variant that declares no
+        # The model's own spec gives the exact pair, and a layout that declares no
         # pair (non-gated or already-fused experts) needs no sync at all.
         #
         # Blocks of unregistered families still reach this loop: quantization admits
@@ -1256,11 +1256,11 @@ def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> in
         # registry existed. Skipping them instead would silently leave the two halves
         # of the fused gate_up_proj on inconsistent weight_scale_2 -- exactly the
         # corruption this function exists to prevent.
-        variant = match_moe_block(sub_module, model_type)
-        if variant is not None and variant.gate_up_pair is None:
+        layout = match_moe_block(sub_module, model_type)
+        if layout is not None and layout.gate_up_pair is None:
             continue
         candidate_pairs = (
-            (variant.gate_up_pair,) if variant is not None else list_all_possible("gate_up_pairs")
+            (layout.gate_up_pair,) if layout is not None else list_all_possible("gate_up_pairs")
         )
         for expert in sub_module.experts:
             for gate_name, up_name in candidate_pairs:
@@ -1579,7 +1579,7 @@ def _set_layer_config_from_metaconfig(layer_config, metaconfig):
 
             layer_config.chatglm_version = chatglm_version
 
-    # For Falcon variants do not provide new_decoder_architecture, but we can infer it from the model_type
+    # For Falcon layouts do not provide new_decoder_architecture, but we can infer it from the model_type
     if "model_type" in metaconfig:
         if metaconfig["model_type"] == "RefinedWeb":
             # Case 1. Falcon-40B / Falcon-40B-instruct
@@ -1590,7 +1590,7 @@ def _set_layer_config_from_metaconfig(layer_config, metaconfig):
             # https://huggingface.co/tiiuae/falcon-7b/blob/main/config.json
             layer_config.new_decoder_architecture = False
 
-    # For Falcon variants, they might not specify the number of kv heads with MQA models, e.g., 7b
+    # For Falcon layouts, they might not specify the number of kv heads with MQA models, e.g., 7b
     if (
         not layer_config.new_decoder_architecture
         and "multi_query" in metaconfig

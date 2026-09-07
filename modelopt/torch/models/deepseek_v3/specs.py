@@ -19,7 +19,7 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 ``DeepseekMoE`` block of DeepSeek-MoE is a separate spec under ``deepseek``.
 """
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoELayout, MoESpec, register
 
 # DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
 # in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
@@ -37,8 +37,8 @@ register(
         min_transformers_version="4.57",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(
+            moe_layouts=(
+                MoELayout(
                     block_names=("DeepseekV3MoE",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),

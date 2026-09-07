@@ -14,7 +14,7 @@ from . import specs
 and `<model_type>/specs.py`:
 
 ```python
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoESpec, MoELayout, register
 
 register(
     ModelSpec(
@@ -23,8 +23,8 @@ register(
         # modelopt policy, not a model fact: this model is validated for grouped export.
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(
+            moe_layouts=(
+                MoELayout(
                     block_names=("Qwen3MoeSparseMoeBlock",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),
@@ -39,7 +39,7 @@ Then add it to the import list in `__init__.py`. Two tables in
 `tests/unit/torch/models/` are checked for exhaustiveness and fail until you extend
 them:
 
-- `EXPECTED_MOE_VARIANTS` in `test_model_specs.py` — pins the spec's values.
+- `EXPECTED_MOE_LAYOUTS` in `test_model_specs.py` — pins the spec's values.
 `test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
 which to skip, from the registry.
 

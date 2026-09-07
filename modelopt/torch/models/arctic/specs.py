@@ -15,15 +15,15 @@
 
 """Snowflake Arctic specs (trust-remote-code model type ``arctic``)."""
 
-from ..specs import ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ModelSpec, MoELayout, MoESpec, register
 
 register(
     ModelSpec(
         model_type="arctic",
         modeling_source="remote_code",
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(
+            moe_layouts=(
+                MoELayout(
                     block_names=("ArcticMoE",),
                     # ArcticMLP experts use Mixtral-style w1/w2/w3 naming.
                     expert_linear_names=("w1", "w2", "w3"),

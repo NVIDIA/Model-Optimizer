@@ -30,8 +30,8 @@ from modelopt.torch.export.layer_utils import (
 from modelopt.torch.export.quant_utils import _layernorm_uses_weight_plus_one
 from modelopt.torch.models import (
     ModelSpec,
+    MoELayout,
     MoESpec,
-    MoEVariant,
     get_spec,
     get_specs,
     hf_model_type,
@@ -41,9 +41,9 @@ from modelopt.torch.models import (
 from modelopt.torch.models.specs import _SPECS
 
 
-def _variants(spec):
-    """The MoE variants a spec declares; empty when it has no MoE section."""
-    return spec.moe_spec.moe_variants if spec.moe_spec is not None else ()
+def _layouts(spec):
+    """The MoE layouts a spec declares; empty when it has no MoE section."""
+    return spec.moe_spec.moe_layouts if spec.moe_spec is not None else ()
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -63,16 +63,16 @@ class _UnknownMoeBlock(nn.Module):
 
 
 def test_match_moe_block_by_class_name():
-    variant = match_moe_block(Qwen3MoeSparseMoeBlock())
-    assert variant is not None
-    assert variant.expert_linear_names == ("gate_proj", "down_proj", "up_proj")
-    assert not variant.fused_expert_names
+    layout = match_moe_block(Qwen3MoeSparseMoeBlock())
+    assert layout is not None
+    assert layout.expert_linear_names == ("gate_proj", "down_proj", "up_proj")
+    assert not layout.fused_expert_names
 
 
 def test_match_moe_block_matches_quantized_class_via_mro():
-    variant = match_moe_block(QuantMixtralSparseMoeBlock())
-    assert variant is not None
-    assert variant.expert_linear_names == ("w1", "w2", "w3")
+    layout = match_moe_block(QuantMixtralSparseMoeBlock())
+    assert layout is not None
+    assert layout.expert_linear_names == ("w1", "w2", "w3")
 
 
 def test_match_moe_block_unmatched_returns_none():
@@ -152,7 +152,7 @@ def test_spec_fused_naming_outranks_the_structural_default():
 def test_spec_declines_when_its_naming_describes_another_layout():
     """A spec must not answer with naming that does not apply to this module.
 
-    Mixtral's variants describe per-expert ``w1``/``w2``/``w3``; on transformers 5 the
+    Mixtral's layouts describe per-expert ``w1``/``w2``/``w3``; on transformers 5 the
     same block holds a fused container instead. Returning the per-expert naming there
     would be wrong, not merely generic, so the spec declines and the structural rule
     resolves it.
@@ -300,11 +300,11 @@ def test_list_all_possible_rejects_scalar_attr():
 
 
 def test_list_all_possible_handles_unhashable_items():
-    # MoEVariant is a mutable dataclass and therefore unhashable; deduplication must
+    # MoELayout is a mutable dataclass and therefore unhashable; deduplication must
     # not go through set()/dict.fromkeys().
-    variants = list_all_possible("moe_variants")
-    assert variants
-    assert all(isinstance(v, MoEVariant) for v in variants)
+    layouts = list_all_possible("moe_layouts")
+    assert layouts
+    assert all(isinstance(v, MoELayout) for v in layouts)
 
 
 def test_weight_plus_one_norm_names_cover_legacy():
@@ -395,8 +395,8 @@ def test_sync_moe_gate_up_amax_fallback_covers_w1_w3_naming():
     assert torch.equal(model.moe.experts[0].w1.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
 
 
-def test_sync_moe_gate_up_amax_skips_variant_without_gate_up_pair():
-    # A registered variant that declares no pair (non-gated or already-fused experts)
+def test_sync_moe_gate_up_amax_skips_layout_without_gate_up_pair():
+    # A registered layout that declares no pair (non-gated or already-fused experts)
     # must NOT fall back to the global vocabulary -- its spec already says "no sync".
     class NemotronHMOE(nn.Module):
         pass
@@ -413,14 +413,14 @@ def test_match_moe_block_scope_prefers_own_model_type():
 
     # A hypothetical remote-code fork registering the same block class name under
     # its own model type: scope must pick the model's own spec among candidates.
-    fork_variant = MoEVariant(
+    fork_layout = MoELayout(
         block_names=("Qwen3MoeSparseMoeBlock",),
         expert_linear_names=("a_proj", "b_proj"),
     )
-    fork_spec = ModelSpec(model_type="zz_fork", moe_spec=MoESpec(moe_variants=(fork_variant,)))
+    fork_spec = ModelSpec(model_type="zz_fork", moe_spec=MoESpec(moe_layouts=(fork_layout,)))
     _SPECS[fork_spec.model_type] = fork_spec
     try:
-        assert match_moe_block(Qwen3MoeSparseMoeBlock(), "zz_fork") is fork_variant
+        assert match_moe_block(Qwen3MoeSparseMoeBlock(), "zz_fork") is fork_layout
         assert match_moe_block(Qwen3MoeSparseMoeBlock(), "qwen3_moe").expert_linear_names == (
             "gate_proj",
             "down_proj",
@@ -477,9 +477,9 @@ def test_multiple_layouts_are_disambiguated_by_block_class():
     spec = ModelSpec(
         model_type="zz_two_layouts",
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(block_names=("TwoLayoutBlockA",), expert_linear_names=("a1", "a2")),
-                MoEVariant(block_names=("TwoLayoutBlockB",), expert_linear_names=("b1", "b2")),
+            moe_layouts=(
+                MoELayout(block_names=("TwoLayoutBlockA",), expert_linear_names=("a1", "a2")),
+                MoELayout(block_names=("TwoLayoutBlockB",), expert_linear_names=("b1", "b2")),
             )
         ),
     )
@@ -594,7 +594,7 @@ def test_fused_experts_shortcut_ignores_unrelated_attributes():
 # ---------------------------------------------------------------------------
 
 # (model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair)
-EXPECTED_MOE_VARIANTS = [
+EXPECTED_MOE_LAYOUTS = [
     ("arctic", ("ArcticMoE",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("dbrx", ("DbrxFFN",), ("w1_linear", "w2_linear", "v1_linear"), False, None),
     (
@@ -662,20 +662,20 @@ EXPECTED_MOE_VARIANTS = [
 
 @pytest.mark.parametrize(
     ("model_type", "block_names", "expert_linear_names", "fused_expert_names", "gate_up_pair"),
-    EXPECTED_MOE_VARIANTS,
-    ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS],
+    EXPECTED_MOE_LAYOUTS,
+    ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_LAYOUTS],
 )
-def test_moe_variant_values(
+def test_moe_layout_values(
     model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair
 ):
     spec = get_spec(model_type)
     assert spec is not None, f"no spec registered for {model_type!r}"
-    matching = [v for v in _variants(spec) if v.block_names == block_names]
-    assert len(matching) == 1, f"expected exactly one {block_names} variant on {model_type!r}"
-    variant = matching[0]
-    assert variant.expert_linear_names == expert_linear_names
-    assert variant.fused_expert_names is fused_expert_names
-    assert variant.gate_up_pair == gate_up_pair
+    matching = [v for v in _layouts(spec) if v.block_names == block_names]
+    assert len(matching) == 1, f"expected exactly one {block_names} layout on {model_type!r}"
+    layout = matching[0]
+    assert layout.expert_linear_names == expert_linear_names
+    assert layout.fused_expert_names is fused_expert_names
+    assert layout.gate_up_pair == gate_up_pair
 
 
 def test_grouped_expert_export_is_exhaustive():
@@ -684,7 +684,7 @@ def test_grouped_expert_export_is_exhaustive():
     Policy, not architecture, so it lives on ``ExportSpec`` and is listed here rather
     than derived: enabling a new model must be a deliberate edit in both places.
 
-    Per model rather than per variant, which is exact now that every spec declares a
+    Per model rather than per layout, which is exact now that every spec declares a
     single layout.
     """
     allowed = {
@@ -704,23 +704,23 @@ def test_grouped_expert_export_is_exhaustive():
     }
 
 
-def test_moe_variant_carries_no_export_policy():
-    """``MoEVariant`` holds architecture only; grouped-export policy is not its business."""
-    assert not hasattr(MoEVariant(), "has_iterable_experts")
+def test_moe_layout_carries_no_export_policy():
+    """``MoELayout`` holds architecture only; grouped-export policy is not its business."""
+    assert not hasattr(MoELayout(), "has_iterable_experts")
 
 
-def test_moe_variant_table_is_exhaustive():
+def test_moe_layout_table_is_exhaustive():
     # Fails when a new MoE spec is added without a row above, so the table cannot
     # silently drift out of date.
-    registered = {(s.model_type, v.block_names) for s in get_specs() for v in _variants(s)}
-    tabled = {(mt, bn) for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS}
+    registered = {(s.model_type, v.block_names) for s in get_specs() for v in _layouts(s)}
+    tabled = {(mt, bn) for mt, bn, _, _, _ in EXPECTED_MOE_LAYOUTS}
     assert registered == tabled
 
 
 @pytest.mark.parametrize(
     ("model_type", "block_names", "expert_linear_names", "fused_expert_names", "gate_up_pair"),
-    EXPECTED_MOE_VARIANTS,
-    ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS],
+    EXPECTED_MOE_LAYOUTS,
+    ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_LAYOUTS],
 )
 def test_expert_linear_names_resolve_for_every_registered_block(
     model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair
@@ -738,22 +738,22 @@ def test_gpt_oss_block_name_matches_the_real_module():
     class GptOssMLP(nn.Module):
         pass
 
-    variant = match_moe_block(GptOssMLP(), "gpt_oss")
-    assert variant is not None
-    assert variant.expert_linear_names == ("gate_up_proj", "down_proj")
+    layout = match_moe_block(GptOssMLP(), "gpt_oss")
+    assert layout is not None
+    assert layout.expert_linear_names == ("gate_up_proj", "down_proj")
     assert is_moe(GptOssMLP(), "gpt_oss")
 
 
 def test_gate_up_pair_is_a_subset_of_expert_linear_names():
-    # A gate/up pair naming projections the variant does not declare would silently
+    # A gate/up pair naming projections the layout does not declare would silently
     # never sync in sync_moe_gate_up_amax.
     for spec in get_specs():
-        for variant in _variants(spec):
-            if variant.gate_up_pair is None or variant.expert_linear_names is None:
+        for layout in _layouts(spec):
+            if layout.gate_up_pair is None or layout.expert_linear_names is None:
                 continue
-            missing = set(variant.gate_up_pair) - set(variant.expert_linear_names)
+            missing = set(layout.gate_up_pair) - set(layout.expert_linear_names)
             assert not missing, (
-                f"{spec.model_type} {variant.block_names}: gate_up_pair names "
+                f"{spec.model_type} {layout.block_names}: gate_up_pair names "
                 f"{sorted(missing)} are not in expert_linear_names"
             )
 
@@ -798,7 +798,7 @@ def test_iterable_experts_matches_pre_refactor_support():
         "qwen3_moe": "Qwen3MoeForCausalLM",
         "qwen3_next": "Qwen3NextForCausalLM",
     }
-    moe_specs = [s for s in get_specs() if _variants(s)]
+    moe_specs = [s for s in get_specs() if _layouts(s)]
     assert {s.model_type for s in moe_specs} == set(root_class_names), (
         "root_class_names is out of sync with the registered MoE specs"
     )

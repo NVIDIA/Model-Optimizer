@@ -15,7 +15,7 @@
 
 """Qwen3.5-MoE specs (HF model type ``qwen3_5_moe``)."""
 
-from ..specs import ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ModelSpec, MoELayout, MoESpec, register
 
 # has_iterable_experts stays False to preserve pre-refactor behavior: the legacy
 # get_experts_list keyed off ``type(root_model).__name__.lower()``, and
@@ -28,8 +28,8 @@ register(
         model_type="qwen3_5_moe",
         min_transformers_version="5.2",
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(
+            moe_layouts=(
+                MoELayout(
                     block_names=("Qwen3_5MoeSparseMoeBlock",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),

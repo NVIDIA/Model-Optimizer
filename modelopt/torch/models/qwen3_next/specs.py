@@ -15,7 +15,7 @@
 
 """Qwen3-Next specs (HF model type ``qwen3_next``)."""
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoELayout, MoESpec, register
 
 register(
     ModelSpec(
@@ -23,8 +23,8 @@ register(
         min_transformers_version="4.57",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
-            moe_variants=(
-                MoEVariant(
+            moe_layouts=(
+                MoELayout(
                     block_names=("Qwen3NextSparseMoeBlock",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),

@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ExportSpec",
+    "MoELayout",
     "MoESpec",
-    "MoEVariant",
     "ModelSpec",
     "SpecSection",
     "get_spec",
@@ -75,12 +75,12 @@ def match_class_names(module, names: tuple[str, ...]) -> bool:
 
 
 @dataclass(kw_only=True)
-class MoEVariant:
+class MoELayout:
     """One concrete MoE-block layout of a model.
 
     A model type usually has exactly one; it has several when the same checkpoint
     materializes with different module classes and projection names (e.g. Mixtral
-    across transformers generations). ``block_names`` tells the variants apart.
+    across transformers generations). ``block_names`` tells the layouts apart.
     """
 
     block_names: tuple[str, ...] = ()
@@ -128,47 +128,47 @@ class MoESpec(SpecSection):
     table.
     """
 
-    moe_variants: tuple[MoEVariant, ...] = ()
+    moe_layouts: tuple[MoELayout, ...] = ()
     """The model's MoE-block layouts; more than one when the same checkpoint
-    materializes differently (see ``MoEVariant``)."""
+    materializes differently (see ``MoELayout``)."""
 
     @property
     def gate_up_pairs(self) -> tuple[tuple[str, str], ...]:
-        """The (gate, up) projection-name pairs declared by this model's variants."""
-        return tuple(v.gate_up_pair for v in self.moe_variants if v.gate_up_pair is not None)
+        """The (gate, up) projection-name pairs declared by this model's layouts."""
+        return tuple(v.gate_up_pair for v in self.moe_layouts if v.gate_up_pair is not None)
 
-    def match_moe_variant(self, module) -> MoEVariant | None:
-        """Return the variant whose ``block_names`` matches ``module``, else None."""
-        for variant in self.moe_variants:
-            if match_class_names(module, variant.block_names):
-                return variant
+    def match_moe_layout(self, module) -> MoELayout | None:
+        """Return the layout whose ``block_names`` matches ``module``, else None."""
+        for layout in self.moe_layouts:
+            if match_class_names(module, layout.block_names):
+                return layout
         return None
 
     def expert_linear_names_for(self, module, fused: bool | None = None) -> tuple[str, ...] | None:
         """Resolve ``module``'s expert linear names within this model.
 
-        When every candidate variant agrees on one naming, the module's class is
+        When every candidate layout agrees on one naming, the module's class is
         irrelevant (a spec can provide naming without the block class being known);
-        with several namings, the module's class picks the variant.
+        with several namings, the module's class picks the layout.
 
         ``fused`` is the layout the caller observed on the module. Passing it restricts
-        the answer to variants whose names describe that layout, so a spec that only
+        the answer to layouts whose names describe that layout, so a spec that only
         describes the per-expert form declines for a fused container instead of
-        returning names that do not apply there. ``None`` considers every variant.
+        returning names that do not apply there. ``None`` considers every layout.
         """
         candidates = [
-            variant
-            for variant in self.moe_variants
-            if variant.expert_linear_names is not None
-            and (fused is None or variant.fused_expert_names == fused)
+            layout
+            for layout in self.moe_layouts
+            if layout.expert_linear_names is not None
+            and (fused is None or layout.fused_expert_names == fused)
         ]
-        namings = {variant.expert_linear_names for variant in candidates}
+        namings = {layout.expert_linear_names for layout in candidates}
         if len(namings) == 1:
             return next(iter(namings))
-        variant = self.match_moe_variant(module)
-        if variant is None or variant not in candidates:
+        layout = self.match_moe_layout(module)
+        if layout is None or layout not in candidates:
             return None
-        return variant.expert_linear_names
+        return layout.expert_linear_names
 
 
 @dataclass(kw_only=True)
@@ -187,7 +187,7 @@ class ExportSpec(SpecSection):
     is architecturally identical to ``qwen3_moe`` here and is still ``False``, because
     the pre-registry code keyed off the root class name and ``"qwen3_5moeforcausallm"``
     matched none of its qwen substrings. That is why it lives in the export section
-    rather than on ``MoEVariant``, which holds only facts about the architecture.
+    rather than on ``MoELayout``, which holds only facts about the architecture.
 
     Whether the experts are *actually* iterable is separate again, and read off the
     module: a model listed here still exports fine when a newer transformers fuses its
@@ -203,7 +203,7 @@ class ExportSpec(SpecSection):
 
     weight_plus_one_norm_names: tuple[str, ...] = ()
     """Class names of norm layers whose stored weight is ``w - 1`` (the effective
-    scale is ``weight + 1``), e.g. Gemma's RMSNorm variants and LayerNorm1P.
+    scale is ``weight + 1``), e.g. Gemma's RMSNorm layouts and LayerNorm1P.
     Matched against a norm module's MRO (case-insensitive exact names). Export
     must account for the +1 when folding scales into the norm weight (AWQ
     pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
@@ -350,7 +350,7 @@ def list_all_possible(attr: str) -> tuple:
                 f"list_all_possible({attr!r}) expects a tuple-valued attribute, got "
                 f"{type(value).__name__} on model type {spec.model_type!r}."
             )
-        # Deduplicate by equality: items need not be hashable (MoEVariant is not).
+        # Deduplicate by equality: items need not be hashable (MoELayout is not).
         values.extend(item for item in value if item not in values)
     return tuple(values)
 
@@ -366,29 +366,29 @@ def hf_model_type(model) -> str | None:
     return model_type if isinstance(model_type, str) else None
 
 
-def match_moe_block(module: "nn.Module", model_type: str | None = None) -> MoEVariant | None:
-    """Return the MoE layout variant for ``module``, resolved by model type.
+def match_moe_block(module: "nn.Module", model_type: str | None = None) -> MoELayout | None:
+    """Return the MoE layout layout for ``module``, resolved by model type.
 
     ``model_type`` (the root ``model.config.model_type``) is a strict filter: only
     that model's own spec is consulted, and an unregistered model type resolves to
     ``None`` even if the module's class names coincide with another model's.
     ``model_type=None`` searches all specs. A composite model whose MoE lives under
     a sub-model type registers the root type too (see ``gemma4/specs.py``). Within the
-    spec, variant ``block_names`` matched against the module's MRO picks the layout.
+    spec, layout ``block_names`` matched against the module's MRO picks the layout.
     """
     if model_type:
         return _match_in_spec(get_spec(model_type), module)
     for spec in get_specs():
-        variant = _match_in_spec(spec, module)
-        if variant is not None:
-            return variant
+        layout = _match_in_spec(spec, module)
+        if layout is not None:
+            return layout
     return None
 
 
 def match_moe_model(module: "nn.Module", model_type: str | None = None) -> ModelSpec | None:
     """Return the spec whose MoE section matches ``module``, or None.
 
-    Same scoping as ``match_moe_block``, which returns only the variant; use this when a
+    Same scoping as ``match_moe_block``, which returns only the layout; use this when a
     consumer also needs the model's other sections, such as the export policy that says
     whether its experts may be grouped.
     """
@@ -401,8 +401,8 @@ def match_moe_model(module: "nn.Module", model_type: str | None = None) -> Model
     return None
 
 
-def _match_in_spec(spec: ModelSpec | None, module: "nn.Module") -> MoEVariant | None:
+def _match_in_spec(spec: ModelSpec | None, module: "nn.Module") -> MoELayout | None:
     """Match ``module`` against one spec's MoE section; ``None`` if either is absent."""
     if spec is None or spec.moe_spec is None:
         return None
-    return spec.moe_spec.match_moe_variant(module)
+    return spec.moe_spec.match_moe_layout(module)

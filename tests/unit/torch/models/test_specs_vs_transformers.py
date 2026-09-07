@@ -94,18 +94,18 @@ def _find_block_class(module, block_names: tuple[str, ...]):
     return None
 
 
-def _moe_variants():
-    """(model_type, variant) for every registered MoE variant."""
+def _moe_layouts():
+    """(model_type, layout) for every registered MoE layout."""
     return [
-        (spec.model_type, variant)
+        (spec.model_type, layout)
         for spec in get_specs()
         if spec.moe_spec is not None
-        for variant in spec.moe_spec.moe_variants
+        for layout in spec.moe_spec.moe_layouts
     ]
 
 
-VARIANTS = _moe_variants()
-MOE_MODEL_TYPES = sorted({mt for mt, _ in VARIANTS})
+LAYOUTS = _moe_layouts()
+MOE_MODEL_TYPES = sorted({mt for mt, _ in LAYOUTS})
 REMOTE_CODE_MODEL_TYPES = sorted(
     s.model_type for s in get_specs() if s.modeling_source == "remote_code"
 )
@@ -154,8 +154,8 @@ def test_moe_block_resolves_from_its_declared_version(model_type):
     ``block_names`` is the matching key: a name existing nowhere silently matches
     nothing, which is how the ``GptOssMoE`` entry stayed invisible.
 
-    Every declared variant must resolve. That is only strict enough to be worth
-    asserting because no spec carries a variant transformers never defines any more:
+    Every declared layout must resolve. That is only strict enough to be worth
+    asserting because no spec carries a layout transformers never defines any more:
     mixtral's ``MixtralMoeSparseMoeBlock``, MCore ``linear_fc1``/``linear_fc2`` naming
     migrated from a legacy branch, matched no release and was dropped.
     """
@@ -171,8 +171,8 @@ def test_moe_block_resolves_from_its_declared_version(model_type):
         f"{spec.min_transformers_version!r} but transformers {installed} has no modeling "
         f"module for it. Either that version is wrong or the model moved."
     )
-    variants = [v for mt, v in VARIANTS if mt == model_type]
-    unresolved = [v.block_names for v in variants if not _find_block_class(module, v.block_names)]
+    layouts = [v for mt, v in LAYOUTS if mt == model_type]
+    unresolved = [v.block_names for v in layouts if not _find_block_class(module, v.block_names)]
     assert not unresolved, (
         f"{model_type!r}: {unresolved} name no class in {module.__name__} on transformers "
         f"{installed}. The block class was most likely renamed upstream; update "

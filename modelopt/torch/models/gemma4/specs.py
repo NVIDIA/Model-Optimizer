@@ -19,13 +19,13 @@ Gemma4RMSNorm is intentionally absent from ``weight_plus_one_norm_names`` until 
 +1 handling is validated on Gemma4.
 """
 
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoELayout, MoESpec, register
 
 # Gemma4 MoE experts are unfused into per-expert nn.Linear layers. The MoE block lives
 # in the text model, so ``gemma4_text`` reuses this exact layout -- see
 # ``gemma4_text/specs.py``, which imports it rather than restating it.
-GEMMA4_MOE_VARIANTS = (
-    MoEVariant(
+GEMMA4_MOE_LAYOUTS = (
+    MoELayout(
         block_names=("Gemma4TextDecoderLayer",),
         expert_linear_names=("gate_proj", "down_proj", "up_proj"),
         gate_up_pair=("gate_proj", "up_proj"),
@@ -37,6 +37,6 @@ register(
         model_type="gemma4",
         min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
-        moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS),
+        moe_spec=MoESpec(moe_layouts=GEMMA4_MOE_LAYOUTS),
     )
 )
