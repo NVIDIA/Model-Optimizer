@@ -460,17 +460,38 @@ def test_get_expert_linear_names_by_model_type_only():
         get_expert_linear_names(_UnknownMoeBlock(), "some_unknown_vlm")
 
 
-def test_mixtral_variants_disambiguated_by_block_class():
-    class MixtralMoeSparseMoeBlock(nn.Module):
-        """Legacy-naming Mixtral layout — same model type, different projections."""
+def test_multiple_layouts_are_disambiguated_by_block_class():
+    """A model type with two namings picks by block class, not by the single-naming shortcut.
 
-    assert get_expert_linear_names(MixtralMoeSparseMoeBlock(), "mixtral") == [
-        "linear_fc1",
-        "linear_fc2",
-    ]
-    # An unrecognized block class under a multi-naming model type cannot resolve.
-    with pytest.raises(NotImplementedError):
-        get_expert_linear_names(_UnknownMoeBlock(), "mixtral")
+    No registered model needs this today -- every spec declares exactly one layout since
+    mixtral's dead MCore entry was dropped -- so the case is built here rather than
+    borrowed from a production spec that might quietly stop exercising it.
+    """
+
+    class TwoLayoutBlockA(nn.Module):
+        pass
+
+    class TwoLayoutBlockB(nn.Module):
+        pass
+
+    spec = ModelSpec(
+        model_type="zz_two_layouts",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(block_names=("TwoLayoutBlockA",), expert_linear_names=("a1", "a2")),
+                MoEVariant(block_names=("TwoLayoutBlockB",), expert_linear_names=("b1", "b2")),
+            )
+        ),
+    )
+    _SPECS[spec.model_type] = spec
+    try:
+        assert get_expert_linear_names(TwoLayoutBlockA(), "zz_two_layouts") == ["a1", "a2"]
+        assert get_expert_linear_names(TwoLayoutBlockB(), "zz_two_layouts") == ["b1", "b2"]
+        # An unrecognized block class under a multi-naming model type cannot resolve.
+        with pytest.raises(NotImplementedError):
+            get_expert_linear_names(_UnknownMoeBlock(), "zz_two_layouts")
+    finally:
+        del _SPECS[spec.model_type]
 
 
 def test_gemma4_both_root_types_resolve():
@@ -607,7 +628,6 @@ EXPECTED_MOE_VARIANTS = [
     ),
     ("gpt_oss", ("GptOssMLP", "GptOssMoE"), ("gate_up_proj", "down_proj"), True, None),
     ("mixtral", ("MixtralSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
-    ("mixtral", ("MixtralMoeSparseMoeBlock",), ("linear_fc1", "linear_fc2"), False, None),
     ("nemotron_h", ("NemotronHMOE",), ("up_proj", "down_proj"), False, None),
     (
         "qwen2_moe",
@@ -664,11 +684,8 @@ def test_grouped_expert_export_is_exhaustive():
     Policy, not architecture, so it lives on ``ExportSpec`` and is listed here rather
     than derived: enabling a new model must be a deliberate edit in both places.
 
-    Note the granularity. The flag is per model, while the support set it replaced was
-    per variant, and mixtral is the only model with more than one variant. Its second,
-    ``MixtralMoeSparseMoeBlock`` with MCore ``linear_fc1``/``linear_fc2`` naming, was
-    excluded before and is now allowed. That variant matches no class in any
-    transformers release from 4.57 to 5.14, so nothing reaches it.
+    Per model rather than per variant, which is exact now that every spec declares a
+    single layout.
     """
     allowed = {
         spec.model_type
