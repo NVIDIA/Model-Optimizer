@@ -511,10 +511,10 @@ class LiLiCorrModule(DFlashModule):
 
         # Optional: wrap every draft sublayer in DFlash2's grouped dynamic convolution,
         # installed only when the recipe asks for it, so this module still builds the
-        # plain reranker when the two geometry keys are absent. Last in __init__ on
-        # purpose -- _init_head_weights above iterates self.lilicorr.modules(), and
-        # keeping the convolutions out of its reach is what makes the init below
-        # authoritative.
+        # plain reranker when the two geometry keys are absent. It has to come after
+        # super().__init__, whose _init_weights sweeps self.modules() and would re-draw
+        # kernel_projection at initializer_range, destroying the exact identity at init
+        # that _install_sublayer_convs relies on.
         taps = getattr(config, "conv_kernel_size", None)
         group_size = getattr(config, "conv_group_size", None)
         if taps is not None and group_size is not None:
@@ -574,7 +574,13 @@ class LiLiCorrModule(DFlashModule):
                 setattr(layer, wrapper_name, conv)
 
     def _init_head_weights(self, config):
-        """Initialize the head's Linear layers to the draft's own convention."""
+        """Initialize the head's Linear layers to the draft's own convention.
+
+        ``nn.Linear`` only. The lattice attention's fused QKV lives on
+        ``nn.MultiheadAttention`` as a bare ``in_proj_weight`` parameter rather than a
+        submodule, so it keeps PyTorch's ``xavier_uniform_`` and ``initializer_range`` does
+        not reach it. That is the arithmetic the published heads were trained with.
+        """
         std = getattr(config, "initializer_range", 0.02)
         for module in self.lilicorr.modules():
             if isinstance(module, nn.Linear):

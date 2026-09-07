@@ -1067,6 +1067,34 @@ class TestDFlashFp32MasterWeights:
             for key in ("exp_avg", "exp_avg_sq")
         } == {torch.float32}
 
+    def test_generation_names_the_flag_instead_of_failing_on_a_matmul(self):
+        """AR validation runs outside the Trainer's autocast, so it has to say so.
+
+        ``pseudo_speculative_generate`` is called directly by ``AcceptanceRateValidation``
+        under ``estimate_ar``, which is outside the wrapper HF Trainer puts around
+        ``forward``. Without the guard a promoted draft dies there on a bare
+        ``F.linear`` dtype mismatch, potentially hours into a run.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            model.pseudo_speculative_generate(input_ids, steps=2)
+
+        # Under the autocast the flag needs, the same call goes through.
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+    def test_the_guard_is_silent_when_the_flag_is_off(self):
+        """An unpromoted draft matches the base dtype, so nothing needs reconciling."""
+        model = _converted(fp32_master_weights=False)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
 
 class TestDFlashDraftActivationCheckpointing:
     """``training.gradient_checkpointing`` has to reach the draft, and be inert when it does.

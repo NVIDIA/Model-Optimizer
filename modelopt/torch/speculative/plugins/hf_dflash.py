@@ -430,8 +430,14 @@ class HFDFlashModel(DFlashModel):
         base_rope_params = getattr(base_config, "rope_parameters", None)
         if not isinstance(base_rope_params, dict):
             base_rope_params = {}
+        # Only rope_theta is taken from the dict. rope_parameters also carries the target's
+        # scaling family and that family's own fields, and copying rope_type without them
+        # builds a draft whose rotary init function looks up keys the draft config has not
+        # got -- a llama3 or yarn target would fail in convert() with a bare KeyError. The
+        # scaling family is deliberately not inherited (see above); it is added at export
+        # via dflash_export_rope_scaling.
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if attr in base_rope_params:
+            if attr == "rope_theta" and attr in base_rope_params:
                 base_val = base_rope_params[attr]
             elif hasattr(base_config, attr):
                 base_val = getattr(base_config, attr)
@@ -580,6 +586,28 @@ class HFDFlashModel(DFlashModel):
             self._base_model.dtype,
         )
         self.dflash_module._maybe_init_rotary_emb(device=base_device)
+
+    def _require_autocast_for_promoted_draft(self, device):
+        """Fail early, and by name, when a promoted draft is about to run unautocast.
+
+        ``dflash_fp32_master_weights`` needs a bf16 autocast around the forward, and HF
+        ``Trainer`` only wraps ``forward``. AR validation reaches the draft through
+        ``pseudo_speculative_generate``, which is called directly, so it runs outside that
+        wrapper: with ``estimate_ar: true`` a run trains normally and then dies at the first
+        ``ar_validate_steps`` boundary on a bare matmul dtype mismatch, possibly hours in.
+        Name the two knobs instead of letting ``F.linear`` report it.
+        """
+        if not self.dflash_fp32_master_weights or self._base_model.dtype == torch.float32:
+            return
+        if torch.is_autocast_enabled(device.type):
+            return
+        raise RuntimeError(
+            f"DFlash: dflash_fp32_master_weights holds the draft in fp32 while the frozen "
+            f"base is {self._base_model.dtype}, and this path runs outside the autocast that "
+            f"reconciles them, so the draft's first matmul would fail. Wrap the call in "
+            f"torch.autocast(device_type={device.type!r}, dtype={self._base_model.dtype}), "
+            f"or set estimate_ar=false, or set dflash_fp32_master_weights=false."
+        )
 
     def restore_draft_precision(self, checkpoint_dir=None):
         """Re-apply the draft's device, dtype and rotary buffer after a checkpoint restore.
@@ -1286,6 +1314,7 @@ class HFDFlashModel(DFlashModel):
         attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
         # Draft forward
+        self._require_autocast_for_promoted_draft(device)
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
