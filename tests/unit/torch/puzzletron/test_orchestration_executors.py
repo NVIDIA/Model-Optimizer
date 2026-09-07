@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 import puzzletron_orchestrator.adapters.sharded as sharded_module
+import puzzletron_orchestrator.controller as controller_module
 import puzzletron_orchestrator.reusable_allocation as reusable_module
 import puzzletron_orchestrator.state as state_module
 from modelopt.torch.puzzletron.distributed_eval.config import load_runtime_config
@@ -58,7 +59,11 @@ from puzzletron_orchestrator.schema import (
     WorkItem,
     WorkPlan,
 )
-from puzzletron_orchestrator.state import acquire_controller_lease
+from puzzletron_orchestrator.state import (
+    acquire_controller_lease,
+    release_matching_controller_lease,
+    reusable_controller_owner_prefix,
+)
 
 # Local and bare-metal execution
 
@@ -120,6 +125,27 @@ def test_controller_lease_renews_while_owner_is_running(tmp_path: Path, monkeypa
     assert acquire_controller_lease(root, "contender") is None
     lease.release()
     assert acquire_controller_lease(root, "contender") is not None
+
+
+def test_reusable_controller_lease_owner_is_bound_to_scheduler_job(monkeypatch) -> None:
+    monkeypatch.setenv("PUZZLETRON_REUSABLE_PLAN_IDENTITY", "plan-identity")
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+
+    assert controller_module._controller_lease_owner().startswith(
+        reusable_controller_owner_prefix("plan-identity", "123")
+    )
+
+
+def test_dead_allocation_lease_cleanup_preserves_unrelated_owner(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    lease = acquire_controller_lease(root, "controller-unrelated")
+
+    assert lease is not None
+    assert not release_matching_controller_lease(
+        root,
+        owner_prefix=reusable_controller_owner_prefix("plan-identity", "123"),
+    )
+    assert lease.path.is_file()
 
 
 def test_local_executor_leases_disjoint_gpu_slices_and_recovers_capacity(
@@ -396,6 +422,12 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
     assert "reattached to reusable allocation slurm-123; log=" in log_stream.getvalue()
 
     FakeSlurmExecutor.state = JobState.CANCELLED
+    plan_identity = reusable_module.reusable_plan_identity(plan)
+    dead_lease = acquire_controller_lease(
+        reusable_module.CampaignStateStore(plan.puzzle_dir).root,
+        reusable_controller_owner_prefix(plan_identity, "123") + "dead-controller",
+    )
+    assert dead_lease is not None
     replacement = run_reusable_allocation(
         plan,
         ("python", "worker.py"),
@@ -405,6 +437,7 @@ def test_reusable_allocation_reattaches_without_duplicate_submit(
     )
     assert FakeSlurmExecutor.submits == 2
     assert replacement["allocation_status"] == JobState.PENDING.value
+    assert not dead_lease.path.exists()
 
     store = reusable_module.CampaignStateStore(plan.puzzle_dir)
     store.write_allocation_result(

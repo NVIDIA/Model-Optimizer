@@ -37,7 +37,13 @@ from .schema import (
     JobStatus,
     TaskTopology,
 )
-from .state import CampaignStateStore, acquire_controller_lease, release_controller_lease
+from .state import (
+    CampaignStateStore,
+    acquire_controller_lease,
+    release_controller_lease,
+    release_matching_controller_lease,
+    reusable_controller_owner_prefix,
+)
 
 if TYPE_CHECKING:
     from .logging import OrchestratorLogger
@@ -190,6 +196,15 @@ def run_reusable_allocation(
         if not active and completed is not None:
             terminal_result = dict(completed)
         elif not active:
+            prior_plan_identity = record.get("plan_identity")
+            prior_job_id = handle.metadata.get("job_id") if handle is not None else None
+            if isinstance(prior_plan_identity, str) and prior_job_id:
+                release_matching_controller_lease(
+                    store.root,
+                    owner_prefix=reusable_controller_owner_prefix(
+                        prior_plan_identity, str(prior_job_id)
+                    ),
+                )
             store.clear_allocation_result()
             plan.log_dir.mkdir(parents=True, exist_ok=True)
             attempt = build_reusable_allocation_attempt(plan, command)

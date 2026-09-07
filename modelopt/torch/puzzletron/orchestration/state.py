@@ -32,7 +32,9 @@ __all__ = [
     "PersistedAttempt",
     "StageRunRecord",
     "acquire_controller_lease",
+    "release_matching_controller_lease",
     "release_controller_lease",
+    "reusable_controller_owner_prefix",
 ]
 
 
@@ -165,6 +167,37 @@ def acquire_controller_lease(
 def release_controller_lease(lease: ControllerLease | None) -> None:
     if lease is not None:
         lease.release()
+
+
+def reusable_controller_owner_prefix(plan_identity: str, scheduler_job_id: str) -> str:
+    """Return the lease-owner prefix for one reusable scheduler allocation."""
+
+    return f"reusable-controller:{plan_identity}:{scheduler_job_id}:"
+
+
+def release_matching_controller_lease(root: Path, *, owner_prefix: str) -> bool:
+    """Release a controller lease only when its owner has the exact trusted prefix."""
+
+    lease_path = root / "controller.lock"
+    try:
+        owned_stat = lease_path.stat()
+        payload = json.loads(lease_path.read_text())
+    except (OSError, ValueError):
+        return False
+    owner = payload.get("owner")
+    if not isinstance(owner, str) or not owner.startswith(owner_prefix):
+        return False
+    try:
+        current_stat = lease_path.stat()
+        if (current_stat.st_dev, current_stat.st_ino) != (
+            owned_stat.st_dev,
+            owned_stat.st_ino,
+        ):
+            return False
+        lease_path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 class CampaignStateStore:

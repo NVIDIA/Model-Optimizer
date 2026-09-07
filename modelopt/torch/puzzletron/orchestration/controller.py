@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import signal
 import time
 import uuid
@@ -67,11 +68,21 @@ from .state import (
     StageRunRecord,
     acquire_controller_lease,
     release_controller_lease,
+    reusable_controller_owner_prefix,
 )
 from .task_topology import resolve_task_topology
 from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControls
 
 __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
+
+
+def _controller_lease_owner() -> str:
+    plan_identity = os.environ.get("PUZZLETRON_REUSABLE_PLAN_IDENTITY")
+    scheduler_job_id = os.environ.get("SLURM_JOB_ID")
+    nonce = str(uuid.uuid4())
+    if plan_identity and scheduler_job_id:
+        return reusable_controller_owner_prefix(plan_identity, scheduler_job_id) + nonce
+    return f"controller-{nonce}"
 
 
 def create_executor(
@@ -1519,7 +1530,7 @@ class CampaignController:
         signal.signal(signal.SIGINT, _on_signal)
         signal.signal(signal.SIGTERM, _on_signal)
         try:
-            owner = f"controller-{uuid.uuid4()}"
+            owner = _controller_lease_owner()
             lease = acquire_controller_lease(
                 self.store.root,
                 owner,
