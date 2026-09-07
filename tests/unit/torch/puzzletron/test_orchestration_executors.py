@@ -1395,6 +1395,10 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
+    assert [attempt.command.env["WORKER_PORT_BASE"] for attempt in attempts] == [
+        "5010",
+        "5014",
+    ]
     assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
         "++replacement_scoring.automodel.lm_head_backend=streaming",
         "++replacement_scoring.automodel.lm_head_backend=streaming",
@@ -1447,6 +1451,20 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     )
     assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
     assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
+
+    _, three_width_work_plan, three_width_attempts = _replacement_width_attempts(
+        tmp_path / "three-widths", [2048, 1792, 1536]
+    )
+    assert [item.metadata["worker_count"] for item in three_width_work_plan.items] == [3, 3, 2]
+    assert [attempt.command.env["WORKER_PORT_BASE"] for attempt in three_width_attempts] == [
+        "5010",
+        "5013",
+        "5016",
+    ]
+    replacement_pool_script = (
+        Path(__file__).parents[4] / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
+    ).read_text()
+    assert "$((WORKER_PORT_BASE + GROUP_INDEX))" in replacement_pool_script
 
 
 def test_replacement_width_overrides_reach_runtime_config(tmp_path: Path):

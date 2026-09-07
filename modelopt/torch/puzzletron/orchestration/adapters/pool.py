@@ -183,6 +183,9 @@ class PersistentPoolAdapter(WorkAdapter):
                     f"per width; instances={node.instances}, widths={widths}"
                 )
             workers_per_width, remainder = divmod(node.instances, len(widths))
+            worker_counts = tuple(
+                workers_per_width + (index < remainder) for index in range(len(widths))
+            )
             items = tuple(
                 WorkItem(
                     work_id=_replacement_work_id(node.stage_id, width, len(widths)),
@@ -192,7 +195,10 @@ class PersistentPoolAdapter(WorkAdapter):
                     gpus_per_instance=node.gpus_per_instance,
                     metadata={
                         "role": "gang",
-                        "worker_count": workers_per_width + (index < remainder),
+                        "worker_count": worker_counts[index],
+                        # Width gangs can share one reusable node. Give each gang
+                        # a disjoint HTTP port range for its resident workers.
+                        "worker_port_base": 5010 + sum(worker_counts[:index]),
                         **({"width": int(width)} if width is not None else {}),
                     },
                 )
@@ -294,6 +300,7 @@ class PersistentPoolAdapter(WorkAdapter):
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
                 env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
+                env["WORKER_PORT_BASE"] = str(item.metadata.get("worker_port_base", 5010))
                 replacement_widths = _replacement_widths(plan)
                 if len(replacement_widths) > 1:
                     width = int(item.metadata["width"])

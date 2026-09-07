@@ -126,11 +126,12 @@ The flow is intentionally compact:
 5. Apply the configured aggregate-rank rule to the searched candidates and
    measure serving for the selected result.
 
-The execution profile shards initial image evaluation across five tasks, then
-runs materialization, pre-KD evaluation, KD, and post-KD evaluation for the five
-retained candidates across disjoint GPUs. Each stage runs concurrently up to
-the configured capacity; final serving measures only the selected candidate,
-and individual stages do not all consume eight GPUs.
+The execution profile splits replacement scoring into eight resident workers
+across the three embedding widths. It shards initial image evaluation across
+five tasks, then runs materialization, pre-KD evaluation, KD, and post-KD
+evaluation for the five retained candidates across disjoint GPUs. Each stage
+runs concurrently up to the configured capacity; final serving measures only
+the selected candidate, and individual stages do not all consume eight GPUs.
 
 The 128-step value demonstrates the integration. It is not a convergence
 criterion or recommended training duration. The aggregate-rank rule is also an

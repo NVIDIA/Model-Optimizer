@@ -23,7 +23,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.schema import ExecutionMode
+from puzzletron_orchestrator.schema import ExecutionMode, ExecutionStrategy
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
@@ -116,6 +116,9 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
 
     assert set(config["mip"]["runs"]) == {"params-90"}
     assert config["replacement_scoring"]["eval_samples"] == 16
+    assert stages["replacement_scoring"].strategy is ExecutionStrategy.PERSISTENT_POOL
+    assert stages["replacement_scoring"].instances == 8
+    assert stages["replacement_scoring"].total_gpus == 8
     assert candidates["best_image_loss"]["top_k"] == 5
     assert candidates["kd"]["config"]["max_steps"] == 128
     assert candidates["pre_kd_eval"]["config"] == config["vlm_quality_evaluation"]
