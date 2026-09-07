@@ -149,7 +149,10 @@ def torch_to_tensorrt_llm_checkpoint(
     elif hasattr(model, "config"):
         # Huggingface models
         model_metadata_config = model.config.__dict__
-        vocab_size = model.config.vocab_size
+        if hasattr(model.config, "vocab_size"):
+            vocab_size = model.config.vocab_size
+        else:
+            vocab_size = model.config.text_config.vocab_size
         hf_config = model.config
         architectures = getattr(model.config, "architectures", None)
         architecture = architectures[0] if architectures else ""
