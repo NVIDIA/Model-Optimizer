@@ -4,6 +4,7 @@
 # and workload-specific runtime overrides.
 prepare_dataset:
   evaluation_tasks: [realworldqa, mmmu_val, mvbench]
+  evaluation_hf_home: ${oc.env:HF_HOME}
 
 vlm_quality_evaluation:
   profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3

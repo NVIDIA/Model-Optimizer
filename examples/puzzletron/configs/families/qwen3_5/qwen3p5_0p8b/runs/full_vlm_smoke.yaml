@@ -16,7 +16,6 @@ data:
 
 prepare_dataset:
   evaluation_tasks: [realworldqa, mmmu_val, mvbench]
-  evaluation_hf_home: ${oc.env:HF_HOME}
 
 post_mip:
   flows:

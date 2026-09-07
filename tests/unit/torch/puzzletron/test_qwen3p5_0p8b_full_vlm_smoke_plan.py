@@ -91,6 +91,7 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     assert set(config["post_mip"]["flows"]) == {"candidates"}
+    assert config["prepare_dataset"]["evaluation_hf_home"] == str(tmp_path / "hf-home")
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
 
     assert {
