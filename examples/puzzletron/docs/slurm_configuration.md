@@ -65,6 +65,12 @@ and [`execution.example.yaml`](../configs/orchestration/execution.example.yaml)
 files show the runner default and per-stage CPU routing together. The CPU-only
 `final_report` task accepts only a `partition` override.
 
+For CPU stages, `runner.slurm.cpu_cpus_per_task` sets the requested CPU count and
+`runner.slurm.cpu_memory_mb` sets memory in MiB. Omit them to use the site's Slurm
+defaults. These settings are part of resume identity, so changing either causes
+Puzzletron to submit the stage with the new allocation instead of treating an
+older active attempt as the same work.
+
 ## Scheduler settings and model settings
 
 Do not put `sequence_parallel` under
