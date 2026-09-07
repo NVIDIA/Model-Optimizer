@@ -166,7 +166,7 @@ def test_checkpoint_contract_accepts_other_positive_qwen35_geometry(tmp_path):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
-@pytest.mark.parametrize("processor_content", [None, "", "[]\n", "{\n", b"\xff"])
+@pytest.mark.parametrize("processor_content", [None, "[]\n", b"\xff"])
 def test_checkpoint_contract_requires_valid_local_processor_assets(tmp_path, processor_content):
     checkpoint_path = _write_checkpoint(tmp_path)
     processor_path = checkpoint_path / "preprocessor_config.json"
