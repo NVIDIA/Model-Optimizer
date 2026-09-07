@@ -142,9 +142,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     _materialize_image_conversations(dataset)
     _write_local_runner(runner, project_root_path)
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(results))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(dataset))
-    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
-
     environment = os.environ.copy()
     environment.update(
         {
@@ -167,6 +164,14 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
             str(project_root_path / EXECUTION_PATH),
             "--stage",
             "full",
+            "--override",
+            "prepare_dataset.enabled=false",
+            "--override",
+            f"dataset_path={dataset}",
+            "--override",
+            f"data.path={dataset}",
+            "--override",
+            "data.revision=fixture-revision",
             "--local",
             "--color",
             "never",
@@ -180,7 +185,7 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     )
     if completed.returncode:
         pytest.fail(
-            "Qwen 3.5 0.8B VLM MIP smoke failed.\n"
+            "Qwen 3.5 0.8B full VLM smoke failed.\n"
             f"stdout tail:\n{completed.stdout[-12000:]}\n"
             f"stderr tail:\n{completed.stderr[-12000:]}"
         )
