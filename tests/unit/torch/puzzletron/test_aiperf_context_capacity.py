@@ -196,7 +196,10 @@ def test_server_context_headroom_cannot_be_negative():
 # Checkpoint preparation and tokenizer policy
 
 
-def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, tmp_path):
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(
+    monkeypatch, tmp_path, trust_remote_code
+):
     config = {
         "architectures": ["BaseModel"],
         "text_config": {"per_layer_config": {"0": {"intermediate_size": 8}}},
@@ -208,24 +211,8 @@ def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, t
         lambda path, **kwargs: observed.append((path, kwargs)),
     )
 
-    assert _prepare_vllm_checkpoint(tmp_path) is True
-    assert observed == [(tmp_path, {"trust_remote_code": False})]
-
-
-def test_prepare_vllm_checkpoint_preserves_explicit_remote_code_trust(monkeypatch, tmp_path):
-    config = {
-        "architectures": ["BaseModel"],
-        "text_config": {"per_layer_config": {"0": {"intermediate_size": 8}}},
-    }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-    observed = []
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
-        lambda path, **kwargs: observed.append((path, kwargs)),
-    )
-
-    assert _prepare_vllm_checkpoint(tmp_path, trust_remote_code=True) is True
-    assert observed == [(tmp_path, {"trust_remote_code": True})]
+    assert _prepare_vllm_checkpoint(tmp_path, trust_remote_code=trust_remote_code) is True
+    assert observed == [(tmp_path, {"trust_remote_code": trust_remote_code})]
 
 
 def test_strict_serving_rejects_checkpoint_that_requires_preparation(tmp_path):

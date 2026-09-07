@@ -225,6 +225,40 @@ def test_inventory_explicit_content_verification_hashes_unchanged_files(tmp_path
     assert hashed == [payload_path]
 
 
+def test_inventory_becomes_incomplete_when_file_set_changes(tmp_path):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    (root / "samples.json").write_text("[]")
+    completion = {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": [dataset_payload.record_file_inventory(root)],
+    }
+    (root / "unexpected.json").write_text("{}")
+
+    assert not dataset_payload.file_inventories_are_complete(completion)
+
+
+def test_inventory_becomes_incomplete_when_symlink_escapes_allowed_root(tmp_path):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    target = allowed / "target"
+    target.write_text("payload")
+    outside = tmp_path / "outside"
+    outside.write_text("payload")
+    link = root / "entry"
+    link.symlink_to(target)
+    completion = {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": [dataset_payload.record_file_inventory(root, allowed_symlink_root=allowed)],
+    }
+    link.unlink()
+    link.symlink_to(outside)
+
+    assert not dataset_payload.file_inventories_are_complete(completion)
+
+
 def test_inventory_rejects_symlinks_to_directories(tmp_path):
     root = tmp_path / "dataset"
     root.mkdir()

@@ -1097,7 +1097,7 @@ def test_exact_checkpoint_evidence_reads_physical_shapes_and_counts(tmp_path):
     assert evidence["tensor_shapes"] == {"model.weight": {"dtype": "F32", "shape": [2, 3]}}
 
 
-def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path):
+def _result_manifest_case(monkeypatch, tmp_path):
     block_configs = [
         {
             "subblock_configs": [
@@ -1282,6 +1282,36 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         producer_execution_identity="selected-execution",
     )
 
+    return SimpleNamespace(
+        architecture_id=architecture_id,
+        block_configs=block_configs,
+        checkpoint_evidence=checkpoint_evidence,
+        evaluation_evidence=evaluation_evidence,
+        evaluation_identity=evaluation_identity,
+        evaluator_contract=evaluator_contract,
+        input_set=input_set,
+        ledger=ledger,
+        node=node,
+        profile=profile,
+        reference_fingerprint=reference_fingerprint,
+        revisions=revisions,
+    )
+
+
+def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
+    architecture_id = case.architecture_id
+    block_configs = case.block_configs
+    evaluation_evidence = case.evaluation_evidence
+    evaluation_identity = case.evaluation_identity
+    evaluator_contract = case.evaluator_contract
+    input_set = case.input_set
+    ledger = case.ledger
+    node = case.node
+    profile = case.profile
+    reference_fingerprint = case.reference_fingerprint
+    revisions = case.revisions
+
     observations, output_set = runner._aggregate_result_manifest(
         {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "manifest-execution"
     )
@@ -1360,56 +1390,87 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         },
     }
 
+
+def test_result_manifest_rejects_changed_checkpoint_geometry(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
+
     def mismatched_checkpoint_evidence(checkpoint):
-        evidence = checkpoint_evidence(checkpoint)
+        evidence = case.checkpoint_evidence(checkpoint)
         if Path(checkpoint).name == "step-128":
             evidence["tensor_shapes"]["model.weight"]["shape"] = [2, 4]
         return evidence
 
     monkeypatch.setattr(runner, "_exact_checkpoint_evidence", mismatched_checkpoint_evidence)
+
     with pytest.raises(RuntimeError, match="checkpoint geometry differs"):
         runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "wrong-geometry-execution"
+            {"puzzle_dir": str(tmp_path)},
+            case.ledger,
+            case.node,
+            case.input_set,
+            "wrong-geometry-execution",
         )
-    monkeypatch.setattr(runner, "_exact_checkpoint_evidence", checkpoint_evidence)
 
-    missing_evidence = evaluation_identity(128)
+
+def test_result_manifest_requires_candidate_evaluation_evidence(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
+    missing_evidence = case.evaluation_identity(128)
     del missing_evidence["evaluation_evidence"]
     (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": missing_evidence}))
+
     with pytest.raises(RuntimeError, match="missing evaluator-owned candidate evidence"):
         runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "missing-audit-execution"
+            {"puzzle_dir": str(tmp_path)},
+            case.ledger,
+            case.node,
+            case.input_set,
+            "missing-audit-execution",
         )
 
-    mismatched = evaluation_identity(128)
+
+def test_result_manifest_rejects_changed_milestone_evaluator_contract(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
+    mismatched = case.evaluation_identity(128)
     mismatched["evaluator"]["contract"]["dataset"]["revision"] = "different-revision"
     mismatched["reference_evaluator_contract"]["dataset"]["revision"] = "different-revision"
     (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": mismatched}))
+
     with pytest.raises(RuntimeError, match="128-step evaluation contract differs from pre-KD"):
         runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "mismatch-execution"
+            {"puzzle_dir": str(tmp_path)},
+            case.ledger,
+            case.node,
+            case.input_set,
+            "mismatch-execution",
         )
 
-    (tmp_path / "comparison-128.json").write_text(
-        json.dumps({"identity": evaluation_identity(128)})
-    )
-    milestone_observation = ledger.observations["short_v1_128"][revisions["kd_128"]]
-    comparison_path = milestone_observation.artifacts.pop("comparison_path")
+
+def test_result_manifest_requires_reference_comparison(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
+    milestone = case.ledger.observations["short_v1_128"][case.revisions["kd_128"]]
+    milestone.artifacts.pop("comparison_path")
+
     with pytest.raises(RuntimeError, match="produced no reference comparison"):
         runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "missing-comparison"
+            {"puzzle_dir": str(tmp_path)},
+            case.ledger,
+            case.node,
+            case.input_set,
+            "missing-comparison",
         )
-    milestone_observation.artifacts["comparison_path"] = comparison_path
 
+
+def test_result_manifest_rejects_mixed_candidate_evaluator_contracts(monkeypatch, tmp_path):
+    case = _result_manifest_case(monkeypatch, tmp_path)
     second_architecture_id = "architecture-second"
-    ledger.architectures[second_architecture_id] = ArchitectureCandidate(
+    case.ledger.architectures[second_architecture_id] = ArchitectureCandidate(
         architecture_id=second_architecture_id,
         block_configs=[],
         mip_metrics={"parameter_ratio": 0.9},
     )
     second_materialized = "revision-second-materialized"
     second_selected = "revision-second-kd-256"
-    ledger.revisions[second_materialized] = CandidateRevision(
+    case.ledger.revisions[second_materialized] = CandidateRevision(
         revision_id=second_materialized,
         architecture_id=second_architecture_id,
         artifact_kind=ArtifactKind.CHECKPOINT,
@@ -1417,7 +1478,7 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         parent_revision_id=None,
         producer_node="materialized",
     )
-    ledger.revisions[second_selected] = CandidateRevision(
+    case.ledger.revisions[second_selected] = CandidateRevision(
         revision_id=second_selected,
         architecture_id=second_architecture_id,
         artifact_kind=ArtifactKind.CHECKPOINT,
@@ -1425,20 +1486,20 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         parent_revision_id=second_materialized,
         producer_node="kd_256",
     )
-    ledger.observations["materialized"][second_materialized] = NodeObservation(
+    case.ledger.observations["materialized"][second_materialized] = NodeObservation(
         node_id="materialized",
         input_revision_id=second_materialized,
         source_revision_id=second_materialized,
         output_revision_id=second_materialized,
         status="success",
     )
-    second_identity = evaluation_identity(0)
+    second_identity = case.evaluation_identity(0)
     second_identity["architecture_id"] = second_architecture_id
     second_identity["evaluator"]["contract"]["dataset"]["revision"] = "other-revision"
     second_identity["reference_evaluator_contract"]["dataset"]["revision"] = "other-revision"
     second_comparison = tmp_path / "comparison-second-pre-kd.json"
     second_comparison.write_text(json.dumps({"identity": second_identity}))
-    ledger.observations["pre_kd_short_v1"][second_materialized] = NodeObservation(
+    case.ledger.observations["pre_kd_short_v1"][second_materialized] = NodeObservation(
         node_id="pre_kd_short_v1",
         input_revision_id=second_materialized,
         source_revision_id=second_materialized,
@@ -1449,10 +1510,15 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
     mixed_input_set = CandidateSet.create(
         "campaign",
         "selected",
-        [revisions["kd_256"], second_selected],
+        [case.revisions["kd_256"], second_selected],
         producer_execution_identity="selected-execution",
     )
+
     with pytest.raises(RuntimeError, match="evaluation contract differs across candidates"):
         runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, mixed_input_set, "mixed-contract"
+            {"puzzle_dir": str(tmp_path)},
+            case.ledger,
+            case.node,
+            mixed_input_set,
+            "mixed-contract",
         )

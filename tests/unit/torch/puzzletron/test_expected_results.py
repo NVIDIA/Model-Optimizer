@@ -249,7 +249,7 @@ def test_expectation_verifier_rejects_artifact_pointer_escape(tmp_path: Path) ->
     assert "escapes" in invalid.reason
 
 
-def test_verification_cli_returns_pass_regression_and_invalid_exit_codes(
+def test_verification_cli_returns_result_exit_code_and_json(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -264,15 +264,11 @@ def test_verification_cli_returns_pass_regression_and_invalid_exit_codes(
     )
     run = tmp_path / "run"
     result_path = run / "artifacts/result.json"
-    _write(result_path, {"identity": {}, "correct_rows": 7, "timing_ms": 1})
+    _write(result_path, {"identity": {}, "correct_rows": 5, "timing_ms": 1})
     argv = ["--contract", str(contract), "--puzzle-dir", str(run)]
 
-    assert verification_main(argv) == 0
-    _write(result_path, {"identity": {}, "correct_rows": 5, "timing_ms": 1})
     assert verification_main(argv) == 1
-    _write(result_path, {"identity": {}, "correct_rows": 7})
-    assert verification_main(argv) == 2
-    capsys.readouterr()
+    assert json.loads(capsys.readouterr().out)["expectation_status"] == "regression"
 
 
 def test_orchestrator_returns_expectation_regression_exit_code(

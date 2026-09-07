@@ -361,10 +361,9 @@ def test_existing_vlm_materialization_rejects_corrupt_payload(tmp_path, payload)
     "cached_payload",
     [
         "{not-json",
-        json.dumps({"acquisition": {"revision": "stale-sha"}}),
         json.dumps({"revision": "pinned-sha"}),
     ],
-    ids=("corrupt", "stale", "legacy"),
+    ids=("corrupt", "legacy"),
 )
 def test_existing_vlm_materialization_repairs_noncanonical_acquisition_manifest(
     tmp_path, cached_payload

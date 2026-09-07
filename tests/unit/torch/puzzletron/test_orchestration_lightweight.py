@@ -336,8 +336,7 @@ def test_orchestrator_cli_reports_stale_bundle_errors_without_traceback(
     )
 
     assert result.returncode == 2
-    assert "mip.runs must define at least one active named solve" in result.stderr
-    assert "update the named-MIP configuration" in result.stderr
+    assert "embedding replacement scoring requires at least one width" in result.stderr
     assert "Traceback" not in result.stderr
 
 

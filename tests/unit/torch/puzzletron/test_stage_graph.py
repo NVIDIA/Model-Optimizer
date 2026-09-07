@@ -160,7 +160,6 @@ def test_mip_semantic_projection_tracks_realization_enablement() -> None:
 
     assert disabled == {"skip_realize_model": True}
     assert enabled == {"skip_realize_model": False}
-    assert disabled != enabled
 
 
 def test_semantic_projection_uses_authored_config_unless_effective_view_is_requested() -> None:
