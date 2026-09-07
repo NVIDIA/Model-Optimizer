@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,7 +41,16 @@ from puzzletron_orchestrator.compiler import (  # noqa: E402
     validate_runner_ready,
 )
 from puzzletron_orchestrator.controller import CampaignController, dry_run_plan  # noqa: E402
+from puzzletron_orchestrator.executors.slurm import render_slurm_attempt_script  # noqa: E402
 from puzzletron_orchestrator.logging import OrchestratorLogger  # noqa: E402
+from puzzletron_orchestrator.reusable_allocation import (  # noqa: E402
+    REUSABLE_PLAN_IDENTITY_ENV,
+    build_reusable_allocation_attempt,
+    reusable_plan_identity,
+    run_reusable_allocation,
+)
+from puzzletron_orchestrator.schema import CampaignPlan, ExecutionMode  # noqa: E402
+from puzzletron_orchestrator.state import CampaignStateStore  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -118,6 +128,62 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _worker_path(path: str | Path, *, repository: str) -> str:
+    resolved = Path(path).resolve()
+    try:
+        relative = resolved.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return str(resolved)
+    return str(Path(repository) / relative)
+
+
+def _reusable_worker_command(
+    args: argparse.Namespace, plan: CampaignPlan, plan_identity: str
+) -> tuple[str, ...]:
+    repository = plan.runner.contract.repository
+    inputs = plan.puzzle_dir / "orchestration" / "reusable_inputs" / plan_identity
+    command = [
+        "python",
+        "examples/puzzletron/orchestrate.py",
+        "--experiment",
+        plan.experiment_config_path,
+        "--runner",
+        str(inputs / "runner.yaml"),
+        "--execution",
+        str(inputs / "execution.yaml"),
+        "--stage",
+        args.stage,
+        "--local",
+        "--color",
+        "never",
+        "--poll-interval",
+        str(args.poll_interval),
+    ]
+    for override in args.override:
+        command.extend(("--override", override))
+    if args.max_iterations is not None:
+        command.extend(("--max-iterations", str(args.max_iterations)))
+    if args.expect is not None:
+        command.extend(("--expect", _worker_path(args.expect, repository=repository)))
+    return tuple(command)
+
+
+def _write_reusable_inputs(
+    args: argparse.Namespace, plan: CampaignPlan, plan_identity: str
+) -> None:
+    store = CampaignStateStore(plan.puzzle_dir)
+    store.write_allocation_input(
+        plan_identity=plan_identity,
+        name="runner.yaml",
+        contents=Path(args.runner).read_text(),
+    )
+    store.write_allocation_input(
+        plan_identity=plan_identity,
+        name="execution.yaml",
+        contents=Path(args.execution).read_text(),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = OrchestratorLogger(color=args.color)
@@ -139,14 +205,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.dry_run:
         assert submissions is not None
+        allocation = None
+        if plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION and not args.local:
+            identity = reusable_plan_identity(plan)
+            command = _reusable_worker_command(args, plan, identity)
+            attempt = build_reusable_allocation_attempt(
+                plan,
+                command,
+                attempt_id="dry-run",
+            )
+            allocation = {
+                "mode": plan.execution_mode.value,
+                "nodes": attempt.allocation_nodes,
+                "gpus": attempt.allocation_gpus,
+                "scheduler_script": render_slurm_attempt_script(attempt, plan.runner),
+            }
         logger.banner("dry-run only; no jobs will be submitted")
-        logger.plan(
-            f"{len(plan.stages)} stage(s), {len(submissions)} submission(s), root={plan.puzzle_dir}"
-        )
+        if allocation is None:
+            summary = f"{len(submissions)} submission(s)"
+        else:
+            summary = f"one scheduler allocation, {len(submissions)} logical attempt(s)"
+        logger.plan(f"{len(plan.stages)} stage(s), {summary}, root={plan.puzzle_dir}")
         for node in plan.stages:
             count = sum(item.stage_id == node.stage_id for item in submissions)
+            unit = "logical attempt" if allocation is not None else "submission"
             logger.stage(
-                f"{node.stage_id}: {count} submission(s), strategy={node.strategy.value}, "
+                f"{node.stage_id}: {count} {unit}(s), strategy={node.strategy.value}, "
                 f"{node.gpus_per_instance} GPU(s)/instance"
             )
         payload = [
@@ -167,24 +251,56 @@ def main(argv: list[str] | None = None) -> int:
                 "launcher": item.launcher,
                 "exclusive": item.exclusive,
                 "argv": list(item.argv),
-                "scheduler_script": item.scheduler_script,
+                "scheduler_script": (None if allocation is not None else item.scheduler_script),
             }
             for item in submissions
         ]
-        print(json.dumps({"plan": str(plan.puzzle_dir), "submissions": payload}, indent=2))
+        output = {"plan": str(plan.puzzle_dir), "submissions": payload}
+        if allocation is not None:
+            output["allocation"] = allocation
+        print(json.dumps(output, indent=2))
         return 0
-    controller = CampaignController(
-        plan,
-        local=args.local,
-        poll_interval_seconds=args.poll_interval,
-        logger=logger,
+    allocation_identity = os.environ.get(REUSABLE_PLAN_IDENTITY_ENV)
+    if (
+        plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
+        and not allocation_identity
+        and not args.local
+    ):
+        identity = reusable_plan_identity(plan)
+        _write_reusable_inputs(args, plan, identity)
+        result = run_reusable_allocation(
+            plan,
+            _reusable_worker_command(args, plan, identity),
+            logger=logger,
+            poll_interval_seconds=args.poll_interval,
+            once=args.once,
+        )
+    else:
+        if allocation_identity:
+            identity = reusable_plan_identity(plan)
+            if not os.environ.get("SLURM_JOB_ID"):
+                logger.error("reusable allocation worker must run inside a Slurm job")
+                return 2
+            if allocation_identity != identity:
+                logger.error("reusable allocation plan identity does not match the compiled plan")
+                return 2
+        controller = CampaignController(
+            plan,
+            local=args.local,
+            poll_interval_seconds=args.poll_interval,
+            logger=logger,
+            environment_prepared=allocation_identity is not None,
+        )
+        result = controller.run(
+            overrides=args.override,
+            once=args.once,
+            max_iterations=args.max_iterations,
+        )
+    verify_expectation_here = (
+        plan.execution_mode is not ExecutionMode.REUSABLE_ALLOCATION
+        or allocation_identity is not None
     )
-    result = controller.run(
-        overrides=args.override,
-        once=args.once,
-        max_iterations=args.max_iterations,
-    )
-    if args.expect is not None:
+    if args.expect is not None and verify_expectation_here:
         if result.get("report_status") == "completed":
             expectation = verify_expected_results(args.expect, puzzle_dir=plan.puzzle_dir)
         else:
@@ -201,6 +317,11 @@ def main(argv: list[str] | None = None) -> int:
                 "campaign expectation verification "
                 f"{expectation.status}: {expectation.reason or 'comparison failed'}"
             )
+    if allocation_identity is not None:
+        CampaignStateStore(plan.puzzle_dir).write_allocation_result(
+            plan_identity=allocation_identity,
+            result=result,
+        )
     failed_stages = list(result.get("failed_stages") or ())
     if failed_stages:
         logger.error(f"failed stage(s): {', '.join(failed_stages)}")

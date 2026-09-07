@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+import puzzletron_orchestrator.controller as controller_module
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.adapters.stage_compat import (
     stage_is_complete as artifacts_are_complete,
@@ -38,9 +39,11 @@ from puzzletron_orchestrator.compiler import (
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.dashboard import format_eta
 from puzzletron_orchestrator.executors.base import Executor
+from puzzletron_orchestrator.executors.local import LocalExecutor
 from puzzletron_orchestrator.progress import summarize_stage_artifacts
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
+    ExecutionMode,
     JobHandle,
     JobState,
     JobStatus,
@@ -432,6 +435,63 @@ def test_controller_waits_for_parent_job_after_artifact_appears(tmp_path: Path, 
     assert not controller._parents_ready(child)
     controller._active.clear()
     assert controller._parents_ready(child)
+
+
+def test_reusable_controller_defers_then_revisits_work_when_capacity_returns(
+    tmp_path: Path,
+) -> None:
+    per_attempt = _compile_test_plan(tmp_path, stage_filter="vllm_stats")
+    assert per_attempt.runner.slurm is not None
+    per_attempt = replace(
+        per_attempt,
+        runner=replace(
+            per_attempt.runner,
+            slurm=replace(per_attempt.runner.slurm, max_nodes=1),
+        ),
+    )
+    assert CampaignController(per_attempt, executor=LocalExecutor())._available_nodes() == 1
+    plan = replace(per_attempt, execution_mode=ExecutionMode.REUSABLE_ALLOCATION)
+
+    class _CapacityExecutor(_FakeExecutor):
+        backend = "local"
+        available = False
+
+        def can_submit(self, attempt):
+            return self.available
+
+    executor = _CapacityExecutor()
+    controller = CampaignController(plan, executor=executor)
+
+    assert not controller._submit_stage(plan.stages[0])
+    assert executor._handles == {}
+    executor.available = True
+    assert controller._submit_stage(plan.stages[0])
+    assert len(executor._handles) == 1
+
+
+@pytest.mark.parametrize("allocation_state", [JobState.RUNNING, JobState.COMPLETED])
+def test_local_override_rejects_only_active_reusable_slurm_allocation(
+    tmp_path: Path, monkeypatch, allocation_state: JobState
+) -> None:
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
+    controller = CampaignController(plan, executor=LocalExecutor())
+    handle = JobHandle(backend="slurm", handle_id="123", attempt_id="outer")
+    controller.store.write_allocation({"handle": {**handle.__dict__, "metadata": {}}})
+
+    class _AllocationExecutor:
+        def __init__(self, runner, *, scripts_dir):
+            pass
+
+        def recover(self, recovered):
+            return JobStatus(handle=recovered, state=allocation_state)
+
+    monkeypatch.setattr(controller_module, "SlurmExecutor", _AllocationExecutor)
+
+    if allocation_state is JobState.RUNNING:
+        with pytest.raises(RuntimeError, match="reusable allocation 123 is running"):
+            controller._reject_conflicting_reusable_allocation()
+    else:
+        controller._reject_conflicting_reusable_allocation()
 
 
 def test_controller_resubmits_completed_work_when_stage_semantics_change(

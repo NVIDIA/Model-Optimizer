@@ -16,12 +16,15 @@ the model guide remains their canonical reference.
 ## Start here: lifecycle smoke
 
 Start with the maintained Qwen 3.5 0.8B VLM smoke. It exercises the complete
-image-text lifecycle with bounded workloads and at most one GPU per stage. Once
-it succeeds, the optional longer example campaign uses the same environment,
-runner, orchestrator, progress display, report, and resume command. That larger
-campaign takes longer than the smoke; its duration depends on worker hardware,
-scheduler availability, cache state, and the execution profile. It is intended
-for scheduled integration validation, not routine smoke or presubmit use.
+image-text lifecycle with bounded workloads inside one reusable eight-GPU Slurm
+allocation. Logical stages still have separate attempts, logs, artifacts, and
+resume checks. Once it succeeds, the optional longer example campaign uses the
+same environment, runner, orchestrator, progress display, report, and resume
+command. Logical stage progress is emitted in the reusable allocation log. That
+larger campaign takes longer than the smoke; its duration depends on worker
+hardware, scheduler availability, cache state, and the execution profile. It is
+intended for scheduled integration validation, not routine smoke or presubmit
+use.
 
 ### 1. Create the controller environment
 
@@ -58,12 +61,18 @@ Python paths must exist inside the worker image. See [environment
 setup](docs/environment_setup.md) for the worker contract and [Slurm
 configuration](docs/slurm_configuration.md) for each runner field.
 
-The three campaign inputs have separate jobs:
+This accelerated route is qualified for the documented one-node/eight-GPU
+environment, not for arbitrary Slurm sites. See [Slurm
+configuration](docs/slurm_configuration.md#reusable-single-node-allocations)
+for the assumptions and settings another site may need to adapt.
+
+The three campaign inputs have separate responsibilities:
 
 - The experiment file defines the model, data, and bounded smoke workload. Do
   not edit it for this first run.
 - The runner file contains the site-specific scheduler and worker settings.
-- The execution file maps the smoke stages onto one GPU or a CPU worker.
+- The execution file selects reusable allocation and maps each logical stage
+  onto a GPU lease or zero-GPU CPU execution inside the shared allocation.
 
 ### 3. Select shared paths
 
@@ -91,7 +100,7 @@ plan before it requests resources:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml
 RUNNER=runner.slurm.yaml
 
 python examples/puzzletron/orchestrate.py \
@@ -102,7 +111,9 @@ python examples/puzzletron/orchestrate.py \
 ```
 
 Review the resolved paths, CPU and GPU requests, worker image, mounts, and log
-locations. Then run the same plan without `--dry-run`:
+locations. This profile's dry-run shows one outer allocation and the logical
+attempts that will execute inside it. Then run the same plan without
+`--dry-run`:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
@@ -115,16 +126,20 @@ python examples/puzzletron/orchestrate.py \
 ### 5. Resume and inspect results
 
 Run the launch command above again to recover an interrupted smoke or verify a
-completed one. Compatible completed stages are not submitted again. Puzzletron
-stores its structured runtime state under
+completed one. It reattaches to a compatible active outer allocation. After
+Slurm reports that allocation failed or was cancelled, it starts a replacement
+and reruns only unfinished compatible work when no terminal worker result was
+written. A worker-authored terminal failure is returned for diagnosis rather
+than automatically retried. Compatible completed stages are not submitted
+again. Puzzletron stores its structured runtime state under
 `$PUZZLETRON_RUN_ROOT/orchestration/`.
 
-While the command is running, it shows completed/total stages, queued and
-running stages, elapsed time, 30-second heartbeats, and the active log path.
-Stages expose their native inner unit when available, including evaluation
-samples and measured rate. An ETA appears only after progress provides a
-reliable denominator and the controller observes throughput; otherwise it says
-`ETA unavailable`.
+The reusable-allocation watcher shows the outer Slurm state and allocation log
+path. Follow that log to see the inner controller's completed/total stages,
+queued and running stages, elapsed time, 30-second heartbeats, and native inner
+units such as evaluation samples and measured rate. An ETA appears only after
+progress provides a reliable denominator and the controller observes
+throughput; otherwise it says `ETA unavailable`.
 
 After the selected plan completes cleanly, `orchestrate.py` attempts to write the
 final report to
@@ -159,9 +174,11 @@ python examples/puzzletron/orchestrate.py \
 
 Inspect the larger plan, then remove `--dry-run` to launch it. Use that same
 launch command for every resume. The example increases sample counts,
-candidate coverage, and distillation work, but does not introduce another
-operational path. Use focused tests and the lifecycle smoke for routine
-development; reserve this campaign for scheduled integration validation.
+candidate coverage, and distillation work. Its execution profile uses
+configured within-node candidate concurrency when dependencies are ready, but
+does not introduce another operational path. Use focused tests and the
+lifecycle smoke for routine development; reserve this campaign for scheduled
+integration validation.
 
 ## Choose the next task
 

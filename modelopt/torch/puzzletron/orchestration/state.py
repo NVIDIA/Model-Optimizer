@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Durable orchestration state on shared storage."""
 
@@ -62,18 +74,44 @@ class StageRunRecord:
 class ControllerLease:
     """File-based campaign controller lease."""
 
-    def __init__(self, path: Path, owner: str) -> None:
+    def __init__(self, path: Path, owner: str, ttl_seconds: int = 120) -> None:
         self.path = path
         self.owner = owner
+        self.ttl_seconds = ttl_seconds
+
+    def renew(self, *, ttl_seconds: int | None = None) -> bool:
+        """Extend an owned lease, returning false if ownership was lost."""
+
+        try:
+            payload = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return False
+        if payload.get("owner") != self.owner:
+            return False
+        ttl_seconds = self.ttl_seconds if ttl_seconds is None else ttl_seconds
+        _write_json(
+            self.path,
+            {"owner": self.owner, "pid": os.getpid(), "expires": time.time() + ttl_seconds},
+        )
+        return True
 
     def release(self) -> None:
         if self.path.exists():
             try:
+                owned_stat = self.path.stat()
                 payload = json.loads(self.path.read_text())
             except (OSError, ValueError):
                 payload = {}
             if payload.get("owner") == self.owner:
-                self.path.unlink(missing_ok=True)
+                try:
+                    current_stat = self.path.stat()
+                    if (current_stat.st_dev, current_stat.st_ino) == (
+                        owned_stat.st_dev,
+                        owned_stat.st_ino,
+                    ):
+                        self.path.unlink()
+                except OSError:
+                    pass
 
 
 def acquire_controller_lease(
@@ -86,20 +124,42 @@ def acquire_controller_lease(
 
     root.mkdir(parents=True, exist_ok=True)
     lease_path = root / "controller.lock"
-    now = time.time()
-    if lease_path.exists():
+    for _attempt in range(3):
+        now = time.time()
         try:
-            payload = json.loads(lease_path.read_text())
-        except (OSError, ValueError):
-            payload = {}
-        expires = float(payload.get("expires", 0))
-        if expires > now and payload.get("owner") != owner:
-            return None
-    _write_json(
-        lease_path,
-        {"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds},
-    )
-    return ControllerLease(lease_path, owner)
+            descriptor = os.open(lease_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                stale_stat = lease_path.stat()
+                payload = json.loads(lease_path.read_text())
+            except OSError:
+                continue
+            except ValueError:
+                payload = {}
+                if now - stale_stat.st_mtime < ttl_seconds:
+                    return None
+            expires = float(payload.get("expires", 0))
+            if expires > now and payload.get("owner") != owner:
+                return None
+            try:
+                current_stat = lease_path.stat()
+                if (current_stat.st_dev, current_stat.st_ino) != (
+                    stale_stat.st_dev,
+                    stale_stat.st_ino,
+                ):
+                    continue
+                lease_path.unlink()
+            except OSError:
+                continue
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds},
+                stream,
+                indent=2,
+            )
+        return ControllerLease(lease_path, owner, ttl_seconds)
+    return None
 
 
 def release_controller_lease(lease: ControllerLease | None) -> None:
@@ -123,6 +183,12 @@ class CampaignStateStore:
 
     def snapshot_path(self) -> Path:
         return self.root / "controller_snapshot.json"
+
+    def allocation_path(self) -> Path:
+        return self.root / "reusable_allocation.json"
+
+    def allocation_result_path(self) -> Path:
+        return self.root / "reusable_allocation_result.json"
 
     def stage_record_path(self, stage_id: str) -> Path:
         return self.root / "stages" / f"{stage_id}.json"
@@ -155,6 +221,44 @@ class CampaignStateStore:
         if not path.is_file():
             return None
         return json.loads(path.read_text())
+
+    def write_allocation(self, payload: Mapping[str, Any]) -> None:
+        _write_json(self.allocation_path(), payload)
+
+    def load_allocation(self) -> dict[str, Any] | None:
+        path = self.allocation_path()
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+
+    def write_allocation_result(self, *, plan_identity: str, result: Mapping[str, Any]) -> None:
+        _write_json(
+            self.allocation_result_path(),
+            {"plan_identity": plan_identity, "result": dict(result)},
+        )
+
+    def load_allocation_result(self, *, plan_identity: str) -> dict[str, Any] | None:
+        path = self.allocation_result_path()
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text())
+        if payload.get("plan_identity") != plan_identity:
+            return None
+        result = payload.get("result")
+        return dict(result) if isinstance(result, Mapping) else None
+
+    def clear_allocation_result(self) -> None:
+        self.allocation_result_path().unlink(missing_ok=True)
+
+    def write_allocation_input(self, *, plan_identity: str, name: str, contents: str) -> Path:
+        if not name or Path(name).name != name:
+            raise ValueError("reusable allocation input name must be a file name")
+        path = self.root / "reusable_inputs" / plan_identity / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        temporary.write_text(contents)
+        os.replace(temporary, path)
+        return path
 
     def save_attempt(self, attempt: AttemptSpec, handle: JobHandle | None, status: str) -> Path:
         directory = self.attempt_dir(attempt.work_id, attempt.attempt_id)

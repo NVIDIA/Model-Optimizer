@@ -49,6 +49,7 @@ from .reporting import (
 from .schema import (
     AttemptSpec,
     CampaignPlan,
+    ExecutionMode,
     FailureClass,
     FailurePolicy,
     HaltPolicy,
@@ -73,9 +74,21 @@ from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControl
 __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
 
 
-def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
+def create_executor(
+    plan: CampaignPlan,
+    *,
+    local: bool = False,
+    environment_prepared: bool = False,
+) -> Executor:
     if local:
-        return LocalExecutor(plan.runner)
+        gpu_capacity = None
+        if plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION:
+            gpu_capacity = int(plan.execution_defaults.get("gpus_per_node", 8))
+        return LocalExecutor(
+            plan.runner,
+            gpu_capacity=gpu_capacity,
+            environment_prepared=environment_prepared,
+        )
     if plan.runner.kind == "slurm":
         return SlurmExecutor(plan.runner)
     if plan.runner.kind == "baremetal":
@@ -224,11 +237,19 @@ class CampaignController:
         local: bool = False,
         logger: OrchestratorLogger | None = None,
         terminal_controls: TerminalControls | None = None,
+        environment_prepared: bool = False,
     ) -> None:
         self.plan = plan
         self.store = CampaignStateStore(plan.puzzle_dir)
         plan.log_dir.mkdir(parents=True, exist_ok=True)
-        self.executor = executor or create_executor(plan, local=local)
+        self.executor = executor or create_executor(
+            plan,
+            local=local,
+            environment_prepared=environment_prepared,
+        )
+        self._inside_reusable_allocation = (
+            plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION and environment_prepared
+        )
         self.poll_interval_seconds = poll_interval_seconds
         self.logger = logger or OrchestratorLogger()
         self.terminal_controls = terminal_controls or TerminalControls(
@@ -255,6 +276,41 @@ class CampaignController:
             defaults
         )
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
+
+    def _reject_conflicting_reusable_allocation(self) -> None:
+        if self._inside_reusable_allocation:
+            return
+        record = self.store.load_allocation() or {}
+        payload = record.get("handle")
+        if not isinstance(payload, Mapping):
+            return
+        handle = JobHandle(
+            backend=str(payload.get("backend") or ""),
+            handle_id=str(payload.get("handle_id") or ""),
+            attempt_id=str(payload.get("attempt_id") or ""),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+        if not handle.backend or not handle.handle_id:
+            return
+        if handle.backend == self.executor.backend:
+            allocation_executor = self.executor
+        elif handle.backend == "slurm" and self.plan.runner.slurm is not None:
+            allocation_executor = SlurmExecutor(
+                self.plan.runner,
+                scripts_dir=self.store.root / "sbatch",
+            )
+        else:
+            raise RuntimeError(
+                f"run root records reusable {handle.backend} allocation {handle.handle_id}; "
+                f"resume it with the {handle.backend} execution path before switching to "
+                f"{self.executor.backend}"
+            )
+        status = allocation_executor.recover(handle)
+        if status.state in {JobState.PENDING, JobState.RUNNING, JobState.UNKNOWN}:
+            raise RuntimeError(
+                f"reusable allocation {handle.handle_id} is {status.state.value}; "
+                "resume or stop it before using another execution path on this run root"
+            )
 
     def _recover_active_attempts(self) -> None:
         active_states = {
@@ -296,6 +352,12 @@ class CampaignController:
         for attempt, handle, current in sorted(recoverable, key=lambda item: item[2]):
             if current and stale_active_attempts:
                 continue
+            if handle.backend != self.executor.backend:
+                raise RuntimeError(
+                    f"run root has active {handle.backend} attempt {handle.handle_id}; "
+                    f"resume it with the {handle.backend} execution path before switching to "
+                    f"{self.executor.backend}"
+                )
             status = self.executor.recover(handle)
             self.store.update_attempt_status(
                 str(attempt["work_id"]),
@@ -630,6 +692,11 @@ class CampaignController:
             self.logger.error(f"{node.stage_id}: recovered terminal stage validation failure")
 
     def _available_nodes(self) -> int | None:
+        if (
+            self.executor.backend == "local"
+            and self.plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
+        ):
+            return None
         slurm = self.plan.runner.slurm
         if slurm is None or slurm.max_nodes is None:
             return None
@@ -686,6 +753,12 @@ class CampaignController:
             if available_nodes is not None and attempt.allocation_nodes > available_nodes:
                 self.logger.wait(
                     f"{node.stage_id}: node budget exhausted; "
+                    "remaining work will be submitted later"
+                )
+                break
+            if not self.executor.can_submit(attempt):
+                self.logger.wait(
+                    f"{node.stage_id}: reusable allocation capacity exhausted; "
                     "remaining work will be submitted later"
                 )
                 break
@@ -1447,11 +1520,16 @@ class CampaignController:
         signal.signal(signal.SIGTERM, _on_signal)
         try:
             owner = f"controller-{uuid.uuid4()}"
-            lease = acquire_controller_lease(self.store.root, owner)
+            lease = acquire_controller_lease(
+                self.store.root,
+                owner,
+                ttl_seconds=max(120, math.ceil(self.poll_interval_seconds * 3)),
+            )
             if lease is None:
                 raise RuntimeError("another controller holds the campaign lease")
 
             self._campaign_started_monotonic = time.monotonic()
+            self._reject_conflicting_reusable_allocation()
             self.logger.enable_dashboard()
             self.store.write_plan(plan_to_dict(self.plan))
             self.logger.banner(
@@ -1476,6 +1554,8 @@ class CampaignController:
             self._interactive_ready = True
 
             while True:
+                if lease is None or not lease.renew():
+                    raise RuntimeError("campaign controller lease was lost")
                 self._stage_execution_identity_cache = {}
                 try:
                     if self._shutdown_requested:

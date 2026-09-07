@@ -236,6 +236,137 @@ def test_orchestrator_cli_reports_config_errors_without_traceback(tmp_path: Path
     assert "Traceback" not in result.stderr
 
 
+def test_orchestrator_dry_run_renders_one_reusable_allocation(tmp_path: Path) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    runner = tmp_path / "runner.yaml"
+    execution = tmp_path / "execution.yaml"
+    experiment.write_text(
+        yaml.safe_dump(
+            {
+                "puzzle_dir": str(tmp_path / "run"),
+                "width_importance": {"enabled": True},
+            }
+        )
+    )
+    runner.write_text(
+        yaml.safe_dump(
+            {
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {"account": "test", "partition": "gpu"},
+                    "execution_contract": {"repository": "/repo", "venv": "/venv"},
+                }
+            }
+        )
+    )
+    execution.write_text(
+        yaml.safe_dump(
+            {
+                "execution": {
+                    "mode": "reusable_allocation",
+                    "defaults": {"gpus_per_node": 6},
+                    "stages": {"width_importance": {"strategy": "single"}},
+                }
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/puzzletron/orchestrate.py",
+            "--experiment",
+            str(experiment),
+            "--runner",
+            str(runner),
+            "--execution",
+            str(execution),
+            "--dry-run",
+            "--color",
+            "never",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["allocation"]["mode"] == "reusable_allocation"
+    assert payload["allocation"]["nodes"] == 1
+    assert payload["allocation"]["gpus"] == 6
+    assert "#SBATCH --gpus-per-node=6" in payload["allocation"]["scheduler_script"]
+    assert payload["submissions"]
+    assert all(item["scheduler_script"] is None for item in payload["submissions"])
+
+
+def test_orchestrator_local_override_does_not_submit_reusable_allocation(tmp_path: Path) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    runner = tmp_path / "runner.yaml"
+    execution = tmp_path / "execution.yaml"
+    experiment.write_text(
+        yaml.safe_dump(
+            {
+                "puzzle_dir": str(tmp_path / "run"),
+                "width_importance": {"enabled": True},
+            }
+        )
+    )
+    runner.write_text(
+        yaml.safe_dump(
+            {
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {"account": "test"},
+                    "execution_contract": {
+                        "repository": str(REPOSITORY_ROOT),
+                        "venv": sys.prefix,
+                    },
+                }
+            }
+        )
+    )
+    execution.write_text(
+        yaml.safe_dump(
+            {
+                "execution": {
+                    "mode": "reusable_allocation",
+                    "defaults": {"gpus_per_node": 1},
+                    "stages": {"width_importance": {"strategy": "single"}},
+                }
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/puzzletron/orchestrate.py",
+            "--experiment",
+            str(experiment),
+            "--runner",
+            str(runner),
+            "--execution",
+            str(execution),
+            "--local",
+            "--max-iterations",
+            "0",
+            "--color",
+            "never",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "run/orchestration/reusable_allocation.json").exists()
+
+
 def test_orchestrator_cli_rejects_unresolved_runner_template(tmp_path: Path) -> None:
     runner = tmp_path / "runner.yaml"
     runner.write_text(

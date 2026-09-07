@@ -15,6 +15,7 @@
 
 """Tests for orchestration executors."""
 
+import io
 import subprocess
 import time
 from pathlib import Path
@@ -23,6 +24,8 @@ import pytest
 import yaml
 
 import puzzletron_orchestrator.adapters.sharded as sharded_module
+import puzzletron_orchestrator.reusable_allocation as reusable_module
+import puzzletron_orchestrator.state as state_module
 from modelopt.torch.puzzletron.distributed_eval.config import load_runtime_config
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.compiler import (
@@ -33,6 +36,8 @@ from puzzletron_orchestrator.compiler import (
 from puzzletron_orchestrator.executors.baremetal import BareMetalSSHExecutor
 from puzzletron_orchestrator.executors.local import LocalExecutor
 from puzzletron_orchestrator.executors.slurm import SlurmExecutor, render_sbatch_script
+from puzzletron_orchestrator.logging import OrchestratorLogger
+from puzzletron_orchestrator.reusable_allocation import run_reusable_allocation
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
     BareMetalHost,
@@ -40,6 +45,7 @@ from puzzletron_orchestrator.schema import (
     CampaignPlan,
     CommandSpec,
     ExecutionContract,
+    ExecutionMode,
     ExecutionStrategy,
     FailurePolicy,
     JobHandle,
@@ -52,6 +58,7 @@ from puzzletron_orchestrator.schema import (
     WorkItem,
     WorkPlan,
 )
+from puzzletron_orchestrator.state import acquire_controller_lease
 
 # Local and bare-metal execution
 
@@ -75,6 +82,109 @@ def test_local_executor_runs_successful_command(tmp_path: Path):
         time.sleep(0.01)
     assert status.state is JobState.COMPLETED
     assert log_path.read_text().splitlines()[-1] == "ok"
+
+
+def test_local_executor_skips_runner_hooks_in_prepared_allocation(tmp_path: Path) -> None:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(
+            repository=str(tmp_path),
+            venv=str(tmp_path / ".venv"),
+            prerun_commands=("prepare-once",),
+            postrun_commands=("cleanup-once",),
+        ),
+        slurm=SlurmRunnerConfig(account="acct"),
+    )
+    executor = LocalExecutor(runner, environment_prepared=True)
+
+    assert executor._wrapped_argv(("python", "worker.py")) == ["python", "worker.py"]
+
+
+def test_controller_lease_keeps_fresh_partial_lock_exclusive(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    root.mkdir()
+    (root / "controller.lock").write_text("")
+
+    assert acquire_controller_lease(root, "contender") is None
+
+
+def test_controller_lease_renews_while_owner_is_running(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "lease"
+    clock = [100.0]
+    monkeypatch.setattr(state_module.time, "time", lambda: clock[0])
+    lease = acquire_controller_lease(root, "owner", ttl_seconds=1)
+
+    assert lease is not None
+    assert lease.renew(ttl_seconds=60)
+    clock[0] = 102.0
+    assert acquire_controller_lease(root, "contender") is None
+    lease.release()
+    assert acquire_controller_lease(root, "contender") is not None
+
+
+def test_local_executor_leases_disjoint_gpu_slices_and_recovers_capacity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,5,7")
+    executor = LocalExecutor(gpu_capacity=3, session_id="allocation-1")
+    gate = tmp_path / "release"
+    handles = []
+
+    def _attempt(attempt_id: str, task_count: int = 1) -> AttemptSpec:
+        code = f"""\
+import os
+import time
+from pathlib import Path
+
+Path({str(tmp_path)!r}, {attempt_id!r} + "-" + os.environ["PUZZLETRON_LOCAL_TASK_INDEX"]).write_text(
+    os.environ["CUDA_VISIBLE_DEVICES"]
+)
+gate = Path({str(gate)!r})
+while not gate.exists():
+    time.sleep(0.01)
+"""
+        return AttemptSpec(
+            attempt_id=attempt_id,
+            work_id=f"stage:{attempt_id}",
+            stage_id="stage",
+            command=CommandSpec(argv=("python", "-c", code)),
+            allocation_nodes=1,
+            allocation_gpus=task_count,
+            metadata={"gpus_per_node": 3},
+            task_topology=TaskTopology(task_count=task_count, gpus_per_task=1),
+        )
+
+    try:
+        first = executor.submit(_attempt("a1"))
+        second = executor.submit(_attempt("a2", task_count=2))
+        handles.extend((first, second))
+
+        deadline = time.monotonic() + 5
+        while len(list(tmp_path.glob("a[12]-*"))) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "a1-0").read_text() == "2"
+        assert {(tmp_path / "a2-0").read_text(), (tmp_path / "a2-1").read_text()} == {
+            "5",
+            "7",
+        }
+        assert not executor.can_submit(_attempt("a3"))
+
+        restarted = LocalExecutor(gpu_capacity=3, session_id="allocation-2")
+        assert restarted.recover(second).state is JobState.CANCELLED
+        gate.touch()
+        deadline = time.monotonic() + 5
+        while any(executor.recover(handle).state is JobState.RUNNING for handle in handles):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        third = executor.submit(_attempt("a3", task_count=3))
+        handles.append(third)
+        deadline = time.monotonic() + 5
+        while executor.recover(third).state is JobState.RUNNING:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert third.metadata["allocated_gpus"] == ("2", "5", "7")
+    finally:
+        executor.cancel(handles)
 
 
 def test_baremetal_preflight_checks_repository_and_venv_on_every_host(
@@ -213,6 +323,141 @@ def test_render_sbatch_script_requests_gpus_per_node():
     assert "--account=acct" in srun
     assert "--job-name=pt-vllm" in srun
     assert "--cpus-per-task" not in srun
+
+
+def test_reusable_allocation_reattaches_without_duplicate_submit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeSlurmExecutor:
+        submits = 0
+        state = JobState.RUNNING
+
+        def __init__(self, runner, *, scripts_dir):
+            self.runner = runner
+            self.scripts_dir = scripts_dir
+
+        def submit(self, attempt):
+            type(self).submits += 1
+            return JobHandle(
+                backend="slurm",
+                handle_id="slurm-123",
+                attempt_id=attempt.attempt_id,
+                metadata={"job_id": "123", "log_paths": (attempt.command.log_path,)},
+            )
+
+        def recover(self, handle):
+            return JobStatus(
+                handle=handle,
+                state=type(self).state,
+                log_paths=self.fetch_logs(handle),
+            )
+
+        @staticmethod
+        def fetch_logs(handle):
+            return tuple(handle.metadata.get("log_paths", ()))
+
+    monkeypatch.setattr(reusable_module, "SlurmExecutor", FakeSlurmExecutor)
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct"),
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={"gpus_per_node": 6},
+        stages=(),
+        contract_hash="contract",
+        execution_mode=ExecutionMode.REUSABLE_ALLOCATION,
+    )
+    log_stream = io.StringIO()
+    logger = OrchestratorLogger(color="never", stream=log_stream)
+
+    first = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+    second = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+
+    assert FakeSlurmExecutor.submits == 1
+    assert first["allocation_handle"] == second["allocation_handle"] == "slurm-123"
+    assert plan.log_dir.is_dir()
+    assert "reattached to reusable allocation slurm-123; log=" in log_stream.getvalue()
+
+    FakeSlurmExecutor.state = JobState.CANCELLED
+    replacement = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+    assert FakeSlurmExecutor.submits == 2
+    assert replacement["allocation_status"] == JobState.PENDING.value
+
+    store = reusable_module.CampaignStateStore(plan.puzzle_dir)
+    store.write_allocation_result(
+        plan_identity=reusable_module.reusable_plan_identity(plan),
+        result={"halted": True, "reason": "worker failure"},
+    )
+    FakeSlurmExecutor.state = JobState.FAILED
+    terminal = run_reusable_allocation(
+        plan,
+        ("python", "worker.py"),
+        logger=logger,
+        poll_interval_seconds=0,
+        once=True,
+    )
+    assert terminal["reason"] == "worker failure"
+    assert FakeSlurmExecutor.submits == 2
+
+    foreign_attempt = AttemptSpec(
+        attempt_id="foreign-attempt",
+        work_id="stage:foreign",
+        stage_id="stage",
+        command=CommandSpec(argv=("true",)),
+        contract_hash=plan.contract_hash,
+    )
+    foreign_handle = JobHandle(
+        backend="slurm",
+        handle_id="foreign-job",
+        attempt_id=foreign_attempt.attempt_id,
+    )
+    store.save_attempt(foreign_attempt, foreign_handle, JobState.RUNNING.value)
+    with pytest.raises(RuntimeError, match="active work from another execution path"):
+        run_reusable_allocation(
+            plan,
+            ("python", "worker.py"),
+            logger=logger,
+            poll_interval_seconds=0,
+            once=True,
+        )
+    store.update_attempt_status(
+        foreign_attempt.work_id,
+        foreign_attempt.attempt_id,
+        JobStatus(handle=foreign_handle, state=JobState.COMPLETED),
+    )
+    assert (
+        run_reusable_allocation(
+            plan,
+            ("python", "worker.py"),
+            logger=logger,
+            poll_interval_seconds=0,
+            once=True,
+        )["reason"]
+        == "worker failure"
+    )
 
 
 def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():

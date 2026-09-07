@@ -3,12 +3,40 @@
 Use the runner file for site-wide Slurm settings and the execution file for
 stage-specific choices.
 
+## Reusable single-node allocations
+
+The default `execution.mode: per_attempt` submits one Slurm job for each
+logical attempt. Set `execution.mode: reusable_allocation` to submit one outer
+Slurm job and run the existing dependency-aware controller inside it. This is
+additive: stage records, attempts, logs, artifacts, failure policies, and
+resume validation remain separate even though they share one container and
+allocation.
+
+Reusable mode currently supports one node. Compilation rejects any stage whose
+resolved topology requires more than one. `execution.defaults.gpus_per_node`
+sets the outer allocation capacity; logical attempts lease disjoint subsets of
+the GPUs visible inside that allocation. Stage `instances` and task topology
+control how much of that capacity each ready stage can use. Capacity is not
+hard-coded to eight, although the maintained Qwen 3.5 0.8B profiles have only
+been validated on an eight-GPU node.
+
+This mode assumes a Slurm site where one containerized task can see the full
+node allocation, shared campaign paths are mounted identically, and runtime
+caches are writable for the lifetime of the outer job. The outer job uses the
+site's CPU and memory defaults for its GPU request, which must be sufficient for
+the concurrent workers. Other sites may need to adapt the runner's account,
+partition, container integration, mounts, time limit, GPU capacity, and cache
+hooks. Use per-attempt mode when those assumptions do not hold.
+
 ## Partitions and logs
 
-`runner.slurm.partition` sets the default for stages without a partition
-override. It accepts one partition name or a list of eligible names. Omit it to
-use the site's Slurm default. A stage can set
-`execution.stages.<stage>.partition` to one name or its own eligible list.
+`runner.slurm.partition` sets the default allocation partition. It accepts one
+partition name or a list of eligible names. Omit it to use the site's Slurm
+default. In per-attempt mode, a stage can set
+`execution.stages.<stage>.partition` to one name or its own eligible list. A
+reusable allocation has only one GPU partition; compilation rejects differing
+GPU-stage overrides, while CPU-stage partition overrides and `partition_cpu`
+do not apply to the zero-GPU subprocesses inside that allocation.
 
 `runner.slurm.log_dir` sets the directory used for every attempt log, including
 the final-report attempt. When omitted, logs are written below
@@ -28,8 +56,9 @@ overrides because those partition names are not portable between Slurm sites.
 
 Puzzletron defaults data preparation, checkpoint conversion, library building,
 MIP solving, filtering, and reporting to `resource: cpu`. Model execution stages
-default to `resource: gpu`. These values control the scheduler request, not
-where the orchestration command itself runs.
+default to `resource: gpu`. In per-attempt mode these values control each
+scheduler request. In reusable mode they select either a GPU lease or a
+zero-GPU subprocess inside the already-running allocation.
 
 Named MIP configurations use the solve-only CPU driver. Checkpoint
 materialization and validation belong to explicit post-MIP stages. Legacy MIP
@@ -44,10 +73,10 @@ Choosing `resource: cpu` for code that actually calls CUDA leaves GPUs hidden an
 can fail at runtime; choosing `resource: gpu` for CPU work reserves a GPU that the
 stage may not use.
 
-Set `runner.slurm.partition_cpu` when CPU work must use a different partition.
-Without it, CPU-routed stages request no GPUs on the runner's default partition.
-A stage-specific partition remains available when one CPU stage needs different
-routing:
+In per-attempt mode, set `runner.slurm.partition_cpu` when CPU work must use a
+different partition. Without it, CPU-routed stages request no GPUs on the
+runner's default partition. A stage-specific partition remains available when
+one CPU stage needs different routing:
 
 ```yaml
 runner:
@@ -76,20 +105,23 @@ and [`execution.example.yaml`](../configs/orchestration/execution.example.yaml)
 files show the runner default and per-stage CPU routing together. The CPU-only
 `final_report` task accepts only a `partition` override.
 
-For CPU stages, `runner.slurm.cpu_cpus_per_task` sets the requested CPU count and
-`runner.slurm.cpu_memory_mb` sets memory in MiB. Omit them to use the site's Slurm
-defaults. These settings are part of resume identity, so changing either causes
-Puzzletron to submit the stage with the new allocation instead of treating an
-older active attempt as the same work.
+For per-attempt CPU stages, `runner.slurm.cpu_cpus_per_task` sets the requested
+CPU count and `runner.slurm.cpu_memory_mb` sets memory in MiB. Omit them to use
+the site's Slurm defaults. These settings are part of resume identity, so
+changing either causes Puzzletron to submit the stage with the new allocation
+instead of treating an older active attempt as the same work. They do not
+change the reusable outer GPU job.
 
-`--dry-run` prints a submission-equivalent `sbatch` script for every planned
-submission. Inspect the account, partition, nodes, tasks, GPU request, container,
-mounts, working directory, and `srun` line before launching. The preview's
-deterministic attempt ID, job name, and log path are replaced at launch. A
-CPU-routed MIP script must omit both `#SBATCH --gpus-per-node` and
-`srun --gpus-per-task` and must use the direct task launcher. A
-validation-enabled MIP script must show the expected GPU count and a
-`torchrun` launcher for the realization mesh.
+In per-attempt mode, `--dry-run` prints a submission-equivalent `sbatch` script
+for every planned submission. In reusable mode, it prints one outer `sbatch`
+script plus every logical attempt and resource request; logical attempts have
+no separate scheduler script. Inspect the account, partition, nodes, tasks, GPU
+request, container, mounts, working directory, and `srun` line before
+launching. The preview's deterministic attempt ID, job name, and log path are
+replaced at launch. A CPU-routed MIP script in per-attempt mode must omit both
+`#SBATCH --gpus-per-node` and `srun --gpus-per-task` and must use the direct task
+launcher. A validation-enabled MIP script must show the expected GPU count and
+a `torchrun` launcher for the realization mesh.
 
 Dry-run output and generated plan snapshots contain the configured setup hooks.
 Never put literal credentials in `prerun_commands` or `postrun_commands`; the

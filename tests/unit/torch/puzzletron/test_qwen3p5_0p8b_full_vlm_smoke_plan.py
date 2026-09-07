@@ -23,6 +23,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.schema import ExecutionMode
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
@@ -31,8 +32,9 @@ CAMPAIGN_PATH = FAMILY_ROOT / "runs/vlm_campaign.yaml"
 RUNNER_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml"
 )
-SINGLE_GPU_EXECUTION_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
+SMOKE_EXECUTION_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml"
 )
 CAMPAIGN_EXECUTION_PATH = (
     REPOSITORY_ROOT
@@ -55,12 +57,14 @@ def _compile(monkeypatch, tmp_path: Path, experiment: Path, execution: Path):
 def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     monkeypatch, tmp_path: Path
 ) -> None:
-    plan = _compile(monkeypatch, tmp_path, SMOKE_PATH, SINGLE_GPU_EXECUTION_PATH)
+    plan = _compile(monkeypatch, tmp_path, SMOKE_PATH, SMOKE_EXECUTION_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
     serving_args = nodes["vlm_serving"]["config"]["topology"]["extra_vllm_args"]
 
+    assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
+    assert plan.execution_defaults["gpus_per_node"] == 8
     assert "tokenize_data" not in stages
     assert config["dataset_path"] == str(tmp_path / "full_vlm_smoke/datasets/nemotron_vlm_v2")
     assert config["prepare_dataset"]["output"] == config["dataset_path"]
@@ -93,6 +97,7 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     assert cpu_stages
     assert all(stage.total_gpus == 0 for stage in cpu_stages)
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
+    assert all(stage.nodes == 1 for stage in stages.values())
 
 
 def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) -> None:
@@ -105,6 +110,8 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     assert set(config["post_mip"]["flows"]) == {"candidates"}
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
     serving_args = candidates["serving"]["config"]["topology"]["extra_vllm_args"]
+    assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
+    assert plan.execution_defaults["gpus_per_node"] == 8
     assert serving_args[serving_args.index("--gdn-prefill-backend") + 1] == "triton"
 
     assert set(config["mip"]["runs"]) == {"params-90"}
@@ -119,8 +126,18 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     assert candidates["selected"]["input"] == "post_kd_eval"
     assert candidates["selected"]["top_k"] == 1
     assert stages["post.candidates.serving"].parents == ("post.candidates.result",)
-    assert stages["post.candidates.kd"].total_gpus == 1
-    assert max(stage.total_gpus for stage in stages.values()) == 1
+    concurrent_candidate_stages = {
+        "post.candidates.image_eval",
+        "post.candidates.materialized",
+        "post.candidates.pre_kd_eval",
+        "post.candidates.kd",
+        "post.candidates.post_kd_eval",
+    }
+    assert {
+        stage_id for stage_id, stage in stages.items() if stage.total_gpus == 5
+    } == concurrent_candidate_stages
+    assert stages["post.candidates.serving"].total_gpus == 1
+    assert all(stage.nodes == 1 for stage in stages.values())
 
     profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None

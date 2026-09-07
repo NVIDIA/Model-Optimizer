@@ -3,19 +3,20 @@
 
 # Parallel execution profile for the illustrative VLM campaign.
 execution:
+  mode: reusable_allocation
   defaults:
     failure_policy: strict
     halt_policy: drain
-    gpus_per_node: 1
+    gpus_per_node: 8
   stages:
     prepare_dataset: {strategy: single, resource: cpu}
     convert: {strategy: single, resource: cpu}
     mip: {strategy: single, resource: cpu}
     depth_importance: {strategy: single}
     replacement_scoring: {strategy: single}
-    # The documented default runner reserves one GPU at a time. One shard still
-    # evaluates every candidate sequentially and can resume between candidates.
-    post.candidates.image_eval: &candidates {instances: 1}
+    # Five shards let the retained candidates use disjoint GPUs concurrently.
+    # Lower this value when a site provides fewer GPUs or memory is constrained.
+    post.candidates.image_eval: &candidates {instances: 5}
     post.candidates.best_image_loss: {strategy: single, resource: cpu}
     post.candidates.materialized: *candidates
     post.candidates.pre_kd_eval: *candidates
@@ -23,4 +24,5 @@ execution:
     post.candidates.post_kd_eval: *candidates
     post.candidates.selected: {strategy: single, resource: cpu}
     post.candidates.result: {strategy: single, resource: cpu}
+    # Serving consumes only the selected top-1 candidate.
     post.candidates.serving: {instances: 1}

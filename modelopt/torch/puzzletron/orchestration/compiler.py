@@ -46,6 +46,7 @@ from .schema import (
     BareMetalRunnerConfig,
     CampaignPlan,
     ExecutionContract,
+    ExecutionMode,
     ExecutionStrategy,
     FailurePolicy,
     HaltPolicy,
@@ -108,7 +109,7 @@ _SLURM_FIELDS = {
 }
 _INVENTORY_FIELDS = {"hosts", "rendezvous_host", "rendezvous_port_base"}
 _HOST_FIELDS = {"hostname", "gpus"}
-_EXECUTION_FIELDS = {"schema_version", "defaults", "stages"}
+_EXECUTION_FIELDS = {"schema_version", "mode", "defaults", "stages"}
 _SUPPORTED_EXECUTION_SCHEMA_VERSION = 1
 _EXECUTION_DEFAULT_FIELDS = {
     "artifact_settling_timeout_seconds",
@@ -266,6 +267,7 @@ def _validate_execution_payload(execution: Mapping[str, Any]) -> None:
             f"{_SUPPORTED_EXECUTION_SCHEMA_VERSION}. Update the execution config to a supported "
             "schema version."
         )
+    ExecutionMode(str(execution.get("mode", ExecutionMode.PER_ATTEMPT.value)))
     defaults = _required_mapping(execution.get("defaults", {}), path="execution.defaults")
     _reject_unknown_fields(defaults, _EXECUTION_DEFAULT_FIELDS, path="execution.defaults")
     if "failure_policy" in defaults:
@@ -991,12 +993,50 @@ def compile_campaign_plan(
             )
         )
 
+    execution_mode = ExecutionMode(str(execution.get("mode", ExecutionMode.PER_ATTEMPT.value)))
+    if execution_mode is ExecutionMode.REUSABLE_ALLOCATION:
+        if runner.kind != "slurm":
+            raise ValueError("execution.mode reusable_allocation requires a Slurm runner")
+        capacity = int(execution_defaults.get("gpus_per_node", 8))
+        multi_node = [node.stage_id for node in nodes if node.nodes != 1]
+        if multi_node:
+            raise ValueError(
+                "execution.mode reusable_allocation requires every stage to fit on one node; "
+                f"multi-node stages: {', '.join(multi_node)}"
+            )
+        oversized = [
+            node.stage_id for node in nodes if node.resource == "gpu" and node.total_gpus > capacity
+        ]
+        if oversized:
+            raise ValueError(
+                "execution.mode reusable_allocation requires every GPU stage to fit within "
+                f"execution.defaults.gpus_per_node={capacity}; oversized stages: "
+                f"{', '.join(oversized)}"
+            )
+        assert runner.slurm is not None
+        outer_partition = normalize_slurm_partition(
+            execution_defaults.get("partition") or runner.slurm.partition_for_nodes(1),
+            path="execution.defaults.partition",
+        )
+        incompatible_partitions = [
+            node.stage_id
+            for node in nodes
+            if node.resource == "gpu"
+            and (node.partition or runner.slurm.partition_for_nodes(1)) != outer_partition
+        ]
+        if incompatible_partitions:
+            raise ValueError(
+                "execution.mode reusable_allocation cannot use GPU-stage partition overrides "
+                "that differ from the outer allocation partition; incompatible stages: "
+                f"{', '.join(incompatible_partitions)}"
+            )
     contract_hash = execution_contract_hash(runner)
     return CampaignPlan(
         experiment_config_path=_worker_experiment_path(experiment_path, runner),
         puzzle_dir=puzzle_dir,
         experiment_config=experiment_config,
         runner=runner,
+        execution_mode=execution_mode,
         execution_defaults=execution_defaults,
         stages=tuple(nodes),
         contract_hash=contract_hash,
@@ -1014,6 +1054,7 @@ def plan_to_dict(plan: CampaignPlan) -> dict[str, Any]:
         "contract_hash": plan.contract_hash,
         "overrides": list(plan.overrides),
         "runner_kind": plan.runner.kind,
+        "execution_mode": plan.execution_mode.value,
         "execution_defaults": dict(plan.execution_defaults),
         "final_report": {
             "resource": "cpu",

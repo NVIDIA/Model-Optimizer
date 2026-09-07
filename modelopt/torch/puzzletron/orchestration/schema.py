@@ -52,6 +52,13 @@ class ExecutionStrategy(str, Enum):
     PERSISTENT_POOL = "persistent_pool"
 
 
+class ExecutionMode(str, Enum):
+    """How the controller reaches its worker resources."""
+
+    PER_ATTEMPT = "per_attempt"
+    REUSABLE_ALLOCATION = "reusable_allocation"
+
+
 class FailurePolicy(str, Enum):
     """Named retry/resume policy for campaign attempts."""
 
@@ -275,6 +282,7 @@ class CampaignPlan:
     execution_defaults: Mapping[str, Any]
     stages: tuple[StagePlanNode, ...]
     contract_hash: str
+    execution_mode: ExecutionMode = ExecutionMode.PER_ATTEMPT
     overrides: tuple[str, ...] = ()
     final_report_partition: str | None = None
 
