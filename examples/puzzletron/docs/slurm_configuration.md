@@ -30,6 +30,28 @@ the concurrent workers. Other sites may need to adapt the runner's account,
 partition, container integration, mounts, time limit, GPU capacity, and cache
 hooks. Use per-attempt mode when those assumptions do not hold.
 
+### Stage instances
+
+`execution.stages.<stage>.instances` is the maximum number of independent workers that a stage may use. It controls execution concurrency, not how many student candidates the experiment creates. Candidate counts come from the MIP and post-MIP flow, including `num_solutions` and filtering rules such as `top_k`.
+
+The meaning depends on the stage strategy:
+
+- `single` requires one instance.
+- `sharded` uses up to that many workers for independent shards. Candidate `evaluation` and `downstream_evaluation` stages may use fewer workers when fewer candidates are available.
+- `persistent_pool` starts that many resident workers. Replacement scoring distributes its workers across configured hidden-width scenarios, with at least one worker per scenario.
+
+Puzzletron does not generally derive `instances` from MIP `num_solutions` or post-MIP `top_k`. Set both values intentionally when a filter leaves fewer candidates than a downstream GPU stage's configured worker count.
+
+Each instance consumes the stage's resolved GPUs per instance. In reusable mode, compilation rejects a stage that cannot fit within `execution.defaults.gpus_per_node`; the controller starts ready stages only when enough of that capacity is free. For example, five one-GPU candidate instances use at most five GPUs concurrently. Lower `instances` to reduce concurrency or accommodate a larger per-instance parallel mesh.
+
+### Interruption and resume
+
+If the launching terminal exits while the outer Slurm job is still active, the job continues. Running the same command reattaches to its recorded job instead of submitting a duplicate.
+
+If the allocated node fails or the outer job reaches its Slurm time limit, all subprocesses inside that allocation stop. Run the same command again after Slurm reports the job as terminal. Unless the compatible worker result already records clean completion or an uncancelled terminal stage failure, Puzzletron submits a replacement allocation, skips stages with complete validated artifacts, and retries incomplete work. A recorded cancellation and a final report failure remain retryable. An incomplete stage resumes from its own checkpoints only when that stage supports native resume; otherwise its unfinished attempt runs again.
+
+The generated job uses Slurm's no-requeue behavior, so replacement requires a new Puzzletron invocation or external automation. The runner's `runner.slurm.time_limit` covers the complete reusable campaign, not each stage separately. Allow enough headroom for the full campaign, or use per-attempt mode when independent scheduler failure domains are more important than avoiding repeated startup overhead.
+
 ## Partitions and logs
 
 `runner.slurm.partition` sets the default allocation partition. It accepts one

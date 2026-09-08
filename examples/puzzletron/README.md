@@ -127,17 +127,7 @@ python examples/puzzletron/orchestrate.py \
 
 ### 5. Resume and inspect results
 
-Run the launch command above again to recover an interrupted smoke or verify a
-completed one. It reattaches to a compatible active outer allocation. After
-Slurm reports that allocation failed or was cancelled, it starts a replacement
-and reruns only unfinished compatible work when no terminal worker result was
-recorded. A worker-authored completion or strict stage failure remains a no-op
-for the same plan, which prevents an unchanged failing campaign from consuming
-another allocation. A final-report failure remains retryable because its
-logical stages are already complete. Changing the configuration or run root
-creates a new plan identity; compatible completed stages in the same run root
-are still not submitted again. Puzzletron stores its structured runtime state
-under `$PUZZLETRON_RUN_ROOT/orchestration/`.
+Run the launch command above again to recover an interrupted smoke or verify a completed one. It reattaches to a compatible active outer allocation. After Slurm reports that allocation failed or was cancelled, it starts a replacement unless a compatible worker result records clean completion or an uncancelled terminal stage failure. The replacement reruns only unfinished compatible work. A recorded cancellation and a final-report failure remain retryable; completed logical stages are not rerun. Changing the configuration or run root creates a new plan identity; compatible completed stages in the same run root are still not submitted again. Puzzletron stores its structured runtime state under `$PUZZLETRON_RUN_ROOT/orchestration/`.
 
 The reusable-allocation watcher shows the outer Slurm state and allocation log
 path. Follow that log to see the inner controller's completed/total stages,

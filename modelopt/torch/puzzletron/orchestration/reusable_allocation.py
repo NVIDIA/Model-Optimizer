@@ -181,6 +181,7 @@ def run_reusable_allocation(
         raise RuntimeError("another process is submitting the reusable allocation; retry shortly")
     terminal_result: dict[str, Any] | None = None
     try:
+        lease.start_heartbeat()
         conflicting_attempts = [
             str(attempt.get("handle", {}).get("handle_id") or attempt.get("attempt_id"))
             for attempt in store.list_attempts()

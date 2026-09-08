@@ -18,6 +18,7 @@
 import io
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ import yaml
 import puzzletron_orchestrator.adapters.sharded as sharded_module
 import puzzletron_orchestrator.controller as controller_module
 import puzzletron_orchestrator.reusable_allocation as reusable_module
+import puzzletron_orchestrator.state as state_module
 from modelopt.torch.puzzletron.distributed_eval.config import load_runtime_config
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.compiler import (
@@ -124,13 +126,35 @@ def test_controller_lease_keeps_fresh_partial_lock_exclusive(tmp_path: Path) -> 
     assert acquire_controller_lease(root, "contender") is None
 
 
-def test_controller_lease_heartbeat_prevents_takeover(tmp_path: Path) -> None:
+def test_controller_lease_heartbeat_prevents_takeover(tmp_path: Path, monkeypatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(state_module.time, "time", lambda: clock[0])
     root = tmp_path / "lease"
     lease = acquire_controller_lease(root, "owner", ttl_seconds=1)
 
     assert lease is not None
+    renewed = threading.Event()
+    original_renew = lease.renew
+
+    def _renew() -> bool:
+        result = original_renew()
+        renewed.set()
+        return result
+
+    wait_calls = 0
+
+    def _advance_past_original_expiry(_timeout: float | None = None) -> bool:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            clock[0] = 1002.0
+            return False
+        return True
+
+    monkeypatch.setattr(lease, "renew", _renew)
+    monkeypatch.setattr(lease._heartbeat_stop, "wait", _advance_past_original_expiry)
     lease.start_heartbeat()
-    time.sleep(1.1)
+    assert renewed.wait(timeout=1)
     assert acquire_controller_lease(root, "contender", ttl_seconds=1) is None
     lease.release()
     contender = acquire_controller_lease(root, "contender", ttl_seconds=1)

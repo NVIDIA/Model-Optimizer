@@ -75,17 +75,7 @@ detach while leaving jobs running, or continue. Non-interactive Ctrl-C and
 SIGTERM cancel active work and quit. Detaching preserves saved job information,
 so running the same command recovers the active jobs.
 
-The reusable-allocation watcher has a narrower interruption contract: Ctrl-C
-detaches and leaves the outer Slurm job running. Rerun the identical command to
-reattach. Cancel the outer job with the site's normal Slurm command only when
-you intend to stop all work in that allocation. After Slurm reports the outer
-job cancelled or failed, rerunning starts a replacement allocation when no
-terminal worker result was recorded. Completed logical stages remain skipped,
-and in-flight local attempts from that allocation are recorded as cancelled
-before unfinished work is resubmitted. A worker-authored terminal success or
-strict stage failure remains a no-op for the same plan; change its configuration
-or use a fresh run root before rerunning a failed campaign. A final-report
-failure remains retryable because the logical stages are already complete.
+The reusable-allocation watcher has a narrower interruption contract: Ctrl-C detaches and leaves the outer Slurm job running. Rerun the identical command to reattach. Cancel the outer job with the site's normal Slurm command only when you intend to stop all work in that allocation. After Slurm reports the outer job cancelled or failed, rerunning starts a replacement unless a compatible worker result records clean completion or an uncancelled terminal stage failure. Completed logical stages remain skipped, and in-flight local attempts from that allocation are recorded as cancelled before unfinished work is resubmitted. A recorded cancellation and a final-report failure remain retryable. Change the configuration or use a fresh run root before rerunning a campaign with a terminal stage failure.
 
 Redirect stderr before piping through `tee` (for example, append
 `2>&1 | tee run.log`) so progress output is captured. Use `--color always` for
