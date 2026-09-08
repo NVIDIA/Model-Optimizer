@@ -34,7 +34,11 @@ from .reporting import (
 @post_mip_node
 class FilterNode(PostMIPNode):
     type_name = "filter"
-    capabilities = NodeCapabilities(NodeKind.SELECTOR, frozenset(ArtifactKind))
+    capabilities = NodeCapabilities(
+        NodeKind.SELECTOR,
+        frozenset(ArtifactKind),
+        default_resource="cpu",
+    )
 
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
@@ -48,14 +52,22 @@ class FilterNode(PostMIPNode):
 @post_mip_node
 class ManualFilterNode(PostMIPNode):
     type_name = "manual_filter"
-    capabilities = NodeCapabilities(NodeKind.SELECTOR, frozenset(ArtifactKind))
+    capabilities = NodeCapabilities(
+        NodeKind.SELECTOR,
+        frozenset(ArtifactKind),
+        default_resource="cpu",
+    )
     common_fields = PostMIPNode.common_fields | {"prompt"}
 
 
 @post_mip_node
 class ResultManifestNode(PostMIPNode):
     type_name = "result_manifest"
-    capabilities = NodeCapabilities(NodeKind.SELECTOR, frozenset(ArtifactKind))
+    capabilities = NodeCapabilities(
+        NodeKind.SELECTOR,
+        frozenset(ArtifactKind),
+        default_resource="cpu",
+    )
 
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
@@ -81,18 +93,9 @@ class ResultManifestNode(PostMIPNode):
             raise ValueError("result_manifest.config.pre_kd_source is required")
         if not settings.get("pre_kd_evaluation"):
             raise ValueError("result_manifest.config.pre_kd_evaluation is required")
-        for field in ("profile", "row_manifest", "reference_checkpoint"):
+        for field in ("profile", "reference_checkpoint"):
             if not settings.get(field):
                 raise ValueError(f"result_manifest.config.{field} is required")
-        digest = settings.get("row_manifest_sha256")
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError(
-                "result_manifest.config.row_manifest_sha256 must be 64 lowercase hex characters"
-            )
 
     @classmethod
     def metric_references(cls, config: Mapping[str, Any]) -> tuple[str, ...]:

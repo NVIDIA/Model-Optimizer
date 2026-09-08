@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,30 @@ __all__ = [
 ]
 
 _WEIGHT = ".weight"
+
+
+def _safetensor_payload_size(path: Path) -> int:
+    """Return the exact tensor-data bytes in one safetensors shard."""
+
+    file_size = path.stat().st_size
+    with path.open("rb") as stream:
+        encoded_header_size = stream.read(8)
+    if len(encoded_header_size) != 8:
+        raise RuntimeError(f"invalid safetensors header: {path}")
+    header_size = struct.unpack("<Q", encoded_header_size)[0]
+    payload_size = file_size - 8 - header_size
+    if payload_size < 0:
+        raise RuntimeError(f"invalid safetensors header size: {path}")
+    return payload_size
+
+
+def _checkpoint_payload_size(checkpoint_dir: Path, weight_map: dict[str, str]) -> int:
+    """Return tensor bytes across the unique emitted safetensors shards."""
+
+    return sum(
+        _safetensor_payload_size(checkpoint_dir / relative)
+        for relative in sorted(set(weight_map.values()))
+    )
 
 
 def _shard_requires_rewrite(
@@ -329,10 +354,10 @@ def _materialize_one_shard(
     teacher_ple_width: int,
     target_ple_width: int,
     num_hidden_layers: int,
-) -> tuple[bool, dict[str, str], set[str], int, int, int]:
+) -> tuple[bool, dict[str, str], set[str], int]:
     """Process one safetensors shard in isolation.
 
-    Returns (hardlinked, new_entries, source_keys, removed_size, added_size, added_count).
+    Returns (hardlinked, new_entries, source_keys, added_count).
     Hardlinked shards contribute no deltas; the caller leaves their source entries in weight_map.
     """
     from safetensors import safe_open
@@ -353,10 +378,9 @@ def _materialize_one_shard(
             os.link(source_shard, destination)
         except OSError:
             shutil.copy2(source_shard, destination)
-        return True, {}, set(), 0, 0, 0
+        return True, {}, set(), 0
 
     tensors = load_file(str(source_shard))
-    removed_size = sum(t.numel() * t.element_size() for t in tensors.values())
     realized = materialize_solution_state_dict(tensors, layouts, targets)
     realized = _drop_descriptor_no_op_tensors(realized, targets, descriptor, num_hidden_layers)
     if embedding_spec is not None:
@@ -365,7 +389,7 @@ def _materialize_one_shard(
         realized = ple_spec.slice_state_dict(realized, target_ple_width)
     del tensors
     if not realized:
-        return False, {}, source_shard_keys, removed_size, 0, 0
+        return False, {}, source_shard_keys, 0
 
     realized = {key: tensor.contiguous() for key, tensor in realized.items()}
     destination = tmp_dir / relative
@@ -374,10 +398,9 @@ def _materialize_one_shard(
         metadata = handle.metadata()
     save_file(realized, str(destination), metadata=metadata)
     new_entries = {key: relative_name for key in realized}
-    added_size = sum(t.numel() * t.element_size() for t in realized.values())
     added_count = len(realized)
     del realized
-    return False, new_entries, source_shard_keys, removed_size, added_size, added_count
+    return False, new_entries, source_shard_keys, added_count
 
 
 def materialize_checkpoint_from_sorted(
@@ -529,12 +552,7 @@ def materialize_checkpoint_from_sorted(
         else {}
     )
     source_weight_map = dict(source_index.get("weight_map") or {})
-    source_total_size = (source_index.get("metadata") or {}).get("total_size")
-    can_link_unchanged = (
-        source_is_indexed
-        and isinstance(source_total_size, int)
-        and bool(source_weight_map)
-    )
+    can_link_unchanged = source_is_indexed and bool(source_weight_map)
     source_keys_by_shard: dict[str, set[str]] = {}
     for key, shard in source_weight_map.items():
         source_keys_by_shard.setdefault(str(shard), set()).add(str(key))
@@ -566,7 +584,6 @@ def materialize_checkpoint_from_sorted(
 
     weight_map: dict[str, str] = dict(source_weight_map) if can_link_unchanged else {}
     tensor_count = len(weight_map)
-    total_size = int(source_total_size) if can_link_unchanged else 0
     output_shards = 0
     hardlinked_shards = 0
     shard_kwargs = dict(
@@ -595,9 +612,7 @@ def materialize_checkpoint_from_sorted(
                 for relative in weight_files
             }
             for future in as_completed(futures):
-                hardlinked, new_entries, rewritten_source_keys, removed_size, added_size, added_count = (
-                    future.result()
-                )
+                hardlinked, new_entries, rewritten_source_keys, added_count = future.result()
                 if hardlinked:
                     hardlinked_shards += 1
                     output_shards += 1
@@ -605,7 +620,6 @@ def materialize_checkpoint_from_sorted(
                 for key in rewritten_source_keys:
                     if weight_map.pop(key, None) is not None:
                         tensor_count -= 1
-                total_size -= removed_size
                 if not new_entries:
                     continue
                 for key, shard_file in new_entries.items():
@@ -613,9 +627,9 @@ def materialize_checkpoint_from_sorted(
                         raise RuntimeError(f"tensor {key} was written by multiple output shards")
                     weight_map[key] = shard_file
                 tensor_count += added_count
-                total_size += added_size
                 output_shards += 1
 
+        total_size = _checkpoint_payload_size(tmp_dir, weight_map)
         if source_is_indexed:
             index_metadata = dict(source_index.get("metadata") or {})
             index_metadata["total_size"] = total_size

@@ -25,6 +25,13 @@ selected plan completes or fails.
 and exits after one scheduling iteration. Submitted jobs keep running. Invoke
 the same `--once` command again for the next recovery and scheduling iteration.
 
+Stage resources are defaults, not fixed deployment policy. On Slurm they select
+zero-GPU or GPU scheduler requests. Local and SSH bare-metal execution use the
+same plan and control which GPUs are visible to the worker. An explicit
+`execution.stages.<stage>.resource` value overrides the default, including on an
+interactive GPU node. A CPU override can fail if the stage actually calls CUDA;
+a GPU override for CPU work can reserve an unused GPU.
+
 Remote model code and AIPerf v0.11 online tokenizer resolution are disabled by
 default. Enable remote code only for a trusted model source. The tokenizer
 compatibility option permits the AIPerf child process to resolve its tokenizer
@@ -60,3 +67,16 @@ Accepted rank-zero stage results also write checksum-validated execution
 records under `<puzzle-dir>/manifests/executions/`. Puzzletron validates these
 records when resuming a stage. They identify existing outputs but do not copy
 or make those outputs immutable.
+
+Dataset preparation additionally records the expected files. Routine resume
+checks their paths, types, sizes, and timestamps without rereading every image
+or video. If metadata changed, Puzzletron verifies that file's SHA-256; set
+`prepare_dataset.verify_content: true` to hash every file on each resume.
+This is a preventive corruption check, not a response to a known failed
+campaign.
+
+A different engineer can prepare the same dataset into another local path. Pin
+`prepare_dataset.revision` or `data.revision` to an immutable source revision to
+obtain the same acquisition, then run the preparation stage to create a local
+manifest. Existing unowned or mismatched output directories are preserved and
+must be moved aside or rebuilt rather than overwritten.

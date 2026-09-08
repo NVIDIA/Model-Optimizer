@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Parallel mesh validation and GPU packing for campaign orchestration."""
 
@@ -124,9 +136,10 @@ def pack_gpu_allocation(
         packed.append(())
 
     used_on_last = len(packed[-1]) * per_instance if packed[-1] else 0
-    exclusive = all(
-        len(group) * per_instance == gpus_per_node for group in packed if group
-    ) and used_on_last == gpus_per_node
+    exclusive = (
+        all(len(group) * per_instance == gpus_per_node for group in packed if group)
+        and used_on_last == gpus_per_node
+    )
 
     return GpuAllocation(
         gpus_per_instance=per_instance,
@@ -141,6 +154,7 @@ def pack_gpu_allocation(
 
 
 _STAGE_PARALLEL_PATHS: dict[str, tuple[str, ...]] = {
+    "prepare_dataset": ("prepare_dataset", "automodel", "parallel"),
     "convert": ("convert", "automodel", "parallel"),
     "tokenize_data": ("tokenize_data", "automodel", "parallel"),
     "vllm_stats": ("vllm_stats", "runtime_stats", "topology"),
@@ -154,6 +168,7 @@ _STAGE_PARALLEL_PATHS: dict[str, tuple[str, ...]] = {
     "bypass": ("bypass", "automodel", "parallel"),
     "build_library": ("build_library", "automodel", "parallel"),
     "replacement_scoring": ("replacement_scoring", "automodel", "parallel"),
+    "mip": ("realize_model", "automodel", "parallel"),
     "zero_shot_evaluation": ("zero_shot_evaluation", "automodel", "parallel"),
     "global_distillation_sanity": ("global_distillation_sanity", "automodel", "parallel"),
     "global_distillation": ("global_distillation", "automodel", "parallel"),
@@ -164,6 +179,7 @@ _STAGE_PARALLEL_FALLBACKS: dict[str, tuple[str, ...]] = {
     "sort": ("pruning", "automodel", "parallel"),
     "bypass_sanity": ("bypass", "automodel", "parallel"),
     "build_library": ("replacement_scoring", "automodel", "parallel"),
+    "mip": ("replacement_scoring", "automodel", "parallel"),
     "post_distillation_evaluation": ("global_distillation", "automodel", "parallel"),
 }
 
@@ -186,9 +202,7 @@ def normalize_vllm_topology(topology: Mapping[str, Any]) -> dict[str, Any]:
     prefill_cp = int(
         topology.get("prefill_context_parallel_size", topology.get("prefill_cp", 1)) or 1
     )
-    decode_cp = int(
-        topology.get("decode_context_parallel_size", topology.get("decode_cp", 1)) or 1
-    )
+    decode_cp = int(topology.get("decode_context_parallel_size", topology.get("decode_cp", 1)) or 1)
     dimensions = {
         "tp": tp,
         "pp": pp,
@@ -229,17 +243,14 @@ def normalize_vllm_topology(topology: Mapping[str, Any]) -> dict[str, Any]:
     configured_gpu_group = int(topology.get("gpu_group_size", gpu_count) or 1)
     if configured_gpu_group != gpu_count:
         raise ValueError(
-            f"gpu_group_size={configured_gpu_group} does not match vLLM "
-            f"world size={gpu_count}"
+            f"gpu_group_size={configured_gpu_group} does not match vLLM world size={gpu_count}"
         )
     return {
         **dimensions,
         "enable_expert_parallel": enable_expert_parallel,
         "effective_ep": full_ep if enable_expert_parallel else 1,
         "gpu_count": gpu_count,
-        "distributed_executor_backend": str(
-            topology.get("distributed_executor_backend", "mp")
-        ),
+        "distributed_executor_backend": str(topology.get("distributed_executor_backend", "mp")),
     }
 
 

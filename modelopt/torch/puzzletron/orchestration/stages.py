@@ -28,6 +28,7 @@ __all__ = [
     "StageSpec",
     "configured_parent_stage_ids",
     "configured_stage_ids",
+    "default_stage_resource",
     "distributed_stage_ids",
     "enabled_stage_ids",
     "StageSkipReason",
@@ -59,6 +60,7 @@ STAGE_SPECS = _GRAPH.STAGE_SPECS
 StageSpec = _GRAPH.StageSpec
 configured_stage_ids = _GRAPH.configured_stage_ids
 configured_parent_stage_ids = _GRAPH.configured_parent_stage_ids
+default_stage_resource = _GRAPH.default_stage_resource
 distributed_stage_ids = _GRAPH.distributed_stage_ids
 enabled_stage_ids = _GRAPH.enabled_stage_ids
 StageSkipReason = _GRAPH.StageSkipReason

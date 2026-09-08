@@ -40,6 +40,8 @@ from .evidence import checkpoint_fingerprint as _checkpoint_fingerprint
 from .evidence import collect_kd_exposure, kd_exposure_metrics
 from .evidence import downstream_evaluation_identity as _downstream_evaluation_identity
 from .evidence import evaluation_contract as _evaluation_contract
+from .evidence import evaluator_result_contract as _evaluator_result_contract
+from .evidence import exact_checkpoint_evidence as _exact_checkpoint_evidence
 from .filters import apply_filter
 from .identity import (
     expected_post_mip_execution_identity,
@@ -554,7 +556,12 @@ def _aiperf(
         namespace = f"concurrency_{concurrency}"
         if image_batch_size > 0:
             namespace = f"images_{image_batch_size}.{namespace}"
-        metric_names = set.intersection(*(set(result.metrics) for result in repetitions))
+        metric_names = set(repetitions[0].metrics)
+        if any(set(result.metrics) != metric_names for result in repetitions[1:]):
+            raise RuntimeError(
+                "AIPerf repetitions produced different metrics for "
+                f"image_batch_size={image_batch_size}, concurrency={concurrency}"
+            )
         aggregated = {
             name: median(float(result.metrics[name]) for result in repetitions)
             for name in sorted(metric_names)
@@ -596,27 +603,33 @@ def _downstream_evaluation(
             raise ValueError(f"unsupported downstream evaluation profile: {profile}")
     if recorded_observation is not None and reference_checkpoint is None:
         raise ValueError("recorded_observation requires reference_checkpoint")
+    if reference_checkpoint is not None and reference_once:
+        if not reference_cache_id:
+            raise ValueError("reference_once requires reference_cache_id")
+        if not isinstance(evaluator_revision, str) or not evaluator_revision.strip():
+            raise ValueError("reference_once requires evaluator_revision")
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        if any(character not in allowed for character in str(reference_cache_id)):
+            raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
     candidate = evaluator(
         source.artifact["checkpoint"],
         output_root=output_root,
         settings=settings,
     )
+    candidate_contract = _evaluator_result_contract(candidate)
     if reference_checkpoint is None:
         return candidate
 
     reference_checkpoint_fingerprint = _checkpoint_fingerprint(reference_checkpoint)
     if reference_once:
-        if not reference_cache_id:
-            raise ValueError("reference_once requires reference_cache_id")
-        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-        if any(character not in allowed for character in str(reference_cache_id)):
-            raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
+        assert reference_cache_id is not None
         cache_identity = stable_hash(
             {
                 "checkpoint_fingerprint": reference_checkpoint_fingerprint,
                 "profile": profile,
                 "evaluator_revision": evaluator_revision,
                 "settings": settings,
+                "evaluator_contract": candidate_contract,
             },
             prefix="post_mip_reference_evaluation",
         )
@@ -645,6 +658,8 @@ def _downstream_evaluation(
             output_root=output_root.parent / "reference",
             settings=settings,
         )
+    if candidate_contract != _evaluator_result_contract(reference):
+        raise RuntimeError("candidate and reference evaluator contracts differ")
     candidate_metrics = dict(candidate["metrics"])
     reference_metrics = dict(reference["metrics"])
     if candidate_metrics.keys() != reference_metrics.keys():
@@ -667,8 +682,8 @@ def _downstream_evaluation(
         reference_checkpoint=reference_checkpoint,
         profile=profile,
         evaluator_revision=evaluator_revision,
-        settings=settings,
         candidate=candidate,
+        reference=reference,
         reference_checkpoint_fingerprint=reference_checkpoint_fingerprint,
     )
     observation_comparison, observation_metrics = _compare_recorded_observation(
@@ -1015,14 +1030,13 @@ def _aggregate_result_manifest(
     input_set: CandidateSet,
     execution_identity: str,
 ) -> tuple[list[NodeObservation], CandidateSet]:
-    """Freeze pre-KD lineage, learning-curve metrics, and exposure in one artifact."""
+    """Freeze checkpoint lineage, evaluator evidence, and KD exposure in one artifact."""
 
     settings = dict(node.config.get("config") or {})
     pre_kd_source = str(settings["pre_kd_source"])
     pre_kd_evaluation = str(settings["pre_kd_evaluation"])
     observations = []
     expected_profile = str(settings["profile"])
-    expected_manifest_sha256 = str(settings["row_manifest_sha256"])
     expected_reference_fingerprint = _checkpoint_fingerprint(settings["reference_checkpoint"])
     campaign_evaluation_contract = None
 
@@ -1049,11 +1063,15 @@ def _aggregate_result_manifest(
             pre_kd_evaluation_observation,
             label=f"pre-KD evaluation {pre_kd_evaluation!r}",
         )
+        if pre_kd_evaluation_observation.status != "success":
+            raise RuntimeError(
+                f"pre-KD evaluation {pre_kd_evaluation!r} is not complete for "
+                f"{revision.architecture_id}"
+            )
         expected_evaluation_contract = _evaluation_contract(
             pre_kd_identity,
             label="pre-KD",
             expected_profile=expected_profile,
-            expected_manifest_sha256=expected_manifest_sha256,
             expected_reference_fingerprint=expected_reference_fingerprint,
         )
         if campaign_evaluation_contract is None:
@@ -1078,6 +1096,11 @@ def _aggregate_result_manifest(
                     "missing evaluation milestone "
                     f"{milestone['evaluation']!r} for {revision.architecture_id}"
                 )
+            if kd_observation.status != "success" or evaluation_observation.status != "success":
+                raise RuntimeError(
+                    f"incomplete {int(milestone['steps'])}-step KD/evaluation milestone for "
+                    f"{revision.architecture_id}"
+                )
             kd_revision = ledger.revisions[kd_observation.output_revision_id]
             milestone_identity = comparison_identity(
                 evaluation_observation,
@@ -1087,7 +1110,6 @@ def _aggregate_result_manifest(
                 milestone_identity,
                 label=f"{int(milestone['steps'])}-step",
                 expected_profile=expected_profile,
-                expected_manifest_sha256=expected_manifest_sha256,
                 expected_reference_fingerprint=expected_reference_fingerprint,
             )
             if milestone_contract != campaign_evaluation_contract:
@@ -1100,6 +1122,9 @@ def _aggregate_result_manifest(
                     "kd_node": str(milestone["kd"]),
                     "evaluation_node": str(milestone["evaluation"]),
                     "checkpoint": kd_revision.artifact["checkpoint"],
+                    "revision_id": kd_revision.revision_id,
+                    "kd_status": kd_observation.status,
+                    "evaluation_status": evaluation_observation.status,
                     "kd_metrics": kd_observation.metrics,
                     "evaluation_metrics": evaluation_observation.metrics,
                     "kd_artifacts": kd_observation.artifacts,
@@ -1107,11 +1132,145 @@ def _aggregate_result_manifest(
                     "evaluation_identity": milestone_identity,
                 }
             )
+        architecture = canonicalize(asdict(ledger.architectures[revision.architecture_id]))
+
+        def exact_evaluation_result(
+            identity: Mapping[str, Any], metrics: Mapping[str, Any], *, label: str
+        ) -> dict[str, Any]:
+            candidate_evidence = identity.get("evaluation_evidence")
+            reference_evidence = identity.get("reference_evaluation_evidence")
+            if not isinstance(candidate_evidence, Mapping):
+                raise RuntimeError(f"{label} is missing evaluator-owned candidate evidence")
+            if not isinstance(reference_evidence, Mapping):
+                raise RuntimeError(f"{label} is missing evaluator-owned reference evidence")
+            return canonicalize(
+                {
+                    "metrics": metrics,
+                    "candidate_evidence": candidate_evidence,
+                    "reference_evidence": reference_evidence,
+                }
+            )
+
+        pre_kd_evaluation_result = exact_evaluation_result(
+            pre_kd_identity,
+            pre_kd_evaluation_observation.metrics,
+            label="pre-KD evaluation",
+        )
+        milestone_evaluation_results = [
+            {
+                "steps": row["steps"],
+                **exact_evaluation_result(
+                    row["evaluation_identity"],
+                    row["evaluation_metrics"],
+                    label=f"{row['steps']}-step evaluation",
+                ),
+            }
+            for row in milestones
+        ]
+        pre_kd_checkpoint_evidence = _exact_checkpoint_evidence(pre_kd.artifact["checkpoint"])
+        milestone_checkpoint_evidence = [
+            _exact_checkpoint_evidence(row["checkpoint"]) for row in milestones
+        ]
+
+        def tensor_dimensions(checkpoint_evidence: Mapping[str, Any]) -> dict[str, Any]:
+            return {
+                name: tensor["shape"]
+                for name, tensor in checkpoint_evidence["tensor_shapes"].items()
+            }
+
+        for row, checkpoint_evidence in zip(milestones, milestone_checkpoint_evidence, strict=True):
+            if (
+                checkpoint_evidence["geometry"] != pre_kd_checkpoint_evidence["geometry"]
+                or checkpoint_evidence["parameter_count"]
+                != pre_kd_checkpoint_evidence["parameter_count"]
+                or tensor_dimensions(checkpoint_evidence)
+                != tensor_dimensions(pre_kd_checkpoint_evidence)
+            ):
+                raise RuntimeError(
+                    f"{row['steps']}-step checkpoint geometry differs from the materialized student"
+                )
+
+        exact_exposure_fields = {
+            "cumulative_steps",
+            "global_batch_size",
+            "cumulative_examples",
+            "max_sample_length",
+            "effective_tokens",
+            "effective_tokens_source",
+            "token_upper_bound",
+            "estimated_cumulative_gpu_hours",
+        }
+
+        def exact_kd_exposure(row: Mapping[str, Any]) -> dict[str, Any]:
+            exposure = row["evaluation_identity"]["kd"].get("exposure")
+            if not isinstance(exposure, Mapping):
+                raise RuntimeError(f"{row['steps']}-step KD is missing exposure evidence")
+            return {key: exposure[key] for key in sorted(exact_exposure_fields) if key in exposure}
+
+        exact_result = {
+            "axis_inventory": architecture["block_configs"],
+            "evaluator_contract": campaign_evaluation_contract["evaluator"],
+            "evaluation_results": {
+                "pre_kd": pre_kd_evaluation_result,
+                "milestones": milestone_evaluation_results,
+            },
+            "realized_geometry_and_tensor_shapes": {
+                "geometry": pre_kd_checkpoint_evidence["geometry"],
+                "tensor_count": pre_kd_checkpoint_evidence["tensor_count"],
+                "tensor_shapes": pre_kd_checkpoint_evidence["tensor_shapes"],
+            },
+            "parameter_counts": {
+                "materialized_checkpoint": pre_kd_checkpoint_evidence["parameter_count"],
+                "mip_estimates": {
+                    key: value
+                    for key, value in architecture["mip_metrics"].items()
+                    if "param" in key
+                },
+            },
+            "stage_completion": {
+                "pre_kd": pre_kd_evaluation_observation.status,
+                "milestones": [
+                    {
+                        "kd": row["kd_status"],
+                        "evaluation": row["evaluation_status"],
+                        "steps": row["steps"],
+                    }
+                    for row in milestones
+                ],
+            },
+            "checkpoint_and_lineage_identities": {
+                "architecture_id": revision.architecture_id,
+                "pre_kd_content_manifest_sha256": pre_kd_checkpoint_evidence[
+                    "content_manifest_sha256"
+                ],
+                "pre_kd_checkpoint_fingerprint": pre_kd_identity[
+                    "candidate_checkpoint_fingerprint"
+                ],
+                "reference_checkpoint_fingerprint": pre_kd_identity[
+                    "reference_checkpoint_fingerprint"
+                ],
+                "milestones": [
+                    {
+                        "checkpoint_fingerprint": row["evaluation_identity"][
+                            "candidate_checkpoint_fingerprint"
+                        ],
+                        "content_manifest_sha256": checkpoint_evidence["content_manifest_sha256"],
+                        "producer_node": row["evaluation_identity"]["kd"]["producer_node"],
+                        "steps": row["steps"],
+                    }
+                    for row, checkpoint_evidence in zip(
+                        milestones, milestone_checkpoint_evidence, strict=True
+                    )
+                ],
+            },
+            "kd_exposure": [exact_kd_exposure(row) for row in milestones],
+        }
         payload = {
-            "schema": "modelopt.puzzletron.kd-learning-curve/v1",
+            "schema": "modelopt.puzzletron.kd-learning-curve/v2",
             "execution_identity": execution_identity,
             "architecture_id": revision.architecture_id,
-            "architecture": canonicalize(asdict(ledger.architectures[revision.architecture_id])),
+            "architecture": architecture,
+            "exact_result": exact_result,
             "pre_kd": {
                 "revision_id": pre_kd.revision_id,
                 "checkpoint": pre_kd.artifact["checkpoint"],
@@ -1120,13 +1279,7 @@ def _aggregate_result_manifest(
                 "evaluation_artifacts": pre_kd_evaluation_observation.artifacts,
                 "evaluation_identity": pre_kd_identity,
             },
-            "evaluation_identity": {
-                "profile": settings.get("profile"),
-                "row_manifest": settings.get("row_manifest"),
-                "row_manifest_sha256": settings.get("row_manifest_sha256"),
-                "reference_checkpoint": settings.get("reference_checkpoint"),
-                "reference_cache_id": settings.get("reference_cache_id"),
-            },
+            "evaluation_contract": campaign_evaluation_contract,
             "milestones": milestones,
         }
         manifest_path = (

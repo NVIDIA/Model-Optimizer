@@ -30,24 +30,14 @@ __all__ = [
     "collect_kd_exposure",
     "downstream_evaluation_identity",
     "evaluation_contract",
+    "evaluator_result_contract",
+    "exact_checkpoint_evidence",
     "kd_exposure_metrics",
 ]
 
 if TYPE_CHECKING:
     from .records import CandidateRevision
 
-_PROFILE_FIELDS = (
-    "profile",
-    "suite",
-    "lmms_eval_revision",
-    "source_tasks",
-    "dataset_revisions",
-    "frame_policy",
-    "generation_policy",
-    "sample_limit",
-    "quick_manifest_sha256",
-    "repetitions",
-)
 _EXPOSURE_FIELDS = (
     "cumulative_steps",
     "global_batch_size",
@@ -56,6 +46,9 @@ _EXPOSURE_FIELDS = (
     "effective_tokens",
     "effective_tokens_source",
     "token_upper_bound",
+    "estimated_cumulative_gpu_hours",
+    "actual_incremental_gpu_hours",
+    "actual_cumulative_gpu_hours",
 )
 
 
@@ -135,6 +128,81 @@ def checkpoint_fingerprint(checkpoint: str | Path) -> str:
     return str(checkpoint_identity(checkpoint)["fingerprint"])
 
 
+def exact_checkpoint_evidence(checkpoint: str | Path) -> dict[str, Any]:
+    """Read root-independent physical geometry and content identity from a checkpoint."""
+
+    from ..benchmarks.provenance import checkpoint_identity
+
+    root = Path(checkpoint)
+    config = json.loads((root / "config.json").read_text())
+    text_config = (
+        config.get("text_config") if isinstance(config.get("text_config"), Mapping) else config
+    )
+    block_configs = config.get("block_configs")
+    if not isinstance(block_configs, list):
+        block_configs = text_config.get("block_configs")
+    if not isinstance(block_configs, list) or not block_configs:
+        raise RuntimeError(f"materialized checkpoint has no block_configs: {root}")
+
+    tensor_shapes: dict[str, dict[str, Any]] = {}
+    for shard in sorted(root.glob("*.safetensors")):
+        with shard.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                raise RuntimeError(f"invalid safetensors header in {shard}")
+            header_size = int.from_bytes(prefix, "little")
+            if not 0 < header_size <= 100 * 1024 * 1024:
+                raise RuntimeError(f"invalid safetensors header size in {shard}: {header_size}")
+            header_bytes = stream.read(header_size)
+            if len(header_bytes) != header_size:
+                raise RuntimeError(f"truncated safetensors header in {shard}")
+        header = json.loads(header_bytes)
+        for name, metadata in header.items():
+            if name == "__metadata__":
+                continue
+            if name in tensor_shapes:
+                raise RuntimeError(f"duplicate tensor {name!r} in materialized checkpoint")
+            shape = [int(dimension) for dimension in metadata["shape"]]
+            tensor_shapes[name] = {"dtype": str(metadata["dtype"]), "shape": shape}
+    if not tensor_shapes:
+        raise RuntimeError(f"materialized checkpoint has no safetensors: {root}")
+
+    identity = checkpoint_identity(root)
+    return canonicalize(
+        {
+            "content_manifest_sha256": identity["content_manifest_sha256"],
+            "geometry": {
+                "block_configs": block_configs,
+                "hidden_size": text_config.get("hidden_size"),
+                "num_hidden_layers": text_config.get("num_hidden_layers", len(block_configs)),
+            },
+            "parameter_count": identity["parameter_count"],
+            "tensor_count": identity["tensor_count"],
+            "tensor_shapes": tensor_shapes,
+        }
+    )
+
+
+def _versioned_payload(result: Mapping[str, Any], field: str) -> dict[str, Any] | None:
+    """Return one evaluator-owned contract or evidence payload without interpreting it."""
+
+    value = result.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(f"downstream evaluator {field} must be a mapping")
+    schema = value.get("schema")
+    if not isinstance(schema, str) or not schema:
+        raise ValueError(f"downstream evaluator {field} must declare a non-empty schema")
+    return canonicalize(value)
+
+
+def evaluator_result_contract(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the evaluator-owned comparison contract declared by one result."""
+
+    return _versioned_payload(result, "contract")
+
+
 def _selected_json(path: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
     if not path:
         return None
@@ -148,17 +216,12 @@ def downstream_evaluation_identity(
     reference_checkpoint: str | Path,
     profile: Any,
     evaluator_revision: Any,
-    settings: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
     reference_checkpoint_fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    """Bind one comparison to its checkpoints, training, data, and evaluator."""
+    """Bind one comparison to its checkpoints, training, and evaluator-owned evidence."""
 
-    evaluator_settings = {
-        key: copy.deepcopy(value)
-        for key, value in settings.items()
-        if key not in {"row_manifest", "timeout_seconds"}
-    }
     return canonicalize(
         {
             "candidate_checkpoint_fingerprint": checkpoint_fingerprint(
@@ -174,9 +237,11 @@ def downstream_evaluation_identity(
             "evaluator": {
                 "profile": profile,
                 "revision": evaluator_revision,
-                "settings": evaluator_settings,
-                "resolved_profile": _selected_json(candidate.get("profile_path"), _PROFILE_FIELDS),
+                "contract": _versioned_payload(candidate, "contract"),
             },
+            "reference_evaluator_contract": _versioned_payload(reference, "contract"),
+            "evaluation_evidence": _versioned_payload(candidate, "evidence"),
+            "reference_evaluation_evidence": _versioned_payload(reference, "evidence"),
         }
     )
 
@@ -186,10 +251,9 @@ def evaluation_contract(
     *,
     label: str,
     expected_profile: str,
-    expected_manifest_sha256: str,
     expected_reference_fingerprint: str,
 ) -> dict[str, Any]:
-    """Validate and project the fields that must match across evaluations."""
+    """Validate and project the generic fields that must match across evaluations."""
 
     if not isinstance(identity, Mapping):
         raise RuntimeError(f"{label} evaluation identity must be a mapping")
@@ -198,23 +262,14 @@ def evaluation_contract(
         raise RuntimeError(f"{label} evaluation identity is missing evaluator")
     if not evaluator.get("revision"):
         raise RuntimeError(f"{label} evaluation identity is missing evaluator revision")
-    evaluator_settings = evaluator.get("settings")
-    resolved_profile = evaluator.get("resolved_profile")
-    if not isinstance(evaluator_settings, Mapping) or not isinstance(resolved_profile, Mapping):
-        raise RuntimeError(
-            f"{label} evaluation identity is missing evaluator settings or resolved profile"
-        )
-    missing = set(_PROFILE_FIELDS) - resolved_profile.keys()
-    if missing:
-        raise RuntimeError(
-            f"{label} evaluation identity resolved profile is missing {sorted(missing)}"
-        )
+    evaluator_contract = evaluator.get("contract")
+    reference_contract = identity.get("reference_evaluator_contract")
+    if not isinstance(evaluator_contract, Mapping) or not isinstance(reference_contract, Mapping):
+        raise RuntimeError(f"{label} evaluation identity is missing evaluator-owned contracts")
+    if evaluator_contract != reference_contract:
+        raise RuntimeError(f"{label} candidate and reference evaluator contracts differ")
     if evaluator.get("profile") != expected_profile:
         raise RuntimeError(f"{label} evaluation profile differs from the result contract")
-    if evaluator_settings.get("row_manifest_sha256") != expected_manifest_sha256:
-        raise RuntimeError(f"{label} evaluator row manifest differs from the result contract")
-    if resolved_profile.get("quick_manifest_sha256") != expected_manifest_sha256:
-        raise RuntimeError(f"{label} resolved row manifest differs from the result contract")
     if identity.get("reference_checkpoint_fingerprint") != expected_reference_fingerprint:
         raise RuntimeError(f"{label} reference checkpoint differs from the result contract")
     return canonicalize(
@@ -223,8 +278,7 @@ def evaluation_contract(
             "evaluator": {
                 "profile": evaluator["profile"],
                 "revision": evaluator["revision"],
-                "settings": evaluator_settings,
-                "resolved_profile": resolved_profile,
+                "contract": evaluator_contract,
             },
         }
     )

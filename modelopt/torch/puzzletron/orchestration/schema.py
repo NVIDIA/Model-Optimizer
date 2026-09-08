@@ -164,6 +164,8 @@ class SlurmRunnerConfig:
     time_limit: str = "4:00:00"
     qos: str | None = None
     log_dir: str | None = None
+    cpu_cpus_per_task: int | None = None
+    cpu_memory_mb: int | None = None
 
     def __post_init__(self) -> None:
         job_name_prefix = str(self.job_name_prefix)
@@ -191,6 +193,14 @@ class SlurmRunnerConfig:
             )
         if self.interactive_max_nodes <= 0:
             raise ValueError("runner.slurm.interactive_max_nodes must be positive")
+        for field_name in ("cpu_cpus_per_task", "cpu_memory_mb"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"runner.slurm.{field_name} must be an integer")
+            if value <= 0:
+                raise ValueError(f"runner.slurm.{field_name} must be positive")
 
     def partition_for_nodes(self, nodes: int) -> str | None:
         """Resolve the canonical partition or a deprecated role-based fallback."""

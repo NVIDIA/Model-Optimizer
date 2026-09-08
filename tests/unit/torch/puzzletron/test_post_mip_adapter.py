@@ -247,22 +247,31 @@ def test_post_mip_result_manifest_is_an_aggregate_only_cpu_node(tmp_path: Path):
     assert attempt.command.argv[-1] == "--aggregate"
 
 
-def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkeypatch):
+def test_post_mip_aggregation_uses_plan_resolved_config(tmp_path: Path, monkeypatch):
     plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    Path(plan.experiment_config_path).write_text(
+        "evaluation:\n  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}\n"
+    )
+    monkeypatch.setenv("PUZZLETRON_SOURCE_REVISION", "ambient-revision")
     plan = replace(
         plan,
+        experiment_config={
+            **plan.experiment_config,
+            "evaluation": {"evaluator_revision": "resolved-revision"},
+        },
         overrides=(
             "post_mip.flows.params.nodes.online_eval.config.eval_samples=2",
             "+post_mip.flows.params.nodes.short_kd.config.checkpoint_every_steps=2",
         ),
     )
     commands = []
-    timeouts = []
 
     def run(command, *, cwd, timeout_seconds):
         assert cwd == tmp_path
+        assert timeout_seconds == 300.0
+        resolved_path = Path(command[command.index("--resolved-config") + 1])
+        assert json.loads(resolved_path.read_text()) == plan.experiment_config
         commands.append(tuple(command))
-        timeouts.append(timeout_seconds)
         return 0, json.dumps({"status": "success"}), ""
 
     monkeypatch.setattr(post_mip_adapter, "_run_aggregation_command", run)
@@ -273,22 +282,10 @@ def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkey
         work_plan=WorkPlan(stage_id=node.stage_id, strategy=node.strategy, items=()),
     )
 
-    assert commands == [
-        (
-            sys.executable,
-            str(tmp_path / "examples" / "puzzletron" / "run_post_mip_node.py"),
-            "--config",
-            plan.experiment_config_path,
-            "--stage-id",
-            node.stage_id,
-            "--aggregate",
-            "--override",
-            plan.overrides[0],
-            "--override",
-            plan.overrides[1],
-        )
-    ]
-    assert timeouts == [300.0]
+    command = commands[0]
+    assert "--config" not in command
+    assert "--override" not in command
+    assert not Path(command[command.index("--resolved-config") + 1]).exists()
     assert publication is not None
     assert publication.summary == {"status": "success"}
 
@@ -315,6 +312,7 @@ def test_post_mip_aggregation_timeout_is_bounded(tmp_path: Path, monkeypatch):
             node=node,
             work_plan=WorkPlan(stage_id=node.stage_id, strategy=node.strategy, items=()),
         )
+    assert not list((plan.puzzle_dir / "orchestration").glob(".post_mip_aggregation_*.json"))
 
 
 def test_aggregation_runner_captures_output_and_return_code(tmp_path: Path):

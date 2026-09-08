@@ -157,6 +157,12 @@ def _prepare_vllm_checkpoint(
         return True
 
 
+def _vllm_checkpoint_requires_preparation(checkpoint_dir: Path) -> bool:
+    config = json.loads((checkpoint_dir / "config.json").read_text())
+    text_config = config.get("text_config") or config
+    return bool(text_config.get("per_layer_config")) and config.get("architectures") != ["AnyModel"]
+
+
 def _descriptor_vllm_args(checkpoint_dir: Path, *, multimodal: bool = False) -> list[str]:
     """Resolve the same model-specific vLLM contract used by runtime stats."""
     from ..anymodel.registry import resolve_descriptor
@@ -607,7 +613,7 @@ def _aiperf_subprocess_environment(
     *,
     allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> dict[str, str]:
-    """Work around AIPerf v0.11's broken offline local-tokenizer resolution.
+    """Work around pinned AIPerf's broken offline local-tokenizer resolution.
 
     Remove this compatibility option after the pinned AIPerf resolver accepts
     absolute local tokenizer directories while offline.
@@ -697,6 +703,8 @@ def run_aiperf_sweep(
     image_height_mean: int = 0,
     trust_remote_code: bool = False,
     allow_aiperf_v011_online_tokenizer_resolution: bool = False,
+    prepare_checkpoint: bool = True,
+    allow_cache: bool = True,
 ) -> list[BenchmarkResult]:
     """Run a serving sweep while preserving offline and remote-code policy by default."""
 
@@ -726,10 +734,15 @@ def run_aiperf_sweep(
     if multimodal and (image_width_mean <= 0 or image_height_mean <= 0):
         raise ValueError("multimodal AIPerf requires positive image dimensions")
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_vllm_checkpoint(
-        checkpoint_dir,
-        trust_remote_code=trust_remote_code,
-    )
+    if prepare_checkpoint:
+        _prepare_vllm_checkpoint(
+            checkpoint_dir,
+            trust_remote_code=trust_remote_code,
+        )
+    elif _vllm_checkpoint_requires_preparation(checkpoint_dir):
+        raise ValueError(
+            "checkpoint is not vLLM-ready and strict serving forbids in-place preparation"
+        )
     request_counts = {
         value: int((request_counts or {}).get(value, max(32, 4 * value)))
         for value in concurrency_values
@@ -823,6 +836,8 @@ def run_aiperf_sweep(
         "allow_aiperf_v011_online_tokenizer_resolution": (
             allow_aiperf_v011_online_tokenizer_resolution
         ),
+        "checkpoint_preparation": "allowed" if prepare_checkpoint else "forbidden",
+        "cache_policy": "reuse" if allow_cache else "live_only",
         "server_contract": server_contract,
         "revisions": revisions,
     }
@@ -884,7 +899,7 @@ def run_aiperf_sweep(
                 )
                 metadata_path = run_dir / "puzzletron_aiperf_result.json"
                 export = run_dir / "profile_export_aiperf.json"
-                if metadata_path.is_file() and export.is_file():
+                if allow_cache and metadata_path.is_file() and export.is_file():
                     try:
                         result_payload = json.loads(metadata_path.read_text())
                         result = BenchmarkResult(**result_payload)

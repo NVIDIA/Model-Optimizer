@@ -163,7 +163,7 @@ def test_mip_stage_restores_scoring_parent_for_subblock_coverage(tmp_path, monke
         return CoverageReport()
 
     monkeypatch.setattr(pipeline, "load_runtime_hydra_config", lambda _config: hydra_cfg)
-    monkeypatch.setattr(pipeline, "_distributed", lambda _config: nullcontext())
+    monkeypatch.setattr(pipeline, "_distributed_if_launched", lambda _config: nullcontext())
     monkeypatch.setattr(pipeline.dist, "is_master", lambda: False)
     monkeypatch.setattr(pipeline.dist, "barrier", lambda: None)
     monkeypatch.setattr(pipeline, "_index_mip_results", lambda *_args: {})

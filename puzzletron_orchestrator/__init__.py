@@ -26,6 +26,9 @@ _PUZZLETRON_SOURCE = Path(__file__).resolve().parents[1] / "modelopt" / "torch" 
 _SOURCE = _PUZZLETRON_SOURCE / "orchestration"
 __path__.append(str(_SOURCE))
 __path__.append(str(_PUZZLETRON_SOURCE))
+# Expose the dependency-light named-MIP contract without importing the heavy
+# ``modelopt.torch.puzzletron.mip`` package initializer.
+__path__.append(str(_PUZZLETRON_SOURCE / "mip"))
 
 from .compiler import compile_campaign_plan, plan_to_dict  # noqa: E402
 from .controller import CampaignController  # noqa: E402

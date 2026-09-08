@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..dataset_payload import file_inventories_are_complete
 from ..identity import (
     artifact_snapshot_identity,
     hash_payload,
@@ -83,6 +84,18 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
         node_id = stage_id.split(".", 2)[-1]
         return (f"artifacts/post_mip/nodes/{node_id}/summary.json",)
 
+    if stage_id == "prepare_dataset":
+        output = (config.get("prepare_dataset") or {}).get("output") or config.get("dataset_path")
+        configured_root = config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir")
+        if output is None or configured_root is None:
+            return ()
+        puzzle_dir = _normalized_path(configured_root)
+        return (
+            _completion_pattern(
+                puzzle_dir,
+                _normalized_path(output) / "puzzletron_acquisition.json",
+            ),
+        )
     if stage_id == "convert":
         patterns = ["ckpts/teacher/config.json"]
         if bool((config.get("vllm_stats") or {}).get("enabled", False)):
@@ -586,6 +599,25 @@ def _zero_shot_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path
     )
 
 
+def _prepared_dataset_is_complete(config: Mapping[str, Any], manifest: Mapping[str, Any]) -> bool:
+    stage_config = config.get("prepare_dataset") or {}
+    output = stage_config.get("output") or config.get("dataset_path")
+    outputs = manifest.get("outputs")
+    if output is None or not isinstance(outputs, Mapping):
+        return False
+    completion = outputs.get("completion")
+    if not isinstance(completion, Mapping) or not file_inventories_are_complete(
+        completion, verify_content=bool(stage_config.get("verify_content", False))
+    ):
+        return False
+    inventories = completion.get("inventories")
+    return isinstance(inventories, list) and any(
+        isinstance(inventory, Mapping)
+        and _normalized_path(inventory.get("root")) == _normalized_path(output)
+        for inventory in inventories
+    )
+
+
 def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir", "."))
     if stage_id.startswith("post."):
@@ -625,6 +657,8 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
         )
     if not _successful_manifest_is_current(config, stage_id, manifest):
         return False
+    if stage_id == "prepare_dataset":
+        return _prepared_dataset_is_complete(config, manifest)
     if stage_id == "tokenize_data":
         return _token_caches_are_complete(config, manifest)
     if stage_id == "depth_importance":

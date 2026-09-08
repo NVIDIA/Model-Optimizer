@@ -196,7 +196,10 @@ def test_server_context_headroom_cannot_be_negative():
 # Checkpoint preparation and tokenizer policy
 
 
-def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, tmp_path):
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(
+    monkeypatch, tmp_path, trust_remote_code
+):
     config = {
         "architectures": ["BaseModel"],
         "text_config": {"per_layer_config": {"0": {"intermediate_size": 8}}},
@@ -208,24 +211,37 @@ def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, t
         lambda path, **kwargs: observed.append((path, kwargs)),
     )
 
-    assert _prepare_vllm_checkpoint(tmp_path) is True
-    assert observed == [(tmp_path, {"trust_remote_code": False})]
+    assert _prepare_vllm_checkpoint(tmp_path, trust_remote_code=trust_remote_code) is True
+    assert observed == [(tmp_path, {"trust_remote_code": trust_remote_code})]
 
 
-def test_prepare_vllm_checkpoint_preserves_explicit_remote_code_trust(monkeypatch, tmp_path):
+def test_strict_serving_rejects_checkpoint_that_requires_preparation(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
     config = {
         "architectures": ["BaseModel"],
         "text_config": {"per_layer_config": {"0": {"intermediate_size": 8}}},
     }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-    observed = []
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
-        lambda path, **kwargs: observed.append((path, kwargs)),
-    )
+    config_path = checkpoint / "config.json"
+    config_path.write_text(json.dumps(config))
 
-    assert _prepare_vllm_checkpoint(tmp_path, trust_remote_code=True) is True
-    assert observed == [(tmp_path, {"trust_remote_code": True})]
+    with pytest.raises(ValueError, match="strict serving forbids in-place preparation"):
+        run_aiperf_sweep(
+            checkpoint,
+            artifact_dir=tmp_path / "artifacts",
+            concurrencies=(1,),
+            input_tokens=32,
+            output_tokens=8,
+            gpu_ids="0",
+            topology={"gpu_group_size": 1},
+            request_counts={1: 1},
+            image_batch_sizes=(1,),
+            image_width_mean=224,
+            image_height_mean=224,
+            prepare_checkpoint=False,
+        )
+
+    assert json.loads(config_path.read_text()) == config
 
 
 def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
@@ -860,7 +876,7 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         FakePeakMemorySampler,
     )
 
-    def run_sweep():
+    def run_sweep(*, allow_cache=True, prepare_checkpoint=True):
         return run_aiperf_sweep(
             checkpoint,
             artifact_dir=tmp_path / "artifacts",
@@ -885,6 +901,8 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
             image_width_mean=1280,
             image_height_mean=720,
             gpu_telemetry=None,
+            allow_cache=allow_cache,
+            prepare_checkpoint=prepare_checkpoint,
         )
 
     results = run_sweep()
@@ -958,6 +976,23 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
     assert all(
         result.result_fingerprint == benchmark_result_fingerprint(result.model_dump(mode="json"))
         for result in recovered_results
+    )
+
+    live_server_count = len(server_starts)
+    live_results = run_sweep(allow_cache=False)
+    assert len(server_starts) == live_server_count + 1
+    assert all(
+        result.measurement_contract["cache_policy"] == "live_only" for result in live_results
+    )
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._prepare_vllm_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("strict serving must not prepare the checkpoint"),
+    )
+    strict_results = run_sweep(allow_cache=False, prepare_checkpoint=False)
+    assert all(
+        result.measurement_contract["checkpoint_preparation"] == "forbidden"
+        for result in strict_results
     )
 
 

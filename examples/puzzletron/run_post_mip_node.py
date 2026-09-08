@@ -45,14 +45,7 @@ def _register_evaluation_profiles(config: dict) -> None:
                 profile = node_config.get("profile")
                 if isinstance(profile, str):
                     profiles.add(profile)
-    if profiles & {
-        "qwen35_vlm_realworldqa2_prefix2",
-        "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
-        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
-        "qwen35_vlm_realworldqa",
-        "qwen35_vlm_e2e_full_eval",
-        "qwen35_vlm_short_v1",
-    }:
+    if any(profile.startswith("qwen35_vlm_") for profile in profiles):
         from examples.puzzletron.evaluation.vlm.post_mip import register_profiles
 
         register_profiles()
@@ -60,7 +53,12 @@ def _register_evaluation_profiles(config: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    config_source = parser.add_mutually_exclusive_group(required=True)
+    config_source.add_argument("--config")
+    config_source.add_argument(
+        "--resolved-config",
+        help="Controller-resolved JSON configuration for aggregate-only execution.",
+    )
     parser.add_argument("--stage-id", required=True)
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int, default=1)
@@ -75,9 +73,20 @@ def main() -> None:
     if args.aggregate:
         from puzzletron_orchestrator.post_mip import aggregate_post_mip_node
 
-        config = load_experiment_config(args.config, overrides=args.override)
+        if args.resolved_config:
+            config = json.loads(Path(args.resolved_config).read_text())
+            if not isinstance(config, dict):
+                parser.error("--resolved-config must contain a JSON object")
+            if args.override:
+                parser.error("--override cannot be combined with --resolved-config")
+        else:
+            assert args.config is not None
+            config = load_experiment_config(args.config, overrides=args.override)
         payload = aggregate_post_mip_node(config, args.stage_id)
     else:
+        if args.resolved_config:
+            parser.error("--resolved-config requires --aggregate")
+        assert args.config is not None
         # Candidate execution runs in the full worker environment. Defer these
         # GPU-heavy imports so login-node aggregation remains dependency-light.
         from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path

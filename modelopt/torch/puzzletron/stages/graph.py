@@ -35,6 +35,7 @@ __all__ = [
     "StageTerminalState",
     "configured_parent_stage_ids",
     "configured_stage_ids",
+    "default_stage_resource",
     "distributed_stage_ids",
     "enabled_stage_ids",
     "required_stage_ids",
@@ -97,6 +98,7 @@ class StageSpec:
     parents: tuple[str, ...] = ()
     conditional_parents: tuple[tuple[str, tuple[str, bool]], ...] = ()
     artifact_choices: tuple[ArtifactChoice, ...] = ()
+    default_resource: str = "gpu"
     distributed: bool = False
     report_order: int = 0
     topology_order: int = 0
@@ -219,8 +221,11 @@ def _stage(
     artifact_choices: tuple[ArtifactChoice, ...] = (),
     completion_artifacts: tuple[str, ...] = (),
     granularity_label: bool = False,
+    default_resource: str = "gpu",
     distributed: bool = False,
 ) -> None:
+    if default_resource not in {"cpu", "gpu"}:
+        raise ValueError(f"unsupported stage resource {default_resource!r}")
     order = len(_SPECS)
     _SPECS.append(
         StageSpec(
@@ -236,6 +241,7 @@ def _stage(
             parents=parents,
             conditional_parents=conditional_parents,
             artifact_choices=artifact_choices,
+            default_resource=default_resource,
             distributed=distributed,
             report_order=order,
             topology_order=order,
@@ -244,10 +250,20 @@ def _stage(
 
 
 _stage(
+    "prepare_dataset",
+    "Prepare Dataset",
+    semantic_config_sections=("prepare_dataset", "data", "dataset_path"),
+    default_enabled=False,
+    default_resource="cpu",
+    completion_artifacts=("datasets/*/puzzletron_acquisition.json",),
+)
+_stage(
     "convert",
     "Convert Checkpoint",
     semantic_config_sections=("convert",),
     required=True,
+    conditional_parents=(("prepare_dataset", ("prepare_dataset.enabled", True)),),
+    default_resource="cpu",
     completion_artifacts=("ckpts/teacher/config.json",),
 )
 _stage(
@@ -267,6 +283,7 @@ _stage(
         "width_sanity",
     ),
     default_enabled=False,
+    default_resource="cpu",
     parents=("convert",),
     completion_artifacts=("dataset_cache/*.tokens",),
 )
@@ -366,6 +383,7 @@ _stage(
     "Build Block Library",
     semantic_config_sections=("build_library", "vllm_stats", "library", "bypass"),
     required=True,
+    default_resource="cpu",
     parents=("bypass",),
     conditional_parents=(("vllm_stats", ("vllm_stats.enabled", True)),),
     completion_artifacts=("replacement_library.json", "candidate_library.json"),
@@ -392,14 +410,17 @@ _stage(
     semantic_config_sections=(
         "mip",
         "realize_model",
+        "skip_realize_model",
         "replacement_scoring",
         "vllm_stats",
         "library",
         "bypass",
     ),
     required=True,
+    default_resource="cpu",
     parents=("vllm_stats", "depth_importance", "replacement_scoring"),
     completion_artifacts=("mip/profiles/*/mip_grid.json",),
+    distributed=True,
 )
 _stage(
     "zero_shot_evaluation",
@@ -563,6 +584,12 @@ def required_stage_ids() -> tuple[str, ...]:
     """Return required public stages in deterministic registry order."""
 
     return tuple(spec.stage_id for spec in STAGE_SPECS if spec.required)
+
+
+def default_stage_resource(stage_id: str) -> str:
+    """Return the scheduler resource class declared by a public stage."""
+
+    return stage_spec(stage_id).default_resource
 
 
 def distributed_stage_ids() -> tuple[str, ...]:

@@ -29,6 +29,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from examples.puzzletron.expectations import (  # noqa: E402
+    ExpectationResult,
+    verify_expected_results,
+)
 from puzzletron_orchestrator.compiler import (  # noqa: E402
     compile_campaign_plan,
     load_execution_config,
@@ -79,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compile and print packed submissions without submitting jobs.",
+        help="Compile and print packed submissions and scheduler scripts without submitting jobs.",
     )
     parser.add_argument("--local", action="store_true", help="Use the local subprocess executor.")
     parser.add_argument(
@@ -102,6 +106,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Seconds between scheduler polls (default: 5).",
+    )
+    parser.add_argument(
+        "--expect",
+        type=Path,
+        help=(
+            "After full completion, require the final report and verify campaign artifacts "
+            "against this versioned expectation contract."
+        ),
     )
     return parser
 
@@ -142,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                 "stage_id": item.stage_id,
                 "work_id": item.work_id,
                 "attempt_id": item.attempt_id,
+                "resource": item.resource,
                 "nodes": item.nodes,
                 "gpus": item.gpus,
                 "gpus_per_node": item.gpus_per_node,
@@ -154,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
                 "launcher": item.launcher,
                 "exclusive": item.exclusive,
                 "argv": list(item.argv),
+                "scheduler_script": item.scheduler_script,
             }
             for item in submissions
         ]
@@ -170,6 +184,23 @@ def main(argv: list[str] | None = None) -> int:
         once=args.once,
         max_iterations=args.max_iterations,
     )
+    if args.expect is not None:
+        if result.get("report_status") == "completed":
+            expectation = verify_expected_results(args.expect, puzzle_dir=plan.puzzle_dir)
+        else:
+            expectation = ExpectationResult(
+                status="skipped",
+                exit_code=2,
+                comparison_path=None,
+                reason="campaign did not reach clean completion",
+            )
+        result.update(expectation.as_dict())
+        if expectation.exit_code:
+            result["halted"] = True
+            logger.error(
+                "campaign expectation verification "
+                f"{expectation.status}: {expectation.reason or 'comparison failed'}"
+            )
     failed_stages = list(result.get("failed_stages") or ())
     if failed_stages:
         logger.error(f"failed stage(s): {', '.join(failed_stages)}")
@@ -177,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
             for path in paths:
                 logger.error(f"{stage_id} log: {path}")
     print(json.dumps(result, indent=2))
+    expectation_exit_code = result.get("expectation_exit_code")
+    if expectation_exit_code is not None:
+        return int(expectation_exit_code)
     return 0 if not result.get("halted") else 1
 
 

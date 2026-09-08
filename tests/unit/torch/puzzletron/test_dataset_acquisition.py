@@ -13,11 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -117,8 +115,13 @@ def test_nemotron_materializer_is_bounded_balanced_and_manifested(tmp_path):
     dataset = load_materialized_conversation_dataset(tmp_path)
 
     assert manifest["sample_count"] == 3
+    assert (
+        manifest["samples_sha256"]
+        == hashlib.sha256((tmp_path / "samples.json").read_bytes()).hexdigest()
+    )
     assert manifest["acquisition"]["source"] == NEMOTRON_VLM_DATASET
     assert manifest["acquisition"]["subsets"] == ["sparsetables", "plotqa_cot"]
+    assert json.loads((tmp_path / "puzzletron_acquisition.json").read_text()) == manifest
     assert [dataset[index]["source"]["row_id"] for index in range(3)] == [
         "sparsetables-0",
         "plotqa_cot-0",
@@ -246,7 +249,8 @@ def test_nemotron_materializer_rejects_shortfall_and_cache_mismatch(tmp_path):
         )
 
 
-def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path):
+@pytest.mark.parametrize("missing_manifest", ["manifest.json", "puzzletron_acquisition.json"])
+def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path, missing_manifest):
     def one_row(**kwargs):
         del kwargs
         yield {
@@ -264,6 +268,7 @@ def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path):
         ),
         sample_loader=one_row,
     )
+    (tmp_path / missing_manifest).unlink()
 
     manifest = materialize_nemotron_vlm_dataset(
         VlmAcquisitionSpec(
@@ -276,6 +281,126 @@ def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path):
     )
 
     assert manifest["acquisition"]["revision"] == "pinned-sha"
+    assert json.loads((tmp_path / "manifest.json").read_text()) == manifest
+    assert json.loads((tmp_path / "puzzletron_acquisition.json").read_text()) == manifest
+
+
+def test_existing_vlm_materialization_ignores_non_object_primary_manifest(tmp_path):
+    def one_row(**kwargs):
+        del kwargs
+        yield {
+            "id": "only",
+            "messages": _messages("only.png"),
+            "image": Image.new("RGB", (2, 2)),
+        }
+
+    materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=tmp_path,
+            subsets=("sparsetables",),
+            num_samples=1,
+            revision="pinned-sha",
+        ),
+        sample_loader=one_row,
+    )
+    (tmp_path / "manifest.json").write_text("[]")
+
+    manifest = materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=tmp_path,
+            subsets=("sparsetables",),
+            num_samples=1,
+        ),
+        sample_loader=lambda **kwargs: pytest.fail(f"unexpected download: {kwargs}"),
+        revision_resolver=lambda *_args: pytest.fail("unexpected revision lookup"),
+    )
+
+    assert manifest["acquisition"]["revision"] == "pinned-sha"
+
+
+@pytest.mark.parametrize("payload", ["samples", "sample_text", "image"])
+def test_existing_vlm_materialization_rejects_corrupt_payload(tmp_path, payload):
+    def one_row(**kwargs):
+        del kwargs
+        yield {
+            "id": "only",
+            "messages": _messages("only.png"),
+            "image": Image.new("RGB", (2, 2)),
+        }
+
+    materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=tmp_path,
+            subsets=("sparsetables",),
+            num_samples=1,
+            revision="pinned-sha",
+        ),
+        sample_loader=one_row,
+    )
+    if payload == "samples":
+        (tmp_path / "samples.json").write_text("[]")
+    elif payload == "sample_text":
+        samples_path = tmp_path / "samples.json"
+        samples_path.write_text(samples_path.read_text().replace("answer", "tamper"))
+    else:
+        (tmp_path / "images/0000_00.png").write_bytes(b"corrupt")
+
+    with pytest.raises(ValueError, match="payload is incomplete or corrupt"):
+        materialize_nemotron_vlm_dataset(
+            VlmAcquisitionSpec(
+                output_dir=tmp_path,
+                subsets=("sparsetables",),
+                num_samples=1,
+            ),
+            sample_loader=lambda **kwargs: pytest.fail(f"unexpected download: {kwargs}"),
+            revision_resolver=lambda *_args: pytest.fail("unexpected revision lookup"),
+        )
+
+
+@pytest.mark.parametrize(
+    "cached_payload",
+    [
+        "{not-json",
+        json.dumps({"revision": "pinned-sha"}),
+    ],
+    ids=("corrupt", "legacy"),
+)
+def test_existing_vlm_materialization_repairs_noncanonical_acquisition_manifest(
+    tmp_path, cached_payload
+):
+    def one_row(**kwargs):
+        del kwargs
+        yield {
+            "id": "only",
+            "messages": _messages("only.png"),
+            "image": Image.new("RGB", (2, 2)),
+        }
+
+    expected = materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=tmp_path,
+            subsets=("sparsetables",),
+            num_samples=1,
+            revision="pinned-sha",
+        ),
+        sample_loader=one_row,
+    )
+    acquisition_path = tmp_path / "puzzletron_acquisition.json"
+    acquisition_path.write_text(cached_payload)
+
+    manifest = materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=tmp_path,
+            subsets=("sparsetables",),
+            num_samples=1,
+        ),
+        sample_loader=lambda **kwargs: pytest.fail(f"unexpected download: {kwargs}"),
+        revision_resolver=lambda *_args: pytest.fail("unexpected revision lookup"),
+    )
+
+    assert manifest == expected
+    assert json.loads(acquisition_path.read_text()) == expected
+    assert not list(tmp_path.glob(".puzzletron_acquisition.json.*"))
 
 
 def test_puzzle_kd_materializer_bounds_both_splits(tmp_path):

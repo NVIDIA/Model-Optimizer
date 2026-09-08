@@ -90,6 +90,17 @@ class GpuLeaseManager:
         existing = self._leases.get(attempt_id)
         if existing is not None:
             return existing
+        if topology.gpus_per_task == 0:
+            if topology.nodes != 1 or topology.task_count != 1:
+                raise ValueError("bare-metal CPU execution supports one task on one host")
+            try:
+                hostname = next(iter(self.hosts))
+            except StopIteration as error:
+                raise RuntimeError("bare-metal inventory contains no hosts") from error
+            leases = (_TaskLease(task_index=0, hostname=hostname, gpu_ids=()),)
+            self._leases[attempt_id] = leases
+            self._persist()
+            return leases
         used = {hostname: set() for hostname in self.hosts}
         for leases in self._leases.values():
             for lease in leases:

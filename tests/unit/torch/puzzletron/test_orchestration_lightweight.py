@@ -273,7 +273,7 @@ def test_orchestrator_cli_rejects_unresolved_runner_template(tmp_path: Path) -> 
     assert "Traceback" not in result.stderr
 
 
-def test_orchestrator_cli_reports_dry_run_adapter_errors_without_traceback(
+def test_orchestrator_cli_reports_stale_bundle_errors_without_traceback(
     tmp_path: Path,
 ) -> None:
     experiment = tmp_path / "experiment.yaml"

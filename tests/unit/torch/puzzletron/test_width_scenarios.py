@@ -192,6 +192,7 @@ def _write_scenario_manifest(
     (scenario / "scenario_manifest.json").write_text(
         json.dumps(
             {
+                "hidden_width": width,
                 "parent_checkpoint": str(scenario / "ckpts" / "sorted_teacher"),
                 "bypass_checkpoint": (
                     str(bypass_checkpoint) if bypass_checkpoint is not None else None
@@ -214,10 +215,27 @@ def test_candidate_identity_and_metadata_are_width_specific():
         parent_checkpoint_identity="teacher",
         hidden_width=768,
     )
+    unspecified = build_candidate_library(
+        [block],
+        parent_checkpoint_identity="teacher",
+        hidden_width=None,
+    )
 
     assert wide[0].hidden_width == 1024
     assert narrow[0].hidden_width == 768
     assert wide[0].identity.value != narrow[0].identity.value
+    assert narrow[0].identity.value != unspecified[0].identity.value
+
+
+def test_scenario_override_rejects_manifest_width_mismatching_directory(tmp_path):
+    scenario = _write_scenario_manifest(tmp_path, 768)
+    manifest_path = scenario / "scenario_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["hidden_width"] = 896
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="does not match its width directory"):
+        _scenario_overrides({}, scenario)
 
 
 def test_scenario_artifact_path_encodes_width_and_depth():
@@ -332,6 +350,7 @@ def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
     assert "embedding_pruning.enabled=false" in overrides
     scenario_teacher = tmp_path / "scenarios/width-0768/depth-00/ckpts/sorted_teacher"
     assert f"build_library.source_checkpoint_dir={scenario_teacher}" in overrides
+    assert "build_library.hidden_width=768" in overrides
     assert "++vllm_stats.runtime_stats.execution=inline" in overrides
     assert "vllm_stats.runtime_stats.execution=inline" not in overrides
     assert "calc_subblock_stats.runtime_stats.execution=inline" not in overrides
@@ -343,15 +362,21 @@ def test_embedding_pipeline_scenario_overrides_compose_with_current_config(tmp_p
     scenario = tmp_path / "scenarios" / "width-0768" / "depth-00"
     scenario.mkdir(parents=True)
     (scenario / "scenario_manifest.json").write_text(
-        json.dumps({"width": 768, "bypass_checkpoint": str(tmp_path / "accepted-bypass")})
+        json.dumps(
+            {
+                "hidden_width": 768,
+                "bypass_checkpoint": str(tmp_path / "accepted-bypass"),
+            }
+        )
     )
     packed_token_cache = tmp_path / "dataset_cache" / "validation.tokens"
     overrides = _scenario_overrides(
         {
+            "dataset_path": str(tmp_path / "datasets" / "nemotron_vlm_v2"),
             "replacement_scoring": {
                 "granularity": "subblock",
                 "packed_token_cache_path": str(packed_token_cache),
-            }
+            },
         },
         scenario,
     )
@@ -359,6 +384,7 @@ def test_embedding_pipeline_scenario_overrides_compose_with_current_config(tmp_p
     config = {
         "puzzle_dir": "/initial/puzzle",
         "experiment": {"dir": "/initial/puzzle"},
+        "dataset_path": "/initial/puzzle/datasets/nemotron_vlm_v2",
         "teacher_dir": "/initial/teacher",
         "convert": {"teacher_dir": "/initial/teacher"},
         "bypass": {"enabled": True},
@@ -380,10 +406,12 @@ def test_embedding_pipeline_scenario_overrides_compose_with_current_config(tmp_p
     # Scenario workers must use only scenario-local inputs and outputs.
     assert config["puzzle_dir"] == str(scenario)
     assert config["experiment"]["dir"] == str(scenario)
+    assert config["dataset_path"] == str(tmp_path / "datasets" / "nemotron_vlm_v2")
     assert config["teacher_dir"] == str(teacher)
     assert config["convert"]["teacher_dir"] == str(teacher)
     assert config["replacement_library_path"] == str(scenario / "replacement_library.json")
     assert config["build_library"]["source_checkpoint_dir"] == str(teacher)
+    assert config["build_library"]["hidden_width"] == 768
 
     # Composite workers disable stages already completed by the parent campaign.
     assert config["bypass"]["enabled"] is False

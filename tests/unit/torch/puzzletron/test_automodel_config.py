@@ -97,6 +97,37 @@ def test_build_recipe_config_generates_recipe_from_stage_parallelism(monkeypatch
     assert recipe["optimizer"]["lr"] == 0.0
 
 
+def test_authored_automodel_backend_reaches_scoring_and_solution_recipes(monkeypatch):
+    cfg = _cfg()
+    cfg.model = {"automodel_backend": {"attn": "sdpa"}}
+    cfg.scoring = {
+        "block_size": 32,
+        "micro_batch_size": 1,
+        "automodel": {
+            "force_hf": False,
+            "parallel": {
+                "tp": 1,
+                "cp": 1,
+                "pp": 1,
+                "ep": 1,
+                "dp_shard": 1,
+                "dp_replicate": 1,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
+    )
+
+    assert build_recipe_config(cfg)["model"]["backend"] == {"attn": "sdpa"}
+    assert build_solution_recipe_config(cfg, "/checkpoint")["model"]["backend"] == {"attn": "sdpa"}
+
+
 def test_build_recipe_config_rejects_pure_ddp_replication():
     cfg = _cfg()
     cfg.pruning.automodel.parallel.dp_shard = 1
