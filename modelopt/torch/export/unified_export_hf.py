@@ -54,7 +54,6 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -440,17 +439,17 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
-def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=None, **kwargs):
+def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=None):
     """Gather the modules only when the fusion will actually write a weight.
 
     ``preprocess_linear_fusion`` writes weights only in its ``pre_quant_scale`` resmooth branch;
     otherwise it unifies amax / global_amax, which are buffers and so are never FSDP-sharded.
     Gathering for those costs a full-unit all-gather + FSDPParam rebuild + reshard for nothing.
     """
-    input_quantizer = getattr(modules[0], "input_quantizer", None)
-    if input_quantizer is None or input_quantizer.pre_quant_scale is None:
+    quantizer = getattr(modules[0], "input_quantizer", None)
+    if getattr(quantizer, "pre_quant_scale", None) is None:
         return nullcontext()
-    return fsdp2_aware_weight_update(model, modules, names=names, **kwargs)
+    return fsdp2_aware_weight_update(model, modules, names=names)
 
 
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
@@ -1013,21 +1012,6 @@ def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> Non
     _reconstruct_fused_moe_linear(model)
 
 
-def _collect_full_state_dict(model: nn.Module) -> dict[str, Any]:
-    """Return the model's complete state dict, whatever it is sharded across.
-
-    Under FSDP2 the shards are gathered to CPU on rank 0, so every rank must call this -- the
-    gather is a collective, and other ranks come back with an empty dict. Otherwise the model is
-    replicated and its own state dict is already complete.
-    """
-    if is_fsdp2_model(model):
-        return get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
-    return model.state_dict()
-
-
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -1055,9 +1039,20 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
-    pack_quantized_weights(model, dtype, is_modelopt_qlora)
 
-    quantized_state_dict = _collect_full_state_dict(model)
+    if is_fsdp2_model(model):
+        # Imported here rather than at module scope: the streaming exporter imports the
+        # shared prep helpers from this module, so a top-level import would be circular.
+        from .unified_export_hf_streaming import collect_export_tensors
+
+        # Packs each unit once it has been gathered, and keeps every unit on rank 0 -- which
+        # therefore holds the whole model, so this needs the checkpoint to fit in host RAM.
+        quantized_state_dict = dict(
+            collect_export_tensors(model, dtype, is_modelopt_qlora, owner="rank0")
+        )
+    else:
+        pack_quantized_weights(model, dtype, is_modelopt_qlora)
+        quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448

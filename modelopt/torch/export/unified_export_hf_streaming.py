@@ -49,7 +49,11 @@ from .unified_export_hf import (
     save_non_weight_artifacts,
 )
 
-__all__ = ["_export_fsdp2_checkpoint_streaming", "_export_transformers_checkpoint_streaming"]
+__all__ = [
+    "_export_fsdp2_checkpoint_streaming",
+    "_export_transformers_checkpoint_streaming",
+    "collect_export_tensors",
+]
 
 
 class _StreamingShardWriter:
@@ -501,6 +505,57 @@ def _export_transformers_checkpoint_streaming(
     return None, quant_config
 
 
+def collect_export_tensors(
+    model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool, *, owner: str
+) -> list[tuple[str, torch.Tensor]]:
+    """Pack each export unit and return this rank's ``(key, CPU tensor)`` pairs.
+
+    Every rank must call this: each unit's gather is a collective that only completes once every
+    rank arrives. ``owner`` decides who keeps a unit -- ``"share"`` deals them round-robin so each
+    rank keeps roughly ``1/world`` of the model, ``"rank0"`` gives every unit to rank 0, which then
+    holds the whole thing and must have room for it.
+
+    All the gathers finish before this returns, so the caller can write or postprocess without
+    stalling anyone. Returning a list rather than a generator is what guarantees that.
+    """
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    from modelopt.torch.quantization.utils.core_utils import (
+        enable_weight_access_and_writeback,
+        module_name_maps,
+    )
+
+    my_rank, world = _dist.rank(), _dist.size()
+    names = module_name_maps(model)
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    owned: list[tuple[str, torch.Tensor]] = []
+    seen_keys: set[str] = set()
+
+    for index, unit in enumerate(get_export_units(model)):
+        is_owner = my_rank == 0 if owner == "rank0" else index % world == my_rank
+        for module in unit:
+            base = names.module_to_name.get(id(module), "")
+            # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
+            # it exactly as a single-process export does. Every rank must enter -- gating around it
+            # instead of inside it would leave the non-owners out of the collective.
+            with enable_weight_access_and_writeback(module, model, names, writeback=True):
+                if not is_owner:
+                    continue
+                for sub_name, sub_module in module.named_modules():
+                    full_name = f"{base}.{sub_name}" if sub_name else base
+                    _dispatch_export_handler(full_name, sub_module, ctx)
+                _reconstruct_fused_moe_linear(module)
+                prefix = f"{base}." if base else ""
+                for key, tensor in module.state_dict().items():
+                    full_key = prefix + key
+                    if full_key in seen_keys or tensor.is_meta:
+                        continue
+                    seen_keys.add(full_key)
+                    # Copy out inside the window: on exit the weights revert to sharded and the
+                    # packed ones are dropped, so nothing is ever re-registered with FSDP.
+                    owned.append((full_key, tensor.detach().contiguous().cpu()))
+    return owned
+
+
 def _export_fsdp2_checkpoint_streaming(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -551,45 +606,13 @@ def _export_fsdp2_checkpoint_streaming(
         is_modelopt_qlora,
     )
 
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import (
-        enable_weight_access_and_writeback,
-        module_name_maps,
-    )
-
-    names = module_name_maps(model)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    # This rank's packed tensors, held until every gather is done. Bounded to its own share of the
-    # model (~model_size / world), not the whole checkpoint.
-    owned: list[tuple[str, torch.Tensor]] = []
-    for index, unit in enumerate(get_export_units(model)):
-        is_owner = index % world == my_rank
-        for module in unit:
-            base = names.module_to_name.get(id(module), "")
-            # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
-            # it exactly as a single-process export does. Every rank must enter -- the gather is a
-            # collective, and gating around it instead of inside it would hang the owner.
-            with enable_weight_access_and_writeback(module, model, names, writeback=True):
-                if not is_owner:
-                    continue
-                for sub_name, sub_module in module.named_modules():
-                    full_name = f"{base}.{sub_name}" if sub_name else base
-                    _dispatch_export_handler(full_name, sub_module, ctx)
-                _reconstruct_fused_moe_linear(module)
-                prefix = f"{base}." if base else ""
-                for key, tensor in module.state_dict().items():
-                    full_key = prefix + key
-                    if full_key in seen_keys or tensor.is_meta:
-                        continue
-                    seen_keys.add(full_key)
-                    # Copy out inside the window: on exit the weights go back to sharded. Writing
-                    # here instead would sit between two gathers, and a gather only completes once
-                    # every rank arrives -- so the other ranks would stall on this owner.
-                    owned.append((full_key, tensor.detach().contiguous().cpu()))
-
-    # Every gather is done, so no rank waits on any other: all ranks postprocess and write their own
-    # share at the same time, and a slow writer delays nobody.
+    # Every gather is done before this returns, so no rank waits on any other below: all ranks
+    # postprocess and write their own share at the same time, and a slow writer delays nobody.
+    owned = collect_export_tensors(model, dtype, is_modelopt_qlora, owner="share")
     for full_key, tensor in owned:
+        if full_key in seen_keys:
+            continue
+        seen_keys.add(full_key)
         _stream(full_key, tensor)
     owned.clear()
 
