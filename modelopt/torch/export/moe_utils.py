@@ -22,8 +22,6 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
-
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
@@ -83,6 +81,10 @@ def _export_fused_experts(
     is_gated = getattr(module, "_is_gated", True)
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers is
+    # an optional extra.
+    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
+
     expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.

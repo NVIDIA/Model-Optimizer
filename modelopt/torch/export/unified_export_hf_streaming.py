@@ -30,9 +30,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 
-from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 from modelopt.torch.quantization.utils.core_utils import (
+    _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
     module_name_maps,
     requires_weight_materialization,
@@ -326,6 +328,10 @@ def _export_transformers_checkpoint_streaming(
         NotImplementedError: if the model's conversion mapping contains split rules.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
+    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
     export_dir = Path(export_dir)
     # Materialization dispatch walks the module tree from the root; without these maps each
     # call re-derives them, which is O(N^2) over a MoE model's expert modules.
@@ -506,6 +512,26 @@ def _export_transformers_checkpoint_streaming(
     return None, quant_config
 
 
+def _assert_fsdp2_owns_every_mesh_dim(model: nn.Module) -> None:
+    """Refuse FSDP2 composed with another DTensor parallelism, e.g. FSDP2 + TP on a 2-D mesh.
+
+    The gather window replicates a parameter over the FSDP mesh dims only, leaving any further
+    dim sharded. The owner would then pack that still-partial tensor and write it under the full
+    weight's name, so the checkpoint would silently hold one TP rank's slice. HSDP is fine: both
+    of its dims belong to the FSDP mesh.
+    """
+    fsdp_meshes = [_get_fsdp2_mesh(m) for m in model.modules() if isinstance(m, FSDPModule)]
+    fsdp_ndim = max((mesh.ndim for mesh in fsdp_meshes if mesh is not None), default=0)
+    for name, param in model.named_parameters():
+        if isinstance(param, DTensor) and param.device_mesh.ndim > fsdp_ndim:
+            raise NotImplementedError(
+                f"Export does not support FSDP2 combined with another DTensor parallelism: "
+                f"{name} lives on a {param.device_mesh.ndim}-D mesh "
+                f"{param.device_mesh.mesh_dim_names} while FSDP2 shards over "
+                f"{fsdp_ndim} of its dims, so gathering it leaves it sharded on the rest."
+            )
+
+
 def collect_export_tensors(
     model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool, *, owner: str
 ) -> list[tuple[str, torch.Tensor]]:
@@ -519,6 +545,11 @@ def collect_export_tensors(
     All the gathers finish before this returns, so the caller can write or postprocess without
     stalling anyone. Returning a list rather than a generator is what guarantees that.
     """
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
+    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
+    _assert_fsdp2_owns_every_mesh_dim(model)
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
@@ -563,7 +594,8 @@ def _export_fsdp2_checkpoint_streaming(
     """Export an FSDP2 model by writing each rank's own layers straight to its own files.
 
     Every rank must call this and walks every layer, since rebuilding a layer needs all of them;
-    only its owner keeps and writes it, so a rank holds one layer at a time. Rank 0 names the shards
+    only its owner keeps and writes it, so a rank buffers its own share (~model / world) rather
+    than the whole checkpoint. Rank 0 names the shards
     and writes the index at the end. Returns ``(None, quant_config)`` -- no state dict is built, and
     the caller writes ``hf_quant_config.json``.
     """

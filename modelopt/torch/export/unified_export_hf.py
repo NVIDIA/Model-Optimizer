@@ -33,7 +33,6 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoFeatureExtractor
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -56,13 +55,11 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
-from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
@@ -497,6 +494,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
         if model_type.startswith("whisper"):
             # For Whisper models, we need to pass a fake input with the specific sequence length
+            from transformers import AutoFeatureExtractor
+
             feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
             fake_input = torch.ones(
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
@@ -938,20 +937,14 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
+    # The handlers pack whatever weight they are handed, and nothing here materializes a shard --
+    # FSDP2 models go through collect_export_tensors instead, which packs inside a gather window.
+    assert not is_fsdp2_model(model), (
+        "_process_quantized_modules cannot pack a sharded model; use collect_export_tensors"
+    )
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
-        # Optimization to perform resharding only once per decoder layer to avoid extra communication overhead
-        if isinstance(sub_module, FSDPModule):
-            # Every time we encounter a new FSDPModule, the previous decoder layer is fully processed.
-            # We need to reshard the previous FSDPModule to prevent potential OOM.
-            # This hack reduces the number of unshard reshard operations, to avoid unnecessary communication.
-            if fsdp_module_to_reshard is not None:
-                fsdp_module_to_reshard.reshard()
-
-            fsdp_module_to_reshard = sub_module
-
         _dispatch_export_handler(name, sub_module, ctx)
 
 
@@ -1007,6 +1000,11 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
 def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears."""
+    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
+    # scope, and transformers is an optional extra -- importing it here keeps
+    # ``import modelopt.torch.export`` working without it.
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
 
@@ -1678,7 +1676,7 @@ def export_hf_checkpoint(
             _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
-            # a rank holds one unit at a time rather than its whole share of the model, and the
+            # a rank buffers its own share of the model rather than the whole checkpoint, and the
             # writes run concurrently. Every rank must call this -- it unshards collectively.
             from .unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
 

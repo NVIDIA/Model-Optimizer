@@ -24,7 +24,6 @@ from _test_utils.torch.quantization.tied_modules import (
     wrap_in_parent_with_tied_keys,
 )
 from torch.distributed._composable.fsdp import fully_shard
-from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
@@ -296,19 +295,6 @@ def test_fsdp2_weight_update_context_for_export_quantized_weight(dist_workers, q
     dist_workers.run(partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias))
 
 
-def _gather_full_state(model):
-    """Every param and buffer as a full tensor.
-
-    ``full_tensor`` is a collective, so every rank walks the same list in the same order.
-    """
-    state = {}
-    for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
-        if tensor is None:
-            continue
-        state[name] = tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
-    return state
-
-
 def _gathered_pack_matches_reference_test(rank, size, quant_config):
     """Packing a gathered weight must give the same checkpoint as a single-process export.
 
@@ -373,11 +359,11 @@ def _gathered_pack_matches_reference_test(rank, size, quant_config):
 @pytest.mark.parametrize(
     "quant_config",
     [
-        mtq.NVFP4_DEFAULT_CFG,  # dynamic blocks -> shard-local fast path
+        mtq.NVFP4_DEFAULT_CFG,  # per-block amax, dynamic
         mtq.FP8_DEFAULT_CFG,  # per-tensor amax
-        mtq.INT8_DEFAULT_CFG,  # per-channel amax -> must be narrowed
-        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,  # per-channel amax
-        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,  # scale grid -> must fall back to unsharded packing
+        mtq.INT8_DEFAULT_CFG,  # per-channel amax
+        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,  # per-channel amax, per-token activations
+        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,  # per-block amax, static scale grid
     ],
     ids=["nvfp4", "fp8", "int8", "fp8_pc_pt", "int4_blockwise"],
 )

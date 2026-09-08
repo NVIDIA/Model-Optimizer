@@ -45,18 +45,28 @@ _empty_cache_calls = 0
 
 
 def maybe_clear_cuda_cache(slack_bytes: int = 4 * 1024**3) -> None:
-    """Clear the CUDA cache only when the allocator is actually holding unused memory.
+    """Clear the CUDA cache only when the allocator is holding a meaningful amount of it.
 
     For callers that run this once per tensor -- tens of thousands of times on a large MoE export.
-    ``empty_cache()`` syncs the device and returns every cached block to the driver, so the next
-    allocation goes back through ``cudaMalloc``. It relieves memory pressure between operations,
-    which only helps when there is reclaimable slack; with no slack it frees nothing and only costs.
-    The allocator-stats query is cheap but not free, so only sample every Nth call -- slack cannot
-    appear between two adjacent calls.
+    ``empty_cache()`` syncs the device and hands every cached block back to the driver, so the next
+    allocation goes through ``cudaMalloc`` again; doing that per tensor is what this exists to
+    avoid.
+
+    Sampling is a rate limit, not a free lunch. A caller that replaces a tensor with a smaller one
+    (weight packing, say) grows ``reserved - allocated`` on *every* call, so skipping a check does
+    leave slack un-returned for up to ``_EMPTY_CACHE_CHECK_EVERY`` calls. That is usually fine
+    because the caching allocator reuses those blocks itself -- the driver only needs them back
+    when something outside the allocator (NCCL, a differently sized block) is competing for memory.
+    Lower the threshold or the interval if a caller is memory-tight.
+
+    The counter is process-global and never reset, so which calls land on the check depends on how
+    many earlier calls the process made. That only shifts the phase, never the rate.
     """
     global _empty_cache_calls
     _empty_cache_calls += 1
-    if _empty_cache_calls % _EMPTY_CACHE_CHECK_EVERY:
+    # Fire on the first call of each interval, not the last, so a caller with fewer than
+    # ``_EMPTY_CACHE_CHECK_EVERY`` calls still gets one check instead of none.
+    if _empty_cache_calls % _EMPTY_CACHE_CHECK_EVERY != 1:
         return
     if not torch.cuda.is_available():
         return

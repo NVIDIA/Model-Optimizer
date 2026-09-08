@@ -171,7 +171,15 @@ def get_export_units(model):
     One per decoder layer, plus one for everything else holding state. Every rank builds the same
     list.
     """
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if not decoder_layers:
+        # Without layers everything lands in one unit, so a single rank would own the whole model
+        # -- the host-RAM blow-up this split exists to avoid. The offloaded exporter refuses the
+        # same case; do not silently degrade into it.
+        raise RuntimeError(
+            "Export requires discoverable decoder layers. The model architecture is not supported "
+            "by LayerActivationCollector."
+        )
     # A module object reused across layers (ALBERT-style sharing) would land in two units under one
     # name, so two ranks would emit the same keys and the merged index would reference only one of
     # the copies. Refuse rather than write a checkpoint whose index does not match its shards.
@@ -193,6 +201,19 @@ def get_export_units(model):
         if descendant is not m and id(descendant) in owning_ids
     }
     root_leaves = [m for m in owning if id(m) not in covered]
+    # `covered` only drops modules held by another *owning* module. A container that holds the
+    # decoder layers and owns direct state of its own is not covered by anything, so it would land
+    # here and its state_dict() would re-emit every layers.N.* key that the layer units already
+    # own -- two ranks writing one key, and a merged index that references only one copy. No
+    # supported architecture does this (causal-mask style buffers are non-persistent), so refuse
+    # rather than guess how to split such a container's own state from its layers'.
+    if any(id(sub) in in_layer for m in root_leaves for sub in m.modules()):
+        raise NotImplementedError(
+            "Export does not support models where a module holding the decoder layers also owns "
+            "parameters or persistent buffers of its own: its state dict would duplicate every "
+            "decoder-layer tensor. Export without FSDP2, which builds the state dict in one "
+            "process."
+        )
     return [[layer] for layer in decoder_layers] + [root_leaves]
 
 

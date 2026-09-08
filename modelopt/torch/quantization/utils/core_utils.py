@@ -1067,9 +1067,6 @@ def fsdp2_aware_weight_update(
                     root_module.reshard()
 
 
-_ShardInfo = namedtuple("_ShardInfo", ["name", "old", "mesh", "placements"])
-
-
 def update_quant_cfg_with_kv_cache_quant(
     quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
 ) -> dict[str, Any]:
