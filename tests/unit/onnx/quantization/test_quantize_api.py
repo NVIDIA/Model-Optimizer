@@ -15,17 +15,23 @@
 
 """Tests for ONNX quantization API handling."""
 
+import copy
 import importlib
 import os
+import tempfile
 
 import onnx
 import onnxruntime
 import pytest
 import torch
 from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
+from onnx import TensorProto, helper
 from packaging import version
 
 import modelopt.onnx.quantization as moq
+import modelopt.onnx.trt_utils as trt_utils
+from modelopt.onnx.quantization.autotune import Config, QDQAutotuner
+from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
 from modelopt.onnx.utils import get_opset_version
 
 # Mapping of quantization mode to minimum required opset
@@ -37,6 +43,36 @@ MIN_OPSET = {
 
 # onnxruntime version that supports opset 22+
 ORT_VERSION_FOR_OPSET_22 = version.parse("1.23.0")
+
+
+def _make_guard_models(site_ops=("QuantizeLinear", "DequantizeLinear")):
+    graph_input = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])
+    graph_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])
+    baseline = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Identity", ["input"], ["output"])],
+            "baseline",
+            [graph_input],
+            [graph_output],
+        ),
+        opset_imports=[helper.make_opsetid("", 19)],
+    )
+    candidate = copy.deepcopy(baseline)
+    candidate.graph.node.extend(
+        helper.make_node(op_type, ["input"], [f"site_{index}"])
+        for index, op_type in enumerate(site_ops)
+    )
+    return baseline, candidate
+
+
+def _make_guard_context(quantize_module, tmp_path, baseline):
+    tmp_path.mkdir(exist_ok=True)
+    return quantize_module._AutotuneContext(
+        ort_config=([], [], [], []),
+        baseline_model=baseline,
+        performance_threshold=1.02,
+        output_dir=tmp_path,
+    )
 
 
 # Test scenarios: (scenario_name, export_opset_offset, request_opset_offset, expected_opset_offset)
@@ -72,6 +108,158 @@ def test_realign_input_shapes_profile_rejects_duplicate_calibration_eps():
             ["cpu", "cpu"],
             ["cpu"],
         )
+
+
+@pytest.mark.parametrize("quant_type", ["int8", "fp8"])
+def test_autotune_ort_op_types_match_quantization_mode(quant_type):
+    model, _ = _make_guard_models(())
+    autotuner = QDQAutotuner(model)
+    autotuner.initialize(Config(default_quant_type=quant_type))
+    expected = get_autotuner_quantizable_ops()
+    if quant_type == "fp8":
+        expected &= {"Conv", "Gemm", "MatMul", "Add"}
+    op_types = autotuner.get_ort_quantization_config()[1]
+    assert isinstance(op_types, list)
+    assert set(op_types) == expected
+
+
+@pytest.mark.parametrize(
+    ("candidate_latency", "site_ops", "expect_qdq"),
+    [
+        (101.0, ("QuantizeLinear", "DequantizeLinear"), False),
+        (100.0, ("QuantizeLinear", "DequantizeLinear"), True),
+        (99.0, ("QuantizeLinear", "DequantizeLinear"), True),
+        (90.0, ("QuantizeLinear",), True),
+        (90.0, ("DequantizeLinear",), True),
+        (90.0, (), False),
+    ],
+)
+def test_autotune_final_guard_selection(
+    monkeypatch, tmp_path, candidate_latency, site_ops, expect_qdq
+):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    workflows = importlib.import_module("modelopt.onnx.quantization.autotune.workflows")
+    latencies = iter([102.0, candidate_latency])
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args: next(latencies))
+    baseline, candidate = _make_guard_models(site_ops)
+
+    selected = quantize_module._apply_autotune_final_guard(
+        candidate,
+        _make_guard_context(quantize_module, tmp_path, baseline),
+        use_external_data_format=False,
+    )
+
+    assert quantize_module._has_qdq_site(selected) is expect_qdq
+
+
+@pytest.mark.parametrize("invalid_latency", [float("nan"), float("inf"), float("-inf"), 0, -1])
+@pytest.mark.parametrize("invalid_model", ["baseline", "candidate"])
+def test_autotune_final_guard_invalid_measurements(
+    monkeypatch, tmp_path, invalid_latency, invalid_model
+):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    workflows = importlib.import_module("modelopt.onnx.quantization.autotune.workflows")
+    latencies = [invalid_latency] if invalid_model == "baseline" else [102.0, invalid_latency]
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args: latencies.pop(0))
+    baseline, candidate = _make_guard_models()
+    context = _make_guard_context(quantize_module, tmp_path, baseline)
+
+    if invalid_model == "baseline":
+        with pytest.raises(RuntimeError, match="finite positive latency"):
+            quantize_module._apply_autotune_final_guard(
+                candidate, context, use_external_data_format=False
+            )
+    else:
+        selected = quantize_module._apply_autotune_final_guard(
+            candidate, context, use_external_data_format=False
+        )
+        assert not quantize_module._has_qdq_site(selected)
+
+
+def test_autotune_rejects_prequantized_source(monkeypatch, tmp_path):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"")
+    _, qdq_model = _make_guard_models()
+    preprocessed = (str(onnx_path), qdq_model, [], False, False, False, {}, {})
+    monkeypatch.setattr(quantize_module, "_preprocess_onnx", lambda *args, **kwargs: preprocessed)
+
+    with pytest.raises(ValueError, match="unquantized source model"):
+        quantize_module.quantize(
+            str(onnx_path),
+            output_path=str(tmp_path / "output.onnx"),
+            quantize_mode="fp8",
+            calibration_data_reader=object(),
+            calibration_eps=["cpu"],
+            autotune=True,
+        )
+
+
+def test_autotune_tempdir_is_cleaned_after_failure(tmp_path):
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    temporary_output_dir = tempfile.TemporaryDirectory(dir=tmp_path)
+    temporary_path = temporary_output_dir.name
+    baseline, _ = _make_guard_models()
+    context = _make_guard_context(quantize_module, tmp_path, baseline)
+    context.temporary_output_dir = temporary_output_dir
+
+    with pytest.raises(RuntimeError, match="failed"):
+        quantize_module._run_with_autotune_cleanup(
+            context, lambda: (_ for _ in ()).throw(RuntimeError("failed"))
+        )
+
+    assert not os.path.exists(temporary_path)
+
+
+def test_fp8_autotune_subthreshold_result_uses_precision_matched_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(trt_utils, "TRT_PYTHON_AVAILABLE", False)
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    workflows = importlib.import_module("modelopt.onnx.quantization.autotune.workflows")
+    onnx_path = tmp_path / "model.onnx"
+    output_path = tmp_path / "autotuned.onnx"
+    autotune_dir = tmp_path / "autotune"
+    autotune_dir.mkdir()
+    export_as_onnx(SimpleMLP(), torch.randn(2, 16, 16), onnx_filename=str(onnx_path), opset=19)
+
+    def fake_find_nodes(model, quantize_mode, trt_plugins, high_precision_dtype, **kwargs):
+        nodes = [node.name for node in model.graph.node if node.op_type in {"Gemm", "MatMul"}]
+        baseline = quantize_module._convert_to_runtime_precision(
+            copy.deepcopy(model),
+            quantize_mode=quantize_mode,
+            high_precision_dtype=high_precision_dtype,
+            direct_io_types=kwargs["direct_io_types"],
+            op_types_to_exclude_fp16=kwargs["op_types_to_exclude_fp16"],
+            custom_ops_to_cast_fp32=kwargs["custom_ops_to_cast_fp32"],
+            trt_extra_plugin_lib_paths=trt_plugins,
+            opset=kwargs["opset"],
+            mha_accumulation_dtype=kwargs["mha_accumulation_dtype"],
+        )
+        return quantize_module._AutotuneContext(
+            ort_config=(nodes, ["Gemm", "MatMul"], [], []),
+            baseline_model=baseline,
+            performance_threshold=1.02,
+            output_dir=autotune_dir,
+        )
+
+    latencies = iter([100.0, 99.0])
+    monkeypatch.setattr(quantize_module, "_find_nodes_to_quantize_autotune", fake_find_nodes)
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args: next(latencies))
+
+    moq.quantize(
+        str(onnx_path),
+        output_path=str(output_path),
+        quantize_mode="fp8",
+        calibration_eps=["cpu"],
+        autotune=True,
+        autotune_output_dir=str(autotune_dir),
+    )
+
+    candidate = onnx.load(autotune_dir / "calibrated_candidate.onnx")
+    assert quantize_module._has_qdq_site(candidate)
+    selected = onnx.load(output_path)
+    assert not quantize_module._has_qdq_site(selected)
+    assert selected.graph.input[0].type.tensor_type.elem_type == TensorProto.FLOAT
+    assert selected.graph.output[0].type.tensor_type.elem_type == TensorProto.FLOAT
 
 
 def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp_path):

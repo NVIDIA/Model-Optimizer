@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import contextlib
+import re
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
 
 import pytest
 import torch
 from _test_utils.torch.misc import set_seed
+from safetensors.torch import load_file, save_file
 
 transformers = pytest.importorskip("transformers")
 from transformers import (
@@ -413,6 +416,45 @@ def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) 
     return AutoModelForImageTextToText.from_config(cfg)
 
 
+def _pack_qwen3_5_moe_experts(dir_path: Path | str) -> None:
+    """Repack a saved Qwen3.5-MoE fixture's experts the way released checkpoints store them.
+
+    transformers unpacks routed experts into per-expert ``experts.{i}.*`` on save, but every real
+    Qwen3.5 checkpoint stores them packed as ``experts.gate_up_proj`` / ``experts.down_proj``.
+    Without this the fixture would push the exporter toward a layout no real checkpoint uses.
+    """
+    dir_path = Path(dir_path)
+    shards = sorted(dir_path.glob("*.safetensors"))
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard in shards:
+        state_dict.update(load_file(str(shard)))
+
+    per_expert = re.compile(r"^(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    grouped: dict[str, dict[int, dict[str, torch.Tensor]]] = defaultdict(lambda: defaultdict(dict))
+    for key in list(state_dict):
+        match = per_expert.match(key)
+        if match:
+            base, expert_id, proj = match.groups()
+            grouped[base][int(expert_id)][proj] = state_dict.pop(key)
+    if not grouped:
+        return
+
+    for base, experts in grouped.items():
+        ids = sorted(experts)
+        # gate first, then up, along the output dim -- the order the packed tensor is split on.
+        state_dict[f"{base}.gate_up_proj"] = torch.stack(
+            [torch.cat([experts[i]["gate_proj"], experts[i]["up_proj"]], dim=0) for i in ids]
+        )
+        state_dict[f"{base}.down_proj"] = torch.stack([experts[i]["down_proj"] for i in ids])
+
+    for shard in shards:
+        shard.unlink()
+    save_file(state_dict, str(dir_path / "model.safetensors"), metadata={"format": "pt"})
+    index = dir_path / "model.safetensors.index.json"
+    if index.exists():
+        index.unlink()
+
+
 def _create_tiny_qwen3_5_vl_dir(
     tmp_path: Path | str,
     with_processor: bool = False,
@@ -421,7 +463,7 @@ def _create_tiny_qwen3_5_vl_dir(
     moe: bool = False,
     **config_kwargs,
 ) -> Path | tuple[Path, PreTrainedModel]:
-    return _create_tiny_vlm_dir(
+    result = _create_tiny_vlm_dir(
         Path(tmp_path) / ("tiny_qwen3_5_moe_vl" if moe else "tiny_qwen3_5_vl"),
         QWEN3_5_VL_REF,
         _get_tiny_qwen3_5_vl,
@@ -430,6 +472,9 @@ def _create_tiny_qwen3_5_vl_dir(
         moe=moe,
         **config_kwargs,
     )
+    if moe:
+        _pack_qwen3_5_moe_experts(result[0] if isinstance(result, tuple) else result)
+    return result
 
 
 get_tiny_qwen3_5_vl = partial(_get_tiny_qwen3_5_vl, moe=False)
@@ -475,12 +520,39 @@ def create_tiny_nemotron_dir(
 
 
 ##### NEMOTRON-H (Mamba + Attention + MoE/MLP hybrid) #####
+def _match_released_nemotron_h_embedding_name() -> None:
+    """Save NemotronH's embedding as ``backbone.embeddings`` like released checkpoints do.
+
+    transformers <= 5.15 renames it to the legacy singular on save, so a saved fixture disagrees
+    with every real checkpoint on one tensor. Dropped upstream in 5.16, where this is a no-op
+    since there is no such rule left to remove.
+    """
+    # Optional dependency: conversion_mapping is transformers 5.x only, while NemotronH also
+    # exists on the 4.57 floor of the support matrix.
+    try:
+        from transformers.conversion_mapping import (
+            get_checkpoint_conversion_mapping,
+            register_checkpoint_conversion_mapping,
+        )
+    except ImportError:
+        return
+
+    mapping = get_checkpoint_conversion_mapping("nemotron_h")
+    if mapping is None:
+        return
+    kept = [m for m in mapping if getattr(m, "source_patterns", None) != ["embedding.weight"]]
+    if len(kept) != len(mapping):
+        register_checkpoint_conversion_mapping("nemotron_h", kept, overwrite=True)
+
+
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
 
     # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
     # module is imported broadly (including by the min-transformers CI job).
     from transformers import NemotronHConfig
+
+    _match_released_nemotron_h_embedding_name()
 
     # Tiny NemotronH hybrid. hybrid_override_pattern letters: M=Mamba, E=MoE/FFN, *=Attention.
     # "ME*E" matches the NemotronH default and exercises Mamba + MoE + attention layers.
