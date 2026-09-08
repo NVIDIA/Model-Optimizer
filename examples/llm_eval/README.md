@@ -117,7 +117,7 @@ checkpoint directly with the TensorRT-LLM LLM API.
 
 ```sh
 python lm_eval_trtllm.py --model trtllm \
-    --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512 \
+    --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512,kv_cache_free_gpu_memory_fraction=0.8 \
     --tasks <comma separated tasks> \
     --batch_size <max batch size>
 ```
@@ -140,11 +140,18 @@ python lm_eval_trtllm.py --model trtllm \
 > loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
 > `lm_eval_trtllm.py` overrides the alignment. It goes away once the fix lands upstream.
 
-> **_NOTE:_** The backend forwards only a fixed set of arguments to TensorRT-LLM, so the
-> tuning the old `lm_eval_tensorrt_llm.py` applied is not reachable: expert parallelism is
-> left at the TensorRT-LLM default (MoE checkpoints can fail in DeepEP kernels on some
-> GPUs, e.g. SM 12.0) and the KV cache uses 90% of free GPU memory rather than 70%. Lower
-> `tensor_parallel_size` if you hit either.
+> **_NOTE:_** `kv_cache_free_gpu_memory_fraction` is the share of the GPU memory left after
+> loading the weights that the KV cache may take. TensorRT-LLM's own default of 0.9 can leave
+> too little room for the `prompt_logprobs` buffers and OOM on a large-memory GPU, so
+> `lm_eval_trtllm.py` defaults it to 0.8; lm-eval's backend drops the key, which is why this
+> entry point forwards it. `huggingface_example.sh` passes its
+> `--kv_cache_free_gpu_memory_fraction` (default 0.8) through.
+
+> **_NOTE:_** Other than the KV cache fraction, the backend forwards only a fixed set of
+> arguments to TensorRT-LLM, so the remaining tuning the old `lm_eval_tensorrt_llm.py`
+> applied is not reachable: expert parallelism is left at the TensorRT-LLM default (MoE
+> checkpoints can fail in DeepEP kernels on some GPUs, e.g. SM 12.0). Lower
+> `tensor_parallel_size` if you hit that.
 
 `lm_eval_tensorrt_llm.py` (`--model trt-llm`) has been removed; use the command above.
 
