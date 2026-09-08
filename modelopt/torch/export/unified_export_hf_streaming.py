@@ -563,6 +563,15 @@ def collect_export_tensors(
             # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
             # it exactly as a single-process export does. Every rank must enter -- gating around it
             # instead of inside it would leave the non-owners out of the collective.
+            #
+            # ``writeback=True`` is load-bearing, not a copy of the offload path above (which
+            # passes False). False takes the ``fsdp_module.unshard()`` branch, which materializes
+            # the *whole enclosing FSDP module*: for the non-layer unit that is the root, so every
+            # rank would hold the entire model and the ~model/world bound this design exists for
+            # would be gone. True instead redistributes only this module's own parameters. The
+            # writeback itself is a no-op here -- packing rebinds the parameter, so the restore
+            # copies the untouched gathered data back and drops the packed tensor, which is
+            # exactly what we want.
             with enable_weight_access_and_writeback(module, model, names, writeback=True):
                 if not is_owner:
                     continue
