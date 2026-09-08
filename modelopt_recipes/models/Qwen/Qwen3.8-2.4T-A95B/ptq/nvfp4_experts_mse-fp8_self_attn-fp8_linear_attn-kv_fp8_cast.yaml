@@ -34,7 +34,8 @@
 # nn.Conv1d is a registered ModelOpt quant module, so the broad `*linear_attn*` rules
 # below reach `linear_attn.conv1d` and put it in FP8 along with the projections. This
 # matches the published nvidia/Qwen3.8-2.4T-A95B-NVFP4 checkpoint, whose
-# hf_quant_config.json lists `linear_attn.conv1d` as FP8 on every layer. Quantizing the
+# hf_quant_config.json lists `linear_attn.conv1d` as FP8 on every gated-delta layer (the
+# interleaved full-attention layers have no conv1d). Quantizing the
 # full gated-delta path this way was validated not to degrade the model: the exported
 # checkpoint was evaluated against the BF16 baseline on GPQA, AA-LCR, SciCode, IFBench
 # and Terminal-Bench 2.1, with no meaningful accuracy regression on any of them.

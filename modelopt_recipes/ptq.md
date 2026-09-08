@@ -416,7 +416,8 @@ checkpoint's** quant config verbatim:
   gated-delta norms stay BF16, but the `conv1d` is FP8 like the projections:
   `nn.Conv1d` is a registered quant module, so the recipe's broad `*linear_attn*`
   wildcards reach `linear_attn.conv1d` too — matching the published checkpoint,
-  whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every layer. The
+  whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every gated-delta
+  layer (the full-attention layers have no `conv1d`). The
   source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
   dequantizes it to BF16 before quantizers are inserted, so the scales are
   calibrated against BF16 weights, not the shipped FP8.
