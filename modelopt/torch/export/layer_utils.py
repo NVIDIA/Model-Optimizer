@@ -1048,7 +1048,7 @@ def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[s
 
     raise NotImplementedError(
         f"Cannot resolve expert linear names for MoE block {type(module).__name__!r} "
-        f"(model type: {model_type!r}). Register a ModelSpec with moe_layouts for "
+        f"(model type: {model_type!r}). Register a ModelSpec with a moe_spec for "
         "this model under modelopt/torch/models/."
     )
 

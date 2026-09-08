@@ -14,7 +14,7 @@ from . import specs
 and `<model_type>/specs.py`:
 
 ```python
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoELayout, register
+from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
 register(
     ModelSpec(
@@ -23,13 +23,9 @@ register(
         # modelopt policy, not a model fact: this model is validated for grouped export.
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
-            moe_layouts=(
-                MoELayout(
-                    block_names=("Qwen3MoeSparseMoeBlock",),
-                    expert_linear_names=("gate_proj", "down_proj", "up_proj"),
-                    gate_up_pair=("gate_proj", "up_proj"),
-                ),
-            )
+            block_names=("Qwen3MoeSparseMoeBlock",),
+            expert_linear_names=("gate_proj", "down_proj", "up_proj"),
+            gate_up_pair=("gate_proj", "up_proj"),
         ),
     )
 )

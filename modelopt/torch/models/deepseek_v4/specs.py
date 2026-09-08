@@ -15,7 +15,7 @@
 
 """DeepSeek-V4 specs (HF model type ``deepseek_v4``)."""
 
-from ..specs import ModelSpec, MoELayout, MoESpec, register
+from ..specs import ModelSpec, MoESpec, register
 
 # DeepseekV4Experts is fused from the start: a single module holding 3-D gate_up_proj
 # and down_proj parameters rather than an iterable of per-expert modules. So there is no
@@ -26,13 +26,9 @@ register(
         model_type="deepseek_v4",
         min_transformers_version="5.8",
         moe_spec=MoESpec(
-            moe_layouts=(
-                MoELayout(
-                    block_names=("DeepseekV4SparseMoeBlock",),
-                    expert_linear_names=("gate_up_proj", "down_proj"),
-                    fused_expert_names=True,
-                ),
-            ),
+            block_names=("DeepseekV4SparseMoeBlock",),
+            expert_linear_names=("gate_up_proj", "down_proj"),
+            fused_expert_names=True,
         ),
     )
 )

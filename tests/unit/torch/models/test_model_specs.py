@@ -30,7 +30,6 @@ from modelopt.torch.export.layer_utils import (
 from modelopt.torch.export.quant_utils import _layernorm_uses_weight_plus_one
 from modelopt.torch.models import (
     ModelSpec,
-    MoELayout,
     MoESpec,
     get_spec,
     get_specs,
@@ -42,8 +41,8 @@ from modelopt.torch.models.specs import _SPECS
 
 
 def _layouts(spec):
-    """The MoE layouts a spec declares; empty when it has no MoE section."""
-    return spec.moe_spec.moe_layouts if spec.moe_spec is not None else ()
+    """The spec's MoE section as a 0-or-1 sequence, so table tests can iterate uniformly."""
+    return () if spec.moe_spec is None else (spec.moe_spec,)
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -299,14 +298,6 @@ def test_list_all_possible_rejects_scalar_attr():
         list_all_possible("model_type")
 
 
-def test_list_all_possible_handles_unhashable_items():
-    # MoELayout is a mutable dataclass and therefore unhashable; deduplication must
-    # not go through set()/dict.fromkeys().
-    layouts = list_all_possible("moe_layouts")
-    assert layouts
-    assert all(isinstance(v, MoELayout) for v in layouts)
-
-
 def test_weight_plus_one_norm_names_cover_legacy():
     names = set(list_all_possible("weight_plus_one_norm_names"))
     assert {"GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm", "LayerNorm1P"} <= names
@@ -413,11 +404,11 @@ def test_match_moe_block_scope_prefers_own_model_type():
 
     # A hypothetical remote-code fork registering the same block class name under
     # its own model type: scope must pick the model's own spec among candidates.
-    fork_layout = MoELayout(
+    fork_layout = MoESpec(
         block_names=("Qwen3MoeSparseMoeBlock",),
         expert_linear_names=("a_proj", "b_proj"),
     )
-    fork_spec = ModelSpec(model_type="zz_fork", moe_spec=MoESpec(moe_layouts=(fork_layout,)))
+    fork_spec = ModelSpec(model_type="zz_fork", moe_spec=fork_layout)
     _SPECS[fork_spec.model_type] = fork_spec
     try:
         assert match_moe_block(Qwen3MoeSparseMoeBlock(), "zz_fork") is fork_layout
@@ -458,40 +449,6 @@ def test_get_expert_linear_names_by_model_type_only():
     ]
     with pytest.raises(NotImplementedError, match="model type"):
         get_expert_linear_names(_UnknownMoeBlock(), "some_unknown_vlm")
-
-
-def test_multiple_layouts_are_disambiguated_by_block_class():
-    """A model type with two namings picks by block class, not by the single-naming shortcut.
-
-    No registered model needs this today -- every spec declares exactly one layout since
-    mixtral's dead MCore entry was dropped -- so the case is built here rather than
-    borrowed from a production spec that might quietly stop exercising it.
-    """
-
-    class TwoLayoutBlockA(nn.Module):
-        pass
-
-    class TwoLayoutBlockB(nn.Module):
-        pass
-
-    spec = ModelSpec(
-        model_type="zz_two_layouts",
-        moe_spec=MoESpec(
-            moe_layouts=(
-                MoELayout(block_names=("TwoLayoutBlockA",), expert_linear_names=("a1", "a2")),
-                MoELayout(block_names=("TwoLayoutBlockB",), expert_linear_names=("b1", "b2")),
-            )
-        ),
-    )
-    _SPECS[spec.model_type] = spec
-    try:
-        assert get_expert_linear_names(TwoLayoutBlockA(), "zz_two_layouts") == ["a1", "a2"]
-        assert get_expert_linear_names(TwoLayoutBlockB(), "zz_two_layouts") == ["b1", "b2"]
-        # An unrecognized block class under a multi-naming model type cannot resolve.
-        with pytest.raises(NotImplementedError):
-            get_expert_linear_names(_UnknownMoeBlock(), "zz_two_layouts")
-    finally:
-        del _SPECS[spec.model_type]
 
 
 def test_gemma4_both_root_types_resolve():
@@ -705,8 +662,8 @@ def test_grouped_expert_export_is_exhaustive():
 
 
 def test_moe_layout_carries_no_export_policy():
-    """``MoELayout`` holds architecture only; grouped-export policy is not its business."""
-    assert not hasattr(MoELayout(), "has_iterable_experts")
+    """``MoESpec`` holds architecture only; grouped-export policy is not its business."""
+    assert not hasattr(MoESpec(), "has_iterable_experts")
 
 
 def test_moe_layout_table_is_exhaustive():

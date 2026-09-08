@@ -15,7 +15,7 @@
 
 """Mixtral specs (HF model type ``mixtral``)."""
 
-from ..specs import ExportSpec, ModelSpec, MoELayout, MoESpec, register
+from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
 # Mixtral with per-expert experts uses w1/w2/w3. Fused experts (transformers 5.0+) are
 # detected from their per-expert quantizer attributes and need no naming override here.
@@ -25,14 +25,10 @@ register(
         min_transformers_version="4.57",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
-            moe_layouts=(
-                MoELayout(
-                    block_names=("MixtralSparseMoeBlock",),
-                    expert_linear_names=("w1", "w2", "w3"),
-                    # w1 = gate, w3 = up, w2 = down (Mixtral convention).
-                    gate_up_pair=("w1", "w3"),
-                ),
-            ),
+            block_names=("MixtralSparseMoeBlock",),
+            expert_linear_names=("w1", "w2", "w3"),
+            # w1 = gate, w3 = up, w2 = down (Mixtral convention).
+            gate_up_pair=("w1", "w3"),
         ),
     )
 )

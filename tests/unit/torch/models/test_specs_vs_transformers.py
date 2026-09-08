@@ -94,18 +94,13 @@ def _find_block_class(module, block_names: tuple[str, ...]):
     return None
 
 
-def _moe_layouts():
-    """(model_type, layout) for every registered MoE layout."""
-    return [
-        (spec.model_type, layout)
-        for spec in get_specs()
-        if spec.moe_spec is not None
-        for layout in spec.moe_spec.moe_layouts
-    ]
+def _moe_specs():
+    """(model_type, MoE section) for every spec that has one."""
+    return [(spec.model_type, spec.moe_spec) for spec in get_specs() if spec.moe_spec is not None]
 
 
-LAYOUTS = _moe_layouts()
-MOE_MODEL_TYPES = sorted({mt for mt, _ in LAYOUTS})
+MOE_SPECS = _moe_specs()
+MOE_MODEL_TYPES = sorted({mt for mt, _ in MOE_SPECS})
 REMOTE_CODE_MODEL_TYPES = sorted(
     s.model_type for s in get_specs() if s.modeling_source == "remote_code"
 )
@@ -171,7 +166,7 @@ def test_moe_block_resolves_from_its_declared_version(model_type):
         f"{spec.min_transformers_version!r} but transformers {installed} has no modeling "
         f"module for it. Either that version is wrong or the model moved."
     )
-    layouts = [v for mt, v in LAYOUTS if mt == model_type]
+    layouts = [v for mt, v in MOE_SPECS if mt == model_type]
     unresolved = [v.block_names for v in layouts if not _find_block_class(module, v.block_names)]
     assert not unresolved, (
         f"{model_type!r}: {unresolved} name no class in {module.__name__} on transformers "

@@ -15,23 +15,19 @@
 
 """GPT-OSS specs (HF model type ``gpt_oss``)."""
 
-from ..specs import ModelSpec, MoELayout, MoESpec, register
+from ..specs import ModelSpec, MoESpec, register
 
 register(
     ModelSpec(
         model_type="gpt_oss",
         min_transformers_version="4.57",
         moe_spec=MoESpec(
-            moe_layouts=(
-                MoELayout(
-                    # GPT-OSS fuses gate and up into a single gate_up_proj.
-                    # transformers names the block GptOssMLP; GptOssMoE is kept for the
-                    # legacy name this data was migrated from.
-                    block_names=("GptOssMLP", "GptOssMoE"),
-                    expert_linear_names=("gate_up_proj", "down_proj"),
-                    fused_expert_names=True,
-                ),
-            ),
+            # GPT-OSS fuses gate and up into a single gate_up_proj.
+            # transformers names the block GptOssMLP; GptOssMoE is kept for the
+            # legacy name this data was migrated from.
+            block_names=("GptOssMLP", "GptOssMoE"),
+            expert_linear_names=("gate_up_proj", "down_proj"),
+            fused_expert_names=True,
         ),
     )
 )
