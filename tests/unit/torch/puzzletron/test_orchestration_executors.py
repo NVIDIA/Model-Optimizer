@@ -126,6 +126,22 @@ def test_controller_lease_keeps_fresh_partial_lock_exclusive(tmp_path: Path) -> 
     assert acquire_controller_lease(root, "contender") is None
 
 
+def test_controller_lease_recovers_invalid_expiry_after_ttl(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "lease"
+    root.mkdir()
+    lock_path = root / "controller.lock"
+    lock_path.write_text('{"owner": "current", "expires": "soon"}')
+    clock = [lock_path.stat().st_mtime]
+    monkeypatch.setattr(state_module.time, "time", lambda: clock[0])
+
+    assert acquire_controller_lease(root, "contender", ttl_seconds=1) is None
+
+    clock[0] += 2
+    lease = acquire_controller_lease(root, "contender", ttl_seconds=1)
+    assert lease is not None
+    lease.release()
+
+
 def test_controller_lease_heartbeat_prevents_takeover(tmp_path: Path, monkeypatch) -> None:
     clock = [1000.0]
     monkeypatch.setattr(state_module.time, "time", lambda: clock[0])

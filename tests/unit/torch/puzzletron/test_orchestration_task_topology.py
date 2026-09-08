@@ -297,6 +297,40 @@ def test_nonzero_group_rank_does_not_own_pool_control_path(
     subprocess.run(["bash", str(script)], env=env, check=True, timeout=10)
 
 
+def test_replacement_pool_derives_worker_port_from_group_index(tmp_path: Path) -> None:
+    false_bin = shutil.which("false")
+    assert false_bin is not None
+    campaign_dir = tmp_path / "campaign"
+    campaign_dir.mkdir()
+    (campaign_dir / "manifest.json").write_text("{}\n")
+    recorded_port = tmp_path / "worker-port"
+    launcher = tmp_path / "record-port"
+    launcher.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$WORKER_PORT" > "$RECORDED_PORT"\n')
+    launcher.chmod(0o755)
+    script = (
+        Path(__file__).parents[4] / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
+    )
+    env = {
+        **os.environ,
+        "CAMPAIGN_DIR": str(campaign_dir),
+        "CONFIG_PATH": str(tmp_path / "experiment.yaml"),
+        "WORLD_SIZE": "1",
+        "WORKER_COUNT": "3",
+        "NPROC_PER_NODE": "1",
+        "TORCHRUN": str(launcher),
+        "PYTHON_BIN": false_bin,
+        "PUZZLETRON_GROUP_INDEX": "2",
+        "PUZZLETRON_GROUP_RANK": "0",
+        "WORKER_PORT": "7777",
+        "WORKER_PORT_BASE": "6010",
+        "RECORDED_PORT": str(recorded_port),
+    }
+
+    subprocess.run(["bash", str(script)], env=env, check=True, timeout=10)
+
+    assert recorded_port.read_text().strip() == "6012"
+
+
 def test_single_node_torchrun_lets_c10d_choose_a_free_local_port() -> None:
     command = task_launcher.build_task_command(
         payload=("python", "worker.py"),

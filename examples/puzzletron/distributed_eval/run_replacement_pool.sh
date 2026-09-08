@@ -88,7 +88,7 @@ export WORKER_GROUP_INDEX="${GROUP_INDEX}"
 export WORKER_ID="${WORKER_PREFIX}${GROUP_INDEX}"
 export WORKER_HOST="${WORKER_HOST:-$(hostname -f)}"
 export WORKER_PORT_BASE="${WORKER_PORT_BASE:-5010}"
-export WORKER_PORT="${WORKER_PORT:-$((WORKER_PORT_BASE + GROUP_INDEX))}"
+export WORKER_PORT="$((WORKER_PORT_BASE + GROUP_INDEX))"
 
 bash "${SCRIPT_DIR}/run_worker.sh" &
 worker_pid=$!

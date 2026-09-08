@@ -193,11 +193,12 @@ def acquire_controller_lease(
                     stale_stat = os.fstat(stream.fileno())
                     try:
                         payload = json.load(stream)
-                    except ValueError:
+                        expires = float(payload["expires"])
+                    except (KeyError, TypeError, ValueError):
                         payload = {}
                         if now - stale_stat.st_mtime < ttl_seconds:
                             return None
-                    expires = float(payload.get("expires", 0))
+                        expires = 0.0
                     if expires > now and payload.get("owner") != owner:
                         return None
                     if not ControllerLease._same_file(lease_path, stale_stat):
