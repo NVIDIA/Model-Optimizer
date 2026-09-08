@@ -15,6 +15,7 @@
 
 """Tests for orchestration compiler and plan generation."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,8 +31,10 @@ from modelopt.torch.puzzletron.orchestration.compiler import (
 )
 from modelopt.torch.puzzletron.orchestration.controller import CampaignController, dry_run_plan
 from modelopt.torch.puzzletron.orchestration.identity import execution_contract_hash, hash_payload
+from modelopt.torch.puzzletron.orchestration.reusable_allocation import reusable_plan_identity
 from modelopt.torch.puzzletron.orchestration.schema import (
     ExecutionContract,
+    ExecutionMode,
     ExecutionStrategy,
     HaltPolicy,
     RunnerEnvironment,
@@ -173,6 +176,100 @@ def test_compile_accepts_unversioned_manual_execution_config(tmp_configs) -> Non
     )
 
     assert plan.stages[0].stage_id == "width_importance"
+    assert plan.execution_mode is ExecutionMode.PER_ATTEMPT
+
+
+def test_compile_configures_one_node_reusable_allocation(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    payload["execution"]["defaults"]["gpus_per_node"] = 6
+    payload["execution"]["stages"]["vllm_stats"]["instances"] = 6
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="vllm_stats",
+    )
+    assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
+    worker_plan = replace(
+        plan,
+        experiment_config={**plan.experiment_config, "_runtime": {"config_path": "/worker"}},
+    )
+    assert reusable_plan_identity(plan) == reusable_plan_identity(worker_plan)
+
+
+def test_compile_rejects_reusable_allocation_for_non_slurm_runner(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    runner_payload = yaml.safe_load(runner_path.read_text())
+    runner_payload["runner"].update(
+        {"kind": "baremetal", "inventory": {"hosts": [{"hostname": "worker", "gpus": 8}]}}
+    )
+    runner_payload["runner"].pop("slurm")
+    runner_path.write_text(yaml.safe_dump(runner_payload))
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match="requires a Slurm runner"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+            stage_filter="width_importance",
+        )
+
+
+def test_compile_rejects_multi_node_reusable_allocation(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match="multi-node stages: vllm_stats"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+        )
+
+
+def test_compile_rejects_reusable_stage_larger_than_outer_capacity(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    payload["execution"]["defaults"]["gpus_per_node"] = 4
+    payload["execution"]["stages"]["vllm_stats"].update({"gpus_per_node": 8, "instances": 5})
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match="oversized stages: vllm_stats"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+            stage_filter="vllm_stats",
+        )
+
+
+def test_compile_rejects_mixed_gpu_partitions_in_reusable_allocation(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    runner_payload = yaml.safe_load(runner_path.read_text())
+    runner_payload["runner"]["slurm"]["partition"] = "gpu"
+    runner_path.write_text(yaml.safe_dump(runner_payload))
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["mode"] = "reusable_allocation"
+    payload["execution"]["stages"]["vllm_stats"].update({"partition": "other", "instances": 8})
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match="incompatible stages: vllm_stats"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+            stage_filter="vllm_stats",
+        )
 
 
 def _write_named_mip_experiment(experiment_path: Path) -> dict:

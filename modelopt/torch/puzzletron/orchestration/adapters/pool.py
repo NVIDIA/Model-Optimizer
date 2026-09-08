@@ -49,6 +49,7 @@ _POOL_STAGES = {
         "worker": "examples/puzzletron/distributed_eval/run_worker.sh",
     },
 }
+_REPLACEMENT_WORKER_PORT_BASE = 6010
 
 
 def _replacement_widths(plan: CampaignPlan) -> tuple[int | None, ...]:
@@ -145,6 +146,8 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
         f"replacement_scoring.solutions_path={puzzle_dir / f'{stem}.json'}",
         f"replacement_scoring.output_dir={puzzle_dir / f'{stem}--validation'}",
     ]
+    if dataset_path := plan.experiment_config.get("dataset_path"):
+        overrides.append(f"dataset_path={dataset_path}")
     if scoring.get("bypass_checkpoint_dir") is not None:
         overrides.append(
             f"replacement_scoring.bypass_checkpoint_dir={puzzle_dir / 'ckpts' / 'bypass_overlay'}"
@@ -183,6 +186,9 @@ class PersistentPoolAdapter(WorkAdapter):
                     f"per width; instances={node.instances}, widths={widths}"
                 )
             workers_per_width, remainder = divmod(node.instances, len(widths))
+            worker_counts = tuple(
+                workers_per_width + (index < remainder) for index in range(len(widths))
+            )
             items = tuple(
                 WorkItem(
                     work_id=_replacement_work_id(node.stage_id, width, len(widths)),
@@ -192,7 +198,11 @@ class PersistentPoolAdapter(WorkAdapter):
                     gpus_per_instance=node.gpus_per_instance,
                     metadata={
                         "role": "gang",
-                        "worker_count": workers_per_width + (index < remainder),
+                        "worker_count": worker_counts[index],
+                        # Width gangs can share one reusable node. Give each gang
+                        # a disjoint HTTP port range for its resident workers.
+                        "worker_port_base": _REPLACEMENT_WORKER_PORT_BASE
+                        + sum(worker_counts[:index]),
                         **({"width": int(width)} if width is not None else {}),
                     },
                 )
@@ -294,6 +304,9 @@ class PersistentPoolAdapter(WorkAdapter):
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
                 env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
+                env["WORKER_PORT_BASE"] = str(
+                    item.metadata.get("worker_port_base", _REPLACEMENT_WORKER_PORT_BASE)
+                )
                 replacement_widths = _replacement_widths(plan)
                 if len(replacement_widths) > 1:
                     width = int(item.metadata["width"])

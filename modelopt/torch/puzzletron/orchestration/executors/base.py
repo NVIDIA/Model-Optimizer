@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Executor interface for orchestration backends."""
 
@@ -18,6 +30,16 @@ class Executor(ABC):
     """Placement and process lifecycle backend."""
 
     backend: str
+
+    def can_submit(self, attempt: AttemptSpec) -> bool:
+        """Return whether this executor currently has capacity for ``attempt``."""
+
+        return True
+
+    def can_submit_all(self, attempts: Sequence[AttemptSpec]) -> bool:
+        """Return whether ``attempts`` can be admitted as one stage batch."""
+
+        return all(self.can_submit(attempt) for attempt in attempts)
 
     @abstractmethod
     def submit(self, attempt: AttemptSpec) -> JobHandle:

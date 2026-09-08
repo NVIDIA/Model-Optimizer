@@ -47,6 +47,10 @@ runnable site configuration. Copy it to a site-specific location and replace its
 for plan inspection, but the orchestrator rejects unresolved placeholders
 before submitting work.
 
+This is the per-attempt Slurm route. Each scheduled GPU attempt requests one
+GPU and may run in a separate allocation, so it is not the reusable single-node
+VLM smoke.
+
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml
 EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
@@ -54,7 +58,8 @@ RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_full_smoke
 ```
 
-Inspect the complete one-GPU plan without submitting work:
+Inspect the complete plan, which uses one GPU per scheduled GPU attempt,
+without submitting work:
 
 ```bash
 python examples/puzzletron/orchestrate.py \

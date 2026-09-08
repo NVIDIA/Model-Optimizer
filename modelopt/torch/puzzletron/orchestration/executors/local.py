@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Local subprocess executor for tests and CPU stages."""
 
@@ -9,8 +21,13 @@ import os
 import shlex
 import signal
 import socket
+
+# Required to supervise concurrent worker process groups; every launch uses an
+# argument sequence with ``shell=False`` and never interpolates a shell command.
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Sequence
 
@@ -25,9 +42,81 @@ __all__ = ["LocalExecutor"]
 class LocalExecutor(Executor):
     backend = "local"
 
-    def __init__(self, runner: RunnerEnvironment | None = None) -> None:
+    def __init__(
+        self,
+        runner: RunnerEnvironment | None = None,
+        *,
+        gpu_capacity: int | None = None,
+        session_id: str | None = None,
+        environment_prepared: bool = False,
+    ) -> None:
         self.runner = runner
+        self._environment_prepared = environment_prepared
         self._processes: dict[str, tuple[subprocess.Popen[str], ...]] = {}
+        self._gpu_capacity = gpu_capacity
+        self._session_id = session_id or str(uuid.uuid4())
+        self._gpu_leases: dict[str, tuple[str, ...]] = {}
+        visible = tuple(gpu for gpu in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu)
+        if gpu_capacity is not None:
+            if gpu_capacity <= 0:
+                raise ValueError("local executor gpu_capacity must be positive")
+            if visible and len(visible) < gpu_capacity:
+                raise RuntimeError(
+                    f"local executor capacity is {gpu_capacity} GPUs but only {visible} are visible"
+                )
+            self._managed_gpus = visible[:gpu_capacity] or tuple(
+                str(gpu) for gpu in range(gpu_capacity)
+            )
+        else:
+            self._managed_gpus = ()
+
+    def can_submit(self, attempt: AttemptSpec) -> bool:
+        if self._gpu_capacity is None:
+            return True
+        topology = resolve_task_topology(attempt)
+        if topology.gpus_per_task == 0:
+            return True
+        required = topology.task_count * topology.gpus_per_task
+        leased = {gpu for lease in self._gpu_leases.values() for gpu in lease}
+        return len([gpu for gpu in self._managed_gpus if gpu not in leased]) >= required
+
+    def can_submit_all(self, attempts: Sequence[AttemptSpec]) -> bool:
+        if self._gpu_capacity is None:
+            return True
+        required = sum(
+            topology.task_count * topology.gpus_per_task
+            for topology in (resolve_task_topology(attempt) for attempt in attempts)
+        )
+        leased = {gpu for lease in self._gpu_leases.values() for gpu in lease}
+        return len([gpu for gpu in self._managed_gpus if gpu not in leased]) >= required
+
+    def _acquire_gpus(
+        self, attempt: AttemptSpec, topology: ResolvedTaskTopology
+    ) -> tuple[str, ...]:
+        if self._gpu_capacity is None:
+            visible = tuple(
+                gpu for gpu in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu
+            ) or tuple(str(gpu) for gpu in range(topology.gpus_per_node))
+            if len(visible) < topology.gpus_per_node:
+                raise RuntimeError(
+                    f"local executor needs K={topology.gpus_per_node} visible GPUs, got {visible}"
+                )
+            return visible[: topology.gpus_per_node]
+        if topology.gpus_per_task == 0:
+            return ()
+        required = topology.task_count * topology.gpus_per_task
+        leased = {gpu for lease in self._gpu_leases.values() for gpu in lease}
+        available = tuple(gpu for gpu in self._managed_gpus if gpu not in leased)
+        if len(available) < required:
+            raise RuntimeError(
+                f"local executor has no capacity for {required} GPUs; available={available}"
+            )
+        allocation = available[:required]
+        self._gpu_leases[attempt.attempt_id] = allocation
+        return allocation
+
+    def _release_gpus(self, attempt_id: str) -> None:
+        self._gpu_leases.pop(attempt_id, None)
 
     def _launcher_argv(
         self, attempt: AttemptSpec, topology: ResolvedTaskTopology
@@ -58,7 +147,7 @@ class LocalExecutor(Executor):
         )
 
     def _wrapped_argv(self, argv: tuple[str, ...]) -> list[str]:
-        if self.runner is None:
+        if self.runner is None or self._environment_prepared:
             return list(argv)
         contract = self.runner.contract
         hooks: list[str] = []
@@ -87,18 +176,62 @@ class LocalExecutor(Executor):
 
     @staticmethod
     def _terminate_processes(processes: Sequence[subprocess.Popen[str]]) -> None:
+        processes = tuple(processes)
+        if all(process.poll() is not None for process in processes):
+            return
+        process_groups = {process.pid for process in processes}
         for process in processes:
-            if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                process_groups.discard(process.pid)
+
+        deadline = time.monotonic() + 30
+        while process_groups and time.monotonic() < deadline:
+            for process in processes:
+                process.poll()
+            for process_group in tuple(process_groups):
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(process_group, 0)
                 except ProcessLookupError:
-                    pass
+                    process_groups.remove(process_group)
+                except PermissionError:
+                    # No signalable process remains in the group. This can be
+                    # reported for an already-terminated group on macOS.
+                    process_groups.remove(process_group)
+            if process_groups:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         for process in processes:
             if process.poll() is None:
                 try:
-                    process.wait(timeout=30)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    raise RuntimeError(
+                        f"local task process {process.pid} survived process-group termination"
+                    ) from None
+
+        kill_deadline = time.monotonic() + 5
+        while process_groups and time.monotonic() < kill_deadline:
+            for process_group in tuple(process_groups):
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    process_groups.remove(process_group)
+                except PermissionError:
+                    process_groups.remove(process_group)
+            if process_groups:
+                time.sleep(min(0.05, max(0.0, kill_deadline - time.monotonic())))
+        if process_groups:
+            raise RuntimeError(
+                "local task process group(s) survived termination: "
+                + ", ".join(str(process_group) for process_group in sorted(process_groups))
+            )
 
     @staticmethod
     def _close_log_files(processes: Sequence[subprocess.Popen[str]]) -> None:
@@ -114,14 +247,7 @@ class LocalExecutor(Executor):
             raise ValueError(
                 f"local executor requires N=1, got N={topology.nodes} for {attempt.attempt_id}"
             )
-        visible = tuple(
-            gpu for gpu in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu
-        ) or tuple(str(gpu) for gpu in range(topology.gpus_per_node))
-        if len(visible) < topology.gpus_per_node:
-            raise RuntimeError(
-                f"local executor needs K={topology.gpus_per_node} visible GPUs, got {visible}"
-            )
-        visible = visible[: topology.gpus_per_node]
+        visible = self._acquire_gpus(attempt, topology)
         base_env = os.environ.copy()
         if self.runner is None:
             repository = str(Path(__file__).resolve().parents[5])
@@ -161,6 +287,8 @@ class LocalExecutor(Executor):
                     stdout = log_file
                     log_paths.append(log_path)
                 try:
+                    # Popen is required so the executor can poll and terminate the
+                    # whole worker process group before releasing its GPU lease.
                     process = subprocess.Popen(
                         self._wrapped_argv(launcher_argv),
                         cwd=attempt.command.cwd,
@@ -181,6 +309,7 @@ class LocalExecutor(Executor):
         except BaseException:
             self._terminate_processes(processes)
             self._close_log_files(processes)
+            self._release_gpus(attempt.attempt_id)
             raise
         handle_id = f"local-{attempt.attempt_id}"
         self._processes[handle_id] = tuple(processes)
@@ -191,6 +320,8 @@ class LocalExecutor(Executor):
             metadata={
                 "pids": tuple(process.pid for process in processes),
                 "log_paths": tuple(log_paths),
+                "local_session_id": self._session_id,
+                "allocated_gpus": visible,
             },
         )
 
@@ -206,11 +337,24 @@ class LocalExecutor(Executor):
             if processes is not None:
                 self._terminate_processes(processes)
                 self._close_log_files(processes)
+            self._release_gpus(handle.attempt_id)
 
     def recover(self, handle: JobHandle) -> JobStatus:
         processes = self._processes.get(handle.handle_id)
         if processes is None:
-            return JobStatus(handle=handle, state=JobState.UNKNOWN, reason="missing local processes")
+            if (
+                self._gpu_capacity is not None
+                and handle.metadata.get("local_session_id") != self._session_id
+            ):
+                return JobStatus(
+                    handle=handle,
+                    state=JobState.CANCELLED,
+                    reason="prior reusable allocation ended",
+                    log_paths=tuple(handle.metadata.get("log_paths", ())),
+                )
+            return JobStatus(
+                handle=handle, state=JobState.UNKNOWN, reason="missing local processes"
+            )
         return_codes = tuple(process.poll() for process in processes)
         log_paths = tuple(handle.metadata.get("log_paths", ()))
         first_failure = next(
@@ -220,6 +364,7 @@ class LocalExecutor(Executor):
         if first_failure is not None:
             self._terminate_processes(processes)
             self._close_log_files(processes)
+            self._release_gpus(handle.attempt_id)
             return JobStatus(
                 handle=handle,
                 state=JobState.FAILED,
@@ -229,6 +374,7 @@ class LocalExecutor(Executor):
         if any(return_code is None for return_code in return_codes):
             return JobStatus(handle=handle, state=JobState.RUNNING, log_paths=log_paths)
         self._close_log_files(processes)
+        self._release_gpus(handle.attempt_id)
         return JobStatus(
             handle=handle,
             state=JobState.COMPLETED,

@@ -310,9 +310,11 @@ class SlurmExecutor(Executor):
         script_path = self.scripts_dir / f"{attempt.stage_id}_{attempt.attempt_id}.sh"
         script_path.write_text(render_slurm_attempt_script(attempt, self.runner))
         script_path.chmod(0o755)
-        job_id = None
+        job_id = _find_queued_job(job_name) if attempt.metadata.get("idempotent_submit") else None
         errors: list[str] = []
         for submit_index in range(3):
+            if job_id:
+                break
             if submit_index:
                 job_id = _find_queued_job(job_name)
                 if job_id:

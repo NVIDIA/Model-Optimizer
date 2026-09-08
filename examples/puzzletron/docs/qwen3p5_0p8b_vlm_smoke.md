@@ -1,11 +1,11 @@
 # Qwen 3.5 0.8B VLM pruning example
 
-The Qwen 3.5 0.8B VLM example has two experiment files with distinct jobs:
+The Qwen 3.5 0.8B VLM example has two experiment files with distinct purposes:
 
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
-| `full_vlm_smoke.yaml` | Check the complete lifecycle on one GPU | `execution.single_gpu.yaml` |
-| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `full_vlm_smoke.yaml` | Check the complete lifecycle in one reusable two-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_smoke.yaml` |
+| `vlm_campaign.yaml` | Run a longer integration example in one reusable eight-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
 
 Both recipes select vLLM's Triton GDN prefill backend. On a fresh worker, the
 FlashInfer GDN kernels can still be compiling when the server readiness check
@@ -22,6 +22,8 @@ performance results.
 The campaign is a larger illustrative experiment intended for scheduled
 integration validation, not routine development or presubmit use. It is not a
 recommended pruning recipe, training duration, or candidate-selection policy.
+The qualifying one-node run completed in about 75 minutes; queue, cache, and
+runtime differences can change the elapsed time at another site.
 
 Unit tests compile these recipes and verify their stage and resource contracts.
 They do not replace an end-to-end GPU run against the current model, data,
@@ -41,6 +43,12 @@ Prepare the setup and worker environments described in
 If workers cannot access the network, populate those caches before launch and
 mount them through the runner. Keep the experiment's public model repository
 and revision unchanged; a local cache is only where workers obtain those files.
+
+The accelerated profiles are qualified for a Slurm environment with eight-GPU
+nodes. The smoke reserves two GPUs on one node, while the representative
+campaign reserves all eight GPUs on one node. Other Slurm sites may need
+adaptation; see [Slurm
+configuration](slurm_configuration.md#reusable-single-node-allocations).
 
 ## Run the lifecycle smoke
 
@@ -75,12 +83,12 @@ Unlike the text-only example, this VLM route does not publish a separate
 tokenized-dataset artifact. It keeps the image conversations in their native
 format so the model processor can construct text and image inputs together.
 
-Use the maintained experiment with the shared single-GPU execution profile and
-a site-specific runner:
+Use the maintained experiment with its reusable two-GPU, single-node execution
+profile and a site-specific runner:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 
 python examples/puzzletron/orchestrate.py \
@@ -90,8 +98,9 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Inspect the resolved paths, resources, and stages. Then omit `--dry-run` to
-launch. Rerun that same launch command to resume compatible completed work.
+Inspect the outer one-node allocation plus every logical attempt, resource, and
+stage. Then omit `--dry-run` to launch. Rerun that same launch command to
+reattach or resume compatible completed work.
 
 After completion, inspect the campaign report and verify that:
 
@@ -120,6 +129,14 @@ The flow is intentionally compact:
 4. Run 128 KD steps and evaluate again on the same 344 rows.
 5. Apply the configured aggregate-rank rule to the searched candidates and
    measure serving for the selected result.
+
+The execution profile uses up to eight resident workers for replacement
+scoring, distributed across the configured width scenarios. It shards initial
+image evaluation across five tasks, then runs materialization, pre-KD
+evaluation, KD, and post-KD evaluation for the five retained candidates across
+disjoint GPUs. Each stage runs concurrently up to the configured capacity;
+final serving measures only the selected candidate, and individual stages do
+not all consume eight GPUs.
 
 The 128-step value demonstrates the integration. It is not a convergence
 criterion or recommended training duration. The aggregate-rank rule is also an
@@ -182,9 +199,11 @@ Use guided setup when you need help resolving the model, dataset, and site
 settings. The [setup wizard guide](setup_wizard.md) owns its invocation,
 profiles, inputs, and generated files. Select Qwen 3.5 0.8B and the
 Nemotron-VLM v2 image-text dataset to generate this route with site-specific
-settings. Hidden (residual/embedding) width, attention, GDN, and depth are
-available through guided customization. Among the tracked routes, attention
-and GDN reductions are enabled only by `vlm_campaign.yaml`.
+settings. Generated bundles use the default `per_attempt` scheduling mode;
+follow the setup guide to opt into a reusable single-node allocation. Hidden
+(residual/embedding) width, attention, GDN, and depth are available through
+guided customization. Among the tracked routes, attention and GDN reductions
+are enabled only by `vlm_campaign.yaml`.
 Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

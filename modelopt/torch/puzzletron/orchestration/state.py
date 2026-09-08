@@ -1,12 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Durable orchestration state on shared storage."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,7 +34,9 @@ __all__ = [
     "PersistedAttempt",
     "StageRunRecord",
     "acquire_controller_lease",
+    "release_matching_controller_lease",
     "release_controller_lease",
+    "reusable_controller_owner_prefix",
 ]
 
 
@@ -62,18 +78,97 @@ class StageRunRecord:
 class ControllerLease:
     """File-based campaign controller lease."""
 
-    def __init__(self, path: Path, owner: str) -> None:
+    def __init__(self, path: Path, owner: str, ttl_seconds: int = 120) -> None:
         self.path = path
         self.owner = owner
+        self.ttl_seconds = ttl_seconds
+        self._mutex = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+        self._lost = False
+
+    @staticmethod
+    def _same_file(path: Path, stat: os.stat_result) -> bool:
+        try:
+            current = path.stat()
+        except OSError:
+            return False
+        return (current.st_dev, current.st_ino) == (stat.st_dev, stat.st_ino)
+
+    def renew(self, *, ttl_seconds: int | None = None) -> bool:
+        """Extend an owned lease, returning false if ownership was lost."""
+
+        with self._mutex:
+            if self._lost:
+                return False
+            try:
+                descriptor = os.open(self.path, os.O_RDWR)
+                with os.fdopen(descriptor, "r+", encoding="utf-8") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX)
+                    owned_stat = os.fstat(stream.fileno())
+                    payload = json.load(stream)
+                    if payload.get("owner") != self.owner:
+                        self._lost = True
+                        return False
+                    duration = self.ttl_seconds if ttl_seconds is None else ttl_seconds
+                    stream.seek(0)
+                    stream.truncate()
+                    json.dump(
+                        {
+                            "owner": self.owner,
+                            "pid": os.getpid(),
+                            "expires": time.time() + duration,
+                        },
+                        stream,
+                        indent=2,
+                    )
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    if not self._same_file(self.path, owned_stat):
+                        self._lost = True
+                        return False
+            except (OSError, ValueError):
+                self._lost = True
+                return False
+            return True
+
+    def start_heartbeat(self) -> None:
+        """Renew the lease while controller work blocks between loop iterations."""
+
+        if self._heartbeat is not None:
+            return
+        interval = max(1.0, min(30.0, self.ttl_seconds / 3))
+
+        def _heartbeat() -> None:
+            while not self._heartbeat_stop.wait(interval):
+                if not self.renew():
+                    return
+
+        self._heartbeat = threading.Thread(
+            target=_heartbeat,
+            name="puzzletron-controller-lease",
+            daemon=True,
+        )
+        self._heartbeat.start()
 
     def release(self) -> None:
-        if self.path.exists():
+        self._heartbeat_stop.set()
+        heartbeat = self._heartbeat
+        if heartbeat is not None and heartbeat is not threading.current_thread():
+            heartbeat.join()
+        with self._mutex:
             try:
-                payload = json.loads(self.path.read_text())
+                descriptor = os.open(self.path, os.O_RDWR)
+                with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX)
+                    owned_stat = os.fstat(stream.fileno())
+                    payload = json.load(stream)
+                    if payload.get("owner") == self.owner and self._same_file(
+                        self.path, owned_stat
+                    ):
+                        self.path.unlink()
             except (OSError, ValueError):
-                payload = {}
-            if payload.get("owner") == self.owner:
-                self.path.unlink(missing_ok=True)
+                pass
 
 
 def acquire_controller_lease(
@@ -86,25 +181,75 @@ def acquire_controller_lease(
 
     root.mkdir(parents=True, exist_ok=True)
     lease_path = root / "controller.lock"
-    now = time.time()
-    if lease_path.exists():
+    for _attempt in range(3):
+        now = time.time()
         try:
-            payload = json.loads(lease_path.read_text())
-        except (OSError, ValueError):
-            payload = {}
-        expires = float(payload.get("expires", 0))
-        if expires > now and payload.get("owner") != owner:
-            return None
-    _write_json(
-        lease_path,
-        {"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds},
-    )
-    return ControllerLease(lease_path, owner)
+            descriptor = os.open(lease_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                descriptor = os.open(lease_path, os.O_RDWR)
+                with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX)
+                    stale_stat = os.fstat(stream.fileno())
+                    try:
+                        payload = json.load(stream)
+                        expires = float(payload["expires"])
+                    except (KeyError, TypeError, ValueError):
+                        payload = {}
+                        if now - stale_stat.st_mtime < ttl_seconds:
+                            return None
+                        expires = 0.0
+                    if expires > now and payload.get("owner") != owner:
+                        return None
+                    if not ControllerLease._same_file(lease_path, stale_stat):
+                        continue
+                    lease_path.unlink()
+            except OSError:
+                continue
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            json.dump(
+                {"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds},
+                stream,
+                indent=2,
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        return ControllerLease(lease_path, owner, ttl_seconds)
+    return None
 
 
 def release_controller_lease(lease: ControllerLease | None) -> None:
     if lease is not None:
         lease.release()
+
+
+def reusable_controller_owner_prefix(plan_identity: str, scheduler_job_id: str) -> str:
+    """Return the lease-owner prefix for one reusable scheduler allocation."""
+
+    return f"reusable-controller:{plan_identity}:{scheduler_job_id}:"
+
+
+def release_matching_controller_lease(root: Path, *, owner_prefix: str) -> bool:
+    """Release a controller lease only when its owner has the exact trusted prefix."""
+
+    lease_path = root / "controller.lock"
+    try:
+        descriptor = os.open(lease_path, os.O_RDWR)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            owned_stat = os.fstat(stream.fileno())
+            payload = json.load(stream)
+            owner = payload.get("owner")
+            if not isinstance(owner, str) or not owner.startswith(owner_prefix):
+                return False
+            if not ControllerLease._same_file(lease_path, owned_stat):
+                return False
+            lease_path.unlink()
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 class CampaignStateStore:
@@ -123,6 +268,12 @@ class CampaignStateStore:
 
     def snapshot_path(self) -> Path:
         return self.root / "controller_snapshot.json"
+
+    def allocation_path(self) -> Path:
+        return self.root / "reusable_allocation.json"
+
+    def allocation_result_path(self) -> Path:
+        return self.root / "reusable_allocation_result.json"
 
     def stage_record_path(self, stage_id: str) -> Path:
         return self.root / "stages" / f"{stage_id}.json"
@@ -155,6 +306,44 @@ class CampaignStateStore:
         if not path.is_file():
             return None
         return json.loads(path.read_text())
+
+    def write_allocation(self, payload: Mapping[str, Any]) -> None:
+        _write_json(self.allocation_path(), payload)
+
+    def load_allocation(self) -> dict[str, Any] | None:
+        path = self.allocation_path()
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text())
+
+    def write_allocation_result(self, *, plan_identity: str, result: Mapping[str, Any]) -> None:
+        _write_json(
+            self.allocation_result_path(),
+            {"plan_identity": plan_identity, "result": dict(result)},
+        )
+
+    def load_allocation_result(self, *, plan_identity: str) -> dict[str, Any] | None:
+        path = self.allocation_result_path()
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text())
+        if payload.get("plan_identity") != plan_identity:
+            return None
+        result = payload.get("result")
+        return dict(result) if isinstance(result, Mapping) else None
+
+    def clear_allocation_result(self) -> None:
+        self.allocation_result_path().unlink(missing_ok=True)
+
+    def write_allocation_input(self, *, plan_identity: str, name: str, contents: str) -> Path:
+        if not name or Path(name).name != name:
+            raise ValueError("reusable allocation input name must be a file name")
+        path = self.root / "reusable_inputs" / plan_identity / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        temporary.write_text(contents)
+        os.replace(temporary, path)
+        return path
 
     def save_attempt(self, attempt: AttemptSpec, handle: JobHandle | None, status: str) -> Path:
         directory = self.attempt_dir(attempt.work_id, attempt.attempt_id)

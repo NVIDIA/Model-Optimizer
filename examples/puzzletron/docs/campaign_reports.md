@@ -2,9 +2,9 @@
 
 After a campaign completes cleanly, `orchestrate.py` attempts to generate a
 cumulative HTML report through the configured runner. A report submission,
-polling, or artifact failure is recorded in the run result but does not fail
-the completed campaign. Inspect the campaign logs, then regenerate the
-report without rerunning model work:
+polling, or artifact failure does not invalidate completed stages, but it is
+recorded in the run result and the command exits nonzero. Inspect the campaign
+logs, then regenerate the report without rerunning model work:
 
 ```bash
 python examples/puzzletron/generate_campaign_progress_report.py \
