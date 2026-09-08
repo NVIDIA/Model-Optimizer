@@ -37,6 +37,8 @@ from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
     EagleVllmStreamingConfig,
     EagleVllmStreamingDataset,
+    MTPBoostVllmStreamingConfig,
+    MTPBoostVllmStreamingDataset,
     StreamingConfig,
     StreamingDataset,
 )
@@ -176,12 +178,18 @@ def test_circuit_breaker_trips_on_consecutive_fetch_failures(patch_dist):
         list(ds)
 
 
-def _write_canned_safetensors(path: Path, seq: int, n_layers: int, hidden: int) -> None:
+def _write_canned_safetensors(
+    path: Path,
+    seq: int,
+    n_layers: int,
+    hidden: int,
+    dtype: torch.dtype = torch.float32,
+) -> None:
     """Mimic what vLLM's ExampleHiddenStatesConnector writes per request."""
     safetensors.torch.save_file(
         {
             "token_ids": torch.arange(seq, dtype=torch.int64),
-            "hidden_states": torch.randn(seq, n_layers, hidden),
+            "hidden_states": torch.randn(seq, n_layers, hidden, dtype=dtype),
         },
         str(path),
     )
@@ -315,3 +323,83 @@ def test_path_outside_shared_storage_root_is_rejected(tmp_path, patch_dist, monk
 
     assert list(ds) == []
     assert forbidden.exists(), "rejected path must not be unlinked"
+
+
+def test_mtp_vllm_dataset_end_to_end(tmp_path, patch_dist, monkeypatch):
+    """Native-MTP streaming splits four raw HC streams from the final teacher state."""
+    patch_dist(0, 1)
+    seq, hc_mult, hidden = 8, 4, 16
+    scratch = tmp_path / "vllm_scratch"
+    scratch.mkdir()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = scratch / "request.safetensors"
+        _write_canned_safetensors(
+            path,
+            seq,
+            hc_mult + 1,
+            hidden,
+            dtype=torch.bfloat16,
+        )
+        return httpx.Response(
+            200,
+            json={"kv_transfer_params": {"hidden_states_path": str(path)}},
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(hf_streaming_dataset.httpx, "AsyncClient", mock_async_client)
+    dataset = MTPBoostVllmStreamingDataset(
+        entries=[
+            {
+                "conversation_id": "mtp-0",
+                "messages": [{"role": "user", "content": "x"}],
+            }
+        ],
+        tokenizer=_tokenizer_returning(seq),
+        config=MTPBoostVllmStreamingConfig(
+            server_url="http://mock:8000",
+            model="mock-model",
+            shared_storage_root=str(scratch),
+            prefetch=1,
+        ),
+    )
+
+    batches = list(dataset)
+
+    assert len(batches) == 1
+    batch = batches[0]
+    assert set(batch) == {
+        "input_ids",
+        "target_mtp_hidden_states",
+        "target_lm_head_hidden_states",
+        "attention_mask",
+        "loss_mask",
+    }
+    assert batch["target_mtp_hidden_states"].shape == (seq, hc_mult, hidden)
+    assert batch["target_lm_head_hidden_states"].shape == (seq, hidden)
+    assert batch["target_mtp_hidden_states"].dtype == torch.bfloat16
+    assert list(scratch.iterdir()) == []
+
+
+def test_mtp_streaming_skips_overlong_instead_of_truncating(patch_dist):
+    patch_dist(0, 1)
+    tokenizer = _tokenizer_returning(seq=10)
+    dataset = MTPBoostVllmStreamingDataset(
+        entries=[{"conversation_id": "mtp-0", "messages": [{"role": "user", "content": "x"}]}],
+        tokenizer=tokenizer,
+        config=MTPBoostVllmStreamingConfig(
+            server_url="http://mock:8000",
+            model="mock-model",
+            shared_storage_root="/tmp",
+            max_seq_len=8,
+            truncate_overlong=False,
+        ),
+    )
+
+    assert dataset._tokenize_entry(dataset.entries[0]) is None
+    assert tokenizer.apply_chat_template.call_args.kwargs["truncation"] is False

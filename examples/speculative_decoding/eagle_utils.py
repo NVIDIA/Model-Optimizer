@@ -50,7 +50,103 @@ except (ImportError, AttributeError):
     wandb = None
 
 # Re-export for backward compatibility
-__all__ = ["EagleOfflineDataCollator", "OfflineSupervisedDataset"]
+__all__ = [
+    "EagleOfflineDataCollator",
+    "OfflineSupervisedDataset",
+    "make_mtp_boost_data_module",
+]
+
+
+def _get_offline_dumped_files(data_args) -> list[str]:
+    """Discover and optionally limit offline feature dumps."""
+    offline_data_path = Path(data_args.offline_data_path)
+    dumped_files = [str(path) for path in offline_data_path.rglob("*.pt")]
+    if not dumped_files:
+        raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
+
+    if data_args.sample_size == 0 or data_args.sample_size < -1:
+        raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
+    if data_args.sample_size > 0:
+        dumped_files = dumped_files[: data_args.sample_size]
+    return dumped_files
+
+
+def make_mtp_boost_data_module(
+    tokenizer: transformers.PreTrainedTokenizer,
+    data_args,
+    train_len: int | None = None,
+    answer_only_loss: bool = False,
+    seed: int = 0,
+) -> dict:
+    """Create a standard online or offline data module for native-MTP boosting."""
+    assert not data_args.vlm_processor, "Native-MTP boosting does not support VLM data."
+    mode = getattr(data_args, "mode", "online")
+    if mode == "online":
+        return make_speculative_data_module(
+            tokenizer,
+            data_args,
+            train_len=train_len,
+            answer_only_loss=answer_only_loss,
+            shift_labels=False,
+        )
+    if mode == "streaming":
+        if train_len is None:
+            raise ValueError("Native-MTP streaming requires a finite training sequence length.")
+        print_rank_0(f"Streaming native-MTP target features from {data_args.streaming_server_url}")
+        from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+            MTPBoostVllmStreamingConfig,
+            MTPBoostVllmStreamingDataset,
+        )
+
+        dataset = load_dataset("json", data_files=data_args.data_path, split="train")
+        if data_args.sample_size > 0:
+            dataset = dataset.select(range(min(data_args.sample_size, len(dataset))))
+        streaming_config = MTPBoostVllmStreamingConfig(
+            server_url=data_args.streaming_server_url,
+            model=data_args.streaming_model_name,
+            shared_storage_root=data_args.streaming_shared_storage_path,
+            max_seq_len=train_len,
+            truncate_overlong=False,
+            answer_only_loss=answer_only_loss,
+            prefetch=data_args.streaming_prefetch,
+            seed=seed,
+        )
+        return {
+            "train_dataset": MTPBoostVllmStreamingDataset(
+                entries=dataset,
+                tokenizer=tokenizer,
+                config=streaming_config,
+            ),
+            "data_collator": EagleOfflineDataCollator(
+                train_len=train_len,
+                batch_keys=("input_ids", "attention_mask", "loss_mask"),
+                feature_keys=("target_mtp_hidden_states", "target_lm_head_hidden_states"),
+                feature_output_key="mtp_boost_inputs",
+            ),
+        }
+    if mode != "offline":
+        raise ValueError(f"Unsupported native-MTP data mode: {mode}")
+    if train_len is None:
+        raise ValueError("Native-MTP offline training requires a finite training sequence length.")
+
+    print_rank_0("Loading pre-processed native-MTP data for offline training...")
+    dumped_files = _get_offline_dumped_files(data_args)
+    return {
+        "train_dataset": OfflineSupervisedDataset(
+            dumped_files,
+            answer_only_loss=answer_only_loss,
+            feature_key_mapping={
+                "target_mtp_hidden_states": "target_mtp_hidden_states",
+                "target_lm_head_hidden_states": "target_lm_head_hidden_states",
+            },
+        ),
+        "data_collator": EagleOfflineDataCollator(
+            train_len=train_len,
+            batch_keys=("input_ids", "attention_mask", "loss_mask"),
+            feature_keys=("target_mtp_hidden_states", "target_lm_head_hidden_states"),
+            feature_output_key="mtp_boost_inputs",
+        ),
+    }
 
 
 def make_speculative_data_module(
@@ -128,16 +224,7 @@ def make_speculative_data_module(
         print_rank_0("Loading pre-processed data for offline training...")
         assert not data_args.vlm_processor, "Offline data is not supported for VLM."
 
-        offline_data_path = Path(data_args.offline_data_path)
-        dumped_files = [str(p) for p in offline_data_path.rglob("*.pt")]
-        if not dumped_files:
-            raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
-
-        # sample_size=-1 means use all samples; positive integer selects that many
-        if data_args.sample_size == 0 or data_args.sample_size < -1:
-            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
-        if data_args.sample_size > 0:
-            dumped_files = dumped_files[: data_args.sample_size]
+        dumped_files = _get_offline_dumped_files(data_args)
         train_dataset = OfflineSupervisedDataset(dumped_files, answer_only_loss=answer_only_loss)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 
@@ -182,6 +269,59 @@ class EagleTrainerWithAccLog(Trainer):
                         new_groups.append(group)
                 self.optimizer.param_groups = new_groups
         return self.optimizer
+
+    def save_model(
+        self,
+        output_dir: str | None = None,
+        _internal_call: bool = False,
+        *args,
+        **kwargs,
+    ):
+        """Save native MTP checkpoints without duplicating frozen target tensors."""
+        output_dir = output_dir or self.args.output_dir
+        model = self.accelerator.unwrap_model(self.model)
+        if not getattr(model, "is_native_mtp_boost", False):
+            return super().save_model(output_dir, _internal_call, *args, **kwargs)
+
+        # ``get_state_dict`` is collective under FSDP, therefore every rank
+        # participates even though only the main process writes the checkpoint.
+        # This is the portable BF16 MTP snapshot used for restore and export.
+        # Native-MTP checkpoints intentionally omit the much larger FSDP
+        # optimizer state; see ``_save_optimizer_and_scheduler`` below.
+        state_dict = self.accelerator.get_state_dict(self.model)
+        if self.args.should_save:
+            model.save_pretrained(output_dir, state_dict=state_dict)
+        self.accelerator.wait_for_everyone()
+
+    def _save_optimizer_and_scheduler(self, output_dir: str) -> None:
+        """Skip non-portable optimizer state for native-MTP checkpoints."""
+        model = self.accelerator.unwrap_model(self.model)
+        if getattr(model, "is_native_mtp_boost", False):
+            return
+        super()._save_optimizer_and_scheduler(output_dir)
+
+    def _load_from_checkpoint(
+        self,
+        resume_from_checkpoint: str,
+        model: torch.nn.Module | None = None,
+    ) -> None:
+        """Restore the appropriate native-MTP model state during Trainer resume."""
+        load_model = self.model if model is None else model
+        native_model = self.accelerator.unwrap_model(load_model)
+        if not getattr(native_model, "is_native_mtp_boost", False):
+            return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
+        if self.is_fsdp_enabled:
+            # FSDP checkpoints use sharded/DTensor parameters. Trainer saves
+            # matching FSDP model shards alongside the compact MTP snapshot,
+            # and its FSDP loader is the supported restore path.
+            return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
+        # Non-FSDP resumes can load the portable ``mtp.*`` snapshot directly.
+        from modelopt.torch.speculative.mtp import load_native_mtp_boost_checkpoint
+
+        load_native_mtp_boost_checkpoint(native_model, resume_from_checkpoint)
+        self.accelerator.wait_for_everyone()
 
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs and per-component losses in trainer state."""

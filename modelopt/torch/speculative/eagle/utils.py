@@ -43,6 +43,14 @@ import torch
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
+__all__ = [
+    "EagleOfflineDataCollator",
+    "OfflineSupervisedDataset",
+    "expand_mask",
+    "make_causal_mask",
+    "masked_soft_target_cross_entropy",
+]
+
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
@@ -80,6 +88,24 @@ def expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: int | None = No
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
+def masked_soft_target_cross_entropy(
+    teacher_probabilities: torch.Tensor,
+    student_logits: torch.Tensor,
+    loss_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute EAGLE's masked soft-target cross-entropy loss.
+
+    ``teacher_probabilities`` must already be normalized along its final dimension.
+    This preserves EAGLE's original loss formulation while making it reusable by
+    checkpoint-native draft models.
+    """
+    loss_mask = loss_mask[:, : student_logits.shape[1], None]
+    student_log_probabilities = torch.log_softmax(student_logits, dim=-1)
+    return -torch.sum(
+        torch.sum(loss_mask * teacher_probabilities * student_log_probabilities, dim=2)
+    ) / (loss_mask.sum() + 1e-5)
+
+
 class OfflineSupervisedDataset(Dataset):
     """Offline dataset for supervised fine-tuning with pre-dumped hidden states.
 
@@ -101,17 +127,27 @@ class OfflineSupervisedDataset(Dataset):
             Raises ``ValueError`` on ``__getitem__`` if the file lacks ``loss_mask``.
             If False (default), a uniform all-ones mask is used regardless of what
             is stored in the file (backward compatible).
+        feature_key_mapping (dict[str, str] | None): Maps feature names in a dump to
+            names returned to the collator. Defaults to EAGLE's ``hidden_states`` and
+            ``aux_hidden_states`` contract. Native draft models can provide their own
+            cached feature schema without a dataset subclass.
     """
 
     def __init__(
         self,
         dumped_files,
         answer_only_loss: bool = False,
+        feature_key_mapping: Mapping[str, str] | None = None,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
+        self.feature_key_mapping = feature_key_mapping or {
+            "hidden_states": "base_model_hidden_states",
+            "aux_hidden_states": "aux_hidden_states",
+        }
+        self.required_keys = ("input_ids", *self.feature_key_mapping)
 
     def __len__(self):
         return len(self.dumped_files)
@@ -124,7 +160,7 @@ class OfflineSupervisedDataset(Dataset):
                 offline_data = torch.load(path, weights_only=True)
                 if not isinstance(offline_data, Mapping):
                     raise TypeError(f"expected mapping, got {type(offline_data).__name__}")
-                for key in ("input_ids", "hidden_states", "aux_hidden_states"):
+                for key in self.required_keys:
                     if key not in offline_data:
                         raise KeyError(key)
                 return offline_data, path
@@ -138,12 +174,7 @@ class OfflineSupervisedDataset(Dataset):
 
         raise RuntimeError("Could not load any valid offline .pt files.") from last_error
 
-    def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data, path = self._load_offline_data(i)
-
-        labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
-        labels[..., :-1] = offline_data["input_ids"][..., 1:]
-
+    def _get_loss_mask(self, offline_data: Mapping[str, torch.Tensor], path: str) -> torch.Tensor:
         if self.answer_only_loss:
             if "loss_mask" not in offline_data:
                 raise ValueError(
@@ -151,27 +182,53 @@ class OfflineSupervisedDataset(Dataset):
                     f".pt file, but {path} does not have one. Re-dump "
                     f"with --answer-only-loss in compute_hidden_states_*.py."
                 )
-            loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
-        else:
-            loss_mask = torch.ones_like(offline_data["input_ids"])
+            return offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+        return torch.ones_like(offline_data["input_ids"])
+
+    def __getitem__(self, i) -> dict[str, torch.Tensor]:
+        offline_data, path = self._load_offline_data(i)
+
+        labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
+        labels[..., :-1] = offline_data["input_ids"][..., 1:]
+
+        loss_mask = self._get_loss_mask(offline_data, path)
 
         ret = {
             "input_ids": offline_data["input_ids"],
-            "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": offline_data["aux_hidden_states"],
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
         }
+        ret.update(
+            {
+                output_key: offline_data[input_key]
+                for input_key, output_key in self.feature_key_mapping.items()
+            }
+        )
         return ret
 
 
 class EagleOfflineDataCollator:
-    """Data collator that truncates or pads data for offline training."""
+    """Data collator that truncates or pads cached training features.
 
-    def __init__(self, train_len):
+    The default fields retain the EAGLE offline/streaming contract.  Native
+    draft modules can supply their own cached feature names without duplicating
+    the padding and batching logic.
+    """
+
+    def __init__(
+        self,
+        train_len: int,
+        *,
+        batch_keys: tuple[str, ...] = ("input_ids", "attention_mask", "loss_mask", "labels"),
+        feature_keys: tuple[str, ...] = ("base_model_hidden_states", "aux_hidden_states"),
+        feature_output_key: str = "base_model_outputs",
+    ):
         """Initialize with the target sequence length for truncation/padding."""
         self.train_len = train_len
+        self.batch_keys = batch_keys
+        self.feature_keys = feature_keys
+        self.feature_output_key = feature_output_key
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -194,16 +251,12 @@ class EagleOfflineDataCollator:
         """Collate a list of feature dicts into a single padded/truncated batch."""
         base_batch = {
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
+            for k in self.batch_keys
         }
 
-        base_model_outputs = {
+        model_features = {
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
-            for k in ["base_model_hidden_states", "aux_hidden_states"]
+            for k in self.feature_keys
         }
 
-        batch = {
-            **base_batch,
-            "base_model_outputs": base_model_outputs,
-        }
-        return batch
+        return {**base_batch, self.feature_output_key: model_features}

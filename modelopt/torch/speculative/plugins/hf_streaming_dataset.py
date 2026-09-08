@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import os
 import queue
 import random
@@ -116,6 +117,11 @@ class StreamingConfig(BaseModel):
     # Token-level cap applied during tokenization (right-truncation). Must hold
     # ``max_seq_len <= vllm.max_model_len``. ``None`` disables truncation.
     max_seq_len: int | None = None
+    # Preserve the historical EAGLE behavior by default. Native-MTP collection
+    # sets this to False because chopping a completed reasoning trajectory can
+    # remove the answer (or stop midway through thinking) while still producing
+    # a superficially valid feature sample.
+    truncate_overlong: bool = True
     # Must be identical on every rank — the dataset shuffles with this seed then
     # stripes by rank, so equal seeds are required for the partition to be disjoint.
     seed: int = 0
@@ -368,12 +374,15 @@ class StreamingDataset(IterableDataset):
         convs = entry.get("messages") or entry.get("conversations")
         if cid is None or not convs or not isinstance(convs, list):
             return None
+        tokenize_limit = self.config.max_seq_len if self.config.truncate_overlong else None
         input_ids, loss_mask = _tokenize_with_loss_mask(
             self.tokenizer,
             convs,
             self.config.answer_only_loss,
-            max_seq_len=self.config.max_seq_len,
+            max_seq_len=tokenize_limit,
         )
+        if self.config.max_seq_len is not None and input_ids.shape[-1] > self.config.max_seq_len:
+            return None
         if int(loss_mask.sum()) == 0:
             return None
         return {
@@ -530,11 +539,21 @@ class EagleVllmStreamingDataset(StreamingDataset):
         torch Tensor (not a view into the mmap'd file), so it is safe to unlink
         right after the ``with`` block exits.
         """
-        with safe_open(path, framework="pt") as f:
-            token_ids = f.get_tensor("token_ids")
-            hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
+        lock_path = f"{path}.lock"
+        lock_file = open(lock_path) if os.path.exists(lock_path) else None
+        try:
+            if lock_file is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_SH)
+            with safe_open(path, framework="pt") as f:
+                token_ids = f.get_tensor("token_ids")
+                hidden_states = f.get_tensor("hidden_states")  # [seq, n_layers, hidden]
+        finally:
+            if lock_file is not None:
+                lock_file.close()
         with contextlib.suppress(OSError):
             os.unlink(path)
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path)
         return token_ids, hidden_states
 
     @staticmethod
@@ -572,6 +591,103 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "attention_mask": torch.ones_like(input_ids),
             "loss_mask": loss_mask,
             "labels": labels,
+        }
+
+
+class MTPBoostFetchPayload(TypedDict):
+    """The vLLM feature payload required by native-MTP boost training."""
+
+    token_ids: torch.Tensor
+    target_mtp_hidden_states: torch.Tensor
+    target_lm_head_hidden_states: torch.Tensor
+    loss_mask: torch.Tensor
+
+
+class MTPBoostVllmStreamingConfig(EagleVllmStreamingConfig):
+    """vLLM endpoint settings plus the number of native HC streams."""
+
+    hc_mult: int = Field(default=4, ge=1)
+
+
+class MTPBoostVllmStreamingDataset(EagleVllmStreamingDataset):
+    """DeepSeek-V4 native MTP targets streamed from an instrumented vLLM server.
+
+    The server-side patch packages the raw pre-``hc_head`` streams followed by
+    the normalized LM-head input in the connector's layer dimension. The
+    resulting tensors match the offline DSV4 collector exactly in layout and
+    precision.
+    """
+
+    config_cls = MTPBoostVllmStreamingConfig
+    fetch_payload_cls = MTPBoostFetchPayload
+
+    def __init__(
+        self,
+        entries: list[dict],
+        tokenizer,
+        config: MTPBoostVllmStreamingConfig,
+    ):
+        """Initialize a native-MTP stream with a fully specified vLLM config."""
+        super().__init__(entries=entries, tokenizer=tokenizer, config=config)
+        self.config: MTPBoostVllmStreamingConfig = config
+
+    async def _fetch(self, client: httpx.AsyncClient, sample: dict) -> MTPBoostFetchPayload | None:
+        response = await client.post(
+            f"{self.config.server_url}/v1/completions",
+            json={
+                "model": self.config.model,
+                "prompt": sample["token_ids"],
+                "max_tokens": 1,
+                "temperature": 0,
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        path = (body.get("kv_transfer_params") or {}).get("hidden_states_path")
+        if path is None:
+            warn_rank_0(f"[streaming] no hidden_states_path for {sample['cid']}")
+            return None
+        if not self._path_under_root(path):
+            warn_rank_0(
+                f"[streaming] path outside shared_storage_root for {sample['cid']}: {path!r}"
+            )
+            return None
+
+        token_ids, hidden_states = await asyncio.to_thread(self._load_safetensors, path)
+        client_ids = torch.as_tensor(sample["token_ids"], dtype=token_ids.dtype)
+        if not torch.equal(token_ids, client_ids):
+            raise RuntimeError(
+                f"server token_ids drift for {sample['cid']}: "
+                f"client_len={client_ids.shape[0]}, server_len={token_ids.shape[0]}"
+            )
+        expected_streams = self.config.hc_mult + 1
+        if hidden_states.ndim != 3 or hidden_states.shape[:2] != (
+            token_ids.shape[0],
+            expected_streams,
+        ):
+            raise RuntimeError(
+                "instrumented vLLM must return hidden_states shaped "
+                f"[S, hc_mult + 1, H]; got {tuple(hidden_states.shape)}"
+            )
+        if hidden_states.dtype != torch.bfloat16:
+            raise RuntimeError(
+                f"native-MTP target features must remain BF16; got {hidden_states.dtype}"
+            )
+        return {
+            "token_ids": token_ids,
+            "target_mtp_hidden_states": hidden_states[:, : self.config.hc_mult, :].contiguous(),
+            "target_lm_head_hidden_states": hidden_states[:, self.config.hc_mult, :].contiguous(),
+            "loss_mask": sample["loss_mask"],
+        }
+
+    def _format(self, fetched: MTPBoostFetchPayload) -> dict[str, torch.Tensor]:
+        input_ids = fetched["token_ids"].to(torch.int64)
+        return {
+            "input_ids": input_ids,
+            "target_mtp_hidden_states": fetched["target_mtp_hidden_states"],
+            "target_lm_head_hidden_states": fetched["target_lm_head_hidden_states"],
+            "attention_mask": torch.ones_like(input_ids),
+            "loss_mask": fetched["loss_mask"],
         }
 
 

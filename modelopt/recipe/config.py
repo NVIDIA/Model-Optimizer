@@ -24,7 +24,12 @@ from pydantic import Field, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
-from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
+from modelopt.torch.speculative.config import (
+    DFlashConfig,
+    EagleConfig,
+    MedusaConfig,
+    MTPBoostConfig,
+)
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
 from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
 from modelopt.torch.speculative.plugins.hf_training_args import (
@@ -39,6 +44,7 @@ class RecipeType(str, Enum):
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
+    SPECULATIVE_MTP_BOOST = "speculative_mtp_boost"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -195,6 +201,25 @@ class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
     )
 
 
+class ModelOptMTPBoostRecipe(ModelOptSpeculativeRecipeBase):
+    """Recipe for boosting a checkpoint-native MTP module."""
+
+    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_MTP_BOOST)
+
+    mtp_boost: MTPBoostConfig = ModeloptField(
+        default=MTPBoostConfig(),
+        title="Native MTP boost config",
+        description="Configuration for cache-free native MTP boost rollouts.",
+        validate_default=True,
+    )
+
+    @model_validator(mode="after")
+    def _check_data_mode(self) -> ModelOptMTPBoostRecipe:
+        if self.data.mode == "online" and not self.mtp_boost.target_checkpoint:
+            raise ValueError("Online speculative_mtp_boost requires mtp_boost.target_checkpoint.")
+        return self
+
+
 # Single source of truth mapping YAML ``metadata.recipe_type`` to its schema class. The loader
 # uses this for typed-list ``$import`` resolution; add a new entry when introducing a recipe.
 RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
@@ -202,4 +227,5 @@ RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
+    RecipeType.SPECULATIVE_MTP_BOOST: ModelOptMTPBoostRecipe,
 }

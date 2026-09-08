@@ -1,0 +1,134 @@
+diff --git a/vllm/models/deepseek_v4/nvidia/model.py b/vllm/models/deepseek_v4/nvidia/model.py
+index be4e87e..eb28877 100644
+--- a/vllm/models/deepseek_v4/nvidia/model.py
++++ b/vllm/models/deepseek_v4/nvidia/model.py
+@@ -1354,8 +1354,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+             requires_grad=False,
+         )
+         spec_config = vllm_config.speculative_config
++        extract_mtp_target_features = (
++            spec_config is not None
++            and spec_config.uses_extract_hidden_states()
++            and getattr(
++                spec_config.draft_model_config.hf_config,
++                "dsv4_mtp_target_features",
++                False,
++            )
++        )
+         needs_mtp_hidden_states = spec_config is not None and (
+-            spec_config.use_eagle() or spec_config.uses_draft_model()
++            spec_config.use_eagle()
++            or spec_config.uses_draft_model()
++            or extract_mtp_target_features
+         )
+         if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+             self._mtp_hidden_buffer = torch.empty(
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 7dec923..0431bb6 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -2013,16 +2013,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+             # target returns a persistent buffer sized at max_num_batched_tokens;
+             # slice to the active token count that propose() expects.
+             spec_hidden_states = hidden_states
++            spec_aux_hidden_states = aux_hidden_states
+             if hasattr(self.model, "get_mtp_target_hidden_states"):
+                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
++                extract_mtp_target_features = getattr(
++                    self.speculative_config.draft_model_config.hf_config,
++                    "dsv4_mtp_target_features",
++                    False,
++                )
++                if extract_mtp_target_features:
++                    hidden_size = hidden_states.shape[-1]
++                    if spec_hidden_states.shape[-1] % hidden_size:
++                        raise ValueError(
++                            "The raw native-MTP hidden dimension must be a multiple of "
++                            f"the final hidden dimension; got {spec_hidden_states.shape[-1]} "
++                            f"and {hidden_size}"
++                        )
++                    raw_hidden_states = spec_hidden_states.view(
++                        spec_hidden_states.shape[0], -1, hidden_size
++                    )
++                    spec_aux_hidden_states = [
++                        *raw_hidden_states.unbind(dim=1),
++                        hidden_states,
++                    ]
++                    expected_streams = len(
++                        self.speculative_config.draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids
++                    )
++                    if len(spec_aux_hidden_states) != expected_streams:
++                        raise ValueError(
++                            "eagle_aux_hidden_state_layer_ids must have one entry per "
++                            "raw HC stream plus the normalized LM-head input; expected "
++                            f"{len(spec_aux_hidden_states)}, got {expected_streams}"
++                        )
+             with use_workspace_lane(self._draft_workspace_lane):
+                 draft_tokens = self.speculator.propose(
+                     input_batch,
+                     attn_metadata,
+                     slot_mappings_by_layer,
+                     spec_hidden_states,
+-                    aux_hidden_states,
++                    spec_aux_hidden_states,
+                     num_sampled,
+                     num_rejected,
+                     self.req_states.last_sampled_tokens,
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 6d35dc7..98490e2 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -5221,11 +5221,51 @@ class GPUModelRunner(
+                 "sampled_token_ids should be a torch.Tensor for "
+                 "extract_hidden_states method."
+             )
++            extract_mtp_target_features = getattr(
++                spec_config.draft_model_config.hf_config,
++                "dsv4_mtp_target_features",
++                False,
++            )
+             if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+                 raise ValueError(
+                     "aux_hidden_states are required when using `extract_hidden_states`"
+                 )
+-            target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
++            if extract_mtp_target_features:
++                raw_hidden_states = getattr(
++                    self.get_model(), "get_mtp_target_hidden_states", lambda: None
++                )()
++                if raw_hidden_states is None:
++                    raise ValueError(
++                        "dsv4_mtp_target_features requires a target model that exposes "
++                        "get_mtp_target_hidden_states()"
++                    )
++                hidden_size = hidden_states.shape[-1]
++                if raw_hidden_states.shape[-1] % hidden_size:
++                    raise ValueError(
++                        "The raw native-MTP hidden dimension must be a multiple of "
++                        f"the final hidden dimension; got {raw_hidden_states.shape[-1]} "
++                        f"and {hidden_size}"
++                    )
++                raw_hidden_states = raw_hidden_states[:num_scheduled_tokens].view(
++                    num_scheduled_tokens, -1, hidden_size
++                )
++                target_hidden_states = [
++                    *raw_hidden_states.unbind(dim=1),
++                    hidden_states[:num_scheduled_tokens],
++                ]
++                expected_streams = len(
++                    spec_config.draft_model_config.hf_config.eagle_aux_hidden_state_layer_ids
++                )
++                if len(target_hidden_states) != expected_streams:
++                    raise ValueError(
++                        "eagle_aux_hidden_state_layer_ids must have one entry per raw "
++                        "HC stream plus the normalized LM-head input; expected "
++                        f"{len(target_hidden_states)}, got {expected_streams}"
++                    )
++            else:
++                target_hidden_states = [
++                    h[:num_scheduled_tokens] for h in aux_hidden_states
++                ]
+ 
+             draft_token_ids = self.drafter.propose(
+                 num_speculative_tokens=num_spec_tokens_to_schedule,

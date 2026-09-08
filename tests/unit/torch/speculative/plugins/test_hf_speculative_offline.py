@@ -37,6 +37,7 @@ from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
+    masked_soft_target_cross_entropy,
 )
 
 _mock_scripts = types.ModuleType("scripts")
@@ -223,6 +224,81 @@ def test_offline_dataset_labels_shift(tmp_path):
     item = ds[0]
     # labels[:-1] should equal input_ids[1:]
     assert torch.equal(item["labels"][:-1], orig["input_ids"][1:])
+
+
+def test_masked_soft_target_cross_entropy_matches_eagle_loss_and_backpropagates():
+    """The shared helper must preserve EAGLE's masked soft-target objective exactly."""
+    teacher_probabilities = torch.softmax(torch.randn(1, 3, 5), dim=-1)
+    student_logits = torch.randn(1, 3, 5, requires_grad=True)
+    loss_mask = torch.tensor([[1, 0, 1, 1]])
+
+    loss = masked_soft_target_cross_entropy(teacher_probabilities, student_logits, loss_mask)
+
+    legacy_mask = loss_mask[:, : student_logits.shape[1], None]
+    expected = -torch.sum(
+        torch.sum(
+            legacy_mask * teacher_probabilities * torch.log_softmax(student_logits, dim=2),
+            dim=2,
+        )
+    ) / (legacy_mask.sum() + 1e-5)
+    assert torch.allclose(loss, expected)
+
+    loss.backward()
+    assert student_logits.grad is not None
+    assert torch.isfinite(student_logits.grad).all()
+
+
+def test_mtp_boost_offline_dataset_and_collator(tmp_path):
+    """Native-MTP dumps retain HC state and target LM-head inputs through collation."""
+    seq_len, hc_mult = 5, 4
+    data = {
+        "input_ids": torch.arange(seq_len),
+        "target_mtp_hidden_states": torch.randn(seq_len, hc_mult, HIDDEN_SIZE),
+        "target_lm_head_hidden_states": torch.randn(seq_len, HIDDEN_SIZE),
+        "loss_mask": torch.tensor([0, 1, 1, 0, 1]),
+    }
+    path = tmp_path / "mtp.pt"
+    torch.save(data, path)
+
+    item = OfflineSupervisedDataset(
+        [str(path)],
+        answer_only_loss=True,
+        feature_key_mapping={
+            "target_mtp_hidden_states": "target_mtp_hidden_states",
+            "target_lm_head_hidden_states": "target_lm_head_hidden_states",
+        },
+    )[0]
+    assert set(item) == {
+        "input_ids",
+        "target_mtp_hidden_states",
+        "target_lm_head_hidden_states",
+        "attention_mask",
+        "loss_mask",
+        "labels",
+    }
+    assert torch.equal(item["loss_mask"], data["loss_mask"])
+
+    batch = EagleOfflineDataCollator(
+        train_len=seq_len + 2,
+        batch_keys=("input_ids", "attention_mask", "loss_mask"),
+        feature_keys=("target_mtp_hidden_states", "target_lm_head_hidden_states"),
+        feature_output_key="mtp_boost_inputs",
+    )([item])
+    assert set(batch) == {"input_ids", "attention_mask", "loss_mask", "mtp_boost_inputs"}
+    assert batch["mtp_boost_inputs"]["target_mtp_hidden_states"].shape == (
+        1,
+        seq_len + 2,
+        hc_mult,
+        HIDDEN_SIZE,
+    )
+    assert batch["mtp_boost_inputs"]["target_lm_head_hidden_states"].shape == (
+        1,
+        seq_len + 2,
+        HIDDEN_SIZE,
+    )
+    assert (
+        torch.count_nonzero(batch["mtp_boost_inputs"]["target_mtp_hidden_states"][:, seq_len:]) == 0
+    )
 
 
 # ---------------------------------------------------------------------------

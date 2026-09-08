@@ -1,0 +1,50 @@
+# Native MTP boost recipe. Override model/data/training fields via OmegaConf dotlist on the CLI.
+
+metadata:
+  recipe_type: speculative_mtp_boost
+  description: Cache-free online, streaming, or offline boosting of checkpoint-native MTP.
+
+model:
+  model_name_or_path:
+  trust_remote_code: false
+
+data:
+  # This placeholder selects the offline data flow. Set it to DSV4 MTP feature dumps.
+  offline_data_path: input_mtp_features/
+  # For vLLM streaming, set offline_data_path=null and provide all four fields below.
+  data_path:
+  chat_template:
+  streaming_server_url:
+  streaming_model_name:
+  streaming_shared_storage_path:
+  streaming_prefetch: 64
+  sample_size: -1
+
+training:
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 1000
+  training_seq_len: 2048
+  logging_steps: 100
+  save_steps: 8192
+  cp_size: 1
+  disable_tqdm: false
+  ar_validate_steps: -1
+  answer_only_loss: true
+  save_strategy: steps
+  weight_decay: 0.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+
+mtp_boost:
+  adapter: auto
+  hsm_mode: "off"
+  rollout_steps: 1
+  # Required online: vendor-converted file (single GPU) or model{rank}-mp{world}.safetensors dir.
+  target_checkpoint:
+  # Optional native DSV4 export destination. Omit to keep only resumable training checkpoints.
+  export_path:

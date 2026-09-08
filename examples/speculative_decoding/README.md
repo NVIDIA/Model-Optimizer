@@ -127,6 +127,191 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
     training.output_dir=ckpts/llama-3.2-1b-offline
 ```
 
+### Native DeepSeek-V4 MTP boost
+
+`speculative_mtp_boost` improves the MTP already stored in a DeepSeek-V4
+checkpoint. The target remains frozen while the native MTP uses BF16 master
+weights. Training can consume precomputed features or produce the same
+features online with the vendor target or an instrumented vLLM server.
+
+The Nemotron generation logs are not conversations yet: their prompt is in
+`messages`, while the assistant reasoning and final answer are separate
+`reasoning_content` and `generation` fields. Normalize, validate, de-duplicate,
+and token-budget them before collecting features:
+
+```bash
+python examples/speculative_decoding/collect_hidden_states/prepare_dsv4_mtp_data.py \
+    --model-dir "$DSV4_MODEL" \
+    --input-file "$MATH_OUTPUT" \
+    --input-file "$CHAT_OUTPUT" \
+    --input-file "$STEM_OUTPUT" \
+    --input-file "$CODE_OUTPUT" \
+    --output-dir "$DSV4_PREPARED" \
+    --max-seq-len 2048 \
+    --token-budget 1000000
+```
+
+The default mixture gives math, chat, STEM, and code equal token budgets. It
+keeps only complete `finish_reason=stop` first turns with nonempty reasoning
+and answers, matching serialized output, safe roles/content, no tool calls,
+and an exact complete-conversation tokenization that fits the limit. It never
+truncates a reasoning trajectory. Selection and the validation split are
+deterministic. The output `report.json` gives every rejection count. A DSV4
+BF16 dump occupies 71,680 bytes per token (`5 * 7168 * 2`), so the one-million
+token default is about 71.7 GB before PyTorch container overhead.
+
+The supplied DSV4 template preserves reasoning and wraps the complete
+assistant span—reasoning, `</think>`, final answer, and EOS—in Transformers'
+`generation` block. Therefore `--answer-only-loss` trains on thinking as well
+as the final answer; it only excludes system and user tokens.
+
+First convert the downloaded target with the vendor `inference/convert.py`
+script using model parallelism one. Then dump the target's native four-stream
+state and LM-head input:
+
+```bash
+python collect_hidden_states/compute_hidden_states_dsv4.py \
+    --model-dir $DSV4_MODEL \
+    --converted-checkpoint $DSV4_CONVERTED/model0-mp1.safetensors \
+    --input-data input_conversations/train.jsonl \
+    --output-dir $DSV4_MTP_FEATURES \
+    --chat-template input_conversations/dsv4_thinking.jinja \
+    --answer-only-loss
+```
+
+For higher-throughput collection, apply
+`collect_hidden_states/vllm_dsv4_mtp_features.patch` to vLLM commit
+`5db652225f00b55783823ae6606d36925e3e3efe`. The patch reuses DSV4's existing
+raw pre-`hc_head` buffer and makes `extract_hidden_states` return five BF16
+streams: four raw HC streams followed by the normalized LM-head input. It
+covers both vLLM GPU model runners.
+
+```bash
+git -C "$VLLM_SOURCE" apply --check \
+    "$MODELOPT_SOURCE/examples/speculative_decoding/collect_hidden_states/vllm_dsv4_mtp_features.patch"
+git -C "$VLLM_SOURCE" apply \
+    "$MODELOPT_SOURCE/examples/speculative_decoding/collect_hidden_states/vllm_dsv4_mtp_features.patch"
+
+mkdir -p "$DSV4_VLLM_SCRATCH"
+vllm serve "$DSV4_MODEL" \
+    --tensor-parallel-size 16 \
+    --max-model-len 2048 \
+    --speculative-config '{"method":"extract_hidden_states","num_speculative_tokens":1,"draft_model_config":{"hf_config":{"eagle_aux_hidden_state_layer_ids":[1,2,3,4,5],"dsv4_mtp_target_features":true}}}' \
+    --kv-transfer-config "{\"kv_connector\":\"ExampleHiddenStatesConnector\",\"kv_role\":\"kv_producer\",\"kv_connector_extra_config\":{\"shared_storage_path\":\"$DSV4_VLLM_SCRATCH\"}}"
+```
+
+The standalone vLLM collector writes the same offline `.pt` schema as the
+vendor collector. It sends exact token IDs and rejects tokenizer drift,
+non-BF16 features, wrong shapes, out-of-root connector paths, partial writes,
+and overlong conversations:
+
+```bash
+python collect_hidden_states/compute_hidden_states_vllm_dsv4.py \
+    --model-dir "$DSV4_MODEL" \
+    --served-model "$DSV4_MODEL" \
+    --input-data "$DSV4_PREPARED" \
+    --output-dir "$DSV4_MTP_FEATURES" \
+    --shared-storage-root "$DSV4_VLLM_SCRATCH" \
+    --chat-template input_conversations/dsv4_thinking.jinja \
+    --answer-only-loss \
+    --concurrency 8
+```
+
+Before a large collection, collect the same small validation shard with both
+backends and compare token IDs, masks, BF16 dtype/layout, cosine similarity,
+and relative L2 error:
+
+```bash
+python collect_hidden_states/validate_dsv4_mtp_features.py \
+    --reference-dir "$DSV4_VENDOR_FEATURES" \
+    --candidate-dir "$DSV4_VLLM_FEATURES" \
+    --max-samples 32 \
+    --report "$DSV4_PARITY_REPORT"
+```
+
+To avoid materializing feature files at all, train directly from the same
+vLLM server. Streaming uses request-scoped connector files only as a bounded
+handoff and removes each one after loading:
+
+```bash
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml \
+    model.model_name_or_path="$DSV4_MODEL" \
+    data.offline_data_path=null \
+    data.data_path="$DSV4_PREPARED/train-00000.jsonl" \
+    data.chat_template=input_conversations/dsv4_thinking.jinja \
+    data.streaming_server_url=http://localhost:8000 \
+    data.streaming_model_name="$DSV4_MODEL" \
+    data.streaming_shared_storage_path="$DSV4_VLLM_SCRATCH" \
+    training.output_dir=ckpts/dsv4-mtp-boost-streaming
+```
+
+Train with the dedicated recipe. Full MTP masters require a suitably sharded
+FSDP launch; set `training.dp_shard_size` for the available GPU allocation.
+Set `mtp_boost.rollout_steps` above one for cache-free normal-causal rollouts.
+`mtp_boost.hsm_mode=uniform_layer_sample` mixes the raw state from the target
+and prior rounds; it requires at least two rollout steps and does not enable
+EAGLE3 TTT masks or KV-cache updates.
+
+```bash
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml \
+    model.model_name_or_path=$DSV4_MODEL \
+    data.offline_data_path=$DSV4_MTP_FEATURES \
+    training.output_dir=ckpts/dsv4-mtp-boost
+```
+
+For online training, omit the offline feature path and provide raw
+conversations plus a vendor-converted target checkpoint. With multiple ranks,
+the converted directory must contain `model{rank}-mp{world_size}.safetensors`;
+the target uses all ranks for model parallelism and the MTP uses the same ranks
+for FSDP.
+
+```bash
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml \
+    model.model_name_or_path=$DSV4_MODEL \
+    data.offline_data_path=null \
+    data.data_path=input_conversations/train.jsonl \
+    mtp_boost.target_checkpoint=$DSV4_CONVERTED \
+    training.dp_shard_size=8 \
+    training.output_dir=ckpts/dsv4-mtp-boost-online
+```
+
+For an initial manual FSDP smoke test on the supplied DSV4 checkpoint, run one
+step against one dumped conversation and set the shard size to the allocation
+size (eight GPUs in this example):
+
+```bash
+./launch_train.sh \
+    --config ../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml \
+    model.model_name_or_path=$DSV4_MODEL \
+    data.offline_data_path=$DSV4_MTP_FEATURES \
+    data.sample_size=1 \
+    training.max_steps=1 \
+    training.save_steps=1 \
+    training.dp_shard_size=8 \
+    training.output_dir=ckpts/dsv4-mtp-smoke
+```
+
+Each checkpoint directory contains an MTP-only BF16 `mtp_boost.pt` snapshot
+for export. It is saved as BF16 even when FSDP keeps FP32 optimizer masters in
+memory. The native-MTP Trainer path intentionally omits FSDP optimizer and
+scheduler state: checkpoints restore the trained MTP weights, while optimizer
+and scheduler state restart when training resumes.
+
+The recipe uses the same soft-target logit loss as EAGLE. Its optional HSM is
+cache-free and does not use EAGLE3's TTT loop. Export the final training
+checkpoint back into a native DSV4 checkpoint directory before invoking the
+vendor conversion/inference flow:
+
+```bash
+python scripts/export_native_mtp.py \
+    --base-model $DSV4_MODEL \
+    --training-checkpoint ckpts/dsv4-mtp-boost \
+    --output-dir $DSV4_MTP_EXPORT
+```
+
 ## Model Validation
 
 For online training checkpoints, we can run in-framework evaluation on MT-bench:

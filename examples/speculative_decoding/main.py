@@ -39,6 +39,7 @@ from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
     LoRAWarmupCallback,
+    make_mtp_boost_data_module,
     make_speculative_data_module,
     patch_ring_attention_for_ttt,
 )
@@ -52,6 +53,7 @@ from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
     ModelOptMedusaRecipe,
+    ModelOptMTPBoostRecipe,
     ModelOptSpeculativeRecipeBase,
 )
 from modelopt.torch.speculative.plugins.hf_training_args import (
@@ -79,6 +81,44 @@ HfTrainingArguments = dataclasses.make_dataclass(
 )
 
 
+def _mtp_boost_training_config(
+    recipe: ModelOptMTPBoostRecipe,
+) -> dict:
+    """Return Trainer arguments with memory-safe FSDP2 loading enabled.
+
+    ``ParallelismConfig`` describes the device mesh but does not construct an
+    FSDP plugin. Native MTP masters are too large to tolerate Trainer's normal
+    pre-wrap ``model.to(device)`` path, so distributed MTP boosting explicitly
+    enables FSDP2 and lets Accelerate shard from a rank-0 CPU state dictionary.
+    """
+    training_config = recipe.training.model_dump()
+    world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
+    cp_size = int(training_config.get("cp_size", 1))
+    dp_shard_size = training_config.get("dp_shard_size")
+    if dp_shard_size is None:
+        dp_shard_size = world_size // cp_size
+    if dp_shard_size <= 1:
+        return training_config
+
+    configured_fsdp = training_config.get("fsdp")
+    if configured_fsdp in (None, False, "", []):
+        training_config["fsdp"] = "full_shard"
+
+    fsdp_config = dict(training_config.get("fsdp_config") or {})
+    version = int(fsdp_config.setdefault("version", 2))
+    if version != 2:
+        raise ValueError("speculative_mtp_boost requires training.fsdp_config.version=2.")
+    if fsdp_config.get("cpu_ram_efficient_loading") is False:
+        raise ValueError(
+            "speculative_mtp_boost requires "
+            "training.fsdp_config.cpu_ram_efficient_loading=true to avoid materializing "
+            "the complete BF16 MTP on every GPU before sharding."
+        )
+    fsdp_config["cpu_ram_efficient_loading"] = True
+    training_config["fsdp_config"] = fsdp_config
+    return training_config
+
+
 def _parse_cli() -> tuple[str, bool, list[str]]:
     """Parse --config (required) and --dry_run from argv; return remaining args as dotlist overrides.
 
@@ -91,7 +131,8 @@ def _parse_cli() -> tuple[str, bool, list[str]]:
         required=True,
         help=(
             "Path to a modelopt speculative-decoding recipe YAML "
-            "(speculative_eagle / speculative_dflash / speculative_medusa)."
+            "(speculative_eagle / speculative_dflash / speculative_medusa / "
+            "speculative_mtp_boost)."
         ),
     )
     p.add_argument(
@@ -154,14 +195,21 @@ def train():
             f"got {type(recipe).__name__} from {config_path!r}."
         )
 
+    is_mtp_boost = isinstance(recipe, ModelOptMTPBoostRecipe)
+
     # Pydantic-typed sections flow straight through as *_args; only TrainingArguments is
     # reconstructed as an HF dataclass so it can be handed to transformers.Trainer.
-    training_args = HfTrainingArguments(**recipe.training.model_dump())
+    training_config = (
+        _mtp_boost_training_config(recipe) if is_mtp_boost else recipe.training.model_dump()
+    )
+    training_args = HfTrainingArguments(**training_config)
     init_distributed_env(training_args)
 
     if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
     if training_args.cp_size > 1:
+        if is_mtp_boost:
+            raise ValueError("speculative_mtp_boost does not support context parallelism.")
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
         training_args.parallelism_config.sp_backend = None
@@ -181,7 +229,48 @@ def train():
 
     use_offline_training = recipe.data.mode != "online"
 
-    if checkpoint:
+    if is_mtp_boost:
+        model_name_or_path = recipe.model.model_name_or_path
+        if model_name_or_path is None:
+            raise ValueError("model.model_name_or_path must be set for speculative_mtp_boost.")
+        # Native adapters are optional/heavy model-specific integrations, so defer their import
+        # until this recipe is selected and keep the existing EAGLE/DFlash startup path unchanged.
+        from modelopt.torch.speculative.mtp import (
+            attach_native_mtp_online_target,
+            create_native_mtp_boost_model,
+        )
+
+        model = create_native_mtp_boost_model(
+            model_name_or_path,
+            dtype=torch.bfloat16,
+            adapter=recipe.mtp_boost.adapter,
+            rollout_steps=recipe.mtp_boost.rollout_steps,
+            hsm_mode=recipe.mtp_boost.hsm_mode,
+        )
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            model_max_length=training_args.training_seq_len,
+            trust_remote_code=recipe.model.trust_remote_code,
+        )
+        if recipe.data.mode == "online" and not dry_run:
+            target_checkpoint = recipe.mtp_boost.target_checkpoint
+            assert target_checkpoint is not None
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            if training_args.dp_shard_size != world_size:
+                raise ValueError(
+                    "DSV4 online training uses all ranks for target model parallelism and "
+                    "requires training.dp_shard_size=WORLD_SIZE."
+                )
+            attach_native_mtp_online_target(
+                model,
+                model_name_or_path,
+                target_checkpoint,
+                device=torch.device("cuda", local_rank()),
+                max_batch_size=training_args.per_device_train_batch_size * world_size,
+                max_seq_len=training_args.training_seq_len,
+                adapter=recipe.mtp_boost.adapter,
+            )
+    elif checkpoint:
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
                 checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
@@ -250,7 +339,7 @@ def train():
     # keep the module tree consistent.  Parameters are left on CPU — the HF
     # Trainer will move them during init.
     if torch.cuda.is_available():
-        _target_dev = torch.device("cuda", 0)
+        _target_dev = torch.device("cuda", local_rank())
         for name, buf in list(model.named_buffers()):
             if buf.device.type == "cpu":
                 parts = name.split(".")
@@ -260,15 +349,24 @@ def train():
                 setattr(mod, parts[-1], buf.to(_target_dev))
 
     print_rank_0("Loading dataset...")
-    is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
-    data_module = make_speculative_data_module(
-        tokenizer,
-        recipe.data,
-        train_len=training_args.training_seq_len,
-        answer_only_loss=training_args.answer_only_loss,
-        shift_labels=not is_dflash,
-        seed=training_args.seed,
-    )
+    if is_mtp_boost:
+        data_module = make_mtp_boost_data_module(
+            tokenizer,
+            recipe.data,
+            train_len=training_args.training_seq_len,
+            answer_only_loss=training_args.answer_only_loss,
+            seed=training_args.seed,
+        )
+    else:
+        is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
+        data_module = make_speculative_data_module(
+            tokenizer,
+            recipe.data,
+            train_len=training_args.training_seq_len,
+            answer_only_loss=training_args.answer_only_loss,
+            shift_labels=not is_dflash,
+            seed=training_args.seed,
+        )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
     if (
@@ -304,6 +402,26 @@ def train():
     trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
+    if not is_mtp_boost:
+        return
+
+    if recipe.mtp_boost.export_path:
+        # Getting the state dict on every rank is required by FSDP before rank
+        # zero writes the native deployment checkpoint.
+        state_dict = trainer.accelerator.get_state_dict(trainer.model)
+        if trainer.is_world_process_zero:
+            native_model = trainer.accelerator.unwrap_model(trainer.model)
+            base_model_path = recipe.model.model_name_or_path
+            assert base_model_path is not None
+            from modelopt.torch.speculative.mtp import export_native_mtp_checkpoint
+
+            export_native_mtp_checkpoint(
+                native_model,
+                base_model_path,
+                recipe.mtp_boost.export_path,
+                state_dict=state_dict,
+            )
+        trainer.accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":

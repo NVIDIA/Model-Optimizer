@@ -23,6 +23,7 @@ import pytest
 from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
+    ModelOptMTPBoostRecipe,
     ModelOptPTQRecipe,
     RecipeType,
 )
@@ -299,6 +300,102 @@ def test_load_recipe_dflash_missing_section_raises(tmp_path):
     bad.write_text("metadata:\n  recipe_type: speculative_dflash\n")
     with pytest.raises(ValueError, match="dflash"):
         load_recipe(bad)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — native MTP boost
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipe_mtp_boost_builtin():
+    """The native MTP recipe selects the offline cache-free configuration."""
+    recipe = load_recipe("general/speculative_decoding/mtp_boost")
+    assert recipe.recipe_type == RecipeType.SPECULATIVE_MTP_BOOST
+    assert isinstance(recipe, ModelOptMTPBoostRecipe)
+    assert recipe.data.mode == "offline"
+    assert recipe.mtp_boost.rollout_steps == 1
+    assert recipe.mtp_boost.hsm_mode == "off"
+
+
+def test_load_recipe_mtp_boost_requires_section_and_online_target(tmp_path):
+    """Native MTP recipes require their own section and an online target checkpoint."""
+    missing_section = tmp_path / "missing.yml"
+    missing_section.write_text("metadata:\n  recipe_type: speculative_mtp_boost\n")
+    with pytest.raises(ValueError, match="mtp_boost"):
+        load_recipe(missing_section)
+
+    online = tmp_path / "online.yml"
+    online.write_text(
+        "metadata:\n  recipe_type: speculative_mtp_boost\n"
+        "data:\n  data_path: train.jsonl\n"
+        "mtp_boost:\n  rollout_steps: 1\n"
+    )
+    with pytest.raises(ValueError, match="requires mtp_boost.target_checkpoint"):
+        load_recipe(online)
+
+
+def test_load_recipe_mtp_boost_accepts_online_data(tmp_path):
+    """Online native MTP training uses raw conversations and a converted target."""
+    online = tmp_path / "online.yml"
+    online.write_text(
+        "metadata:\n  recipe_type: speculative_mtp_boost\n"
+        "data:\n  data_path: train.jsonl\n"
+        "mtp_boost:\n  target_checkpoint: converted-target\n"
+    )
+    recipe = load_recipe(online)
+    assert recipe.data.mode == "online"
+    assert recipe.mtp_boost.target_checkpoint == "converted-target"
+
+
+def test_load_recipe_mtp_boost_accepts_streaming_without_target_checkpoint(tmp_path):
+    """vLLM supplies native-MTP target features, so no in-process target is required."""
+    streaming = tmp_path / "streaming.yml"
+    streaming.write_text(
+        "metadata:\n  recipe_type: speculative_mtp_boost\n"
+        "data:\n"
+        "  data_path: train.jsonl\n"
+        "  streaming_server_url: http://localhost:8000\n"
+        "  streaming_model_name: deepseek-v4-pro\n"
+        "  streaming_shared_storage_path: /dev/shm/dsv4-hiddens\n"
+        "mtp_boost:\n  rollout_steps: 1\n"
+    )
+
+    recipe = load_recipe(streaming)
+
+    assert recipe.data.mode == "streaming"
+    assert recipe.mtp_boost.target_checkpoint is None
+
+
+def test_load_recipe_mtp_boost_accepts_cache_free_rollout_and_hsm(tmp_path):
+    """Multiple normal-causal MTP rounds can use uniform hidden-state mixing."""
+    recipe_path = tmp_path / "mtp.yml"
+    recipe_path.write_text(
+        "metadata:\n  recipe_type: speculative_mtp_boost\n"
+        "data:\n  offline_data_path: dumps\n"
+        "mtp_boost:\n  rollout_steps: 2\n  hsm_mode: uniform_layer_sample\n"
+    )
+    recipe = load_recipe(recipe_path)
+    assert recipe.mtp_boost.rollout_steps == 2
+    assert recipe.mtp_boost.hsm_mode == "uniform_layer_sample"
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ("rollout_steps: 0", "at least 1"),
+        ('hsm_mode: "uniform_layer_sample"', "requires rollout_steps >= 2"),
+    ],
+)
+def test_load_recipe_mtp_boost_rejects_invalid_rollouts(tmp_path, override, match):
+    """MTP rollout validation rejects impossible schedules."""
+    invalid = tmp_path / "invalid.yml"
+    invalid.write_text(
+        "metadata:\n  recipe_type: speculative_mtp_boost\n"
+        "data:\n  offline_data_path: dumps\n"
+        f"mtp_boost:\n  {override}\n"
+    )
+    with pytest.raises(ValueError, match=match):
+        load_recipe(invalid)
 
 
 def test_load_recipe_eagle_with_training_sections(tmp_path):

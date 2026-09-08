@@ -45,6 +45,7 @@ _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
     RecipeType.SPECULATIVE_MEDUSA: "medusa",
+    RecipeType.SPECULATIVE_MTP_BOOST: "mtp_boost",
 }
 
 
@@ -80,8 +81,9 @@ def load_recipe(
 
     * A ``.yml`` / ``.yaml`` file with ``metadata`` and one of ``quantize`` (PTQ),
       ``eagle`` (EAGLE speculative decoding), ``dflash`` (DFlash speculative
-      decoding) or ``medusa`` (Medusa speculative decoding) sections. The suffix
-      may be omitted and will be probed automatically.
+      decoding), ``medusa`` (Medusa speculative decoding), or ``mtp_boost``
+      (native MTP boosting) sections. The suffix may be omitted and will be probed
+      automatically.
     * A directory containing ``metadata.yml`` and ``quantize.yml`` —
       **PTQ recipes only**. Speculative-decoding recipes are always single YAML files.
 
@@ -152,7 +154,8 @@ def _load_recipe_from_file(
     """Load a recipe from a YAML file, optionally applying dotlist overrides.
 
     The file must contain a ``metadata`` section with at least ``recipe_type``,
-    plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
+    plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa`` /
+    ``mtp_boost``).
     """
     rtype = _peek_recipe_type(recipe_file)
     if rtype is None:

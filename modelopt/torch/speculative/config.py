@@ -16,6 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
+from typing import Literal
 
 from pydantic import model_validator
 
@@ -135,6 +136,57 @@ class MedusaConfig(ModeloptBaseConfig):
     )
 
 
+class MTPBoostConfig(ModeloptBaseConfig):
+    """Configuration for training a checkpoint-native MTP module."""
+
+    adapter: str = ModeloptField(
+        default="auto",
+        description=(
+            "Native MTP adapter to use. 'auto' detects the adapter from the source checkpoint."
+        ),
+    )
+
+    hsm_mode: Literal["off", "uniform_layer_sample"] = ModeloptField(
+        default="off",
+        description=(
+            "How cache-free MTP rollouts choose their next raw hidden state. "
+            "'uniform_layer_sample' samples one prior-round state per token."
+        ),
+    )
+
+    rollout_steps: int = ModeloptField(
+        default=1,
+        description=(
+            "Number of normal-causal MTP rollouts. These do not use EAGLE3's TTT mask or KV cache."
+        ),
+    )
+
+    target_checkpoint: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Vendor-converted target checkpoint file or directory used for online training."
+        ),
+    )
+
+    export_path: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Optional destination for a deployment-native MTP export after training. "
+            "Training checkpoints remain in training.output_dir."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_rollouts(self) -> "MTPBoostConfig":
+        if self.rollout_steps < 1:
+            raise ValueError("mtp_boost.rollout_steps must be at least 1.")
+        if self.hsm_mode == "uniform_layer_sample" and self.rollout_steps < 2:
+            raise ValueError(
+                "mtp_boost.hsm_mode='uniform_layer_sample' requires rollout_steps >= 2."
+            )
+        return self
+
+
 class EagleConfig(ModeloptBaseConfig):
     """Eagle config."""
 
@@ -196,29 +248,6 @@ class EagleConfig(ModeloptBaseConfig):
         description=(
             "Hidden state mixing variant used when eagle_mix_hidden_states=True. "
             "Available options: sparse_replace, uniform_layer_sample."
-        ),
-    )
-
-    eagle_share_kv: bool = ModeloptField(
-        default=False,
-        description=(
-            "Whether to share K/V across TTT steps: each draft self-attention captures its "
-            "post-RoPE (K, V) at step 0 and reuses them in subsequent steps instead of "
-            "recomputing. This narrows the train-infer gap by mimicking the inference-time "
-            "KV-cache reuse. Disables the TTT triangular mask (the original eagle_attn_mask_0 "
-            "is reused, like with eagle_mix_hidden_states). Composable with eagle_mix_hidden_states. "
-            "Memory cost: each TTT step retains the prior step's (K, V) activations with gradients. "
-            "Not supported with flex_attention or torch.compile."
-        ),
-    )
-
-    eagle_share_kv_roll_query: bool = ModeloptField(
-        default=False,
-        description=(
-            "When eagle_share_kv is on, roll Q right by +1 inside the draft attention so "
-            "Q'_i attends to K_0..K_{i+1}. Preserves K_0 in the context and gives correct "
-            "RoPE relative positions, at the cost of monkey-patching the HF attention "
-            "function. Requires eagle_share_kv=True."
         ),
     )
 
@@ -303,12 +332,6 @@ class EagleConfig(ModeloptBaseConfig):
             raise ValueError(
                 f"eagle_hsm_mode={self.eagle_hsm_mode!r} requires eagle_mix_hidden_states=True."
             )
-        return self
-
-    @model_validator(mode="after")
-    def _check_share_kv_consistency(self) -> "EagleConfig":
-        if self.eagle_share_kv_roll_query and not self.eagle_share_kv:
-            raise ValueError("eagle_share_kv_roll_query=True requires eagle_share_kv=True.")
         return self
 
     @model_validator(mode="after")
