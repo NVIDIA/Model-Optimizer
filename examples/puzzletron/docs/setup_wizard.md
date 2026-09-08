@@ -3,7 +3,8 @@
 The Puzzletron setup wizard inspects a local checkpoint configuration or a
 Hugging Face model configuration and generates self-contained smoke and
 production bundles. It reads configuration metadata, not model weights, and
-does not submit jobs.
+does not submit jobs. Use it after the maintained lifecycle smoke when you need
+to select another model, dataset, search profile, or execution environment.
 
 ## Profiles
 
