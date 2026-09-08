@@ -518,6 +518,29 @@ def _validate_scopes(model: nn.Module, plan: CalibrationPlan, sink: list[str]) -
                     sink=sink,
                 )
                 continue
+        # A module-granularity algorithm writes *every* quantizer of the linears it touches:
+        # `awq_lite` sets a pre_quant_scale on the input quantizer as well as the weight amax.
+        # Its scope therefore has to be closed under module ownership. A `quantizer_name` scope
+        # that selects only some of a module's quantizers cannot constrain such an algorithm --
+        # the predicate admits the parent module, the algorithm writes both roles, and the write
+        # -mask is silently violated. Worse, `effective_produces` is derived from the declared
+        # role sets, so the compiler would *understate* what the stage writes and miss real
+        # conflicts with later stages.
+        if caps.granularity == "module":
+            modules, quantizers = stage_targets(model, stage)
+            owned = _index_model(model).quantizers_of
+            unreachable = {q for m in modules for q in owned.get(m, ()) if q not in quantizers}
+            if unreachable:
+                _report(
+                    f"{stage.algo!r} is a module-level algorithm: it writes every quantizer of "
+                    f"the modules it touches, but {stage.selector}={stage.scope!r} leaves "
+                    f"{len(unreachable)} of them out of scope (e.g. "
+                    f"{sorted(unreachable)[0]!r}). It would write them anyway, outside the "
+                    "write-mask. Select the modules instead, with `module_name`.",
+                    sink=sink,
+                )
+                continue
+
         # Role check: a weight-only algorithm pointed at input quantizers writes nothing.
         if stage.selector == "quantizer_name":
             roles = {"weight" if "weight_quantizer" in q else "input" for q in quantizers}

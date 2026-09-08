@@ -253,6 +253,28 @@ def test_weight_only_algorithm_on_input_quantizers_is_rejected(quantized):
         )
 
 
+def test_module_level_algorithm_cannot_take_a_partial_quantizer_scope(quantized):
+    """`awq_lite` writes the input quantizer too, so a weight-only scope cannot hold it."""
+    with pytest.raises(AlgoCfgValidationError, match="module-level algorithm"):
+        compile_algo_cfg(
+            {
+                "algo_cfg": [{"quantizer_name": "*weight_quantizer", "cfg": ["awq_lite"]}],
+                "algorithm": None,
+            },
+            quantized,
+        )
+
+
+def test_module_level_algorithm_accepts_a_scope_closed_over_its_modules(quantized):
+    """Whole-model and `module_name` scopes both cover every quantizer a module owns."""
+    for entry in (
+        {"quantizer_name": "*", "cfg": ["awq_lite"]},
+        {"module_name": "*mlp*", "cfg": ["awq_lite"]},
+    ):
+        plan = compile_algo_cfg({"algo_cfg": [entry], "algorithm": None}, quantized)
+        assert [stage.algo for stage in plan] == ["awq_lite"]
+
+
 def test_fusible_siblings_must_share_one_pipeline(quantized):
     with pytest.raises(AlgoCfgValidationError, match="fusible siblings"):
         compile_algo_cfg(
