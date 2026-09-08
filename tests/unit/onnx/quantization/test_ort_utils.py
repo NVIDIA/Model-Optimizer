@@ -178,7 +178,7 @@ def test_prepare_ep_list_registers_missing_trt_rtx_abi_provider(monkeypatch):
         get_library_path=lambda: "trt_rtx.dll",
     )
     monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
-    monkeypatch.setattr(ort_utils.ort, "get_ep_devices", lambda: ep_devices)
+    monkeypatch.setattr(ort_utils.ort, "get_ep_devices", lambda: ep_devices, raising=False)
 
     def register_provider(*args):
         register_calls.append(args)
@@ -188,6 +188,7 @@ def test_prepare_ep_list_registers_missing_trt_rtx_abi_provider(monkeypatch):
         ort_utils.ort,
         "register_execution_provider_library",
         register_provider,
+        raising=False,
     )
 
     providers = ort_utils._prepare_ep_list(
@@ -213,11 +214,13 @@ def test_prepare_ep_list_reuses_registered_trt_rtx_abi_provider(monkeypatch):
         ort_utils.ort,
         "get_ep_devices",
         lambda: [types.SimpleNamespace(ep_name="nv_tensorrt_rtx")],
+        raising=False,
     )
     monkeypatch.setattr(
         ort_utils.ort,
         "register_execution_provider_library",
         lambda *args: pytest.fail("The registered ABI EP should not be registered again"),
+        raising=False,
     )
 
     assert ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="abi") == [
@@ -243,12 +246,18 @@ def test_create_inference_session_configures_trt_rtx_abi_devices(monkeypatch):
 
     monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
     monkeypatch.setattr(ort_utils.ort, "SessionOptions", lambda: sess_options)
-    monkeypatch.setattr(ort_utils.ort, "get_ep_devices", lambda: [cpu_device, trt_rtx_device])
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_ep_devices",
+        lambda: [cpu_device, trt_rtx_device],
+        raising=False,
+    )
     monkeypatch.setattr(ort_utils.ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
     monkeypatch.setattr(
         ort_utils.ort,
         "register_execution_provider_library",
         lambda *args: pytest.fail("The registered ABI EP should not be registered again"),
+        raising=False,
     )
     monkeypatch.setattr(
         ort_utils.ort,
