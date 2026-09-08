@@ -17,6 +17,14 @@ python examples/puzzletron/orchestrate.py \
 be complete; it does not run missing prerequisites. Use `--stage full` for the
 normal dependency-ordered campaign and whole-campaign resume.
 
+For repeated manual stage-by-stage work, `per_attempt` is usually the better
+fit because Slurm reserves only the resources requested by that attempt. A
+selected stage also works in `reusable_allocation` mode, but the complete outer
+node remains reserved until that stage finishes or fails, even while some of
+its GPUs are unused. Puzzletron then exits the outer job; it does not keep an
+idle allocation between separate commands. Site policies that reclaim jobs
+with low GPU utilization may still favor `per_attempt`.
+
 Run the same command with `--dry-run` after changing any input file or updating
 the checkout. For Slurm runners, each dry-run submission includes a
 submission-equivalent `sbatch` script with its nested `srun` command. CPU/GPU
@@ -76,6 +84,14 @@ SIGTERM cancel active work and quit. Detaching preserves saved job information,
 so running the same command recovers the active jobs.
 
 The reusable-allocation watcher has a narrower interruption contract: Ctrl-C detaches and leaves the outer Slurm job running. Rerun the identical command to reattach. Cancel the outer job with the site's normal Slurm command only when you intend to stop all work in that allocation. After Slurm reports the outer job cancelled or failed, rerunning starts a replacement unless a compatible worker result records clean completion or an uncancelled terminal stage failure. Completed logical stages remain skipped, and in-flight local attempts from that allocation are recorded as cancelled before unfinished work is resubmitted. A recorded cancellation and a final-report failure remain retryable. Change the configuration or use a fresh run root before rerunning a campaign with a terminal stage failure.
+
+Do not edit the experiment, runner, or execution files while a compatible
+reusable allocation is active. Let it finish or cancel it, make the change,
+and run a fresh dry-run before launching again. A changed configuration has a
+new plan identity. In the same run root, Puzzletron can still reuse completed
+stages whose recorded outputs remain compatible and valid; affected or
+unfinished stages run again. Choose a new run root for a clean independent
+campaign.
 
 Redirect stderr before piping through `tee` (for example, append
 `2>&1 | tee run.log`) so progress output is captured. Use `--color always` for

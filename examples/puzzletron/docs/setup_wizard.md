@@ -104,6 +104,17 @@ experiment, runner, and execution YAML plus a `dry-run-plan.txt`; users do not
 need to construct a smoke configuration themselves. The wizard does not submit
 either bundle, and the campaign is not automatically gated on validation.
 
+Generated execution files use Puzzletron's default `per_attempt` mode, which
+submits each logical attempt as its own Slurm job. The wizard does not select
+`reusable_allocation` automatically because it cannot infer whether the site
+supports the required single-node container and shared-storage contract. To use
+the accelerated route, set `execution.mode: reusable_allocation` in the
+generated execution YAML and run a fresh dry-run. Compilation rejects a stage
+whose workers and parallel mesh do not fit within
+`execution.defaults.gpus_per_node`. See [reusable single-node
+allocations](slurm_configuration.md#reusable-single-node-allocations) before
+opting in.
+
 For named width/depth MIP, setup reads the teacher hidden size and layer count
 from the inspected model configuration. It always retains the teacher hidden
 size as the full-width scenario, even when the selected search only changes
@@ -127,4 +138,5 @@ The wizard writes `instances` for each stage in the generated execution YAML. An
 
 Smoke bundles use one instance per stage. Production bundles default non-single stages to the configured `infrastructure.gpus_per_node`, unless a model profile or an advanced stage setting supplies another value. Setup does not generally reduce `instances` to match `num_solutions` or an upstream `top_k`. At runtime, post-MIP `evaluation` and `downstream_evaluation` stages use fewer workers when fewer candidate artifacts actually exist; other GPU candidate stages retain their configured worker count. Lower the advanced stage setting when an upstream filter bounds the input to a smaller set.
 
-Generated bundles currently leave `execution.mode` unset and therefore use the default per-attempt scheduler path. To opt into a reusable single-node Slurm allocation, set `execution.mode: reusable_allocation` in the generated execution YAML and run a fresh dry-run. Compilation rejects any stage whose instances and parallel mesh cannot fit within `execution.defaults.gpus_per_node`. See [reusable single-node allocations](slurm_configuration.md#reusable-single-node-allocations) and [stage instances](slurm_configuration.md#stage-instances) for the execution and recovery behavior.
+See [stage instances](slurm_configuration.md#stage-instances) for the execution
+and recovery behavior of generated worker counts.

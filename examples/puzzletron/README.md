@@ -26,6 +26,12 @@ smoke; its duration depends on worker hardware, scheduler availability, cache
 state, and the execution profile. It is intended for scheduled integration
 validation, not routine smoke or presubmit use.
 
+The commands in this first-run path explicitly select maintained execution
+files that enable `reusable_allocation`. This is not Puzzletron's global
+default. Wizard-generated bundles use `per_attempt`, which submits each stage
+attempt as a separate Slurm job, unless the generated execution file is changed
+after checking that the site supports a reusable single-node allocation.
+
 ### 1. Create the controller environment
 
 From the ModelOpt checkout, use Python 3.10 through 3.14 to create a lightweight
@@ -150,7 +156,7 @@ report. For a failed or interrupted run, follow the actionable checks in
 The [Qwen VLM example guide](docs/qwen3p5_0p8b_vlm_smoke.md) lists the smoke's
 expected lifecycle checks and explains how to interpret its bounded results.
 
-### 6. Optional: run the longer example
+### 6. Optional: run the longer integration example
 
 After the smoke succeeds, keep the controller venv and runner and select a new
 run root plus the longer example files:

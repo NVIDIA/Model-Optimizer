@@ -5,7 +5,7 @@ The Qwen 3.5 0.8B VLM example has two experiment files with distinct purposes:
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
 | `full_vlm_smoke.yaml` | Check the complete lifecycle in one reusable two-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_smoke.yaml` |
-| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example in one reusable eight-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `vlm_campaign.yaml` | Run a longer integration example in one reusable eight-GPU allocation on a single node | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
 
 Both recipes select vLLM's Triton GDN prefill backend. On a fresh worker, the
 FlashInfer GDN kernels can still be compiling when the server readiness check
@@ -22,6 +22,8 @@ performance results.
 The campaign is a larger illustrative experiment intended for scheduled
 integration validation, not routine development or presubmit use. It is not a
 recommended pruning recipe, training duration, or candidate-selection policy.
+The qualifying one-node run completed in about 75 minutes; queue, cache, and
+runtime differences can change the elapsed time at another site.
 
 Unit tests compile these recipes and verify their stage and resource contracts.
 They do not replace an end-to-end GPU run against the current model, data,
@@ -197,9 +199,11 @@ Use guided setup when you need help resolving the model, dataset, and site
 settings. The [setup wizard guide](setup_wizard.md) owns its invocation,
 profiles, inputs, and generated files. Select Qwen 3.5 0.8B and the
 Nemotron-VLM v2 image-text dataset to generate this route with site-specific
-settings. Hidden (residual/embedding) width, attention, GDN, and depth are
-available through guided customization. Among the tracked routes, attention
-and GDN reductions are enabled only by `vlm_campaign.yaml`.
+settings. Generated bundles use the default `per_attempt` scheduling mode;
+follow the setup guide to opt into a reusable single-node allocation. Hidden
+(residual/embedding) width, attention, GDN, and depth are available through
+guided customization. Among the tracked routes, attention and GDN reductions
+are enabled only by `vlm_campaign.yaml`.
 Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.
