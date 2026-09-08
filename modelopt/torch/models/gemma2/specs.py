@@ -18,6 +18,8 @@
 
 from ..specs import ExportSpec, ModelSpec, register
 
+__all__: list[str] = []
+
 # Gemma 2 RMSNorm stores weight - 1 (the effective scale is weight + 1).
 register(
     ModelSpec(

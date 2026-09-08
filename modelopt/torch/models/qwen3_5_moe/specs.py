@@ -17,6 +17,8 @@
 
 from ..specs import ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # has_iterable_experts stays False to preserve pre-refactor behavior: the legacy
 # get_experts_list keyed off ``type(root_model).__name__.lower()``, and
 # "qwen3_5moeforcausallm" matched none of its qwen substrings (the "_5" breaks

@@ -17,6 +17,8 @@
 
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 register(
     ModelSpec(
         model_type="nemotron_h",

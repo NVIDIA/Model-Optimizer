@@ -17,6 +17,8 @@
 
 from ..specs import ExportSpec, ModelSpec, register
 
+__all__: list[str] = []
+
 # LayerNorm1P stores weight - 1 (zero-centered gamma); both the Megatron-style class
 # name and the HF Nemotron port are listed.
 register(

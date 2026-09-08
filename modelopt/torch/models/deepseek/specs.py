@@ -21,6 +21,8 @@ classes.
 
 from ..specs import ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # has_iterable_experts stays False until the grouped export path is validated on
 # this model.
 register(

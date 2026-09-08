@@ -24,6 +24,8 @@ the two must not drift apart.
 from ..gemma4.specs import _GEMMA4_MOE_SPEC
 from ..specs import ExportSpec, ModelSpec, register
 
+__all__: list[str] = []
+
 register(
     ModelSpec(
         model_type="gemma4_text",

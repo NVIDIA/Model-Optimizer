@@ -21,6 +21,8 @@ Covers the transformers-native V3 family (V3, R1, V3.1). The remote-code
 
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # DeepseekV3MoE is invisible to the generic MoE detection: its class name does not end
 # in "SparseMoeBlock" and it calls its router ``gate``, so neither the name test nor the
 # structural router+experts test in is_moe matches. block_names below is what puts it on

@@ -17,6 +17,8 @@
 
 from ..specs import ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # DeepseekV4Experts is fused from the start: a single module holding 3-D gate_up_proj
 # and down_proj parameters rather than an iterable of per-expert modules. So there is no
 # (gate, up) pair left for a serving engine to fuse, and the grouped-export path

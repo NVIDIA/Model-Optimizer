@@ -21,6 +21,8 @@ Gemma4RMSNorm is intentionally absent from ``weight_plus_one_norm_names`` until 
 
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # Gemma4 MoE experts are unfused into per-expert nn.Linear layers. The MoE block lives in
 # the text model, so ``gemma4_text`` reuses this exact layout rather than restating it --
 # the two must not drift apart.

@@ -17,6 +17,8 @@
 
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # Mixtral with per-expert experts uses w1/w2/w3. Fused experts (transformers 5.0+) are
 # detected from their per-expert quantizer attributes and need no naming override here.
 register(

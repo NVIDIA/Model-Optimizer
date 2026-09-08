@@ -17,6 +17,8 @@
 
 from ..specs import ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 # Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
 # w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
 # experts.mlp (see modelopt/torch/quantization/plugins/huggingface.py).

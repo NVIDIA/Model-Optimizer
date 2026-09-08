@@ -16,6 +16,8 @@ and `<model_type>/specs.py`:
 ```python
 from ..specs import ExportSpec, ModelSpec, MoESpec, register
 
+__all__: list[str] = []
+
 register(
     ModelSpec(
         model_type="qwen3_moe",
@@ -41,6 +43,12 @@ which to skip, from the registry.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
+
+`__all__` is empty because these modules export nothing — they exist so that importing
+them runs `register()`. Declaring it keeps the helper imports above out of any
+star-import. A value shared between two model types is private and imported explicitly
+(`gemma4_text` reuses `gemma4`'s `_GEMMA4_MOE_SPEC`); sub-model types of one family are
+an intra-family detail, not a package API.
 
 ## Sections
 
