@@ -21,7 +21,10 @@ import os
 import shlex
 import signal
 import socket
-import subprocess  # nosec B404
+
+# Required to supervise concurrent worker process groups; every launch uses an
+# argument sequence with ``shell=False`` and never interpolates a shell command.
+import subprocess
 import sys
 import time
 import uuid
@@ -284,7 +287,9 @@ class LocalExecutor(Executor):
                     stdout = log_file
                     log_paths.append(log_path)
                 try:
-                    process = subprocess.Popen(  # nosec B603
+                    # Popen is required so the executor can poll and terminate the
+                    # whole worker process group before releasing its GPU lease.
+                    process = subprocess.Popen(
                         self._wrapped_argv(launcher_argv),
                         cwd=attempt.command.cwd,
                         env=env,
