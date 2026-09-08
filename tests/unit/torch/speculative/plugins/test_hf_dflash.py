@@ -1039,10 +1039,15 @@ class TestDFlashFp32MasterWeights:
 
         with tempfile.TemporaryDirectory() as tmp:
             model.save_pretrained(tmp)
-            restored = AutoModelForCausalLM.from_pretrained(tmp)
+            # `dtype="auto"` is what the resume path in examples/speculative_decoding/main.py
+            # uses, and it is also what collapses every tensor onto the base model's dtype.
+            restored = AutoModelForCausalLM.from_pretrained(tmp, dtype="auto")
 
-            # What the restore leaves behind on its own, which is the bug this guards.
-            assert {p.dtype for p in restored.dflash_module.parameters()} == {torch.bfloat16}
+            # What the restore leaves behind on its own, which is the bug this guards: the
+            # draft comes back at the base model's dtype with the flag still set.
+            assert {p.dtype for p in restored.dflash_module.parameters()} == {
+                restored._base_model.dtype
+            }
 
             restored.restore_draft_precision(tmp)
 

@@ -566,10 +566,13 @@ class LiLiCorrExporter(DFlashExporter):
         # The serving loader builds the conv wrappers from geometry, not from the tensors:
         # without these two keys it defaults both to 0 and drops the conv tensors silently.
         conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
-        if getattr(conv, "taps", None):
+        # `taps` is absent on the no-op sublayer wrapper, which is what a conv-free draft
+        # carries, so its presence is the test for whether convolutions were installed.
+        taps = getattr(conv, "taps", None)
+        if conv is not None and taps:
             config["dflash_config"].update(
                 {
-                    "conv_kernel_size": conv.taps,
+                    "conv_kernel_size": taps,
                     "conv_group_size": conv.group_size,
                 }
             )
