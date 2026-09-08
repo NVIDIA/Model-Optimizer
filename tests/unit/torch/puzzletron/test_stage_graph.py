@@ -24,7 +24,6 @@ from modelopt.torch.puzzletron.stages.graph import (
     StageSpec,
     selected_parent_stage_ids,
     semantic_stage_config,
-    stage_display_name,
     topological_stage_ids,
 )
 
@@ -219,25 +218,9 @@ def test_registry_uses_the_approved_fixed_dependencies():
 
 
 def test_model_executing_sanity_stages_are_distributed():
-    assert STAGE_REGISTRY["sort_sanity"].distributed
-    assert STAGE_REGISTRY["width_sanity"].distributed
-    assert STAGE_REGISTRY["bypass_sanity"].distributed
+    for stage_id in ("sort_sanity", "width_sanity", "bypass_sanity", "build_library"):
+        assert STAGE_REGISTRY[stage_id].distributed
     assert not STAGE_REGISTRY["slicing_sanity"].distributed
-
-
-def test_block_library_stage_is_distributed():
-    assert STAGE_REGISTRY["build_library"].distributed
-
-
-def test_stage_labels_use_independent_granularity():
-    assert stage_display_name("vllm_stats", granularity="block") == "Block vLLM Stats"
-    assert stage_display_name("vllm_stats", granularity="subblock") == "Subblock vLLM Stats"
-    assert stage_display_name("bypass", granularity="subblock") == "Subblock Bypass"
-    assert (
-        stage_display_name("replacement_scoring", granularity="subblock")
-        == "Replace-one-subblock Scoring"
-    )
-    assert stage_display_name("build_library", granularity="subblock") == "Build Block Library"
 
 
 def test_topological_order_rejects_unknown_parents():

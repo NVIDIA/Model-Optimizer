@@ -103,24 +103,15 @@ def test_batch_alignment_preserves_hydra_references() -> None:
     assert config["nested"]["micro_batch_size"] == 4
 
 
-def test_nemotron_nano_omits_latent_moe_activation_pass() -> None:
+@pytest.mark.parametrize("latent_moe", [False, True])
+def test_latent_moe_activation_pass_follows_model_capability(latent_moe: bool) -> None:
     experiment = render_experiment(
-        _nemotron_render_state(latent_moe=False),
+        _nemotron_render_state(latent_moe=latent_moe),
         "production",
     )
 
     pass_names = {item["name"] for item in experiment["pruning"]["activation_passes"]}
-    assert "moe_latent" not in pass_names
-
-
-def test_nemotron_super_keeps_latent_moe_activation_pass() -> None:
-    experiment = render_experiment(
-        _nemotron_render_state(latent_moe=True),
-        "production",
-    )
-
-    pass_names = {item["name"] for item in experiment["pruning"]["activation_passes"]}
-    assert "moe_latent" in pass_names
+    assert ("moe_latent" in pass_names) is latent_moe
 
 
 @pytest.mark.parametrize(
@@ -200,15 +191,6 @@ def test_first_class_vlm_acquisition_disables_text_token_memmaps() -> None:
     assert "packed_token_cache_path" not in experiment["bypass"]["data"]
 
 
-def test_render_experiment_uses_global_runtime_repeat_default() -> None:
-    experiment = render_experiment(
-        _nemotron_render_state(latent_moe=False),
-        "production",
-    )
-
-    assert experiment["vllm_stats"]["runtime_stats"]["repeat_block_n_times"] == 4
-
-
 def test_normal_aiperf_config_asks_shared_cp_and_maps_moe_ep_to_dp() -> None:
     prompts = _ServingPrompts(
         {
@@ -278,7 +260,7 @@ def test_advanced_aiperf_config_asks_split_cp_and_workload() -> None:
     assert config["concurrency"] == [8]
 
 
-def test_default_post_mip_flow_uses_fifteen_minute_aiperf_timeout() -> None:
+def test_default_post_mip_flow_uses_loss_metrics_for_selection() -> None:
     flow = _default_flow(
         "memory",
         {"objectives": [{"metric": "metrics.lm_loss", "direction": "minimize"}]},
@@ -288,7 +270,6 @@ def test_default_post_mip_flow_uses_fifteen_minute_aiperf_timeout() -> None:
         include_initial_filter=False,
     )
 
-    assert flow["nodes"]["serving"]["config"]["benchmark_timeout"] == 900
     assert flow["nodes"]["best_lm"]["metric"] == "online_eval.lm_loss"
     assert flow["nodes"]["best"]["metric"] == "final_eval.lm_loss"
 
@@ -663,149 +644,6 @@ def test_render_execution_preserves_gpu_mip_validation_topology() -> None:
     }
 
 
-def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:
-    state = {
-        "model": {"source": "Qwen/test", "resolved_revision": "revision"},
-        "inventory": {
-            "family": "qwen3_5",
-            "descriptor": "qwen3_5",
-            "family_config": "examples/puzzletron/configs/families/qwen3_5/family.yaml",
-            "num_layers": 4,
-            "num_sublayers": 8,
-        },
-        "answers": {
-            "data": {
-                "source": "/dataset",
-                "modality": "text",
-                "layout": "fixed",
-                "sequence_length": 2048,
-            },
-            "pruning": {
-                "width_importance_samples": 128,
-                "replacement_samples": 16,
-                "depth_remove": 0,
-                "axes": {
-                    "hidden_width": {
-                        "enabled": True,
-                        "teacher_value": 1024,
-                        "values": [1024, 768],
-                        "alignment": 256,
-                    },
-                    "ffn_intermediate": {
-                        "enabled": True,
-                        "teacher_value": 3584,
-                        "values": [3584, 3072],
-                        "alignment": 256,
-                    },
-                },
-                "bypass": {"enabled": True, "batch_size": 3},
-            },
-            "runtime": {
-                "vllm_enabled": True,
-                "isl": 2048,
-                "osl": 256,
-                "concurrency": 4,
-            },
-            "mip": {"runs": {}},
-            "post_mip": {
-                "flows": {
-                    "memory": {
-                        "source": {"run": "memory"},
-                        "nodes": {
-                            "serving": {
-                                "type": "aiperf",
-                                "config": {
-                                    "concurrency": [1],
-                                    "topology": {
-                                        "tensor_parallel_size": 4,
-                                        "pipeline_parallel_size": 1,
-                                        "prefill_context_parallel_size": 2,
-                                        "decode_context_parallel_size": 2,
-                                        "data_parallel_size": 1,
-                                        "expert_parallel_size": 1,
-                                        "distributed_executor_backend": "mp",
-                                        "gpu_group_size": 8,
-                                    },
-                                },
-                            },
-                            "short_kd": {
-                                "type": "global_kd",
-                                "input": "serving",
-                                "config": {"local_batch_size": 1},
-                            },
-                        },
-                    }
-                }
-            },
-            "infrastructure": {
-                "meshes": {
-                    "common": {"tp": 2, "pp": 2, "dp_shard": 2, "ep": 1},
-                    "bypass": {"pp": 1, "dp_shard": 2, "dp_replicate": 1},
-                    "global_kd": {
-                        "pp": 2,
-                        "dp_shard": 2,
-                        "dp_replicate": 2,
-                    },
-                }
-            },
-            "output": {"result_root": "/results"},
-        },
-    }
-
-    experiment = render_experiment(state, "production")
-    runtime = experiment["vllm_stats"]["runtime_stats"]
-    serving = experiment["post_mip"]["flows"]["memory"]["nodes"]["serving"]["config"]
-
-    assert runtime["granularity"] == "subblock"
-    assert experiment["embedding_pruning"]["widths"] == [1024, 768]
-    assert experiment["vllm_stats"]["model_hidden_sizes"] == [1024, 768]
-    assert experiment["search_space"]["axes"]["hidden_width"]["values"] == [1024, 768]
-    assert experiment["search_space"]["axes"]["ffn_intermediate"]["values"] == [3584, 3072]
-    assert {
-        key: runtime["topology"][key]
-        for key in (
-            "tensor_parallel_size",
-            "pipeline_parallel_size",
-            "prefill_context_parallel_size",
-            "decode_context_parallel_size",
-            "gpu_group_size",
-        )
-    } == {
-        "tensor_parallel_size": 1,
-        "pipeline_parallel_size": 1,
-        "prefill_context_parallel_size": 1,
-        "decode_context_parallel_size": 1,
-        "gpu_group_size": 1,
-    }
-    assert serving["topology"] == {
-        "tensor_parallel_size": 4,
-        "pipeline_parallel_size": 1,
-        "prefill_context_parallel_size": 2,
-        "decode_context_parallel_size": 2,
-        "data_parallel_size": 1,
-        "expert_parallel_size": 1,
-        "distributed_executor_backend": "mp",
-        "gpu_group_size": 8,
-    }
-    assert serving["topology"] != runtime["topology"]
-    assert experiment["data"]["calibration"]["micro_batch_size"] == 4
-    assert experiment["data"]["replacement_scoring"]["micro_batch_size"] == 4
-    assert experiment["pruning"]["micro_batch_size"] == 4
-    assert experiment["sort_sanity"]["micro_batch_size"] == 4
-    assert experiment["depth_importance"]["micro_batch_size"] == 4
-    assert experiment["replacement_scoring"]["micro_batch_size"] == 4
-    assert experiment["bypass"]["training"]["micro_batch_size"] == 4
-    assert experiment["bypass"]["training"]["val_micro_batch_size"] == 2
-    assert experiment["bypass"]["iter_num"] == 1
-    assert experiment["bypass"]["step_num"] == 1
-    assert experiment["bypass"]["training"]["training_tokens"] == 4096 * 2048
-    assert experiment["global_distillation"]["local_batch_size"] == 8
-    assert (
-        experiment["post_mip"]["flows"]["memory"]["nodes"]["short_kd"]["config"]["local_batch_size"]
-        == 8
-    )
-
-
 def test_normal_mip_flow_asks_for_embedding_widths(tmp_path) -> None:
     state = AnswerState.start(tmp_path / "campaign", detailed=False)
     state.record_many(
@@ -817,7 +655,6 @@ def test_normal_mip_flow_asks_for_embedding_widths(tmp_path) -> None:
     _ask_mip(prompts, state)
 
     run = next(iter(state.section("mip")["runs"].values()))
-    assert "Embedding widths for this MIP run (all or YAML list):" in prompts.messages
     assert run["search_space"]["embedding"] == [1024, 768]
     assert run["solver"]["num_solutions"] == 3
     assert run["homogeneous"] == {

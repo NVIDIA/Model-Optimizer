@@ -25,7 +25,6 @@ from modelopt.torch.puzzletron.subblock_stats.runtime_estimator import (
     candidate_slope,
     effective_repeat_count,
     fixed_intercept,
-    homogeneous_layout,
     median_measurement,
     scaffolded_layout,
 )
@@ -42,12 +41,6 @@ def test_effective_repeat_rejects_non_positive_values():
         effective_repeat_count(0, 2)
     with pytest.raises(ValueError, match="positive"):
         effective_repeat_count(4, 0)
-
-
-def test_homogeneous_layout_contains_only_candidate():
-    candidate = BlockConfig(subblock_configs=(FFNConfig(intermediate_size=16),))
-
-    assert homogeneous_layout(candidate, repeat_count=4) == (candidate,) * 4
 
 
 def test_scaffolded_layout_places_one_scaffold_in_each_pp_chunk():

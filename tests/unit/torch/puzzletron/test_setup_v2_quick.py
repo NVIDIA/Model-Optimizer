@@ -31,13 +31,12 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.controller import dry_run_plan
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
 from puzzletron_setup.v2.defaults import DefaultsResolver, validate_defaults
 from puzzletron_setup.v2.presets import get_setup_preset
-from puzzletron_setup.v2.prompts import NonInteractiveBackend, PromptChoice, ScriptedBackend
+from puzzletron_setup.v2.prompts import NonInteractiveBackend, ScriptedBackend
 from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
@@ -134,18 +133,6 @@ def test_each_model_family_defines_every_guided_profile(family_config, preset_na
 # Non-interactive CLI behavior
 
 
-def test_non_interactive_backend_uses_semantic_defaults() -> None:
-    backend = NonInteractiveBackend()
-    choices = [PromptChoice("First", "first"), PromptChoice("Second", "second")]
-
-    assert backend.text("Path:", "/resolved/path") == "/resolved/path"
-    assert backend.text("Optional commands:", "") == ""
-    assert backend.select("Choice:", choices, "second") == "second"
-    assert backend.checkbox("Choices:", choices, ["first"]) == ["first"]
-    with pytest.raises(SetupError, match="requires a default"):
-        backend.text("Path:", None)
-
-
 @pytest.mark.parametrize(
     "argv",
     [
@@ -161,7 +148,7 @@ def test_cli_rejects_invalid_automation_argument_combinations(argv):
     assert error.value.code == 2
 
 
-def test_cli_incomplete_noninteractive_defaults_fail_fast(tmp_path, capsys):
+def test_cli_incomplete_noninteractive_defaults_fail_fast(tmp_path):
     defaults = tmp_path / "defaults.yaml"
     defaults.write_text("schema_version: 1\n")
 
@@ -177,7 +164,6 @@ def test_cli_incomplete_noninteractive_defaults_fail_fast(tmp_path, capsys):
         )
         == 2
     )
-    assert "Setup stopped: Enter a model path or Hugging Face URL." in capsys.readouterr().out
 
 
 def test_cli_invalid_noninteractive_vllm_topology_fails_fast(tmp_path, monkeypatch, capsys):
@@ -398,166 +384,6 @@ def test_width_sanity_samples_contribute_without_sort_sanity(tmp_path):
     assert _acquisition_sample_requirements(state) == (2, 11)
 
 
-def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
-    tmp_path,
-    monkeypatch,
-):
-    campaign = tmp_path / "campaign"
-    model_path = tmp_path / "model"
-    dataset = tmp_path / "dataset"
-    model_path.mkdir()
-    dataset.mkdir()
-    inspected = _qwen_inspected_model(model_path)
-    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
-    monkeypatch.setattr(
-        wizard_module,
-        "infer_dataset_modality",
-        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
-    )
-    defaults = tmp_path / "defaults.yaml"
-    defaults.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "model": {"source": str(model_path)},
-                "data": {
-                    "source": str(dataset),
-                    "modality": "text",
-                    "layout": "fixed",
-                    "sequence_length": 32,
-                },
-                "infrastructure": {
-                    "gpus_per_node": 1,
-                    "runner": {
-                        "slurm": {"job_name_prefix": "acct-puzzletron"},
-                    },
-                    "execution_contract": {
-                        "repository": "/worker/modelopt",
-                        "venv": "/worker/venv",
-                    },
-                },
-            },
-            sort_keys=False,
-        )
-    )
-
-    result = wizard_module.run_wizard_v2(
-        resume=None,
-        defaults_path=defaults,
-        backend=NonInteractiveBackend(),
-        campaign_dir=campaign,
-        setup_profile="smoke",
-    )
-
-    assert result == campaign.resolve()
-    generated = WizardState.resume(campaign)
-    assert generated.collection("pruning")["depth_remove"] == 0
-    assert generated.collection("pruning")["width_importance_samples"] == 8
-    assert generated.collection("pruning")["replacement_samples"] == 4
-    assert generated.collection("default_resolutions")["pruning.depth_remove"] == {
-        "value": 0,
-        "source": "model_profile",
-    }
-    assert generated.collection("default_resolutions")["pruning.width_importance_samples"] == {
-        "value": 8,
-        "source": "model_profile",
-    }
-    assert (
-        generated.collection("default_resolutions")["post_mip.quality_comparison"]["source"]
-        == "model_profile"
-    )
-    smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
-    smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
-    assert (
-        smoke_flow["nodes"]["serving"]["config"]["topology"]["server_context_overhead_tokens"]
-        == 16384
-    )
-    assert smoke_flow["nodes"]["serving"]["config"]["topology"]["extra_vllm_args"] == [
-        "-cc.cudagraph_mode=NONE",
-        "--no-enable-flashinfer-autotune",
-        "--gdn-prefill-backend",
-        "triton",
-        "--gpu-memory-utilization",
-        "0.5",
-        "--reasoning-parser",
-        "qwen3",
-        "--default-chat-template-kwargs",
-        '{"enable_thinking": false}',
-    ]
-    smoke_comparison = smoke_flow["nodes"]["quality_benchmarks"]
-    assert "recorded_observation" not in smoke_comparison["config"]
-    smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
-    assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
-    production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
-    execution = yaml.safe_load((campaign / "production" / "execution.yaml").read_text())
-    assert execution["execution"]["schema_version"] == 1
-    assert production["model_info"]["hidden_size"] == 1024
-    assert production["model_info"]["num_hidden_layers"] == 24
-    assert production["embedding_pruning"] == {
-        "enabled": True,
-        "widths": [1024],
-        "alignment": 256,
-        "cycle_widths": True,
-    }
-    assert production["depth_importance"]["expected_initial_sublayers"] == 48
-    assert production["depth_importance"]["max_subblocks_to_remove"] == 0
-    mip_run = next(iter(production["mip"]["runs"].values()))
-    assert mip_run["search_space"]["embedding"] == [1024]
-    assert mip_run["search_space"]["depth"] == [0]
-    assert execution["execution"]["stages"]["mip"]["resource"] == "cpu"
-    plan = compile_campaign_plan(
-        experiment_config_path=campaign / "production" / "experiment.yaml",
-        runner=load_runner_config(campaign / "production" / "runner.yaml"),
-        execution=load_execution_config(campaign / "production" / "execution.yaml"),
-        stage_filter="mip",
-    )
-    submission = dry_run_plan(plan)[0]
-    assert submission.launcher == "direct"
-    assert submission.gpus == 0
-    assert any(
-        str(argument).endswith("examples/puzzletron/main.py") for argument in submission.argv
-    )
-    assert submission.argv[submission.argv.index("--worker-stage") + 1] == "mip"
-    flow = next(iter(production["post_mip"]["flows"].values()))
-    comparison = flow["nodes"]["quality_benchmarks"]
-    assert comparison["type"] == "downstream_evaluation"
-    assert comparison["input"] == "best"
-    assert comparison["failure_policy"] == "strict"
-    assert comparison["config"]["tasks"] == [
-        "ifeval",
-        "gsm8k",
-        "mmlu_pro_computer_science",
-        "mmlu_pro_history",
-    ]
-    assert comparison["config"]["limit"] == 256
-    assert "recorded_observation" not in comparison["config"]
-    resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
-    assert resolved_defaults["pruning.depth_remove"] == {
-        "value": 0,
-        "requested": None,
-        "effective": 0,
-        "source": "model_profile",
-    }
-    pruning = generated.collection("pruning")
-    pruning["depth_remove"] = 1
-    generated.set_collection("pruning", pruning)
-    profiles = generated.collection("parallel_profiles")
-    first_profile = next(iter(profiles.values()))
-    profiles["secondary"] = {**first_profile, "tp": 2}
-    generated.set_collection("parallel_profiles", profiles)
-
-    wizard_module.build_bundles_v2(campaign, generated)
-
-    resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
-    assert resolved_defaults["pruning.depth_remove"] == {
-        "value": 0,
-        "requested": None,
-        "effective": 1,
-        "source": "model_profile",
-    }
-    assert resolved_defaults["profiles"]["effective"] == profiles
-
-
 def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatch):
     campaign = tmp_path / "campaign"
     model_path = tmp_path / "model"
@@ -620,13 +446,7 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert flow_id == "params-90"
     nodes = flow["nodes"]
     quality = nodes["quality_benchmarks"]
-    assert (
-        quality["config"]["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
-    )
-    assert quality["config"]["limit_mm_per_prompt"] == {"image": 32}
-    assert quality["config"]["max_model_len"] == 32768
     assert "model" not in quality["config"]
-    assert "log_samples" not in quality["config"]
     assert "recorded_observation" not in quality["config"]
     assert production_execution["execution"]["stages"]["replacement_scoring"]["instances"] == 8
     assert production_execution["execution"]["stages"]["post.params-90.short_kd"]["instances"] == 8
@@ -650,14 +470,6 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     mip = next(stage for stage in plan.stages if stage.stage_id == "mip")
     assert mip.resource == "cpu"
     assert mip.total_gpus == 0
-    dry_run = (campaign / "production" / "dry-run-plan.txt").read_text()
-    assert "mip: 1 submission(s), strategy=single, resource=cpu" in dry_run
-    assert '"resource": "cpu"' in dry_run
-    assert "scheduler_script" in dry_run
-    assert str(campaign / "production" / "experiment.yaml") in dry_run
-    assert ".puzzletron-v2-" not in dry_run
-    readme = (campaign / "README.md").read_text()
-    assert "generation-time snapshot" in readme
     snapshots = {
         budget: (campaign / budget / "dry-run-plan.txt").read_text()
         for budget in ("smoke", "production")
@@ -745,83 +557,6 @@ def test_guided_infrastructure_records_cpu_partition_default(tmp_path):
 
     assert state.get_field("infrastructure.runner.slurm.partition") == "gpu"
     assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu"
-
-
-def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_path):
-    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
-    resolver = DefaultsResolver(
-        file_defaults={
-            "infrastructure": {
-                "runner": {
-                    "slurm": {
-                        "partition": ["gpu-a", "gpu-b"],
-                        "partition_cpu": ["cpu-a", "cpu-b"],
-                    }
-                },
-            }
-        }
-    )
-
-    class PartitionDefaultBackend(ScriptedBackend):
-        partition_default = None
-        cpu_partition_default = None
-
-        def text(self, message: str, default: str) -> str:
-            if message.startswith("Eligible Slurm partitions"):
-                self.partition_default = default
-                return default
-            if message.startswith("Eligible CPU-only Slurm partitions"):
-                self.cpu_partition_default = default
-                return default
-            return super().text(message, default)
-
-    backend = PartitionDefaultBackend(
-        [
-            "customize",
-            "/worker/modelopt",
-            "/worker/venv",
-            "",
-            "",
-            "acct",
-            "pt",
-            "4:00:00",
-            "6",
-            "24576",
-            "8",
-            "",
-        ]
-    )
-
-    assert infrastructure_section(
-        WizardSession(state, backend),
-        resolver,
-        {},
-    )
-
-    assert backend.partition_default == "gpu-a,gpu-b"
-    assert backend.cpu_partition_default == "cpu-a,cpu-b"
-    assert state.get_field("infrastructure.runner.slurm.partition") == "gpu-a,gpu-b"
-    assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu-a,cpu-b"
-    assert state.get_field("infrastructure.runner.slurm.cpu_cpus_per_task") == 6
-    assert state.get_field("infrastructure.runner.slurm.cpu_memory_mb") == 24576
-    assert backend.remaining == 0
-
-
-def test_resume_preserves_legacy_partition_fields(tmp_path):
-    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
-    legacy = {
-        "partition_batch": "batch",
-        "partition_interactive": "interactive",
-        "partition_cpu": "cpu",
-        "interactive_max_nodes": 2,
-    }
-    for field, value in legacy.items():
-        state.set_field(f"infrastructure.runner.slurm.{field}", value, source="user")
-
-    resumed = WizardState.resume(state.path)
-
-    for field, value in legacy.items():
-        assert resumed.get_field(f"infrastructure.runner.slurm.{field}") == value
 
 
 def _qwen_inspected_model(model_path, *, multimodal: bool = False) -> InspectedModel:

@@ -91,16 +91,10 @@ def test_pipeline_boundary_rejects_stage_local_legacy_varlen():
         )
 
 
-def test_pipeline_defaults_sort_sanity_to_include_reverse():
-    canonical = normalize_pipeline_config({})
-
-    assert canonical["sort_sanity"]["include_reverse"] is True
-
-
-def test_pipeline_preserves_explicit_reverse_sort_opt_out():
-    canonical = normalize_pipeline_config({"sort_sanity": {"include_reverse": False}})
-
-    assert canonical["sort_sanity"]["include_reverse"] is False
+def test_pipeline_normalizes_reverse_sort_sanity_policy():
+    assert normalize_pipeline_config({})["sort_sanity"]["include_reverse"] is True
+    explicit = normalize_pipeline_config({"sort_sanity": {"include_reverse": False}})
+    assert explicit["sort_sanity"]["include_reverse"] is False
 
 
 @pytest.mark.parametrize(

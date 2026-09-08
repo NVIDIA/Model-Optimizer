@@ -59,6 +59,9 @@ class _TrackingExecutor:
     def __init__(self) -> None:
         self.attempts = []
 
+    def can_submit_all(self, _attempts):
+        return True
+
     def submit(self, attempt):
         self.attempts.append(attempt)
         return JobHandle(

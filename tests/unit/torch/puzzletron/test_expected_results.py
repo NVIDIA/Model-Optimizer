@@ -66,18 +66,27 @@ def _contract(tmp_path: Path) -> Path:
     return path
 
 
-def test_expectation_verifier_projects_fields_and_allows_one_directional_row_flip(
-    tmp_path: Path,
+def _write_observation(
+    contract: Path,
+    *,
+    identity: dict | None = None,
+    correct_rows: int = 7,
 ) -> None:
-    contract = _contract(tmp_path)
     _write(
         contract.with_name("observation.json"),
         {
             "schema": "modelopt.puzzletron-reference-observation/v1",
             "contract_id": "smoke-v1",
-            "values": {"identity": {"profile": "smoke-native-v1"}, "correct_rows": 7},
+            "values": {"identity": identity or {}, "correct_rows": correct_rows},
         },
     )
+
+
+def test_expectation_verifier_projects_fields_and_allows_one_directional_row_flip(
+    tmp_path: Path,
+) -> None:
+    contract = _contract(tmp_path)
+    _write_observation(contract, identity={"profile": "smoke-native-v1"})
     run = tmp_path / "run"
     _write(
         run / "artifacts/result.json",
@@ -105,14 +114,7 @@ def test_expectation_verifier_distinguishes_regression_from_invalid_evidence(
     tmp_path: Path,
 ) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {"profile": "smoke-native-v1"}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract, identity={"profile": "smoke-native-v1"})
     run = tmp_path / "run"
     result_path = run / "artifacts/result.json"
     _write(
@@ -134,14 +136,7 @@ def test_expectation_verifier_distinguishes_regression_from_invalid_evidence(
 
 def test_expectation_verifier_rejects_invalid_denominator_evidence(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {"profile": "smoke-native-v1"}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract, identity={"profile": "smoke-native-v1"})
     run = tmp_path / "run"
     _write(
         run / "artifacts/result.json",
@@ -189,18 +184,10 @@ def test_expectation_verifier_follows_root_confined_artifact_pointers(tmp_path: 
         }
     )
     _write(contract, contract_payload)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {
-                "identity": {"profile": "smoke-native-v1"},
-                "correct_rows": 7,
-                "profile": "smoke-native-v1",
-            },
-        },
-    )
+    _write_observation(contract, identity={"profile": "smoke-native-v1"})
+    observation = json.loads(contract.with_name("observation.json").read_text())
+    observation["values"]["profile"] = "smoke-native-v1"
+    _write(contract.with_name("observation.json"), observation)
     run = tmp_path / "run"
     manifest = run / "artifacts/curve.json"
     observations = run / "artifacts/observations.json"
@@ -230,14 +217,7 @@ def test_expectation_verifier_rejects_artifact_pointer_escape(tmp_path: Path) ->
         "follow": ["/observations_path"],
     }
     _write(contract, payload)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {}, "correct_rows": 0},
-        },
-    )
+    _write_observation(contract, correct_rows=0)
     run = tmp_path / "run"
     _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 0, "timing_ms": 1})
     _write(run / "artifacts/summary.json", {"observations_path": str(tmp_path / "outside.json")})
@@ -254,14 +234,7 @@ def test_verification_cli_returns_result_exit_code_and_json(
     capsys,
 ) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract)
     run = tmp_path / "run"
     result_path = run / "artifacts/result.json"
     _write(result_path, {"identity": {}, "correct_rows": 5, "timing_ms": 1})
@@ -277,14 +250,7 @@ def test_orchestrator_returns_expectation_regression_exit_code(
     capsys,
 ) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract)
     run = tmp_path / "run"
     _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 5, "timing_ms": 1})
     plan = SimpleNamespace(
@@ -375,14 +341,7 @@ def test_reusable_orchestrator_verifies_expectation_after_worker_completion(
     capsys,
 ) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract)
     run = tmp_path / "run"
     _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 5, "timing_ms": 1})
     plan = SimpleNamespace(
@@ -428,14 +387,7 @@ def test_reusable_orchestrator_verifies_expectation_after_worker_completion(
 
 def test_exact_fields_preserve_json_types(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": {"profile": 1}, "correct_rows": 7},
-        },
-    )
+    _write_observation(contract, identity={"profile": 1})
     run = tmp_path / "run"
     _write(
         run / "artifacts/result.json",

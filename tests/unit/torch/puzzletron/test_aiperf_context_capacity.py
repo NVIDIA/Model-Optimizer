@@ -34,7 +34,6 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _PeakGpuMemorySampler,
     _prepare_vllm_checkpoint,
     _profile_command,
-    _resolve_executable,
     _run_profile_command_async,
     _server_max_model_len,
     _topology_vllm_args,
@@ -81,15 +80,6 @@ def test_profile_command_terminates_child_when_cancelled(monkeypatch):
 
     assert process.killed
     assert process.returncode == -9
-
-
-def test_resolve_executable_uses_program_specific_configuration_hint(monkeypatch):
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf.shutil.which", lambda *_args, **_kwargs: None
-    )
-
-    with pytest.raises(FileNotFoundError, match="Cannot find executable vllm; add vLLM to PATH"):
-        _resolve_executable("vllm", configuration_hint="add vLLM to PATH")
 
 
 def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch):

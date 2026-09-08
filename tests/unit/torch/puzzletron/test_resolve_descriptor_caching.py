@@ -33,29 +33,23 @@ REGISTRY_MODULE = "modelopt.torch.puzzletron.anymodel.registry"
 class TestResolveDescriptorCachesDynamicModules:
     """resolve_descriptor_from_pretrained must call force_cache_dynamic_modules."""
 
+    @pytest.mark.parametrize("trust_remote_code", [False, True])
     @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
     @patch(f"{REGISTRY_MODULE}.AutoConfig")
-    def test_force_cache_called(self, mock_auto_config_cls, mock_force_cache):
-        mock_config = MagicMock()
-        mock_config.model_type = "llama"
-        mock_auto_config_cls.from_pretrained.return_value = mock_config
-
-        mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path", trust_remote_code=True)
-
-        mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=True)
-
-    @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
-    @patch(f"{REGISTRY_MODULE}.AutoConfig")
-    def test_force_cache_called_without_trust_remote_code(
-        self, mock_auto_config_cls, mock_force_cache
+    def test_resolver_caches_dynamic_modules(
+        self, mock_auto_config_cls, mock_force_cache, trust_remote_code
     ):
         mock_config = MagicMock()
         mock_config.model_type = "llama"
         mock_auto_config_cls.from_pretrained.return_value = mock_config
 
-        mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
+        mtpz.anymodel.resolve_descriptor_from_pretrained(
+            "/fake/path", trust_remote_code=trust_remote_code
+        )
 
-        mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)
+        mock_force_cache.assert_called_once_with(
+            mock_config, "/fake/path", trust_remote_code=trust_remote_code
+        )
 
     @patch(f"{REGISTRY_MODULE}.register_native_config_aliases")
     @patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
@@ -85,17 +79,14 @@ class TestResolveDescriptorCachesDynamicModules:
         ("qwen3_6", "Qwen3P5VLModelDescriptor"),
     ],
 )
-@patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules")
 @patch(f"{REGISTRY_MODULE}.AutoConfig")
-def test_resolve_qwen3_5_and_qwen3_6_model_types(
-    mock_auto_config_cls, mock_force_cache, model_type, descriptor_name
-):
+def test_resolve_qwen3_5_and_qwen3_6_model_types(mock_auto_config_cls, model_type, descriptor_name):
     pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
     mock_config = MagicMock()
     mock_config.model_type = model_type
     mock_auto_config_cls.from_pretrained.return_value = mock_config
 
-    resolution = mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
+    with patch(f"{REGISTRY_MODULE}.force_cache_dynamic_modules"):
+        resolution = mtpz.anymodel.resolve_descriptor_from_pretrained("/fake/path")
 
     assert resolution.descriptor.__name__ == descriptor_name
-    mock_force_cache.assert_called_once_with(mock_config, "/fake/path", trust_remote_code=False)

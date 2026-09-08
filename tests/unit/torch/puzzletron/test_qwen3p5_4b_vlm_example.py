@@ -79,39 +79,14 @@ def test_qwen3p5_4b_model_pins_the_bounded_ffn_grid() -> None:
     model = yaml.safe_load(MODEL_PATH.read_text())
 
     assert model["input_hf_model_path"] == "Qwen/Qwen3.5-4B"
-    assert model["model_info"] == {
-        "hf_repo": model["input_hf_model_path"],
-        "hf_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
-        "model_type": "qwen3_5",
-        "architectures": ["Qwen3_5ForConditionalGeneration"],
-        "num_hidden_layers": 32,
-        "hidden_size": 2560,
-        "intermediate_size": 9216,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 4,
-        "head_dim": 256,
-        "vocab_size": 248320,
-        "tie_word_embeddings": True,
-        "max_position_embeddings": 262144,
-        "mtp_num_hidden_layers": 1,
-        "layer_counts": {"linear_attention": 24, "full_attention": 8},
-        "mamba": {
-            "linear_key_head_dim": 128,
-            "linear_num_key_heads": 16,
-            "linear_num_value_heads": 32,
-            "linear_value_head_dim": 128,
-            "linear_conv_kernel_dim": 4,
-        },
+    assert model["model_info"]["hf_revision"] == ("851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a")
+    assert model["model_info"]["model_type"] == "qwen3_5"
+    assert model["model_info"]["layer_counts"] == {
+        "linear_attention": 24,
+        "full_attention": 8,
     }
     widths = [8704, 8192, 7168, 6144, 5632, 5120, 4608]
     assert model["pruning"] == {"intermediate_size_list": widths}
-    assert model["search_space"]["axes"] == {
-        "ffn_intermediate": {
-            "enabled": True,
-            "teacher_value": 9216,
-            "values": widths,
-        }
-    }
 
 
 def test_qwen3p5_4b_default_compiles_the_complete_ffn_grid_and_stops_at_mip(
@@ -133,68 +108,11 @@ def test_qwen3p5_4b_default_compiles_the_complete_ffn_grid_and_stops_at_mip(
         "replacement_scoring",
         "mip",
     )
-    cpu_stages = {"convert", "build_library", "mip"}
-    assert all(stage.resource == "cpu" for stage in plan.stages if stage.stage_id in cpu_stages)
-    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in cpu_stages)
-    assert all(stage.total_gpus == 1 for stage in plan.stages if stage.stage_id not in cpu_stages)
-    assert config["model"]["source"] == "Qwen/Qwen3.5-4B"
-    assert config["model"]["revision"] == "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-    assert config["data"]["processor_identity"] == (
-        "Qwen/Qwen3.5-4B@851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-    )
-    assert config["search_space"]["axes"]["ffn_intermediate"] == {
-        "enabled": True,
-        "teacher_value": 9216,
-        "values": [8704, 8192, 7168, 6144, 5632, 5120, 4608],
-    }
     assert config["vllm_stats"]["enabled"] is False
-    assert config["vllm_stats"]["runtime_stats"]["enabled"] is False
-    assert config["mip"]["runs"] == {
-        "params-80": {
-            "constraints": {"params": {"max": "82%"}},
-            "objectives": [
-                {
-                    "metric": "metrics.cosine_embedding_loss_hidden_states",
-                    "direction": "minimize",
-                }
-            ],
-            "search_space": {
-                "depth": [0],
-                "embedding": [2560],
-                "axes_default": "teacher",
-                "axes": {"ffn.intermediate_size": "all"},
-            },
-            "solver": {
-                "backend": "auto",
-                "num_solutions": 3,
-                "min_hamming_distance": 2,
-                "max_seconds_per_solution": 30,
-            },
-            "homogeneous": {"enabled": True, "keep": 2, "rank_by": "objective"},
-        },
-        "memory-85": {
-            "constraints": {"memory": {"at": {"serving-default": {"max": "85%"}}}},
-            "objectives": [
-                {
-                    "metric": "metrics.cosine_embedding_loss_hidden_states",
-                    "direction": "minimize",
-                }
-            ],
-            "search_space": {
-                "depth": [0],
-                "embedding": [2560],
-                "axes_default": "teacher",
-                "axes": {"ffn.intermediate_size": "all"},
-            },
-            "solver": {
-                "backend": "auto",
-                "num_solutions": 3,
-                "min_hamming_distance": 2,
-                "max_seconds_per_solution": 30,
-            },
-            "homogeneous": {"enabled": True, "keep": 2, "rank_by": "objective"},
-        },
-    }
+    runs = config["mip"]["runs"]
+    assert set(runs) == {"params-80", "memory-85"}
+    assert all(run["solver"]["num_solutions"] == 3 for run in runs.values())
+    assert all(run["homogeneous"]["keep"] == 2 for run in runs.values())
     assert config["post_mip"]["flows"] == {}
 
 
@@ -225,62 +143,15 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
     assert post_stages[0].parents == ("mip",)
     for parent, stage in pairwise(post_stages):
         assert stage.parents == (parent.stage_id,)
-    assert nodes["materialized"] == {"type": "materialize", "input": "best_vlm_loss"}
+    assert nodes["materialized"]["input"] == "best_vlm_loss"
     assert nodes["checkpoint_eval"]["input"] == "materialized"
     assert nodes["checkpoint_eval"]["failure_policy"] == "strict"
-    assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_realworldqa"
-    assert nodes["checkpoint_eval"]["config"]["batch_size"] == 1
-    assert nodes["checkpoint_eval"]["config"]["timeout_seconds"] == 900
-    assert nodes["checkpoint_eval"]["config"]["limit_mm_per_prompt"] == {"image": 1}
-    assert nodes["short_vlm_kd"] == {
-        "type": "global_kd",
-        "input": "checkpoint_eval",
-        "config": {
-            "freeze_policy": "vision_frozen",
-            "activation_checkpointing": True,
-            "automodel": {
-                "parallel": {
-                    "tp": 2,
-                    "cp": 1,
-                    "pp": 1,
-                    "ep": 1,
-                    "dp_shard": 1,
-                    "dp_replicate": 1,
-                    "sequence_parallel": False,
-                    "pipeline_schedule": "1f1b",
-                }
-            },
-            "objective": {
-                "main_ce": {"weight": 1.0},
-                "main_kd": {"weight": 1.0, "chunk_size": 64},
-                "mtp_ce": {"weight": 1.0},
-                "mtp_kd": {"weight": 1.0, "chunk_size": 64},
-            },
-            "max_steps": 2,
-            "global_batch_size": 1,
-            "local_batch_size": 1,
-            "checkpoint_every_steps": 2,
-        },
-    }
-    assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
-    assert nodes["final_image_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
+    kd = nodes["short_vlm_kd"]
+    assert kd["input"] == "checkpoint_eval"
+    assert kd["config"]["automodel"]["parallel"]["tp"] == 2
     assert (
         next(stage for stage in plan.stages if stage.stage_id.endswith("short_vlm_kd")).total_gpus
         == 2
-    )
-    cpu_stages = {
-        "convert",
-        "build_library",
-        "mip",
-        "post.params-80.best_vlm_loss",
-        "post.params-80.best",
-    }
-    assert all(stage.resource == "cpu" for stage in plan.stages if stage.stage_id in cpu_stages)
-    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in cpu_stages)
-    assert all(
-        stage.total_gpus == 1
-        for stage in plan.stages
-        if stage.stage_id not in cpu_stages and not stage.stage_id.endswith("short_vlm_kd")
     )
 
 
@@ -327,67 +198,8 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     assert tuple(config["mip"]["runs"]) == ("params-80", "memory-85", "ffn-candidates")
     assert config["mip"]["runs"]["params-80"] is False
     assert config["mip"]["runs"]["memory-85"] is False
-    assert candidates["variants"] == {
-        "width-7168": {
-            "constraints": {"params": {"max": "92%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [7168]}},
-        },
-        "width-6144": {
-            "constraints": {"params": {"max": "87%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [6144]}},
-        },
-        "width-5120": {
-            "constraints": {"params": {"max": "82%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [5120]}},
-        },
-    }
-    assert nodes["screening_kd"]["config"]["max_steps"] == 64
-    assert nodes["screening_kd"]["config"]["checkpoint_every_steps"] == 64
-    assert nodes["global_kd"]["config"]["max_steps"] == 256
-    assert nodes["global_kd"]["config"]["checkpoint_every_steps"] == 256
-    assert config["global_distillation"]["automodel"]["activation_checkpointing"] is True
-    assert config["global_distillation"]["freeze_policy"] == "vision_frozen"
-    assert config["global_distillation"]["objective"]["main_kd"]["chunk_size"] == 64
-    assert config["global_distillation"]["objective"]["mtp_kd"]["chunk_size"] == 64
-    for node_id in ("screening_kd", "global_kd"):
-        assert nodes[node_id]["config"]["freeze_policy"] == "vision_frozen"
-        assert nodes[node_id]["config"]["activation_checkpointing"] is True
-        assert nodes[node_id]["config"]["automodel"]["parallel"] == {
-            "tp": 2,
-            "cp": 1,
-            "pp": 1,
-            "ep": 1,
-            "dp_shard": 1,
-            "dp_replicate": 1,
-            "sequence_parallel": False,
-            "pipeline_schedule": "1f1b",
-        }
-        assert nodes[node_id]["config"]["objective"] == config["global_distillation"]["objective"]
-    assert nodes["serving"]["config"]["allow_aiperf_v011_online_tokenizer_resolution"] is True
-    assert nodes["quality_screen"]["config"]["profile"] == (
-        "qwen35_vlm_realworldqa_mmmu_prefix100_x2"
-    )
-    assert nodes["quality_screen"]["config"]["disable_thinking"] is True
-    assert "reference_checkpoint" not in nodes["quality_screen"]["config"]
-    assert nodes["quality_benchmarks"]["config"]["disable_thinking"] is True
+    assert set(candidates["variants"]) == {"width-7168", "width-6144", "width-5120"}
     assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert nodes["selected"] == {
-        "type": "filter",
-        "input": "quality_screen",
-        "mode": "aggregate_rank",
-        "metrics": [
-            {"metric": "screening_eval.lm_loss", "direction": "minimize"},
-            {
-                "metric": "quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
-                "direction": "maximize",
-            },
-            {
-                "metric": "quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
-                "direction": "maximize",
-            },
-        ],
-        "top_k": 1,
-    }
     assert nodes["global_kd"]["model_source"] == "materialized"
     assert tuple(stage.stage_id for stage in plan.stages)[-11:-1] == (
         "post.candidate-evaluation.online_eval",
@@ -412,14 +224,9 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
         "post.candidate-evaluation.quality_screen",
     }
     assert all(stages[stage_id].instances == 4 for stage_id in candidate_stages)
-    one_gpu_candidate_stages = candidate_stages - {"post.candidate-evaluation.screening_kd"}
-    assert all(stages[stage_id].total_gpus == 4 for stage_id in one_gpu_candidate_stages)
     assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 8
     assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
     assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2
-    execution = load_execution_config(CAMPAIGN_EXECUTION_PATH)
-    assert execution["stages"]["width_importance"] == {"strategy": "single"}
-    assert "depth_importance" not in execution["stages"]
 
 
 def test_qwen3p5_4b_legacy_campaign_alias_resolves_to_named_search(

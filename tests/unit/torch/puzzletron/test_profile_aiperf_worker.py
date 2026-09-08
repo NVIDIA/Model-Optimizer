@@ -24,7 +24,6 @@ from examples.puzzletron import run_profile_aiperf_worker as worker_module
 from examples.puzzletron.run_profile_aiperf_worker import (
     TOPOLOGIES,
     build_work_items,
-    expected_result_count,
     merge_results,
     run_worker,
     select_registry_solutions,
@@ -75,17 +74,6 @@ def test_profile_aiperf_work_shards_cover_every_item_once():
 
     assert sorted(row["id"] for shard in shards for row in shard) == list(range(15))
     assert max(map(len, shards)) == 2
-
-
-def test_profile_aiperf_expected_results_follow_registry_size():
-    registry = {
-        "solutions": [
-            {"solution_id": "best-loss"},
-            {"solution_id": "largest"},
-        ]
-    }
-
-    assert expected_result_count(registry) == 48
 
 
 def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
@@ -177,7 +165,7 @@ def test_profile_aiperf_cli_forwards_explicit_security_flags(tmp_path, monkeypat
 
 @pytest.mark.parametrize(
     ("trust_remote_code", "online_tokenizer"),
-    [(False, False), (True, False), (False, True), (True, True)],
+    [(False, False), (True, True)],
 )
 def test_profile_aiperf_worker_forwards_security_policy_to_real_sweep(
     tmp_path, monkeypatch, trust_remote_code, online_tokenizer

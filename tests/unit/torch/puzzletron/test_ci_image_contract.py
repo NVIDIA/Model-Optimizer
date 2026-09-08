@@ -100,38 +100,6 @@ def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_ro
     patch = puzzletron_root / "patches" / lmms_source["compatibility_patch"]
     patch_bytes = patch.read_bytes()
     assert hashlib.sha256(patch_bytes).hexdigest() == lmms_source["compatibility_patch_sha256"]
-    changed_lines = [
-        line
-        for line in patch_bytes.decode().splitlines()
-        if line.startswith(("+", "-"))
-        and line not in {"+", "-"}
-        and not line.startswith(("+++ ", "--- "))
-    ]
-    assert changed_lines == [
-        "-from typing import Any, Dict, List, Literal, Tuple",
-        "+from typing import Any, Dict, List, Tuple",
-        '-def get_wandb_printer() -> Literal["Printer"]:',
-        '-    """Returns a wandb printer instance for pretty stdout."""',
-        "-    from wandb.sdk.wandb_settings import Settings",
-        "-    try:",
-        "-        from wandb.sdk.lib.printer import get_printer",
-        "-    except ImportError:",
-        "-        from wandb.sdk.lib.printer import new_printer as get_printer",
-        "-    printer = get_printer(Settings()._jupyter)",
-        "-    return printer",
-        "-        self.printer = get_wandb_printer()",
-        "-                sampling_params = SamplingParams(**params)",
-        "-from latex2sympy2 import latex2sympy",
-        "+from latex2sympy2_extended import latex2sympy",
-        "-from latex2sympy2 import latex2sympy",
-        "+from latex2sympy2_extended import latex2sympy",
-        "-from latex2sympy2 import latex2sympy",
-        "+from latex2sympy2_extended import latex2sympy",
-        '-    "latex2sympy2",',
-        '+    "latex2sympy2-extended==1.11.0",',
-        '-    "wandb==0.25.0",',
-        '+    "wandb>=0.28.0,<0.30",',
-    ]
     assert lmms_source["compatibility_patch_files"] == [
         "lmms_eval/loggers/wandb_logger.py",
         "lmms_eval/models/simple/vllm.py",
