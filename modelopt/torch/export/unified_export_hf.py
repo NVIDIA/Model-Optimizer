@@ -1638,13 +1638,13 @@ def export_hf_checkpoint(
         )
         return
 
-    is_distributed = (
+    is_fsdp2_sharded = (
         torch.distributed.is_available()
         and torch.distributed.is_initialized()
         and is_fsdp2_model(model)
     )
     # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
-    rank = torch.distributed.get_rank() if is_distributed else 0
+    rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0
     # Offloaded models take the streaming path: it materializes one layer at a time and
     # writes each straight to a shard file, so peak memory is one layer plus one shard
     # buffer instead of the whole quantized state dict.
@@ -1672,7 +1672,7 @@ def export_hf_checkpoint(
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
             _revert_quant_config_names_best_effort(model, hf_quant_config)
-        elif is_distributed:
+        elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank holds one unit at a time rather than its whole share of the model, and the
             # writes run concurrently. Every rank must call this -- it unshards collectively.
@@ -1754,5 +1754,5 @@ def export_hf_checkpoint(
         )
         raise e
     finally:
-        if is_distributed:
+        if is_fsdp2_sharded:
             torch.distributed.barrier()
