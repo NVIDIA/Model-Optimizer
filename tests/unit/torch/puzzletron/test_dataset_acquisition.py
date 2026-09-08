@@ -24,7 +24,6 @@ from PIL import Image
 from modelopt.torch.puzzletron.dataset.acquisition import (
     NEMOTRON_VLM_DATASET,
     PUZZLE_KD_DATASET,
-    VLM_HEADER_SUBSETS,
     TextAcquisitionSpec,
     VlmAcquisitionSpec,
     largest_remainder_quotas,
@@ -48,6 +47,15 @@ def _messages(image_name: str, *, answer: str = "answer"):
         },
         {"role": "assistant", "content": [{"type": "text", "text": answer}]},
     ]
+
+
+def _one_vlm_row(**kwargs):
+    del kwargs
+    yield {
+        "id": "only",
+        "messages": _messages("only.png"),
+        "image": Image.new("RGB", (2, 2)),
+    }
 
 
 def test_vlm_acquisition_rejects_invalid_bounds_and_duplicate_subsets(tmp_path):
@@ -209,14 +217,6 @@ def test_nemotron_materializer_redistributes_exhausted_subset_quota(tmp_path):
 
 
 def test_nemotron_materializer_rejects_shortfall_and_cache_mismatch(tmp_path):
-    def one_row(**kwargs):
-        del kwargs
-        yield {
-            "id": "only",
-            "messages": _messages("only.png"),
-            "image": Image.new("RGB", (2, 2)),
-        }
-
     with pytest.raises(RuntimeError, match="only found 1/2"):
         materialize_nemotron_vlm_dataset(
             VlmAcquisitionSpec(
@@ -225,7 +225,7 @@ def test_nemotron_materializer_rejects_shortfall_and_cache_mismatch(tmp_path):
                 num_samples=2,
                 revision="sha",
             ),
-            sample_loader=one_row,
+            sample_loader=_one_vlm_row,
         )
 
     materialize_nemotron_vlm_dataset(
@@ -235,7 +235,7 @@ def test_nemotron_materializer_rejects_shortfall_and_cache_mismatch(tmp_path):
             num_samples=1,
             revision="sha",
         ),
-        sample_loader=one_row,
+        sample_loader=_one_vlm_row,
     )
     with pytest.raises(ValueError, match="does not match"):
         materialize_nemotron_vlm_dataset(
@@ -245,20 +245,12 @@ def test_nemotron_materializer_rejects_shortfall_and_cache_mismatch(tmp_path):
                 num_samples=1,
                 revision="sha",
             ),
-            sample_loader=one_row,
+            sample_loader=_one_vlm_row,
         )
 
 
 @pytest.mark.parametrize("missing_manifest", ["manifest.json", "puzzletron_acquisition.json"])
 def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path, missing_manifest):
-    def one_row(**kwargs):
-        del kwargs
-        yield {
-            "id": "only",
-            "messages": _messages("only.png"),
-            "image": Image.new("RGB", (2, 2)),
-        }
-
     materialize_nemotron_vlm_dataset(
         VlmAcquisitionSpec(
             output_dir=tmp_path,
@@ -266,7 +258,7 @@ def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path, m
             num_samples=1,
             revision="pinned-sha",
         ),
-        sample_loader=one_row,
+        sample_loader=_one_vlm_row,
     )
     (tmp_path / missing_manifest).unlink()
 
@@ -286,14 +278,6 @@ def test_existing_vlm_materialization_reuses_pinned_revision_offline(tmp_path, m
 
 
 def test_existing_vlm_materialization_ignores_non_object_primary_manifest(tmp_path):
-    def one_row(**kwargs):
-        del kwargs
-        yield {
-            "id": "only",
-            "messages": _messages("only.png"),
-            "image": Image.new("RGB", (2, 2)),
-        }
-
     materialize_nemotron_vlm_dataset(
         VlmAcquisitionSpec(
             output_dir=tmp_path,
@@ -301,7 +285,7 @@ def test_existing_vlm_materialization_ignores_non_object_primary_manifest(tmp_pa
             num_samples=1,
             revision="pinned-sha",
         ),
-        sample_loader=one_row,
+        sample_loader=_one_vlm_row,
     )
     (tmp_path / "manifest.json").write_text("[]")
 
@@ -320,14 +304,6 @@ def test_existing_vlm_materialization_ignores_non_object_primary_manifest(tmp_pa
 
 @pytest.mark.parametrize("payload", ["samples", "sample_text", "image"])
 def test_existing_vlm_materialization_rejects_corrupt_payload(tmp_path, payload):
-    def one_row(**kwargs):
-        del kwargs
-        yield {
-            "id": "only",
-            "messages": _messages("only.png"),
-            "image": Image.new("RGB", (2, 2)),
-        }
-
     materialize_nemotron_vlm_dataset(
         VlmAcquisitionSpec(
             output_dir=tmp_path,
@@ -335,7 +311,7 @@ def test_existing_vlm_materialization_rejects_corrupt_payload(tmp_path, payload)
             num_samples=1,
             revision="pinned-sha",
         ),
-        sample_loader=one_row,
+        sample_loader=_one_vlm_row,
     )
     if payload == "samples":
         (tmp_path / "samples.json").write_text("[]")
@@ -368,14 +344,6 @@ def test_existing_vlm_materialization_rejects_corrupt_payload(tmp_path, payload)
 def test_existing_vlm_materialization_repairs_noncanonical_acquisition_manifest(
     tmp_path, cached_payload
 ):
-    def one_row(**kwargs):
-        del kwargs
-        yield {
-            "id": "only",
-            "messages": _messages("only.png"),
-            "image": Image.new("RGB", (2, 2)),
-        }
-
     expected = materialize_nemotron_vlm_dataset(
         VlmAcquisitionSpec(
             output_dir=tmp_path,
@@ -383,7 +351,7 @@ def test_existing_vlm_materialization_repairs_noncanonical_acquisition_manifest(
             num_samples=1,
             revision="pinned-sha",
         ),
-        sample_loader=one_row,
+        sample_loader=_one_vlm_row,
     )
     acquisition_path = tmp_path / "puzzletron_acquisition.json"
     acquisition_path.write_text(cached_payload)
@@ -438,7 +406,3 @@ def test_puzzle_kd_materializer_bounds_both_splits(tmp_path):
         (PUZZLE_KD_DATASET, "validation", "text-sha", True),
     ]
     assert json.loads((tmp_path / "puzzletron_acquisition.json").read_text()) == manifest
-
-
-def test_first_class_defaults_are_stable():
-    assert VLM_HEADER_SUBSETS == ("sparsetables", "plotqa_cot", "wiki_en")

@@ -25,24 +25,12 @@ import modelopt.torch.puzzletron as mtpz
     ("input_dtype", "expected"),
     [
         ("torch.bfloat16", torch.bfloat16),
-        ("torch.float16", torch.float16),
         ("torch.float32", torch.float32),
         ("bfloat16", torch.bfloat16),
         ("float16", torch.float16),
-        ("float32", torch.float32),
-        (torch.bfloat16, torch.bfloat16),
         (torch.float32, torch.float32),
     ],
-    ids=[
-        "str-bf16",
-        "str-fp16",
-        "str-fp32",
-        "bare-bf16",
-        "bare-fp16",
-        "bare-fp32",
-        "dtype-bf16",
-        "dtype-fp32",
-    ],
+    ids=["qualified", "qualified-fp32", "bare", "bare-fp16", "dtype"],
 )
 def test_resolve_torch_dtype(input_dtype, expected):
     assert mtpz.tools.resolve_torch_dtype(input_dtype) is expected

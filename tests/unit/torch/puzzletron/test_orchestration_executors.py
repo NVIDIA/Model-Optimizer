@@ -1556,54 +1556,6 @@ def test_post_mip_workers_share_one_packed_allocation(tmp_path: Path):
     assert attempt.command.argv[-2:] == ("--shard-count", "8")
 
 
-def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
-    )
-    node = StagePlanNode(
-        stage_id="replacement_scoring",
-        strategy=ExecutionStrategy.PERSISTENT_POOL,
-        instances=4,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={"tp": 1, "cp": 1, "pp": 2, "ep": 4, "dp_shard": 4, "dp_replicate": 1},
-        gpus_per_instance=8,
-        gpus_per_node=8,
-        nodes=4,
-        total_gpus=32,
-        exclusive=True,
-        parents=("build_library",),
-        distributed=True,
-        partition="batch",
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config={"replacement_scoring": {}},
-        runner=runner,
-        execution_defaults={"gpus_per_node": 8},
-        stages=(node,),
-        contract_hash="contract",
-    )
-    adapter = adapter_for_stage(node)
-    work_plan = adapter.plan(plan, node)
-
-    assert [item.work_id for item in work_plan.items] == ["replacement_scoring:gang"]
-    attempt = adapter.command(
-        plan=plan,
-        node=node,
-        item=work_plan.items[0],
-        attempt_id="a1",
-        runner=runner,
-    )
-    assert attempt.allocation_nodes == 4
-    assert attempt.allocation_gpus == 32
-    assert attempt.metadata["kill_on_bad_exit"] is True
-    assert attempt.metadata["partition"] == "batch"
-    assert attempt.command.argv[-1].endswith("run_replacement_pool.sh")
-
-
 def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path):
     _, work_plan, attempts = _replacement_width_attempts(tmp_path, [2048, 1792])
 

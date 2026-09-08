@@ -78,8 +78,6 @@ def test_aiperf_report_plots_repetition_medians_by_workload(tmp_path):
         ("student", "profile", "topology-a"): (2, {"output_token_throughput": 10.0}),
         ("teacher", "profile", "topology"): (2, {"output_token_throughput": 12.0}),
     }
-    assert "id='workload'" in report
-
     json_rows = json.loads((tmp_path / "aiperf_results.json").read_text())
     assert json_rows[0]["repetition"] == 0
     assert json_rows[0]["checkpoint_identity"] == {

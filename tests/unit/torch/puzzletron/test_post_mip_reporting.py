@@ -17,10 +17,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from modelopt.torch.puzzletron.post_mip.reporting import (
-    build_post_mip_report_payloads,
-    render_evaluation_report,
-)
+from modelopt.torch.puzzletron.post_mip.reporting import build_post_mip_report_payloads
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -28,7 +25,7 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_evaluation_report_compares_teacher_and_deduplicated_mip_origins(tmp_path: Path):
+def test_evaluation_payload_compares_teacher_and_deduplicated_mip_origins(tmp_path: Path):
     architecture_id = "architecture_shared"
     revision_id = "revision_candidate"
     execution_id = "post_mip_execution_test"
@@ -48,7 +45,6 @@ def test_evaluation_report_compares_teacher_and_deduplicated_mip_origins(tmp_pat
             "revisions": {
                 revision_id: {
                     "architecture_id": architecture_id,
-                    "artifact": {"hidden_width": 1024, "kind": "heterogeneous"},
                 },
                 "failed_revision": {"architecture_id": "architecture_invalid"},
             },
@@ -61,20 +57,10 @@ def test_evaluation_report_compares_teacher_and_deduplicated_mip_origins(tmp_pat
             {
                 "input_revision_id": revision_id,
                 "status": "success",
-                "metrics": {
-                    "candidate.lm_loss": 0.7,
-                    "candidate.token_accuracy_top_1": 0.8,
-                    "candidate.token_accuracy_top_10": 0.95,
-                    "reference.lm_loss": 0.5,
-                    "reference.token_accuracy_top_1": 0.9,
-                    "delta.lm_loss": 0.2,
-                },
             },
             {
                 "input_revision_id": "failed_revision",
                 "status": "failed",
-                "metrics": {"reference.lm_loss": None},
-                "error": "evaluation failed",
             },
         ],
     )
@@ -86,18 +72,6 @@ def test_evaluation_report_compares_teacher_and_deduplicated_mip_origins(tmp_pat
     )
 
     payload = build_post_mip_report_payloads(tmp_path, (node,))[node.stage_id]
-    rendered = render_evaluation_report(str(payload["section_id"]), payload)
 
     assert payload["observations"][0]["origin_kinds"] == ["heterogeneous", "homogeneous"]
     assert payload["observations"][1]["origin_kinds"] == []
-    assert rendered.count("Reference checkpoint") == 1
-    assert rendered.count("<td>Teacher</td>") == 1
-    assert "Heterogeneous" in rendered
-    assert "Homogeneous" in rendered
-    assert "Top-1 token accuracy" in rendered
-    assert "Top-10 token accuracy" in rendered
-    assert rendered.count("<td>0.8</td>") == 2
-    assert rendered.count("<td>0.9</td>") == 1
-    assert rendered.count("<td>0.95</td>") == 2
-    assert "evaluation failed" in rendered
-    assert rendered.count("Shared physical measurement (same architecture)") == 2

@@ -43,12 +43,10 @@ def test_direct_launcher_does_not_shadow_standard_library_profile():
 
 
 def test_vlm_parser_exposes_only_suite_owned_sample_limits():
-    help_text = evaluation._build_parser().format_help()
+    parser = evaluation._build_parser()
+    help_text = parser.format_help()
     assert "--limit" not in help_text
     assert "--full" not in help_text
     assert "--tasks" not in help_text
     assert "--evaluation-profile" not in help_text
-
-
-def test_vlm_parser_defaults_to_short_suite():
-    assert evaluation._build_parser().get_default("suite") == "short"
+    assert parser.get_default("suite") == "short"

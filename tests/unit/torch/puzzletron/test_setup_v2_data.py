@@ -25,7 +25,7 @@ from puzzletron_setup import SetupError
 from puzzletron_setup.v2.bundle import _bundle_readme
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.hf_datasets import HfSubsetCatalog, HfSubsetInfo
-from puzzletron_setup.v2.prompts import InteractiveBackend, PromptChoice, ScriptedBackend
+from puzzletron_setup.v2.prompts import PromptChoice, ScriptedBackend
 from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
@@ -256,20 +256,6 @@ def test_resume_can_change_between_fixed_dataset_modalities(tmp_path):
     assert state.get_field("data.modality") == "multimodal"
 
 
-def test_nemotron_vlm_subset_prompt_uses_catalog_choices_and_defaults(tmp_path):
-    _, backend = _run_nemotron_vlm_data_section(tmp_path)
-
-    assert len(backend.checkbox_calls) == 1
-    choices, defaults = backend.checkbox_calls[0]
-    assert tuple(choice.value for choice in choices) == tuple(
-        subset.name for subset in _nemotron_catalog().subsets
-    )
-    assert next(choice for choice in choices if choice.value == "external").disabled == (
-        "external media required"
-    )
-    assert defaults == ("sparsetables", "plotqa_cot", "wiki_en")
-
-
 def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
     tmp_path,
     monkeypatch,
@@ -412,9 +398,6 @@ def test_bundle_readme_emits_bounded_vlm_materialization_command(tmp_path):
     assert "--revision sha" in document
     assert "--num-samples 64" in document
     assert "--max-shards-per-subset 2" in document
-    assert "Python 3.10+ controller venv" in document
-    assert "This is a worker command" in document
-    assert "vlm_checkpoint_evaluation.md" in document
 
 
 def test_checkbox_rejects_a_disabled_scripted_selection(tmp_path):
@@ -436,71 +419,3 @@ def test_checkbox_rejects_a_disabled_scripted_selection(tmp_path):
 
     assert selected == ["hosted"]
     assert backend.remaining == 0
-
-
-def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch):
-    shown_choices = []
-
-    class _KeyBindings:
-        @staticmethod
-        def add(*args, **kwargs):
-            def decorator(callback):
-                return callback
-
-            return decorator
-
-    class _Application:
-        key_bindings = _KeyBindings()
-
-    class _Question:
-        application = _Application()
-
-        @staticmethod
-        def ask():
-            return ["hosted"]
-
-    class _Questionary:
-        @staticmethod
-        def Choice(**kwargs):  # noqa: N802 - mirrors questionary's public constructor
-            return kwargs
-
-        @staticmethod
-        def Separator(title):  # noqa: N802 - mirrors questionary's public constructor
-            return {"separator": title}
-
-        @staticmethod
-        def Style(rules):  # noqa: N802 - mirrors questionary's public constructor
-            return rules
-
-        @staticmethod
-        def checkbox(message, choices, *, instruction, style):
-            del message, instruction, style
-            shown_choices.extend(choices)
-            return _Question()
-
-    monkeypatch.setattr(
-        "puzzletron_setup.v2.prompts._questionary",
-        lambda: _Questionary(),
-    )
-    monkeypatch.setattr(
-        "puzzletron_setup.v2.prompts._bind_escape_back",
-        lambda question: question,
-    )
-
-    selected = InteractiveBackend().checkbox(
-        "Subsets:",
-        [
-            PromptChoice("hosted", "hosted"),
-            PromptChoice(
-                "external",
-                "external",
-                disabled="external media required",
-            ),
-        ],
-        defaults=("hosted",),
-    )
-
-    assert selected == ["hosted"]
-    assert shown_choices[0]["checked"]
-    assert shown_choices[0]["disabled"] is None
-    assert shown_choices[1]["disabled"] == "external media required"

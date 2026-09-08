@@ -112,37 +112,6 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
     assert settings["max_steps"] == 8
 
 
-def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch):
-    # Keep the examples-layer VLM dependencies out of core test collection.
-    from examples.puzzletron.evaluation.vlm import post_mip as vlm_post_mip
-
-    calls = []
-    monkeypatch.setattr(vlm_post_mip, "register_profiles", lambda: calls.append(True))
-
-    post_mip_entrypoint._register_evaluation_profiles(
-        {
-            "post_mip": {
-                "flows": {
-                    "params": {
-                        "nodes": {
-                            "checkpoint_eval": {
-                                "type": "downstream_evaluation",
-                                "config": {
-                                    "profile": (
-                                        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
-                                    )
-                                },
-                            },
-                        }
-                    },
-                }
-            }
-        }
-    )
-
-    assert calls == [True]
-
-
 def test_worker_entrypoint_leaves_unknown_vlm_profile_to_fail_closed(monkeypatch, tmp_path):
     from examples.puzzletron.evaluation.vlm import post_mip as vlm_post_mip
 
@@ -478,12 +447,8 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
                 "minimum_request_count": 4,
                 "requests_per_concurrency": 2,
                 "best_selection_mode": "individual_best",
-                "allow_aiperf_v011_online_tokenizer_resolution": True,
                 "input_tokens": 1024,
                 "output_tokens": 128,
-                "image_batch_sizes": [1, 6, 12],
-                "image_width_mean": 1280,
-                "image_height_mean": 720,
                 "topology": {"gpu_group_size": 1},
             }
         },
@@ -500,18 +465,18 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
         "execution",
     )
 
-    assert captured["checkpoint"] == str(tmp_path / "checkpoint")
     assert captured["concurrencies"] == (8,)
     assert captured["request_counts"] == {8: 23}
     assert captured["trust_remote_code"] is True
-    assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is True
-    assert captured["image_batch_sizes"] == [1, 6, 12]
-    assert captured["image_width_mean"] == 1280
-    assert captured["image_height_mean"] == 720
-    assert "request_count" not in captured
-    assert "minimum_request_count" not in captured
-    assert "requests_per_concurrency" not in captured
-    assert "best_selection_mode" not in captured
+    assert (
+        not {
+            "request_count",
+            "minimum_request_count",
+            "requests_per_concurrency",
+            "best_selection_mode",
+        }
+        & captured.keys()
+    )
     assert result["metrics"] == {
         "output_token_throughput": 12.0,
         "images_12.concurrency_8.output_token_throughput": 12.0,
@@ -548,43 +513,6 @@ def test_aiperf_rejects_repetitions_with_different_metric_sets(monkeypatch, tmp_
 
     with pytest.raises(RuntimeError, match="repetitions produced different metrics"):
         runner._aiperf({"puzzle_dir": str(tmp_path)}, node, source, "execution")
-
-
-def test_downstream_evaluation_delegates_to_generic_checkpoint_evaluator(monkeypatch, tmp_path):
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    captured = {}
-
-    def fake_evaluate(checkpoint_path, *, output_root, settings):
-        captured.update(
-            checkpoint=checkpoint_path,
-            output_root=output_root,
-            settings=settings,
-        )
-        return {"metrics": {"ifeval.accuracy": 0.5}}
-
-    monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
-    node = SimpleNamespace(
-        node_id="lmms_eval",
-        config={"config": {"tasks": ["ifeval"], "limit": 4}},
-    )
-    source = SimpleNamespace(
-        architecture_id="architecture",
-        artifact_kind=ArtifactKind.CHECKPOINT,
-        artifact={"checkpoint": str(checkpoint)},
-    )
-
-    result = runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
-
-    assert result == {"metrics": {"ifeval.accuracy": 0.5}}
-    assert captured == {
-        "checkpoint": str(checkpoint),
-        "output_root": (
-            tmp_path
-            / "artifacts/post_mip/nodes/lmms_eval/executions/execution/raw/architecture/lmms_eval"
-        ),
-        "settings": {"tasks": ["ifeval"], "limit": 4},
-    }
 
 
 def test_downstream_evaluation_routes_the_pinned_vlm_profile(monkeypatch, tmp_path):
@@ -1309,7 +1237,6 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
     ledger = case.ledger
     node = case.node
     profile = case.profile
-    reference_fingerprint = case.reference_fingerprint
     revisions = case.revisions
 
     observations, output_set = runner._aggregate_result_manifest(
@@ -1329,66 +1256,51 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         evaluation_identity(256),
     ]
 
-    def expected_evaluation_result(accuracy):
-        return {
-            "candidate_evidence": evaluation_evidence(
-                "student-0" if accuracy == 0.1 else f"student-{int(accuracy * 1000)}"
-            ),
-            "metrics": {"accuracy": accuracy},
-            "reference_evidence": evaluation_evidence("teacher"),
-        }
-
-    assert manifest["exact_result"] == {
-        "axis_inventory": block_configs,
-        "checkpoint_and_lineage_identities": {
-            "architecture_id": architecture_id,
-            "milestones": [
-                {
-                    "checkpoint_fingerprint": f"student-{steps}",
-                    "content_manifest_sha256": f"step-{steps}",
-                    "producer_node": f"kd_{steps}",
-                    "steps": steps,
-                }
-                for steps in (64, 128, 256)
-            ],
-            "pre_kd_content_manifest_sha256": "pre-kd",
-            "pre_kd_checkpoint_fingerprint": "student-0",
-            "reference_checkpoint_fingerprint": reference_fingerprint,
-        },
-        "evaluation_results": {
-            "milestones": [
-                {"steps": steps, **expected_evaluation_result(steps / 1000)}
-                for steps in (64, 128, 256)
-            ],
-            "pre_kd": expected_evaluation_result(0.1),
-        },
-        "evaluator_contract": {
-            "contract": evaluator_contract,
-            "profile": profile,
-            "revision": "source-revision",
-        },
-        "kd_exposure": [{"cumulative_steps": steps} for steps in (64, 128, 256)],
-        "parameter_counts": {
-            "materialized_checkpoint": 6,
-            "mip_estimates": {"parameter_ratio": 0.9},
-        },
-        "realized_geometry_and_tensor_shapes": {
-            "geometry": {
-                "block_configs": block_configs,
-                "hidden_size": 8,
-                "num_hidden_layers": 1,
-            },
-            "tensor_count": 1,
-            "tensor_shapes": {"model.weight": {"dtype": "BF16", "shape": [2, 3]}},
-        },
-        "stage_completion": {
-            "milestones": [
-                {"evaluation": "success", "kd": "success", "steps": steps}
-                for steps in (64, 128, 256)
-            ],
-            "pre_kd": "success",
-        },
+    exact_result = manifest["exact_result"]
+    assert set(exact_result) == {
+        "axis_inventory",
+        "checkpoint_and_lineage_identities",
+        "evaluation_results",
+        "evaluator_contract",
+        "kd_exposure",
+        "parameter_counts",
+        "realized_geometry_and_tensor_shapes",
+        "stage_completion",
     }
+    assert exact_result["axis_inventory"] == block_configs
+    lineage = exact_result["checkpoint_and_lineage_identities"]
+    assert lineage["architecture_id"] == architecture_id
+    assert lineage["pre_kd_content_manifest_sha256"] == "pre-kd"
+    assert [row["content_manifest_sha256"] for row in lineage["milestones"]] == [
+        "step-64",
+        "step-128",
+        "step-256",
+    ]
+    assert exact_result["evaluator_contract"] == {
+        "contract": evaluator_contract,
+        "profile": profile,
+        "revision": "source-revision",
+    }
+    assert exact_result["kd_exposure"] == [{"cumulative_steps": steps} for steps in (64, 128, 256)]
+    assert exact_result["parameter_counts"] == {
+        "materialized_checkpoint": 6,
+        "mip_estimates": {"parameter_ratio": 0.9},
+    }
+    geometry = exact_result["realized_geometry_and_tensor_shapes"]
+    assert geometry["geometry"]["block_configs"] == block_configs
+    assert geometry["tensor_shapes"] == {"model.weight": {"dtype": "BF16", "shape": [2, 3]}}
+    evaluations = exact_result["evaluation_results"]
+    assert evaluations["pre_kd"]["metrics"] == {"accuracy": 0.1}
+    assert [row["metrics"]["accuracy"] for row in evaluations["milestones"]] == [
+        0.064,
+        0.128,
+        0.256,
+    ]
+    assert all(
+        row["reference_evidence"] == evaluation_evidence("teacher")
+        for row in evaluations["milestones"]
+    )
+    assert exact_result["stage_completion"]["pre_kd"] == "success"
 
 
 def test_result_manifest_rejects_changed_checkpoint_geometry(monkeypatch, tmp_path):

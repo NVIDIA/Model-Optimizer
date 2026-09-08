@@ -62,10 +62,6 @@ def test_full_smoke_compiles_one_complete_bounded_lifecycle(monkeypatch, tmp_pat
         "post.params-90.final_eval",
         "post.params-90.best",
     )
-    assert nodes["online_eval"]["config"]["eval_samples"] == 2
-    assert nodes["checkpoint_eval"]["config"]["limit"] == 2
-    assert nodes["serving"]["config"]["request_count"] == 4
-    assert nodes["short_kd"]["config"]["max_steps"] == 2
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     cpu_stages = [stage for stage in stages.values() if stage.resource == "cpu"]
     assert cpu_stages

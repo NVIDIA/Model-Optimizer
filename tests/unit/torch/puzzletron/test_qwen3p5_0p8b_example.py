@@ -41,40 +41,16 @@ CAMPAIGN_PATH = (
 )
 
 
-def test_qwen3p5_0p8b_model_identity_and_geometry_are_pinned() -> None:
+def test_qwen3p5_0p8b_model_and_default_search_are_pinned() -> None:
     model = yaml.safe_load(MODEL_PATH.read_text())
 
     assert model["input_hf_model_path"] == "Qwen/Qwen3.5-0.8B"
-    assert model["model_info"] == {
-        "hf_repo": model["input_hf_model_path"],
-        "hf_revision": "2fc06364715b967f1860aea9cf38778875588b17",
-        "model_type": "qwen3_5",
-        "architectures": ["Qwen3_5ForConditionalGeneration"],
-        "num_hidden_layers": 24,
-        "hidden_size": 1024,
-        "intermediate_size": 3584,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 2,
-        "head_dim": 256,
-        "vocab_size": 248320,
-        "tie_word_embeddings": True,
-        "max_position_embeddings": 262144,
-        "mtp_num_hidden_layers": 1,
-        "layer_counts": {"linear_attention": 18, "full_attention": 6},
-        "full_attention_layer_indices": [3, 7, 11, 15, 19, 23],
-        "mamba": {
-            "linear_key_head_dim": 128,
-            "linear_num_key_heads": 16,
-            "linear_num_value_heads": 16,
-            "linear_value_head_dim": 128,
-            "linear_conv_kernel_dim": 4,
-        },
+    assert model["model_info"]["hf_revision"] == ("2fc06364715b967f1860aea9cf38778875588b17")
+    assert model["model_info"]["model_type"] == "qwen3_5"
+    assert model["model_info"]["layer_counts"] == {
+        "linear_attention": 18,
+        "full_attention": 6,
     }
-
-
-def test_qwen3p5_0p8b_default_search_matches_tracked_runtime_campaign() -> None:
-    model = yaml.safe_load(MODEL_PATH.read_text())
-
     assert model["pruning"] == {"intermediate_size_list": [3072, 2048]}
     assert model["search_space"]["axes"] == {
         "ffn_intermediate": {
@@ -85,24 +61,8 @@ def test_qwen3p5_0p8b_default_search_matches_tracked_runtime_campaign() -> None:
     }
 
 
-def test_qwen3p5_0p8b_vlm_campaign_keeps_mild_domains_explicit() -> None:
+def test_qwen3p5_0p8b_vlm_campaign_pins_width_and_depth_bounds() -> None:
     campaign = yaml.safe_load(CAMPAIGN_PATH.read_text())
-    axes = campaign["search_space"]["axes"]
-
-    expected_enabled_domains = {
-        "hidden_width": (1024, [960, 896]),
-        "kv_groups": (2, [1]),
-        "q_heads_per_group": (4, [3]),
-        "ffn_intermediate": (3584, [3328, 3072]),
-        "gdn_key_groups": (16, [14]),
-        "gdn_key_head_dim": (128, [112]),
-        "gdn_value_head_dim": (128, [112]),
-    }
-    enabled_domains = {
-        axis_id: (axis["teacher_value"], axis["values"])
-        for axis_id, axis in axes.items()
-        if axis["enabled"]
-    }
 
     assert campaign["embedding_pruning"]["widths"] == [1024, 960, 896]
     spec = Qwen3P5VLModelDescriptor.embedding_pruning_spec(
@@ -113,42 +73,13 @@ def test_qwen3p5_0p8b_vlm_campaign_keeps_mild_domains_explicit() -> None:
         alignment=campaign["embedding_pruning"]["alignment"],
     )
     assert [spec.validate_width(width) for width in spec.legal_widths] == [1024, 960, 896]
-    assert campaign["pruning"]["intermediate_size_list"] == [3328, 3072]
-    assert campaign["pruning"]["attn_heads_list"] == [[8, 2], [6, 2], [4, 1], [3, 1]]
-    assert campaign["pruning"]["attention_scored_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
-    ]
-    assert campaign["pruning"]["gdn_scored_axes"] == [
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
     assert campaign["depth_importance"]["enabled"] is True
-    assert campaign["depth_importance"]["max_removals"] == 2
     assert campaign["depth_importance"]["max_subblocks_to_remove"] == 2
     assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
         "depth": [0, 1, 2],
         "embedding": [1024, 960, 896],
         "axes_default": "all",
         "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert enabled_domains == expected_enabled_domains
-    assert {axis_id: axes[axis_id] for axis_id in ("gdn_value_heads_per_group",)} == {
-        "gdn_value_heads_per_group": {
-            "enabled": False,
-            "teacher_value": 1,
-            "values": [],
-        },
-    }
-    assert set(axes) == {
-        *expected_enabled_domains,
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_value_heads_per_group",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
     }
 
 

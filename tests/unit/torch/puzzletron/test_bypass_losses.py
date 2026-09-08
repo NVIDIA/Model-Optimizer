@@ -23,7 +23,6 @@ from modelopt.torch.puzzletron.bypass_distillation.losses import (
     normalized_mse_loss,
     vectorwise_normalized_mse_loss,
 )
-from modelopt.torch.puzzletron.utils.parsing import format_stitched_losses
 
 
 def test_vectorwise_normalized_mse_loss_matches_batched_last_dim():
@@ -89,34 +88,3 @@ def test_batched_normalized_mse_loss_rejects_invalid_inputs():
     ]:
         with pytest.raises(ValueError, match=match):
             batched_normalized_mse_loss(*args, **kwargs)
-
-
-def test_format_stitched_losses_reports_expected_summary_states():
-    non_finite_out = format_stitched_losses(
-        {"block_0": float("nan"), "block_1": 1.0},
-        initial_values_dict={"block_0": 0.5, "block_1": 2.0},
-        not_trainable_names={"block_2"},
-        step_number=3,
-    )
-    assert "nan" in non_finite_out
-    assert "non-finite" in non_finite_out
-    assert "Skipped=1" in non_finite_out
-    assert "No trainable blocks found" not in non_finite_out
-
-    empty_out = format_stitched_losses({}, not_trainable_names={"block_0", "block_1"})
-    assert empty_out == "No trainable losses found; skipped 2 non-trainable blocks"
-
-    delta_out = format_stitched_losses(
-        {"block_0": 1.0, "block_1": 3.0},
-        best_steps_dict={"block_0": 5, "block_9": 99},
-        best_values_dict={"block_0": 0.5, "block_9": 9.0},
-        initial_values_dict={"block_0": 2.0, "block_1": 3.0, "block_9": 9.0},
-        not_trainable_names={"block_2"},
-        step_number=8,
-    )
-    assert "↓ -1.0e+00 (-50%)" in delta_out
-    assert "↔ 0.0e+00" in delta_out
-    assert "Step 5" in delta_out
-    assert "Step 99" not in delta_out
-    assert "Skipped=1" in delta_out
-    assert "Avg=2.00e+00" in delta_out

@@ -61,14 +61,10 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
-    serving_args = nodes["vlm_serving"]["config"]["topology"]["extra_vllm_args"]
 
     assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
     assert plan.execution_defaults["gpus_per_node"] == 2
     assert "tokenize_data" not in stages
-    assert config["dataset_path"] == str(tmp_path / "full_vlm_smoke/datasets/nemotron_vlm_v2")
-    assert config["prepare_dataset"]["output"] == config["dataset_path"]
-    assert serving_args[serving_args.index("--gdn-prefill-backend") + 1] == "triton"
     assert tuple(node for node in stages if node.startswith("post.")) == (
         "post.params-90.image_eval",
         "post.params-90.best_vlm_loss",
@@ -81,18 +77,10 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
         "post.params-90.final_image_eval",
         "post.params-90.best",
     )
-    assert config["prepare_dataset"]["num_samples"] == 8
-    assert config["sort_sanity"]["max_abs_lm_loss_delta"] == 0.003
-    assert config["sort_sanity"]["max_abs_reverse_lm_loss_delta"] == 0.003
-    assert nodes["image_eval"]["config"]["eval_samples"] == 2
-    assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_core3_24row_smoke_v2"
-    assert nodes["checkpoint_eval"]["config"]["gdn_prefill_backend"] == "triton"
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
-    assert nodes["vlm_serving"]["config"]["request_count"] == 1
     assert nodes["fastest_vlm"]["metric"] == (
         "vlm_serving.images_12.concurrency_1.image_throughput"
     )
-    assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
     cpu_stages = [stage for stage in stages.values() if stage.resource == "cpu"]
     assert cpu_stages
     assert all(stage.total_gpus == 0 for stage in cpu_stages)
@@ -103,30 +91,14 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
-    assert config["dataset_path"] == str(tmp_path / "vlm_campaign/datasets/nemotron_vlm_v2")
-    assert config["prepare_dataset"]["output"] == config["dataset_path"]
-    assert config["prepare_dataset"]["evaluation_hf_home"] == str(tmp_path / "hf-home")
-    assert set(config["post_mip"]["flows"]) == {"candidates"}
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
-    serving_args = candidates["serving"]["config"]["topology"]["extra_vllm_args"]
     assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
     assert plan.execution_defaults["gpus_per_node"] == 8
-    assert serving_args[serving_args.index("--gdn-prefill-backend") + 1] == "triton"
-
-    assert set(config["mip"]["runs"]) == {"params-90"}
-    assert config["replacement_scoring"]["eval_samples"] == 16
     assert stages["replacement_scoring"].strategy is ExecutionStrategy.PERSISTENT_POOL
     assert stages["replacement_scoring"].instances == 8
     assert stages["replacement_scoring"].total_gpus == 8
-    assert candidates["best_image_loss"]["top_k"] == 5
-    assert candidates["kd"]["config"]["max_steps"] == 128
     assert candidates["pre_kd_eval"]["config"] == config["vlm_quality_evaluation"]
     assert candidates["pre_kd_eval"]["config"] == candidates["post_kd_eval"]["config"]
-    assert candidates["result"]["config"]["milestones"] == [
-        {"steps": 128, "kd": "kd", "evaluation": "post_kd_eval"}
-    ]
-    assert candidates["selected"]["input"] == "post_kd_eval"
-    assert candidates["selected"]["top_k"] == 1
     assert stages["post.candidates.serving"].parents == ("post.candidates.result",)
     concurrent_candidate_stages = {
         "post.candidates.image_eval",

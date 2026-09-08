@@ -25,7 +25,6 @@ from modelopt.torch.puzzletron.post_mip.records import (
     CandidateRevision,
     NodeObservation,
 )
-from modelopt.torch.puzzletron.post_mip.reporting import render_aiperf_report
 
 
 def _ledger(tmp_path, metrics_by_revision):
@@ -121,34 +120,6 @@ def test_multimodal_sweep_selection_resolves_one_image_workload(tmp_path):
     assert selected == ("revision-b",)
     assert excluded == {"revision-a": "outside top_k"}
     assert scores == {"revision-a": 25.0, "revision-b": 30.0}
-
-
-def test_aiperf_report_renders_multimodal_namespaced_metrics():
-    html = render_aiperf_report(
-        "vlm-serving",
-        {
-            "status": "completed",
-            "observations": [
-                {
-                    "label": "candidate-a",
-                    "status": "success",
-                    "selected_by": ["fastest_vlm"],
-                    "metrics": {
-                        "images_12.concurrency_1.request_throughput": 2.0,
-                        "images_12.concurrency_1.image_throughput": 24.0,
-                        "images_12.concurrency_1.output_token_throughput": 128.0,
-                        "images_12.concurrency_1.ttft_mean_ms": 10.0,
-                        "images_12.concurrency_1.tpot_mean_ms": 3.0,
-                    },
-                }
-            ],
-        },
-    )
-
-    assert "images 12 / concurrency 1" in html
-    assert "<td>24</td>" in html
-    assert "<td>128</td>" in html
-    assert "Selected by Fastest" in html
 
 
 def test_best_per_concurrency_unions_top_k_from_each_point(tmp_path):

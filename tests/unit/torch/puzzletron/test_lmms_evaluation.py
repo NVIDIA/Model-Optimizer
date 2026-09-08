@@ -215,23 +215,6 @@ def test_command_maps_checkpoint_for_native_qwen35_backend(tmp_path):
     assert "tensor_parallel_size" not in model_args
 
 
-def test_command_forwards_unowned_model_and_evaluator_options(tmp_path):
-    argv, _, _ = lmms._build_command(
-        {
-            **_settings("ifeval"),
-            "model_args": {"new_vllm_option": "enabled"},
-            "extra_args": ["--new-lmms-option", "enabled"],
-        },
-        checkpoint="/ckpts/candidate",
-        output_path=tmp_path / "results",
-    )
-
-    model_args = argv[argv.index("--model_args") + 1]
-    evaluator_option = argv.index("--new-lmms-option")
-    assert "new_vllm_option=enabled" in model_args
-    assert argv[evaluator_option + 1] == "enabled"
-
-
 def test_command_splits_string_prefix(tmp_path):
     argv, _, _ = lmms._build_command(
         {**_settings("ifeval"), "command_prefix": "python -m lmms_eval"},

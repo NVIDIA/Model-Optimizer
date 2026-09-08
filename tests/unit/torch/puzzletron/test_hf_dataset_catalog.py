@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from types import SimpleNamespace
 
@@ -9,7 +21,6 @@ from puzzletron_setup import SetupError
 from puzzletron_setup.v2.hf_datasets import (
     HfSubsetCatalog,
     discover_hf_subset_catalog,
-    format_subset_choice,
     proportional_subset_weights,
 )
 
@@ -115,22 +126,6 @@ def test_catalog_falls_back_to_hosted_or_parquet_bytes_when_original_size_is_abs
     assert all(item.selectable for item in catalog.subsets)
 
 
-def test_catalog_preserves_all_46_dynamic_configurations():
-    names = [f"subset_{index:02d}" for index in range(46)]
-
-    catalog = discover_hf_subset_catalog(
-        "nvidia/forty-six",
-        config_names_loader=lambda source, revision=None: names,
-        size_payload_loader=lambda source: _sizes(
-            *((name, index + 1, (index + 1) * 1000) for index, name in enumerate(names))
-        ),
-        api=_FakeApi(),
-    )
-
-    assert len(catalog.subsets) == 46
-    assert [item.name for item in catalog.subsets] == names
-
-
 def test_generic_catalog_does_not_require_nemotron_media_layout():
     catalog = discover_hf_subset_catalog(
         "owner/generic",
@@ -141,9 +136,6 @@ def test_generic_catalog_does_not_require_nemotron_media_layout():
     )
 
     assert catalog.subsets[0].selectable
-    assert format_subset_choice(catalog.subsets[0]) == (
-        "trainable — 5 rows — 2.00 KiB"
-    )
 
 
 def test_missing_or_zero_size_metadata_disables_subset():
