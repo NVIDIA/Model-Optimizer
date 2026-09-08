@@ -25,7 +25,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from modelopt.torch.models import hf_model_type
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
@@ -34,7 +34,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 
-from .layer_utils import is_moe, sync_moe_gate_up_amax
+from .layer_utils import sync_moe_gate_up_amax
 from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .model_utils import TiedWeightMap
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names

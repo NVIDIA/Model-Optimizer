@@ -31,6 +31,7 @@ except Exception:
 from modelopt.torch.models import (
     get_spec,
     hf_model_type,
+    is_moe,
     list_all_possible,
     match_moe_block,
     match_moe_model,
@@ -311,30 +312,6 @@ def is_attention(module: nn.Module) -> bool:
 def is_mlp(module: nn.Module) -> bool:
     """Returns whether the module is an MLP layer."""
     return any(key in type(module).__name__.upper() for key in ("MLP", "T5DENSE"))
-
-
-def is_moe(module: nn.Module, model_type: str | None = None) -> bool:
-    """Returns whether the module is an MOE layer.
-
-    ``model_type`` (``model.config.model_type``) scopes the registry lookup to the
-    model's own spec.
-
-    The model's own spec is consulted first: per-model data always takes precedence
-    over the generic name and structural fallbacks.
-    """
-    # Per-model data (modelopt/torch/models/*), which also covers non-standard names.
-    if match_moe_block(module, model_type) is not None:
-        return True
-    # Generic fallback: the common MoE block naming conventions.
-    name = type(module).__name__.lower()
-    if name.endswith("sparsemoeblock") or "moelayer" in name:
-        return True
-    # Structural fallback: modules with router + experts (e.g. Gemma4TextDecoderLayer)
-    return (
-        hasattr(module, "router")
-        and hasattr(module, "experts")
-        and isinstance(module.experts, nn.Module)
-    )
 
 
 def is_quantlinear(module: nn.Module) -> bool:
