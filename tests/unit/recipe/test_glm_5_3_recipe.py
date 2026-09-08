@@ -13,29 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wildcard-precedence tests for the GLM-5.3-Flash checkpoint-mirror PTQ recipes.
+"""Wildcard-precedence test for the GLM-5.3-Flash checkpoint-mirror PTQ recipe.
 
-Both recipes rely on wildcard scoping over ``base_disable_all`` rather than an
+The recipe relies on wildcard scoping over ``base_disable_all`` rather than an
 explicit per-module map, so a few non-obvious matches decide correctness:
 
 * ``*.experts.*`` needs a literal ``.experts.``, so ``mlp.shared_experts.*`` is
   *not* matched and the shared experts stay BF16.
-* In the experts+dense-MLP recipe the vision tower reuses the language MLP's leaf
-  names (``mlp.gate_proj`` / ``up_proj`` / ``down_proj``), so the dense-MLP patterns
-  match ``model.visual.*`` too -- only the trailing ``*visual*`` disable (which must
-  stay last) keeps the vision tower in BF16.
+* The vision tower reuses the language MLP's leaf names (``mlp.gate_proj`` /
+  ``up_proj`` / ``down_proj``), so the dense-MLP patterns match ``model.visual.*``
+  too -- only the trailing ``*visual*`` disable (which must stay last) keeps the
+  vision tower in BF16.
 * ``*mlp.gate_proj*`` must not catch the router ``mlp.gate``.
 
-These pin that behaviour so it can't silently drift.
+This pins that behaviour so it can't silently drift.
 """
 
-import pytest
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 
-_RECIPE_DIR = "models/zai-org/GLM-5.3-Flash/ptq"
+_RECIPE = "models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast"
 _H = 32
 
 
@@ -119,18 +118,11 @@ def _nvfp4(quantizer):
     return quantizer.is_enabled and quantizer.num_bits == (2, 1)
 
 
-@pytest.mark.parametrize(
-    ("recipe", "quantizes_dense_mlp"),
-    [
-        ("nvfp4_experts_only-kv_fp8_cast", False),
-        ("nvfp4_experts_dense_mlp-kv_fp8_cast", True),
-    ],
-)
-def test_glm_5_3_recipe_quantizer_precedence(recipe, quantizes_dense_mlp):
+def test_glm_5_3_recipe_quantizer_precedence():
     model = _GLM53Flash()
 
-    config = load_recipe(f"{_RECIPE_DIR}/{recipe}").quantize.model_dump()
-    # Both recipes use plain max calibration; here we only assert quantizer placement,
+    config = load_recipe(_RECIPE).quantize.model_dump()
+    # The recipe uses plain max calibration; here we only assert quantizer placement,
     # so drop the algorithm to avoid needing a calibration forward pass.
     assert config["algorithm"]["method"] == "max"
     config["algorithm"] = None
@@ -139,22 +131,20 @@ def test_glm_5_3_recipe_quantizer_precedence(recipe, quantizes_dense_mlp):
     dense = model.model.language_model.layers[0]
     sparse = model.model.language_model.layers[1]
 
-    # Routed experts -> NVFP4 W4A4 in both recipes.
+    # Routed experts -> NVFP4 W4A4.
     for expert in sparse.mlp.experts:
         for proj in (expert.gate_proj, expert.up_proj, expert.down_proj):
             assert _nvfp4(proj.weight_quantizer)
             assert _nvfp4(proj.input_quantizer)
 
-    # Dense MLP (layers 0-2) -> NVFP4 only in the experts+dense-MLP recipe.
+    # Dense MLP (layers 0-2) -> NVFP4.
     for proj in (dense.mlp.gate_proj, dense.mlp.up_proj, dense.mlp.down_proj):
-        assert proj.weight_quantizer.is_enabled is quantizes_dense_mlp
-        assert proj.input_quantizer.is_enabled is quantizes_dense_mlp
-        if quantizes_dense_mlp:
-            assert proj.weight_quantizer.num_bits == (2, 1)
+        assert _nvfp4(proj.weight_quantizer)
+        assert _nvfp4(proj.input_quantizer)
 
-    # Vision tower stays BF16 in BOTH recipes. For experts+dense-MLP this is the
-    # load-bearing case: the vision MLP reuses gate_proj/up_proj/down_proj, so the
-    # dense-MLP patterns match it and only the trailing `*visual*` disable keeps it off.
+    # Vision tower stays BF16 -- the load-bearing case: the vision MLP reuses
+    # gate_proj/up_proj/down_proj, so the dense-MLP patterns match it and only the
+    # trailing `*visual*` disable keeps it off.
     vblock = model.model.visual.blocks[0]
     for proj in (vblock.mlp.gate_proj, vblock.mlp.up_proj, vblock.mlp.down_proj):
         assert proj.weight_quantizer.is_enabled is False

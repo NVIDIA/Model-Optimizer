@@ -15,7 +15,7 @@
 
 # Recipe for zai-org/GLM-5.3-Flash: NVFP4 on the routed experts and the dense MLP, FP8 KV cache.
 #
-# The wider sibling of `nvfp4_experts_only-kv_fp8_cast`. GLM-5.3-Flash is a `glm5_next` VLM
+# GLM-5.3-Flash is a `glm5_next` VLM
 # MoE -- 45 decoder layers, 288 routed experts, and HYBRID attention: KDA (linear-attention)
 # layers interleaved with NoPE sparse-MLA layers. It needs transformers >= 5.16.1 (earlier
 # releases cannot parse the config).
@@ -33,8 +33,7 @@
 # The vision tower reuses the same leaf names -- `model.visual.blocks.<N>.mlp.gate_proj` and
 # friends, across 24 blocks -- so the dense-MLP patterns match 144 modules inside it. Entries
 # apply in order, so the disable has to come LAST or the vision tower is quantized by accident.
-# (The experts-only sibling needs no such rule: `*.experts.*` matches nothing under
-# `model.visual.*`.)
+# (`*.experts.*` matches nothing under `model.visual.*`, so only the dense-MLP patterns reach it.)
 #
 # Two model-specific notes:
 #
@@ -42,11 +41,12 @@
 #   layers nest under `model.language_model.layers` and layerwise_calibrate cannot find
 #   them.
 #
-# * The MTP head is inlined as decoder layer 45 and is NOT quantized. The config declares
-#   `num_hidden_layers: 45`, so transformers builds layers 0-44 and never instantiates
-#   layer 45; no quantizer attaches to it and it stays BF16.
+# * The MTP (next-token-prediction) head is not quantized because it is not built. The config
+#   declares `num_hidden_layers: 45` (with `num_nextn_predict_layers: 1`), so the HF model class
+#   instantiates decoder layers 0-44 only and does not construct the MTP layer -- it is therefore
+#   neither quantized nor carried into the exported checkpoint.
 #
-# Like the sibling, the shared `default_disabled_quantizers` unit is deliberately not imported.
+# The shared `default_disabled_quantizers` unit is deliberately not imported.
 # Of its patterns only `*visual*` changes anything here; every other one either matches no
 # module in this model or matches a module `base_disable_all` already left off (`lm_head`, the
 # `mlp.gate.` routers), and none of them are re-enabled below. Two patterns that look riskier
