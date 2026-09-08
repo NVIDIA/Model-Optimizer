@@ -63,8 +63,8 @@ metadata:
   description: >-
     GLM-5.3-Flash: NVFP4 (W4A4) on the routed experts and on the dense MLP of layers 0-2,
     plus an FP8 KV cache in cast mode using constant amax; max calibration. Shared experts,
-    router gate, KDA and MLA attention, vision tower, embeddings, lm_head and the inlined
-    MTP layer all stay BF16.
+    router gate, KDA and MLA attention, vision tower, embeddings and lm_head stay BF16. The
+    MTP layer is not built at num_hidden_layers=45, so it is neither quantized nor exported.
 quantize:
   algorithm:
     method: max

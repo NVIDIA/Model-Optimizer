@@ -423,10 +423,14 @@ checkpoint's** quant config verbatim:
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
   the dense-MLP scope plus the vision-tower exclusion.)
 
-*Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
-different component types — or individual layers** — and hardcode the precise
-published layout (for Super, matched on both HF and Megatron-Core module names)
-rather than a portable wildcard scheme.
+*Why special:* unlike any general recipe, each is pinned to one checkpoint and
+captures a model-specific deviation a portable general recipe can't express. Most
+**mix FP8 and NVFP4 across different component types — or individual layers** —
+and hardcode the precise published layout (for Super, matched on both HF and
+Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flash
+is the exception: its deviation is a model-specific *scope* — a wildcard scheme
+plus a load-bearing vision-tower exclusion and the VLM-required
+`layerwise.enable=false` — rather than a per-component precision map.
 
 ---
 
