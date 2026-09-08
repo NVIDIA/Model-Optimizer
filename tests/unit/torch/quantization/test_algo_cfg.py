@@ -403,6 +403,36 @@ def test_gptq_preserves_a_preceding_range_search():
     assert not torch.equal(chained[probe], only_gptq[probe])
 
 
+def test_awq_full_is_exactly_its_two_stage_pipeline():
+    """`awq_full` is a bundled composite; the plan surface expresses it as the pipeline.
+
+    Bit-identical equivalence is the strongest available evidence that stage sequencing
+    reproduces what an algorithm does internally today.
+    """
+    bundled = mtq.quantize(
+        _model(), {"quant_cfg": QUANT_CFG, "algorithm": "awq_full"}, _forward_loop
+    )
+    pipeline = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"quantizer_name": "*", "cfg": ["awq_lite", "awq_clip"]}],
+        },
+        _forward_loop,
+    )
+    lite_only = mtq.quantize(
+        _model(), {"quant_cfg": QUANT_CFG, "algorithm": "awq_lite"}, _forward_loop
+    )
+    bundled_amax, pipeline_amax = _weight_amax(bundled), _weight_amax(pipeline)
+
+    assert set(bundled_amax) == set(pipeline_amax)
+    assert all(torch.equal(bundled_amax[k], pipeline_amax[k]) for k in bundled_amax)
+    # Guard against the assertion passing because awq_clip did nothing.
+    lite_amax = _weight_amax(lite_only)
+    assert any(not torch.equal(bundled_amax[k], lite_amax[k]) for k in bundled_amax)
+
+
 def test_awq_then_mse_refines_the_smoothed_weights():
     """MSE re-searches the amax on AWQ's smoothed weights: a forward-free awq_clip."""
     only_awq = _run_chain(["awq_lite"])
