@@ -165,6 +165,23 @@ search_space:
 `{range: [low, high]}` selects an inclusive measured range. With
 `axes_default: teacher`, omitted pruning axes stay at the teacher value.
 
+Use a layer-scoped selector when a sentinel or controlled ablation must place a
+nonteacher value at an exact layer while retaining teacher geometry elsewhere:
+
+```yaml
+axes:
+  attention.num_kv_heads:
+    default: teacher
+    layers:
+      19: [1]
+```
+
+Layer keys are zero-based parent-layer indices and must be integer YAML keys;
+booleans, floats, and quoted numeric strings are rejected. Each layer value
+accepts the same `teacher`, `all`, scalar, list, or inclusive-range selector
+used by a global axis. A layer-scoped selector must name at least one layer;
+its default is `teacher` when omitted.
+
 Depth can also select typed subblock prefixes:
 
 ```yaml
@@ -209,10 +226,9 @@ MIP and homogeneous outputs may contain thousands of candidates. Candidate
 deduplication and filtering belong to the configurable post-MIP pipeline; see
 `post_mip_pipeline.md`.
 
-Each completed invocation writes `mip/active_profiles.json`, the authoritative
-snapshot of concrete profile IDs and their execution identity. Old profile directories
-remain available as history, but post-MIP source selection only reads candidates from
-this active snapshot. Changing constraints, objectives, search dimensions, solver-pool
+Each completed invocation writes `mip/active_profiles.json`, the list of
+concrete profile IDs used for post-MIP source selection. Changing constraints,
+objectives, search dimensions, solver-pool
 settings, or materialization mode invalidates the corresponding cached scenario.
 The identity also snapshots upstream score, statistics, library, teacher-control,
 and stage-manifest artifacts, so regenerating MIP inputs invalidates old solutions.

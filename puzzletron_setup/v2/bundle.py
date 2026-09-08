@@ -23,6 +23,7 @@ import shlex
 import shutil
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -339,6 +340,22 @@ def _write_yaml(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(yaml.safe_dump(_plain(payload), sort_keys=False, width=100))
 
 
+def _write_text_atomic(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(content)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
 def _bundle_readme(
     campaign_dir: Path,
     repository: str,
@@ -399,6 +416,10 @@ def _bundle_readme(
                 "## Prepare dataset",
                 "",
                 "The command is idempotent only when the existing manifest matches these answers.",
+                (
+                    "If a nonempty destination contains a different manifest, choose a new output "
+                    "path; the setup tool will not delete or rewrite that dataset."
+                ),
                 "",
                 "```bash",
                 shlex.join(acquisition_command),
@@ -418,6 +439,29 @@ def _bundle_readme(
             "Run this campaign after the setup validation succeeds.",
             "After reviewing the plan and worker paths, launch the campaign:",
         ),
+    )
+    lines.extend(
+        (
+            "",
+            (
+                "The generated experiment records the inspected teacher width and depth used by "
+                "named MIP. Do not edit the generated worker command or invoke the MIP solver "
+                "directly; the orchestrator selects the compatible stage implementation."
+            ),
+            (
+                "Prepare any evaluator dependencies or task cache required by your selected "
+                "profile in the worker environment before launch. Dataset or evaluator "
+                "preparation does not change the campaign launch command."
+            ),
+            (
+                "Each dry-run-plan.txt is a generation-time snapshot. Rerun the dry-run command "
+                "after updating ModelOpt or editing any generated configuration."
+            ),
+            (
+                "If an updated compiler rejects a generated file, resume setup to regenerate both "
+                "bundles, review the changes, and run the dry-run again."
+            ),
+        )
     )
     for budget, heading, introduction, launch_introduction in sections:
         bundle = campaign_dir / budget
@@ -453,12 +497,17 @@ def _bundle_readme(
                 "```bash",
                 launch_command,
                 "```",
+                "",
+                (
+                    "Run the same launch command again to recover compatible active attempts and "
+                    "skip completed stages."
+                ),
             ]
         )
     lines.extend(
         [
             "",
-            "## Resume setup",
+            "## Regenerate or change setup",
             "",
             "```bash",
             shlex.join(
@@ -501,7 +550,6 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
             if not validation.valid:
                 raise SetupError(f"{budget} bundle is invalid: {validation.error}")
             validations[budget] = validation
-            (bundle / "dry-run-plan.txt").write_text(dry_run_bundle(bundle))
 
         provenance = {
             path: {
@@ -522,19 +570,42 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
             )
         )
 
-        for relative in ("smoke", "production"):
-            source = temp_root / relative
-            target = campaign_dir / relative
-            backup = campaign_dir / f".{relative}.previous"
-            if backup.exists():
-                shutil.rmtree(backup)
-            if target.exists():
-                os.replace(target, backup)
-            os.replace(source, target)
-            if backup.exists():
-                shutil.rmtree(backup)
-        for name in ("resolved_defaults.yaml", "README.md"):
-            os.replace(temp_root / name, campaign_dir / name)
+        swaps: list[tuple[Path, Path, bool]] = []
+        try:
+            for relative in ("smoke", "production"):
+                source = temp_root / relative
+                target = campaign_dir / relative
+                backup = campaign_dir / f".{relative}.previous"
+                if backup.exists():
+                    _remove_path(backup)
+                had_target = target.exists()
+                if had_target:
+                    os.replace(target, backup)
+                swaps.append((target, backup, had_target))
+                os.replace(source, target)
+            for target, _backup, _had_target in swaps:
+                _write_text_atomic(target / "dry-run-plan.txt", dry_run_bundle(target))
+            for name in ("resolved_defaults.yaml", "README.md"):
+                source = temp_root / name
+                target = campaign_dir / name
+                backup = campaign_dir / f".{name}.previous"
+                if backup.exists():
+                    _remove_path(backup)
+                had_target = target.exists()
+                if had_target:
+                    os.replace(target, backup)
+                swaps.append((target, backup, had_target))
+                os.replace(source, target)
+        except Exception:
+            for target, backup, had_target in reversed(swaps):
+                if target.exists():
+                    _remove_path(target)
+                if had_target and backup.exists():
+                    os.replace(backup, target)
+            raise
+        for _target, backup, _had_target in swaps:
+            with suppress(OSError):
+                _remove_path(backup)
         return BundleResult(
             campaign_dir=campaign_dir,
             smoke=validations["smoke"],

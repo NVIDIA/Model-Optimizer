@@ -29,10 +29,11 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.controller import dry_run_plan
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
-from puzzletron_setup.v2.defaults import DefaultsResolver
+from puzzletron_setup.v2.defaults import DefaultsResolver, validate_defaults
 from puzzletron_setup.v2.presets import get_setup_preset
 from puzzletron_setup.v2.prompts import NonInteractiveBackend, PromptChoice, ScriptedBackend
 from puzzletron_setup.v2.session import WizardSession
@@ -46,6 +47,24 @@ from puzzletron_setup.v2.wizard import (
 
 _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
+
+
+def test_only_cpu_slurm_integer_defaults_accept_null() -> None:
+    defaults = validate_defaults(
+        {
+            "schema_version": 1,
+            "infrastructure": {
+                "runner": {"slurm": {"cpu_cpus_per_task": None, "cpu_memory_mb": None}}
+            },
+        }
+    )
+
+    assert defaults["infrastructure"]["runner"]["slurm"] == {
+        "cpu_cpus_per_task": None,
+        "cpu_memory_mb": None,
+    }
+    with pytest.raises(SetupError, match="data.sequence_length must be an integer"):
+        validate_defaults({"schema_version": 1, "data": {"sequence_length": None}})
 
 
 # Public facade and guided-profile defaults
@@ -455,6 +474,35 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
     assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    execution = yaml.safe_load((campaign / "production" / "execution.yaml").read_text())
+    assert execution["execution"]["schema_version"] == 1
+    assert production["model_info"]["hidden_size"] == 1024
+    assert production["model_info"]["num_hidden_layers"] == 24
+    assert production["embedding_pruning"] == {
+        "enabled": True,
+        "widths": [1024],
+        "alignment": 256,
+        "cycle_widths": True,
+    }
+    assert production["depth_importance"]["expected_initial_sublayers"] == 48
+    assert production["depth_importance"]["max_subblocks_to_remove"] == 0
+    mip_run = next(iter(production["mip"]["runs"].values()))
+    assert mip_run["search_space"]["embedding"] == [1024]
+    assert mip_run["search_space"]["depth"] == [0]
+    assert execution["execution"]["stages"]["mip"]["resource"] == "cpu"
+    plan = compile_campaign_plan(
+        experiment_config_path=campaign / "production" / "experiment.yaml",
+        runner=load_runner_config(campaign / "production" / "runner.yaml"),
+        execution=load_execution_config(campaign / "production" / "execution.yaml"),
+        stage_filter="mip",
+    )
+    submission = dry_run_plan(plan)[0]
+    assert submission.launcher == "direct"
+    assert submission.gpus == 0
+    assert any(
+        str(argument).endswith("examples/puzzletron/main.py") for argument in submission.argv
+    )
+    assert submission.argv[submission.argv.index("--worker-stage") + 1] == "mip"
     flow = next(iter(production["post_mip"]["flows"].values()))
     comparison = flow["nodes"]["quality_benchmarks"]
     assert comparison["type"] == "downstream_evaluation"
@@ -545,15 +593,21 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
     smoke_quality = smoke_flow["nodes"]["quality_benchmarks"]["config"]
-    assert smoke_quality["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+    assert smoke_quality["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
     assert smoke_quality["limit"] == 8
+    assert smoke_quality["limit_mm_per_prompt"] == {"image": 32}
+    assert smoke_quality["max_model_len"] == 32768
     assert "recorded_observation" not in smoke_quality
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
     flow_id, flow = next(iter(production["post_mip"]["flows"].items()))
     assert flow_id == "params-90"
     nodes = flow["nodes"]
     quality = nodes["quality_benchmarks"]
-    assert quality["config"]["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+    assert (
+        quality["config"]["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+    )
+    assert quality["config"]["limit_mm_per_prompt"] == {"image": 32}
+    assert quality["config"]["max_model_len"] == 32768
     assert "model" not in quality["config"]
     assert "log_samples" not in quality["config"]
     assert "recorded_observation" not in quality["config"]
@@ -649,6 +703,8 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
             "acct",
             "pt",
             "4:00:00",
+            "6",
+            "24576",
             "8",
             "",
         ]
@@ -664,6 +720,8 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
     assert backend.cpu_partition_default == "cpu-a,cpu-b"
     assert state.get_field("infrastructure.runner.slurm.partition") == "gpu-a,gpu-b"
     assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu-a,cpu-b"
+    assert state.get_field("infrastructure.runner.slurm.cpu_cpus_per_task") == 6
+    assert state.get_field("infrastructure.runner.slurm.cpu_memory_mb") == 24576
     assert backend.remaining == 0
 
 

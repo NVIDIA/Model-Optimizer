@@ -652,6 +652,8 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
             ),
             "partition_batch": effective("infrastructure.runner.slurm.partition_batch", None),
             "partition_cpu": effective("infrastructure.runner.slurm.partition_cpu", None),
+            "cpu_cpus_per_task": effective("infrastructure.runner.slurm.cpu_cpus_per_task", None),
+            "cpu_memory_mb": effective("infrastructure.runner.slurm.cpu_memory_mb", None),
             "interactive_max_nodes": effective(
                 "infrastructure.runner.slurm.interactive_max_nodes", 2
             ),

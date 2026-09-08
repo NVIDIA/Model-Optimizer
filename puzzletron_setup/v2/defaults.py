@@ -53,6 +53,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
                 "account": "",
                 "job_name_prefix": "pt",
                 "partition": None,
+                "cpu_cpus_per_task": None,
+                "cpu_memory_mb": None,
                 "time_limit": "4:00:00",
                 "qos": None,
                 "max_nodes": 64,
@@ -121,6 +123,8 @@ _INTEGER_MINIMUMS = {
     "data.acquisition.max_shards_per_subset": 1,
     "infrastructure.gpus_per_node": 1,
     "infrastructure.runner.slurm.max_nodes": 1,
+    "infrastructure.runner.slurm.cpu_cpus_per_task": 1,
+    "infrastructure.runner.slurm.cpu_memory_mb": 1,
     "pruning.depth_remove": 0,
     "pruning.depth_importance_samples": 1,
     "pruning.width_importance_samples": 1,
@@ -143,6 +147,10 @@ _INTEGER_MINIMUMS = {
     "vllm.topology.prefill_context_parallel_size": 1,
     "vllm.topology.decode_context_parallel_size": 1,
     "mip.num_solutions": 1,
+}
+_OPTIONAL_INTEGER_PATHS = {
+    "infrastructure.runner.slurm.cpu_cpus_per_task",
+    "infrastructure.runner.slurm.cpu_memory_mb",
 }
 _BOOLEAN_PATHS = {
     "campaign.generate_smoke",
@@ -214,6 +222,8 @@ _SCHEMA = {
                 "job_name_prefix": None,
                 "partition": None,
                 "partition_cpu": None,
+                "cpu_cpus_per_task": None,
+                "cpu_memory_mb": None,
                 "max_nodes": None,
                 "time_limit": None,
                 "qos": None,
@@ -247,6 +257,8 @@ def _validate_leaf(value: Any, path: str) -> None:
     if len(parts) == 3 and parts[0] == "stages" and parts[2] in _STAGE_INTEGER_FIELDS:
         minimum = 1
     if minimum is not None:
+        if value is None and path in _OPTIONAL_INTEGER_PATHS:
+            return
         if isinstance(value, bool) or not isinstance(value, int):
             raise SetupError(f"Defaults field {path} must be an integer.")
         if value < minimum:

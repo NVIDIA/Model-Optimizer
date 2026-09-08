@@ -39,7 +39,7 @@
         "materialization and observational serving",
         "best 4 by mean rank with LM-loss weight 1.0, throughput weight 0.25, and at least 1 from each band"
       ],
-      "current_recipe": "existing params-90 run followed by LM-loss top_k 2; serving metrics are observational",
+      "successor_recipe_at_record_time": "params-90 run followed by LM-loss top_k 2; serving metrics were observational",
       "consequence": "A corrected-recipe execution can retain different students."
     }
   },

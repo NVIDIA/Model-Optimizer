@@ -7,9 +7,7 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/model@_global_
   - _self_
 
-# Focused one-GPU smoke for the real pinned checkpoint. The enabled DAG ends at
-# MIP; bypass, serving statistics, evaluation, AIPerf, and distillation are not
-# part of this milestone.
+# Shared bounded-search settings for the maintained lifecycle examples.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_smoke}
 dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH,../Puzzle-KD-Nemotron-Post-Training-Dataset-v2}
 display_name: Qwen3p5_0p8B

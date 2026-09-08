@@ -53,7 +53,10 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-The compiled default plan should end at `mip` and request one GPU for every enabled stage. Inspect the complete plan, paths, and resource settings before removing `--dry-run`.
+The compiled default plan should end at `mip`. Conversion, library construction,
+and MIP request no GPUs; every other enabled stage in this plan requests one
+GPU. Inspect the complete plan, paths, and resource settings before removing
+`--dry-run`.
 
 ## Compile the opt-in lifecycle
 

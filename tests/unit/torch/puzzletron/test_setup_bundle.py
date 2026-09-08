@@ -123,6 +123,28 @@ def test_nemotron_super_keeps_latent_moe_activation_pass() -> None:
     assert "moe_latent" in pass_names
 
 
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("hidden_size", "inspected teacher has no positive hidden_size"),
+        ("num_layers", "inspected teacher has no positive num_hidden_layers"),
+        ("num_sublayers", "inspected teacher has no positive sublayer depth"),
+    ],
+)
+def test_named_mip_generation_requires_inspected_teacher_geometry(
+    missing: str, message: str
+) -> None:
+    state = _nemotron_render_state(latent_moe=False)
+    if missing == "hidden_size":
+        state["inventory"]["facts"].pop(missing)
+    else:
+        state["inventory"].pop(missing)
+    state["answers"]["mip"]["runs"] = {"params-90": {}}
+
+    with pytest.raises(SetupError, match=message):
+        render_experiment(state, "production")
+
+
 def test_first_class_text_acquisition_renders_local_path_and_keeps_tokenization() -> None:
     state = _nemotron_render_state(latent_moe=False)
     state["answers"]["data"].update(
@@ -607,6 +629,38 @@ def test_render_execution_uses_cpu_resources_without_partition_taxonomy() -> Non
     assert stages["mip"]["resource"] == "cpu"
     assert stages["post.run.materialized"]["resource"] == "cpu"
     assert stages["post.run.materialized"]["instances"] == 1
+
+
+def test_render_execution_preserves_gpu_mip_validation_topology() -> None:
+    state = {
+        "answers": {
+            "infrastructure": {
+                "runner": {"kind": "slurm", "slurm": {"account": "acct"}},
+                "gpus_per_node": 8,
+                "workers": {"pool": 8, "sharded": 8},
+                "meshes": {"common": {}, "bypass": {}, "global_kd": {}},
+            }
+        }
+    }
+    experiment = {
+        "skip_realize_model": False,
+        "realize_model": {
+            "skip_validation": False,
+            "automodel": {"parallel": {"cp": 4, "pp": 2}},
+        },
+    }
+
+    mip = render_execution(state, experiment, "production")["execution"]["stages"]["mip"]
+
+    assert mip["resource"] == "gpu"
+    assert mip["parallel"] == {
+        "tp": 1,
+        "cp": 4,
+        "pp": 2,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
+    }
 
 
 def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:

@@ -35,6 +35,7 @@ from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
+    mip_resource,
 )
 from puzzletron_orchestrator.controller import dry_run_plan
 
@@ -212,6 +213,43 @@ def _model_info(state: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if value is not None}
 
 
+def _named_mip_teacher_geometry(
+    state: Mapping[str, Any], axes: Mapping[str, Any]
+) -> tuple[int, int, int]:
+    """Return inspected teacher width and depth required by named MIP runs."""
+    inventory = _mapping(state.get("inventory"))
+    facts = _mapping(inventory.get("facts"))
+    hidden_axis = _mapping(axes.get("hidden_width"))
+    hidden_size = facts.get("hidden_size")
+    num_layers = inventory.get("num_layers")
+    num_sublayers = inventory.get("num_sublayers")
+    if not isinstance(hidden_size, int) or isinstance(hidden_size, bool) or hidden_size < 1:
+        raise SetupError(
+            "Cannot generate named MIP runs because the inspected teacher has no positive "
+            "hidden_size. Verify the model config or choose a supported local/Hugging Face "
+            "checkpoint, then rerun setup."
+        )
+    if not isinstance(num_layers, int) or isinstance(num_layers, bool) or num_layers < 1:
+        raise SetupError(
+            "Cannot generate named MIP runs because the inspected teacher has no positive "
+            "num_hidden_layers. Verify the model config or choose a supported local/Hugging "
+            "Face checkpoint, then rerun setup."
+        )
+    if not isinstance(num_sublayers, int) or isinstance(num_sublayers, bool) or num_sublayers < 1:
+        raise SetupError(
+            "Cannot generate named MIP runs because the inspected teacher has no positive "
+            "sublayer depth. Verify the model family descriptor and checkpoint config, then "
+            "rerun model inspection and setup."
+        )
+    axis_teacher = hidden_axis.get("teacher_value")
+    if axis_teacher is not None and int(axis_teacher) != hidden_size:
+        raise SetupError(
+            "Cannot generate named MIP runs because the inspected hidden-width axis disagrees "
+            f"with teacher hidden_size={hidden_size}. Rerun model inspection before setup."
+        )
+    return hidden_size, num_layers, num_sublayers
+
+
 def _axis_config(pruning: Mapping[str, Any]) -> dict[str, Any]:
     axes = {}
     for axis_id, raw in _mapping(pruning.get("axes")).items():
@@ -385,11 +423,19 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     runtime = _answers(state, "runtime")
     infrastructure = _answers(state, "infrastructure")
     output = _answers(state, "output")
+    mip_runs = _mapping(_answers(state, "mip").get("runs"))
     meshes = _mapping(infrastructure.get("meshes"))
     common_mesh = _mapping(meshes.get("common"))
     bypass_mesh = _mapping(meshes.get("bypass"))
     global_kd_mesh = _mapping(meshes.get("global_kd"))
     axes = _axis_config(pruning)
+    teacher_hidden_size = None
+    teacher_num_layers = None
+    teacher_num_sublayers = None
+    if mip_runs:
+        teacher_hidden_size, teacher_num_layers, teacher_num_sublayers = (
+            _named_mip_teacher_geometry(state, axes)
+        )
     enabled_axis_ids = [
         axis_id for axis_id, axis in axes.items() if bool(axis.get("enabled", False))
     ]
@@ -424,9 +470,11 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
                 "activation_hooks_kwargs": {"method": "minitron_hidden_width"},
             },
         )
-    embedding_widths = (
-        list(hidden_axis.get("values") or ()) if bool(hidden_axis.get("enabled", False)) else []
-    )
+    embedding_widths = list(hidden_axis.get("values") or ()) if hidden_axis.get("enabled") else []
+    if teacher_hidden_size is not None:
+        embedding_widths = list(
+            dict.fromkeys((teacher_hidden_size, *(int(width) for width in embedding_widths)))
+        )
     model_parallel = _parallel(common_mesh)
     bypass = _mapping(pruning.get("bypass"))
     bypass_samples = int(bypass.get("samples", 4096))
@@ -451,13 +499,17 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
 
     train_cache = f"{puzzle_dir}/dataset_cache/train.tokens"
     validation_cache = f"{puzzle_dir}/dataset_cache/validation.tokens"
+    model_info = _model_info(state)
+    if teacher_hidden_size is not None:
+        model_info["hidden_size"] = teacher_hidden_size
+        model_info["num_hidden_layers"] = teacher_num_layers
     overlay = {
         "defaults": ["_self_"],
         "clean_config_root": str(Path(puzzle_dir) / "resolved_config"),
         "puzzle_dir": puzzle_dir,
         "dataset_path": data["source"],
         "input_hf_model_path": model["source"],
-        "model_info": _model_info(state),
+        "model_info": model_info,
         "model": {
             "source": model["source"],
             "revision": model.get("resolved_revision") or model.get("requested_revision"),
@@ -617,7 +669,11 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "granularity": pruning.get("depth_granularity", "subblock"),
             "source_checkpoint_dir": "${teacher_dir}",
             "output_dir": "${puzzle_dir}/depth/iterative",
-            "expected_initial_sublayers": int(inventory.get("num_sublayers", 0)),
+            "expected_initial_sublayers": int(
+                teacher_num_sublayers
+                if teacher_num_sublayers is not None
+                else inventory.get("num_sublayers", 0)
+            ),
             "max_removals": int(pruning.get("depth_remove", 0)),
             "max_subblocks_to_remove": int(pruning.get("depth_remove", 0)),
             "metric": "lm_loss",
@@ -906,7 +962,18 @@ def render_execution(
             "instances": sharded_workers if len(embedding_widths) > 1 else pool_workers,
             "parallel": common,
         },
-        "mip": {"strategy": "single", "instances": 1},
+        "mip": {
+            "strategy": "single",
+            "instances": 1,
+            "resource": mip_resource(experiment),
+            "parallel": _parallel(
+                _mapping(_mapping(experiment.get("realize_model")).get("automodel")).get("parallel")
+                or _mapping(_mapping(experiment.get("replacement_scoring")).get("automodel")).get(
+                    "parallel"
+                )
+                or {}
+            ),
+        },
     }
     stages.update(
         _dynamic_stage_entries(
@@ -919,7 +986,9 @@ def render_execution(
             pool_source_evaluations=not bool(state.get("detailed", False)),
         )
     )
-    cpu_stage_ids = {"convert", "tokenize_data", "build_library", "mip"}
+    cpu_stage_ids = {"convert", "tokenize_data", "build_library"}
+    if mip_resource(experiment) == "cpu":
+        cpu_stage_ids.add("mip")
     for stage_id in cpu_stage_ids:
         stages[stage_id]["resource"] = "cpu"
         if cpu_partition:
@@ -930,6 +999,7 @@ def render_execution(
             stage["parallel"] = global_kd
     return {
         "execution": {
+            "schema_version": 1,
             "defaults": {
                 "failure_policy": "strict",
                 "halt_policy": "drain",
@@ -965,6 +1035,7 @@ def _submission_payload(submission) -> dict[str, Any]:
         "stage_id": submission.stage_id,
         "work_id": submission.work_id,
         "attempt_id": submission.attempt_id,
+        "resource": submission.resource,
         "nodes": submission.nodes,
         "gpus": submission.gpus,
         "gpus_per_node": submission.gpus_per_node,
@@ -977,6 +1048,7 @@ def _submission_payload(submission) -> dict[str, Any]:
         "launcher": submission.launcher,
         "exclusive": submission.exclusive,
         "argv": list(submission.argv),
+        "scheduler_script": submission.scheduler_script,
     }
 
 
@@ -994,7 +1066,8 @@ def dry_run_bundle(bundle_dir: Path) -> str:
         count = sum(item.stage_id == stage.stage_id for item in submissions)
         lines.append(
             f"{stage.stage_id}: {count} submission(s), strategy={stage.strategy.value}, "
-            f"gpus_per_instance={stage.gpus_per_instance}, nodes={stage.nodes}"
+            f"resource={stage.resource}, gpus_per_instance={stage.gpus_per_instance}, "
+            f"nodes={stage.nodes}"
         )
     lines.extend(["", json.dumps([_submission_payload(item) for item in submissions], indent=2)])
     return "\n".join(lines) + "\n"
@@ -1039,6 +1112,14 @@ def _readme(
         "Run the commands below from this campaign directory.",
         "Smoke and production are independent. Running smoke is recommended but never gates production.",
         "The setup wizard did not submit any jobs.",
+        (
+            "Each dry-run-plan.txt is a generation-time snapshot. Rerun the dry-run command "
+            "after updating ModelOpt or editing any generated configuration."
+        ),
+        (
+            "If an updated compiler rejects a generated file, resume setup to regenerate both "
+            "bundles, review the changes, and run the dry-run again."
+        ),
         "",
         "## Resource summary",
         "",
@@ -1075,12 +1156,17 @@ def _readme(
                 f"  --runner {bundle / 'runner.yaml'} \\",
                 f"  --execution {bundle / 'execution.yaml'} --stage full",
                 "```",
+                "",
+                (
+                    "Run the same launch command again to recover compatible active attempts and "
+                    "skip completed stages."
+                ),
             ]
         )
     lines.extend(
         [
             "",
-            "## Resume setup",
+            "## Regenerate or change setup",
             "",
             "```bash",
             f"python {Path(repository) / 'examples/puzzletron/puzzletron_setup.py'} --resume .",

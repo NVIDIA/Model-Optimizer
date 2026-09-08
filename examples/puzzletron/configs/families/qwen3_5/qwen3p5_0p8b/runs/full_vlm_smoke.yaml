@@ -1,32 +1,21 @@
 # @package _global_
 
 defaults:
-  - mip_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_base@_global_
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Extend the bounded image-text MIP smoke through evaluation, physical
-# materialization, comparative multimodal serving, VLM distillation, and final
-# image-text evaluation. The inherited recipe owns the pinned public checkpoint,
-# native multimodal data contract, and FFN-only search.
+# Complete bounded image-text lifecycle through evaluation, physical
+# materialization, multimodal serving, VLM distillation, and final image-text
+# evaluation. The shared base owns the pinned public checkpoint, native
+# multimodal data contract, and bounded search.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 data:
   # Tested public snapshot; callers may override with another immutable SHA.
   revision: ${oc.env:PUZZLETRON_DATASET_REVISION,51f4f4d219315c3283950994d4eb3d7fc30aa87b}
 
-# Auto-detection would select the VLM recipe from data.modality. Declare the
-# domain and trainable groups explicitly so the resolved run packet is auditable.
-global_distillation:
-  domain: vlm
-  force_hf: false
-  teacher_force_hf: false
-  student_force_hf: false
-  freeze_policy: train_all
-  validation_enabled: false
-  objective:
-    main_ce: {weight: 1.0}
-    main_kd: {weight: 1.0}
-    mtp_ce: {weight: 1.0}
-    mtp_kd: {weight: 1.0, chunk_size: 512}
+prepare_dataset:
+  evaluation_tasks: [realworldqa, mmmu_val, mvbench]
 
 post_mip:
   flows:
@@ -55,23 +44,7 @@ post_mip:
           type: downstream_evaluation
           input: materialized
           failure_policy: strict
-          config: &realworldqa_smoke_config
-            profile: qwen35_vlm_realworldqa
-            batch_size: 1
-            timeout_seconds: 600
-            dtype: bfloat16
-            gpu_memory_utilization: 0.5
-            max_model_len: 4096
-            limit_mm_per_prompt: {image: 1}
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
+          config: ${vlm_full_smoke_evaluation}
         vlm_serving:
           type: aiperf
           input: checkpoint_eval
@@ -126,7 +99,7 @@ post_mip:
           type: downstream_evaluation
           input: short_vlm_kd
           failure_policy: strict
-          config: *realworldqa_smoke_config
+          config: ${vlm_full_smoke_evaluation}
         final_image_eval:
           type: evaluation
           input: post_kd_checkpoint_eval

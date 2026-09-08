@@ -10,5 +10,7 @@ execution:
     halt_policy: drain
     gpus_per_node: 1
   stages:
+    prepare_dataset: {strategy: single, resource: cpu}
+    mip: {strategy: single, resource: cpu}
     depth_importance: {strategy: single}
     replacement_scoring: {strategy: single}

@@ -13,6 +13,13 @@ runner:
     partition:
       - REPLACE_WITH_PRIMARY_SLURM_PARTITION
       - REPLACE_WITH_ALTERNATE_SLURM_PARTITION
+    # Bound zero-GPU stages instead of inheriting a site's full-node defaults.
+    cpu_cpus_per_task: 4
+    cpu_memory_mb: 32768
+    # Optional fallback for CPU-only stages without their own partition.
+    partition_cpu:
+      - REPLACE_WITH_PRIMARY_CPU_SLURM_PARTITION
+      - REPLACE_WITH_ALTERNATE_CPU_SLURM_PARTITION
     time_limit: "4:00:00"
     log_dir: logs
   execution_contract:

@@ -1,0 +1,129 @@
+# @package _global_
+
+defaults:
+  - /families/qwen3_5/qwen3p5_0p8b/smoke_base@_global_
+  - _self_
+
+# Shared multimodal settings for the maintained VLM lifecycle and campaign.
+# Images and conversations are read through the native AutoModel processor
+# path; no text token cache is created or consumed.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
+dataset_path: ${puzzle_dir}/datasets/nemotron_vlm_v2
+display_name: Qwen3p5_0p8B_VLM
+
+prepare_dataset:
+  enabled: true
+  adapter: nemotron_vlm_v2
+  output: ${dataset_path}
+  subsets: [sparsetables, plotqa_cot, wiki_en]
+  num_samples: 8
+  seed: 42
+  max_shards_per_subset: 1
+  revision: ${oc.env:PUZZLETRON_DATASET_REVISION,51f4f4d219315c3283950994d4eb3d7fc30aa87b}
+  evaluation_datasets:
+    realworldqa:
+      repository: lmms-lab/RealWorldQA
+      revision: 907c4e5228fd1703c710ed937601cb5f89ab8d5c
+      requires_media: false
+      preparation_dir:
+    mmmu_val:
+      repository: lmms-lab/MMMU
+      revision: 364f2e2eb107b36e07ff4c5a15f5947a759cef47
+      requires_media: false
+      preparation_dir:
+    video_mmmu:
+      repository: lmms-lab/VideoMMMU
+      revision: d1c35ac933123d79e877b7f1b9506afb0309cf1b
+      requires_media: true
+      preparation_dir: video_mmmu
+    mvbench:
+      repository: OpenGVLab/MVBench
+      revision: a776e554280b99b70f00cc3eacd69a65e0727efc
+      requires_media: true
+      preparation_dir: mvbench_video
+    mmvu_val:
+      repository: lmms-lab/MMVU
+      revision: 7537bc8a4b6716be5a9995e022c295679f4af616
+      requires_media: true
+      preparation_dir: mmvu
+    videomme:
+      repository: lmms-lab/Video-MME
+      revision: ead1408f75b618502df9a1d8e0950166bf0a2a0b
+      requires_media: true
+      preparation_dir: videomme
+    longvideobench_val_v:
+      repository: longvideobench/LongVideoBench
+      revision: 60d1c89c1919a198b73be39c2babb213b29d6a5c
+      requires_media: true
+      preparation_dir: datasets/longvideobench
+    mlvu_dev:
+      repository: sy1998/MLVU_dev
+      revision: 96207eb9aa7101e2a495dd147684a7e618c79e12
+      requires_media: true
+      preparation_dir: mlvu
+    perceptiontest_val_mc:
+      repository: lmms-lab/PerceptionTest_Val
+      revision: c5e520d8c4167fb1f135c36e9d6e67312b4f8e6b
+      requires_media: true
+      preparation_dir: perceptiontest_val
+
+data:
+  modality: multimodal
+  layout: padded_varlen
+  max_sample_length: 512
+  path: ${dataset_path}
+  revision: ${prepare_dataset.revision}
+  processor_identity: ${model_info.hf_repo}@${model_info.hf_revision}
+  packing:
+
+train_token_cache_path:
+validation_token_cache_path:
+tokenize_data:
+  enabled: false
+  caches: []
+
+pruning:
+  packed_token_cache_path:
+
+# All derived VLM runs share the same explicit, auditable distillation domain
+# and trainable groups; individual flows own only their step budgets.
+global_distillation:
+  enabled: false
+  domain: vlm
+  force_hf: false
+  teacher_force_hf: false
+  student_force_hf: false
+  freeze_policy: train_all
+  validation_enabled: false
+  objective:
+    main_ce: {weight: 1.0}
+    main_kd: {weight: 1.0}
+    mtp_ce: {weight: 1.0}
+    mtp_kd: {weight: 1.0, chunk_size: 512}
+
+sort:
+  # Preserve ordering for axes outside this bounded smoke search.
+  deferred_axes:
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+sort_sanity:
+  packed_token_cache_path:
+  # Exact FFN channel permutations change BF16 reduction order and produced
+  # sub-0.002 loss drift on the VLM smoke batch; keep the gate symmetric.
+  max_abs_lm_loss_delta: 0.002
+  max_abs_reverse_lm_loss_delta: 0.002
+  automodel:
+    # Keep the portable smoke independent of the optional FLA fused-KL backend.
+    lm_head_backend: streaming
+width_sanity:
+  packed_token_cache_path:
+depth_importance:
+  packed_token_cache_path:
+replacement_scoring:
+  packed_token_cache_path:
+  automodel:
+    lm_head_backend: streaming

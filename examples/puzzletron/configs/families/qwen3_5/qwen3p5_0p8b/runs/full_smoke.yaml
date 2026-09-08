@@ -1,12 +1,12 @@
 # @package _global_
 
 defaults:
-  - mip_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/smoke_base@_global_
   - _self_
 
-# Extend the current real-checkpoint MIP smoke through the complete post-MIP
-# lifecycle. Evaluate the bounded MIP result set, benchmark the two strongest
-# quality candidates, then distill and re-evaluate the faster candidate.
+# Complete bounded text lifecycle. Evaluate the MIP result set, benchmark the
+# two strongest quality candidates, then distill and re-evaluate the faster
+# candidate.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_full_smoke}
 
 # This route searches only FFN intermediate width. Keep attention and GDN

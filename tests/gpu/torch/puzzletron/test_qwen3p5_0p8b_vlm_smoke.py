@@ -27,6 +27,7 @@ import pytest
 import yaml
 from PIL import Image
 
+from examples.puzzletron.evaluation.vlm import contracts as evaluation_contracts
 from examples.puzzletron.evaluation.vlm import profile as evaluation_profile
 from examples.puzzletron.evaluation.vlm import suites as evaluation_suites
 from modelopt.torch.puzzletron.dataset.multimodal import materialize_normalized_conversation_samples
@@ -142,9 +143,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     _materialize_image_conversations(dataset)
     _write_local_runner(runner, project_root_path)
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(results))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(dataset))
-    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
-
     environment = os.environ.copy()
     environment.update(
         {
@@ -167,6 +165,14 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
             str(project_root_path / EXECUTION_PATH),
             "--stage",
             "full",
+            "--override",
+            "prepare_dataset.enabled=false",
+            "--override",
+            f"dataset_path={dataset}",
+            "--override",
+            f"data.path={dataset}",
+            "--override",
+            "data.revision=fixture-revision",
             "--local",
             "--color",
             "never",
@@ -180,7 +186,7 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     )
     if completed.returncode:
         pytest.fail(
-            "Qwen 3.5 0.8B VLM MIP smoke failed.\n"
+            "Qwen 3.5 0.8B full VLM smoke failed.\n"
             f"stdout tail:\n{completed.stdout[-12000:]}\n"
             f"stderr tail:\n{completed.stderr[-12000:]}"
         )
@@ -224,6 +230,12 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     active_profiles = json.loads((results / "mip/active_profiles.json").read_text())
     assert active_profiles["status"] == "success"
     assert active_profiles["profile_ids"] == ["params-90"]
+    smoke_rows = evaluation_contracts.load_profile("core-3_24-examples_r1-vllm").exact_rows
+    assert smoke_rows is not None
+    expected_realworldqa_samples = evaluation_suites.manifest_task_denominators(smoke_rows)[
+        "realworldqa"
+    ]["selected_rows"]
+    assert expected_realworldqa_samples is not None
     for checkpoint_node, evaluation_node in (
         ("materialized", "checkpoint_eval"),
         ("short_vlm_kd", "post_kd_checkpoint_eval"),
@@ -233,5 +245,5 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
             checkpoint_node=checkpoint_node,
             evaluation_node=evaluation_node,
             task=evaluation_suites.task_name("realworldqa"),
-            limit=2,
+            limit=expected_realworldqa_samples,
         )

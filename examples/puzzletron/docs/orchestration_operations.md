@@ -17,6 +17,13 @@ python examples/puzzletron/orchestrate.py \
 be complete; it does not run missing prerequisites. Use `--stage full` for the
 normal dependency-ordered campaign and whole-campaign resume.
 
+Run the same command with `--dry-run` after changing any input file or updating
+the checkout. For Slurm runners, each dry-run submission includes a
+submission-equivalent `sbatch` script with its nested `srun` command. CPU/GPU
+requests, task launchers, partitions, containers, mounts, and worker commands
+match a launch. The preview uses a deterministic attempt ID, job name, and log
+path; a real launch replaces those three identifiers.
+
 The launch command runs in the foreground. It submits every
 dependency-ready branch concurrently, polls scheduler state, and exits when the
 selected plan completes or fails.

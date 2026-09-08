@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Parallel execution profile for the illustrative VLM campaign.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    prepare_dataset: {strategy: single, resource: cpu}
+    convert: {strategy: single, resource: cpu}
+    mip: {strategy: single, resource: cpu}
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}
+    post.candidates.image_eval: &candidates {instances: 2}
+    post.candidates.best_image_loss: {strategy: single, resource: cpu}
+    post.candidates.materialized: *candidates
+    post.candidates.pre_kd_eval: *candidates
+    post.candidates.kd: *candidates
+    post.candidates.post_kd_eval: *candidates
+    post.candidates.selected: {strategy: single, resource: cpu}
+    post.candidates.result: {strategy: single, resource: cpu}
+    post.candidates.serving: {instances: 1}

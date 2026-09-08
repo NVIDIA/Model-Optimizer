@@ -4,7 +4,7 @@
 input_hf_model_path: Qwen/Qwen3.5-0.8B
 
 model_info:
-  # Immutable public model identity used by the focused MIP smoke.
+  # Immutable public model identity used by the maintained examples.
   # Geometry is reproducible from the config at this exact revision.
   hf_repo: Qwen/Qwen3.5-0.8B
   hf_revision: 2fc06364715b967f1860aea9cf38778875588b17
@@ -23,6 +23,9 @@ model_info:
   layer_counts:
     linear_attention: 18
     full_attention: 6
+  # Exact hybrid layout at the pinned revision. Campaign validation uses this to
+  # prevent an attention sentinel from being assigned to a GDN block.
+  full_attention_layer_indices: [3, 7, 11, 15, 19, 23]
   mamba:
     linear_key_head_dim: 128
     linear_num_key_heads: 16

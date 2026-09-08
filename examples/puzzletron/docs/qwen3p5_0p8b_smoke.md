@@ -68,15 +68,7 @@ python examples/puzzletron/orchestrate.py \
 ```
 
 Resume by rerunning that exact launch command with the same experiment,
-materialized runner, and execution config:
-
-```bash
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full
-```
+materialized runner, and execution config.
 
 The flow deliberately uses two candidate-evaluation samples, two
 IFEval samples, four AIPerf requests per serving candidate, and two
@@ -91,44 +83,3 @@ nodes under `artifacts/post_mip/nodes`. Their summaries must name the correspond
 pre-KD and post-KD checkpoints, report two effective IFEval samples, and contain
 finite metrics. Also verify the cumulative report and confirm that resuming
 submits no work for completed stages.
-
-## Run the opt-in end-to-end quality comparison
-
-`e2e_quality_comparison.yaml` inherits the full smoke workflow and adds a
-bounded quality comparison. It evaluates fixed 256-example prefixes of pinned
-IFEval, GSM8K, MMLU-Pro computer science, and MMLU-Pro history revisions for
-both the final distilled student and the pinned teacher with the same
-greedy-decoding settings. The result publishes student, teacher, and
-student-minus-teacher metrics without applying a pass/fail threshold. The same
-evaluation contract is also used by the
-[Qwen 3.5 0.8B campaign](qwen3p5_0p8b_campaign.md), so the affordable comparison
-exercises its final downstream evaluation without repeating the larger search.
-
-The recipe fixes the evaluator revision, dataset revisions, sample prefixes,
-seed, generation settings, and batch size. Keep those values unchanged when
-comparing checkpoints. Backend numerical variation can still change a small
-number of outputs, so compare the reported metrics and logged samples rather
-than expecting bit-for-bit equality.
-
-Use the shared `execution.single_gpu.yaml` profile with a site-specific runner
-whose walltime covers both serial evaluations. Set a distinct
-`PUZZLETRON_RUN_ROOT`; the comparison is intentionally not part of default CI:
-
-```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_quality_comparison.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
-RUNNER=/path/to/site-specific/runner.slurm.yaml
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_quality_comparison
-
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full --dry-run
-```
-
-After inspecting the plan, omit `--dry-run` to launch or resume it. Keep the
-checkpoint revision, evaluator revision, task list, seed, and generation
-settings fixed when comparing runs. The tiny model is useful for exercising
-the pipeline and checking student-to-teacher score changes, but its absolute
-task scores should not be treated as a quality target.

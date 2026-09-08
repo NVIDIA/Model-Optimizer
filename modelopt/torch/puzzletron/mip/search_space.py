@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Candidate-domain filtering and homogeneous Puzzletron solution ranking."""
 
@@ -34,6 +46,7 @@ _KNOWN_AXES = frozenset(
         *_AXIS_ALIASES.values(),
         "moe.latent_dim",
         "mamba.state_dim",
+        "mamba.num_groups",
         "ffn.intermediate_size",
         "mla.q_lora_rank",
         "mla.kv_lora_rank",
@@ -57,13 +70,8 @@ def _block_axis_values(block_config) -> dict[str, Any]:
         if isinstance(subblock, AttentionConfig):
             if subblock.num_kv_heads is not None:
                 values[f"{prefix}.num_kv_heads"] = subblock.num_kv_heads
-            if (
-                subblock.num_query_heads is not None
-                and subblock.num_kv_heads is not None
-            ):
-                values[f"{prefix}.q_per_group"] = (
-                    subblock.num_query_heads // subblock.num_kv_heads
-                )
+            if subblock.num_query_heads is not None and subblock.num_kv_heads is not None:
+                values[f"{prefix}.q_per_group"] = subblock.num_query_heads // subblock.num_kv_heads
         elif isinstance(subblock, MoEConfig):
             for field in (
                 "num_experts",
@@ -76,7 +84,7 @@ def _block_axis_values(block_config) -> dict[str, Any]:
                 if value is not None:
                     values[f"{prefix}.{field}"] = value
         elif isinstance(subblock, MambaConfig):
-            for field in ("num_heads", "head_dim", "state_dim"):
+            for field in ("num_heads", "num_groups", "head_dim", "state_dim"):
                 value = getattr(subblock, field)
                 if value is not None:
                     values[f"{prefix}.{field}"] = value
@@ -105,25 +113,57 @@ def _teacher_axes(replacements: Mapping[Any, Mapping[str, Any]]) -> dict[int, di
     teachers = {}
     for replacement in replacements.values():
         if replacement.get("is_teacher", False):
-            teachers[_layer_index(replacement)] = _block_axis_values(
-                replacement["block_config"]
-            )
+            teachers[_layer_index(replacement)] = _block_axis_values(replacement["block_config"])
     missing = sorted({_layer_index(row) for row in replacements.values()} - set(teachers))
     if missing:
         raise ValueError(f"search-space filtering is missing teacher blocks for layers {missing}")
     return teachers
 
 
-def _selector_accepts(selector: Any, value: Any, teacher_value: Any) -> bool:
+def _layer_scoped_selector(selector: Any) -> tuple[Any, dict[int, Any]] | None:
+    if not isinstance(selector, Mapping) or "layers" not in selector:
+        return None
+    if not set(selector) <= {"default", "layers"}:
+        raise ValueError("layer-scoped axis selector may contain only default and layers")
+    layer_selectors = selector["layers"]
+    if not isinstance(layer_selectors, Mapping) or not layer_selectors:
+        raise ValueError("axis selector layers must be a non-empty mapping")
+    normalized_layers = {}
+    for raw_layer, layer_selector in layer_selectors.items():
+        if isinstance(raw_layer, bool) or not isinstance(raw_layer, int):
+            raise ValueError("axis selector layer keys must be integers")
+        layer_index = raw_layer
+        if layer_index < 0:
+            raise ValueError("axis selector layer keys must be nonnegative")
+        if layer_index in normalized_layers:
+            raise ValueError(f"axis selector repeats layer {layer_index}")
+        if isinstance(layer_selector, Mapping) and "layers" in layer_selector:
+            raise ValueError("axis selector layers cannot be nested")
+        normalized_layers[layer_index] = layer_selector
+    default = selector.get("default", "teacher")
+    if isinstance(default, Mapping) and "layers" in default:
+        raise ValueError("axis selector layers cannot be nested")
+    return default, normalized_layers
+
+
+def _selector_accepts(selector: Any, value: Any, teacher_value: Any, *, layer: int) -> bool:
     if selector == "all":
         return True
     if selector is None or selector == "teacher":
         return value == teacher_value
     if isinstance(selector, Mapping):
-        if set(selector) != {"range"} or len(selector["range"]) != 2:
-            raise ValueError("axis selector range must contain [min, max]")
-        lower, upper = selector["range"]
-        return lower <= value <= upper
+        if set(selector) == {"range"}:
+            if len(selector["range"]) != 2:
+                raise ValueError("axis selector range must contain [min, max]")
+            lower, upper = selector["range"]
+            return lower <= value <= upper
+        scoped = _layer_scoped_selector(selector)
+        if scoped is None:
+            raise ValueError(
+                "axis selector must contain range or layer-scoped default/layers settings"
+            )
+        default, layers = scoped
+        return _selector_accepts(layers.get(layer, default), value, teacher_value, layer=layer)
     if isinstance(selector, Iterable) and not isinstance(selector, (str, bytes, Mapping)):
         return value in selector
     return value == selector
@@ -141,12 +181,21 @@ def filter_replacements_by_axes(
     if axes_default not in {"all", "teacher"}:
         raise ValueError("axes_default must be all or teacher")
     options = {
-        _canonical_axis(str(axis)): selector
-        for axis, selector in dict(axis_options or {}).items()
+        _canonical_axis(str(axis)): selector for axis, selector in dict(axis_options or {}).items()
     }
     if axes_default == "all" and not options:
-        return {key: deepcopy(value) for key, value in replacements.items()}
+        return {key: deepcopy(dict(value)) for key, value in replacements.items()}
     teachers = _teacher_axes(teacher_replacements or replacements)
+    for axis, selector in options.items():
+        scoped = _layer_scoped_selector(selector)
+        if scoped is None:
+            continue
+        _default, layers = scoped
+        invalid_layers = sorted(layer for layer in layers if axis not in teachers.get(layer, {}))
+        if invalid_layers:
+            raise ValueError(
+                f"axis {axis!r} is not present in teacher blocks at layers {invalid_layers}"
+            )
     known_axes = {
         axis
         for replacement in replacements.values()
@@ -157,7 +206,7 @@ def filter_replacements_by_axes(
         selectors.update(dict.fromkeys(known_axes, "teacher"))
     selectors.update(options)
 
-    filtered = {}
+    filtered: dict[Any, dict[str, Any]] = {}
     for replacement_id, replacement in replacements.items():
         layer = _layer_index(replacement)
         candidate = _block_axis_values(replacement["block_config"])
@@ -166,18 +215,22 @@ def filter_replacements_by_axes(
         for axis, selector in selectors.items():
             if axis not in candidate:
                 continue
-            if not _selector_accepts(selector, candidate[axis], teacher.get(axis)):
+            if not _selector_accepts(
+                selector,
+                candidate[axis],
+                teacher.get(axis),
+                layer=layer,
+            ):
                 accepted = False
                 break
         if accepted:
-            filtered[replacement_id] = deepcopy(replacement)
+            filtered[replacement_id] = deepcopy(dict(replacement))
 
     before = {_layer_index(row) for row in replacements.values()}
     after = {_layer_index(row) for row in filtered.values()}
     if before != after:
         raise ValueError(
-            "search-space restrictions removed every candidate for layers "
-            f"{sorted(before - after)}"
+            f"search-space restrictions removed every candidate for layers {sorted(before - after)}"
         )
     return filtered
 
@@ -225,7 +278,7 @@ def rank_homogeneous_solutions(
     for replacement_id, replacement in replacements.items():
         layer = _layer_index(replacement)
         values = _block_axis_values(replacement["block_config"])
-        objective_value = float(get_nested_key(replacement, objective))
+        objective_value = float(get_nested_key(dict(replacement), objective))
         row = (
             replacement_id,
             replacement,
@@ -268,11 +321,7 @@ def rank_homogeneous_solutions(
     }
     assignment_count = math.prod(len(domain) for domain in domains)
     for assignment_index, selected in enumerate(product(*domains), start=1):
-        if (
-            assignment_index == 1
-            or assignment_index == assignment_count
-            or assignment_index % 1000 == 0
-        ):
+        if assignment_index in {1, assignment_count} or assignment_index % 1000 == 0:
             print(
                 "[homogeneous] "
                 f"assignments={assignment_index}/{assignment_count} "
@@ -349,8 +398,7 @@ def rank_homogeneous_solutions(
         replacements_to_copy = solution["chosen_replacements"]
         solution["total_costs"] = {
             key: sum(
-                float(get_nested_key(replacement, key))
-                for replacement in replacements_to_copy
+                float(get_nested_key(replacement, key)) for replacement in replacements_to_copy
             )
             for key in constraints
         }
@@ -382,7 +430,5 @@ def _constraint_closeness(
         else:
             continue
         scale = max(abs(target), 1.0)
-        distances.append(
-            float(weights.get(key, 1.0)) * abs(float(costs[key]) - target) / scale
-        )
+        distances.append(float(weights.get(key, 1.0)) * abs(float(costs[key]) - target) / scale)
     return max(distances, default=0.0)

@@ -1,16 +1,24 @@
 # @package _global_
 
-# Bounded VLM student-versus-teacher evaluation shared by the campaign and the
-# opt-in comparison.
+# Shared VLM evaluator identities. Run recipes own only their flow structure
+# and workload-specific runtime overrides.
+prepare_dataset:
+  evaluation_tasks: [realworldqa, mmmu_val, mvbench]
+  evaluation_hf_home: ${oc.env:HF_HOME}
+
 vlm_quality_evaluation:
-  profile: qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2
+  profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
+  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+  row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
   reference_checkpoint: ${teacher_dir}
+  reference_once: true
+  reference_cache_id: qwen35-0p8b-short-v2-teacher
   batch_size: 1
   timeout_seconds: 14400
   dtype: bfloat16
   gpu_memory_utilization: 0.5
-  max_model_len: 16384
-  limit_mm_per_prompt: {image: 12}
+  max_model_len: 32768
+  limit_mm_per_prompt: {image: 32}
   topology:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
@@ -20,3 +28,42 @@ vlm_quality_evaluation:
     enable_expert_parallel: false
     distributed_executor_backend: mp
     gpu_group_size: 1
+
+vlm_campaign_evaluation:
+  profile: ${vlm_quality_evaluation.profile}
+  evaluator_revision: ${vlm_quality_evaluation.evaluator_revision}
+  row_manifest_sha256: ${vlm_quality_evaluation.row_manifest_sha256}
+  reference_checkpoint: ${vlm_quality_evaluation.reference_checkpoint}
+  reference_once: ${vlm_quality_evaluation.reference_once}
+  reference_cache_id: ${vlm_quality_evaluation.reference_cache_id}
+  batch_size: ${vlm_quality_evaluation.batch_size}
+  timeout_seconds: ${vlm_quality_evaluation.timeout_seconds}
+  dtype: ${vlm_quality_evaluation.dtype}
+  gpu_memory_utilization: ${vlm_quality_evaluation.gpu_memory_utilization}
+  max_model_len: ${vlm_quality_evaluation.max_model_len}
+  limit_mm_per_prompt: ${vlm_quality_evaluation.limit_mm_per_prompt}
+  topology: ${vlm_quality_evaluation.topology}
+
+vlm_smoke_evaluation:
+  profile: qwen35_vlm_core3_24row_smoke_v2
+  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+  row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
+  reference_checkpoint: ${teacher_dir}
+  reference_once: true
+  reference_cache_id: qwen35-0p8b-smoke-v1-teacher
+  batch_size: 1
+  timeout_seconds: 3000
+
+vlm_full_smoke_evaluation:
+  profile: ${vlm_smoke_evaluation.profile}
+  evaluator_revision: ${vlm_smoke_evaluation.evaluator_revision}
+  row_manifest_sha256: ${vlm_smoke_evaluation.row_manifest_sha256}
+  reference_checkpoint: ${vlm_smoke_evaluation.reference_checkpoint}
+  reference_once: ${vlm_smoke_evaluation.reference_once}
+  reference_cache_id: ${vlm_smoke_evaluation.reference_cache_id}
+  batch_size: ${vlm_smoke_evaluation.batch_size}
+  timeout_seconds: ${vlm_smoke_evaluation.timeout_seconds}
+  dtype: bfloat16
+  gpu_memory_utilization: 0.5
+  max_model_len: 16384
+  limit_mm_per_prompt: {image: 32}
