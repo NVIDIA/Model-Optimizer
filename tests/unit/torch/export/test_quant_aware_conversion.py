@@ -22,6 +22,7 @@ uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not porta
 across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
+import contextlib
 import types
 
 import pytest
@@ -39,6 +40,20 @@ from modelopt.torch.export.quant_aware_conversion import (
 )
 
 BLOCK = 16
+
+
+def _set_scope_attr(transform, name, value):
+    """Set an optional scoped-match attribute that only some transformers versions expose.
+
+    transformers>=5.9 dropped ``base_model_prefix`` from ``WeightTransform``'s ``__slots__``
+    (scoped matching now keys off ``scope_prefix`` alone); older supported versions still
+    carry it. Production ``_scope_prefixes`` reads it via ``getattr(..., None)``, so skipping
+    the assignment where the slot is absent is equivalent — and lets these tests run across
+    the whole supported transformers range instead of ``AttributeError``-ing on the setattr.
+    """
+    with contextlib.suppress(AttributeError):
+        setattr(transform, name, value)
+
 
 # Tiny Mixtral shaped to match the synthetic expert tensors built by ``_nvfp4_linear`` below.
 _MIXTRAL_KWARGS = {
@@ -341,7 +356,7 @@ def test_scoped_submodel_prefix_change_does_not_capture_siblings():
 
     prefix_change = PrefixChange(prefix_to_remove="vision_model")
     prefix_change.scope_prefix = "model.vision_tower"
-    prefix_change.base_model_prefix = "model"
+    _set_scope_attr(prefix_change, "base_model_prefix", "model")
     model._weight_conversions = [prefix_change]
 
     state_dict = {
@@ -381,7 +396,7 @@ def test_scoped_rule_maps_config_module_names_consistently():
 
     prefix_change = PrefixChange(prefix_to_remove="vision_model")
     prefix_change.scope_prefix = "model.vision_tower"
-    prefix_change.base_model_prefix = "model"
+    _set_scope_attr(prefix_change, "base_model_prefix", "model")
     model._weight_conversions = [prefix_change]
 
     mapper = build_reverse_name_mapper(model)
@@ -420,7 +435,7 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
     )
     # Root scope: reaches every key, exactly like an unscoped rule.
     renaming.scope_prefix = ""
-    renaming.base_model_prefix = ""
+    _set_scope_attr(renaming, "base_model_prefix", "")
     model._weight_conversions = [renaming]
 
     state_dict = {
@@ -454,7 +469,7 @@ def test_scoped_weight_converter_is_refused():
         operations=[Chunk(dim=0)],
     )
     conv.scope_prefix = "model.language_model"
-    conv.base_model_prefix = "model"
+    _set_scope_attr(conv, "base_model_prefix", "model")
     model = types.SimpleNamespace(_weight_conversions=[conv])
 
     sd = _nvfp4_linear("model.language_model.layers.0.mlp.gate_up_proj", 8, 16)

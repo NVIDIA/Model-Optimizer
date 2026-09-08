@@ -90,7 +90,7 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
     aq = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
     ).auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
@@ -111,12 +111,12 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
     recipe = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(
         recipe.auto_quantize, args, fixed_quantize_config=recipe.quantize
     )
-    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    model_ptq = load_recipe("model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
 
     assert inputs["quantization_formats"] == []
     assert inputs["fixed_quantization_config"] == model_ptq.quantize.model_dump()

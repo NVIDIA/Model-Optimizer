@@ -21,7 +21,7 @@ Pipeline:
 2. Build a calibration loader from `zh-plus/tiny-imagenet` so the recipe runs
    end-to-end without ImageNet access.
 3. Run ``mtq.quantize`` with the ViT-specific FP8 recipe under
-   `modelopt_recipes/huggingface/vit/ptq/`.
+   `modelopt_recipes/model_type/vit/ptq/`.
 4. Compile the quantized model with ``torch_tensorrt.compile(ir="dynamo",
    min_block_size=1)`` and verify the compiled-model argmax matches the
    fake-quant argmax on a sample input.
@@ -44,10 +44,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.quantization.utils import export_torch_mode
 
-# Default ViT PTQ recipe under `modelopt_recipes/huggingface/vit/ptq/`. The
+# Default ViT PTQ recipe under `modelopt_recipes/model_type/vit/ptq/`. The
 # recipe loader resolves this relative path against the built-in recipe library;
 # pass `--recipe` for a different one.
-DEFAULT_RECIPE = "huggingface/vit/ptq/fp8"
+DEFAULT_RECIPE = "model_type/vit/ptq/fp8"
 
 
 def load_model_and_processor(model_id: str, device: torch.device, dtype: torch.dtype):

@@ -19,7 +19,7 @@ from _test_utils.torch.transformers_models import create_tiny_vit_dir
 
 # Recipe variants the example ships.
 _RECIPES = [
-    "huggingface/vit/ptq/fp8",
+    "model_type/vit/ptq/fp8",
 ]
 
 

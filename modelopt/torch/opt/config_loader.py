@@ -80,6 +80,34 @@ class _ResolvedImport:
 # Root to all built-in configs and recipes.
 BUILTIN_CONFIG_ROOT = files("modelopt_recipes")
 
+# Deprecated ``modelopt_recipes/`` tier prefixes mapped to their current location. The recipe
+# library was restructured and keeps source-tree symlinks (``huggingface`` -> ``model_type``
+# and ``model_type/models`` -> ``../models``) for backward compatibility, but symlinks do not
+# survive into built wheels. Every relative path handed to the built-in library -- a top-level
+# ``--recipe`` / ``load_recipe`` input *or* an ``$import`` inside a recipe -- is rewritten
+# through :func:`_alias_builtin_recipe_prefix` so old paths keep resolving for pip-installed
+# users too. Ordered longest-prefix first so ``.../models/`` wins over the bare rename.
+_DEPRECATED_RECIPE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("huggingface/models/", "models/"),
+    ("model_type/models/", "models/"),
+    ("huggingface/", "model_type/"),
+)
+
+
+def _alias_builtin_recipe_prefix(config_path: str) -> str:
+    """Rewrite a deprecated ``modelopt_recipes/`` tier prefix to its current location.
+
+    Returns *config_path* unchanged when it does not start with a deprecated prefix. Only
+    the built-in-library candidates should use the rewritten form; filesystem probes keep
+    the original path so a user's local ``huggingface/`` recipe tree still loads by that name.
+    """
+    norm = config_path.replace("\\", "/")
+    for old, new in _DEPRECATED_RECIPE_PREFIXES:
+        if norm.startswith(old):
+            return new + norm[len(old) :]
+    return config_path
+
+
 _EXMY_RE = re.compile(r"^[Ee](\d+)[Mm](\d+)$")
 _EXMY_KEYS = frozenset({"num_bits", "scale_bits"})
 _MODELOPT_SCHEMA_RE = re.compile(r"^\s*#\s*modelopt-schema:\s*(\S+)\s*$")
@@ -120,27 +148,32 @@ def _resolve_config_path(config_file: str | Path | Traversable) -> Path | Traver
     """
     # Probe order: filesystem first, then built-in library.
     # This lets users override built-in configs by placing a file locally.
+    # Built-in candidates use the deprecated-tier alias (huggingface/ -> model_type/,
+    # .../models/ -> models/) so old ``$import`` paths resolve from wheels; filesystem
+    # candidates keep the original path so a local override tree loads by its own name.
     paths_to_check: list[Path | Traversable] = []
     if isinstance(config_file, str):
+        builtin = _alias_builtin_recipe_prefix(config_file)
         if not config_file.endswith(".yml") and not config_file.endswith(".yaml"):
             paths_to_check.append(Path(f"{config_file}.yml"))
             paths_to_check.append(Path(f"{config_file}.yaml"))
-            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yml"))
-            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yaml"))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{builtin}.yml"))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{builtin}.yaml"))
         else:
             paths_to_check.append(Path(config_file))
-            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(config_file))
+            paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(builtin))
     elif isinstance(config_file, Path):
+        builtin = _alias_builtin_recipe_prefix(str(config_file))
         if config_file.suffix in (".yml", ".yaml"):
             paths_to_check.append(config_file)
             if not config_file.is_absolute():
-                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(str(config_file)))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(builtin))
         else:
             paths_to_check.append(Path(f"{config_file}.yml"))
             paths_to_check.append(Path(f"{config_file}.yaml"))
             if not config_file.is_absolute():
-                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yml"))
-                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{config_file}.yaml"))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{builtin}.yml"))
+                paths_to_check.append(BUILTIN_CONFIG_ROOT.joinpath(f"{builtin}.yaml"))
     elif isinstance(config_file, Traversable):
         paths_to_check.append(config_file)
     else:
