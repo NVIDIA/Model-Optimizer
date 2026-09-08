@@ -22,6 +22,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
+
 
 def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
     """Remove the 3-D fused source params and per-expert quantizer ModuleLists.
@@ -75,7 +77,6 @@ def _export_fused_experts(
     dropped by name in ``postprocess_state_dict`` (the single dedup authority).
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
     # Gated experts fuse gate+up into ``gate_up_proj`` and must be split on export;

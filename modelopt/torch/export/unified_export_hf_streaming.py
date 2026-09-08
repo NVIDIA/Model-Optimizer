@@ -31,10 +31,17 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+from modelopt.torch.quantization.utils.core_utils import (
+    enable_weight_access_and_writeback,
+    module_name_maps,
+    requires_weight_materialization,
+)
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as _dist
 
 from .model_utils import get_export_units
-from .quant_aware_conversion import build_reverse_name_mapper
+from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
 from .unified_export_hf import (
@@ -201,8 +208,6 @@ def _parse_shard_size(size: int | str) -> int:
 
 def _assert_no_split_rules(model: nn.Module) -> None:
     """Refuse to stream a model whose conversion mapping needs tensor-level splits."""
-    from .quant_aware_conversion import _build_reverse_rules
-
     try:
         split_rules, _, _ = _build_reverse_rules(model)
     except Exception:
@@ -317,14 +322,6 @@ def _export_transformers_checkpoint_streaming(
         NotImplementedError: if the model's conversion mapping contains split rules.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import (
-        enable_weight_access_and_writeback,
-        module_name_maps,
-        requires_weight_materialization,
-    )
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
     export_dir = Path(export_dir)
     # Materialization dispatch walks the module tree from the root; without these maps each
     # call re-derives them, which is O(N^2) over a MoE model's expert modules.
@@ -518,12 +515,6 @@ def collect_export_tensors(
     All the gathers finish before this returns, so the caller can write or postprocess without
     stalling anyone. Returning a list rather than a generator is what guarantees that.
     """
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import (
-        enable_weight_access_and_writeback,
-        module_name_maps,
-    )
-
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)

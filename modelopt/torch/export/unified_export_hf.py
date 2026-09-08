@@ -16,6 +16,7 @@
 """Code that export quantized Hugging Face models for deployment."""
 
 import contextlib
+import importlib
 import json
 import re
 import shutil
@@ -32,6 +33,7 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+from transformers import AutoFeatureExtractor
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -60,6 +62,7 @@ from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
@@ -494,8 +497,6 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
         if model_type.startswith("whisper"):
             # For Whisper models, we need to pass a fake input with the specific sequence length
-            from transformers import AutoFeatureExtractor
-
             feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
             fake_input = torch.ones(
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
@@ -1006,8 +1007,6 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
 def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears."""
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
 
@@ -1446,8 +1445,6 @@ def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
 
 def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
     """Try to patch revert_weight_conversion in a single module."""
-    import importlib
-
     try:
         mod = importlib.import_module(mod_path)
         if hasattr(mod, "revert_weight_conversion"):
