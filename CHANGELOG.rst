@@ -12,6 +12,7 @@ Changelog
 
 **Bug Fixes**
 
+- Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
 - Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
 
 0.47.0 (2026-09-xx)
