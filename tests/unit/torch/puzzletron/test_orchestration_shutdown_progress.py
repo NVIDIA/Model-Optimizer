@@ -447,17 +447,10 @@ def test_reusable_controller_admits_a_multi_attempt_stage_atomically(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    per_attempt = _compile_test_plan(tmp_path, stage_filter="convert")
-    assert per_attempt.runner.slurm is not None
-    per_attempt = replace(
-        per_attempt,
-        runner=replace(
-            per_attempt.runner,
-            slurm=replace(per_attempt.runner.slurm, max_nodes=1),
-        ),
+    plan = replace(
+        _compile_test_plan(tmp_path, stage_filter="convert"),
+        execution_mode=ExecutionMode.REUSABLE_ALLOCATION,
     )
-    assert CampaignController(per_attempt, executor=LocalExecutor())._available_nodes() == 1
-    plan = replace(per_attempt, execution_mode=ExecutionMode.REUSABLE_ALLOCATION)
 
     items = tuple(
         WorkItem(

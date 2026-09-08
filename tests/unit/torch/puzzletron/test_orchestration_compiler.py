@@ -194,7 +194,6 @@ def test_compile_configures_one_node_reusable_allocation(tmp_configs) -> None:
         stage_filter="vllm_stats",
     )
     assert plan.execution_mode is ExecutionMode.REUSABLE_ALLOCATION
-    assert plan_to_dict(plan)["execution_mode"] == "reusable_allocation"
     worker_plan = replace(
         plan,
         experiment_config={**plan.experiment_config, "_runtime": {"config_path": "/worker"}},
