@@ -79,30 +79,33 @@ For data-parallel evaluation, launch with `accelerate launch --multi_gpu --num_p
 Multi-GPU evaluation without data-parallelism:
 
 ```sh
-# MODELOPT_QUANT_CFG_TO_SEARCH: Choose the formats to search separated by commas from [W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE]
+# MODELOPT_QUANT_CFG_TO_SEARCH: Comma-separated list of the formats auto_quantize searches over.
+# Pick each one from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG|NONE],
+# where NONE lets auto_quantize leave a layer unquantized.
 # EFFECTIVE_BITS: Effective bits constraint for auto_quantize
 
-# Examples settings for optimally quantized model with W4A8 & FP8 with effective bits to 4.8:
-# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE
+# Example settings for an optimally quantized model with W4A8 & FP8 with effective bits of 4.8:
+# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG,NONE
 # EFFECTIVE_BITS=4.8
 
 python lm_eval_hf.py --model hf \
     --tasks <comma separated tasks> \
     --model_args pretrained=<HF model folder or model card>,parallelize=True \
-    --quant_cfg <AUTOQUANTIZE_SEARCH_FORMATS> \
+    --quant_cfg <MODELOPT_QUANT_CFG_TO_SEARCH> \
     --auto_quantize_bits <EFFECTIVE_BITS> \
     --batch_size 4
 ```
 
 For data-parallel evaluation, launch with `accelerate launch --multi_gpu --num_processes <num_copies_of_your_model>` (as shown earlier).
 
-- If evaluating T5 models:
-
-  - use `--model hf-seq2seq` instead.
+- If evaluating encoder-decoder models such as T5, keep `--model hf`: lm-eval detects the
+  encoder-decoder architecture from `config.json`. There is no `hf-seq2seq` backend in the
+  supported lm-eval versions (>= 0.4.12); add `backend=seq2seq` to `--model_args` only for
+  checkpoints lm-eval cannot classify on its own.
 
 ```sh
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG]
-python lm_eval_hf.py --model hf-seq2seq --model_args pretrained=t5-small --quant_cfg=<MODELOPT_QUANT_CFG> --tasks <comma separated tasks> --batch_size 4
+python lm_eval_hf.py --model hf --model_args pretrained=t5-small --quant_cfg <MODELOPT_QUANT_CFG> --tasks <comma separated tasks> --batch_size 4
 ```
 
 If `trust_remote_code` needs to be true, please append the command with the `--trust_remote_code` flag.
@@ -158,8 +161,9 @@ mkdir -p data
 wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
     https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar -O data/mmlu.tar
 tar -xf data/mmlu.tar -C data && mv data/data data/mmlu
-cd ..
 ```
+
+Run the commands below from `examples/llm_eval`; `mmlu.py` resolves its default `--data_dir data/mmlu` relative to the current directory.
 
 ### Baseline
 
@@ -171,17 +175,19 @@ python mmlu.py --model_name causal --model_path <HF model folder or model card>
 
 ```bash
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG]
-python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg MODELOPT_QUANT_CFG
+python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg <MODELOPT_QUANT_CFG>
 ```
 
 ### auto_quantize (simulated)
 
 ```bash
-# MODELOPT_QUANT_CFG_TO_SEARCH: Choose the formats to search separated by commas from [W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE]
+# MODELOPT_QUANT_CFG_TO_SEARCH: Comma-separated list of the formats auto_quantize searches over.
+# Pick each one from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG|NONE],
+# where NONE lets auto_quantize leave a layer unquantized.
 # EFFECTIVE_BITS: Effective bits constraint for auto_quantize
 
-# Examples settings for optimally quantized model with W4A8 & FP8 with effective bits to 4.8:
-# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE
+# Example settings for an optimally quantized model with W4A8 & FP8 with effective bits of 4.8:
+# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG,NONE
 # EFFECTIVE_BITS=4.8
 
 python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg $MODELOPT_QUANT_CFG_TO_SEARCH --auto_quantize_bits $EFFECTIVE_BITS --batch_size 4
@@ -210,8 +216,10 @@ bash run_livecodebench.sh <custom defined model name> <prompt batch size in para
 Similarly, we support running simple evals against a local running OpenAI API compatible server. Once the local server is up, the following command can be used to run the Simple Evals:
 
 ```bash
-bash run_simple_eval.sh <custom defined model name> <comma separated eval names> <max output tokens> <local model server port>
+bash run_simple_eval.sh <custom defined model name> <comma separated eval names> <max output tokens> <local model server port> [num examples per eval]
 ```
+
+The optional fifth argument caps the number of examples per eval (`--examples`); omit it to run the full eval.
 
 ## Customize quantization method for evaluation
 
@@ -258,9 +266,9 @@ This is useful for evaluating quantized models deployed with vLLM or any model s
    ```bash
    # Example using vLLM's built-in server
    vllm serve nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --quantization modelopt
-    --port 8000 \
-    --tensor-parallel-size <tp_size> # Adjust as needed
+       --quantization modelopt \
+       --port 8000 \
+       --tensor-parallel-size <tp_size> # Adjust as needed
    ```
 
    To generate the quantized model such as `nvidia/Llama-3.1-8B-Instruct-FP8`, please refer to instructions [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#deploy-fp8-quantized-model-using-vllm-and-sglang). Note currently modelopt quantized model support in vLLM is limited, we are working on expanding the model and quant formats support.
