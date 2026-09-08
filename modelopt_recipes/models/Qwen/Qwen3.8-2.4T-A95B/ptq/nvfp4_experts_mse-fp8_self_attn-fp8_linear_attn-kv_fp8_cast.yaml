@@ -25,16 +25,19 @@
 # What this quantizes:
 #   routed experts   NVFP4  (MSE-searched static weight scales, dynamic input scales)
 #   self-attention   FP8    (W8A8, all projections)
-#   linear-attention FP8    (W8A8, the gated-delta projections:
-#                            in_proj_qkv / in_proj_z / in_proj_a / in_proj_b, out_proj)
+#   linear-attention FP8    (W8A8, the full gated-delta path: conv1d plus the
+#                            in_proj_qkv / in_proj_z / in_proj_a / in_proj_b / out_proj projections)
 #   KV cache         FP8    (cast mode)
 #   everything else  BF16   -- including MTP, which is left unquantized
 #
-# The gated-delta conv1d and the norms carry no Linear quantizer, so the recurrent state
-# path itself is never quantized; only the projections around it are. Quantizing those
-# projections was validated not to degrade the model: the exported checkpoint was
-# evaluated against the BF16 baseline on GPQA, AA-LCR, SciCode, IFBench and
-# Terminal-Bench 2.1, with no meaningful accuracy regression on any of them.
+# The gated-delta norms carry no quantizer and stay BF16. The conv1d IS quantized:
+# nn.Conv1d is a registered ModelOpt quant module, so the broad `*linear_attn*` rules
+# below reach `linear_attn.conv1d` and put it in FP8 along with the projections. This
+# matches the published nvidia/Qwen3.8-2.4T-A95B-NVFP4 checkpoint, whose
+# hf_quant_config.json lists `linear_attn.conv1d` as FP8 on every layer. Quantizing the
+# full gated-delta path this way was validated not to degrade the model: the exported
+# checkpoint was evaluated against the BF16 baseline on GPQA, AA-LCR, SciCode, IFBench
+# and Terminal-Bench 2.1, with no meaningful accuracy regression on any of them.
 #
 # The source checkpoint ships as native block-FP8 (`quant_method=fp8`,
 # `weight_block_size [128, 128]`, dynamic activations). The loader dequantizes it to
