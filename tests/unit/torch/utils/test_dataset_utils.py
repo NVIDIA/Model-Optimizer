@@ -918,3 +918,49 @@ class TestLocalDatasetDirRoundTrips:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
+
+
+class TestVLMShardedIterable:
+    """DP sharding of a streaming VLM calibration set: uneven per-rank counts deadlock calibration."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_transformers(self):
+        pytest.importorskip("transformers")
+
+    @staticmethod
+    def _counts(total: int, world: int) -> list[int]:
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(total)), num_samples=total)
+        return [len(list(_ShardedIterable(base, rank=r, world=world))) for r in range(world)]
+
+    @pytest.mark.parametrize("total", [1024, 1023, 1022, 510, 7])
+    @pytest.mark.parametrize("world", [2, 4])
+    def test_every_rank_gets_the_same_count(self, total, world):
+        counts = self._counts(total, world)
+        assert len(set(counts)) == 1, f"uneven shards {counts} for total={total} world={world}"
+        assert counts[0] == total // world
+
+    def test_shards_are_disjoint_and_ordered(self):
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        shards = [list(_ShardedIterable(base, rank=r, world=4)) for r in range(4)]
+        assert shards[0][:3] == [0, 4, 8]
+        flat = [x for s in shards for x in s]
+        assert len(flat) == len(set(flat)), "shards overlap"
+
+    def test_nemotron_subset_budget_sums_to_num_samples(self):
+        """A short stream is what hands the sharder uneven counts."""
+        for num_samples, n_subsets in [(1024, 3), (512, 3), (256, 3), (100, 7)]:
+            base, extra = divmod(num_samples, n_subsets)
+            targets = [max(1, base + (1 if i < extra else 0)) for i in range(n_subsets)]
+            assert sum(targets) == num_samples, (
+                f"{num_samples} over {n_subsets} subsets sums to {sum(targets)}"
+            )

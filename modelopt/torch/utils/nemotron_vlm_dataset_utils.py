@@ -119,11 +119,18 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
                 shard_list = shard_list[: max(0, self.max_shards)]
             shards_by_subset[subset] = shard_list
 
-        # Roughly split sample budget across subsets.
-        per_subset_target = max(1, self.num_samples // max(1, len(self.subsets)))
+        # Targets must sum to num_samples exactly: truncating division yields 1023 for 1024,
+        # and the strided DP sharder then leaves one rank short, deadlocking calibration.
+        n_subsets = max(1, len(self.subsets))
+        base_target, extra = divmod(self.num_samples, n_subsets)
+        subset_targets = {
+            subset: max(1, base_target + (1 if i < extra else 0))
+            for i, subset in enumerate(self.subsets)
+        }
         yielded_total = 0
 
         for subset in self.subsets:
+            per_subset_target = subset_targets[subset]
             if yielded_total >= self.num_samples:
                 break
 

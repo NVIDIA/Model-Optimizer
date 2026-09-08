@@ -81,7 +81,14 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
         self._world = world
 
     def __iter__(self):
-        return itertools.islice(iter(self._base), self._rank, None, self._world)
+        shard = itertools.islice(iter(self._base), self._rank, None, self._world)
+        # Truncate to floor(len / world) so every rank yields the same count: one rank short
+        # leaves the others blocked forever on the next collective.
+        try:
+            per_rank = len(self._base) // self._world
+        except TypeError:
+            return shard
+        return itertools.islice(shard, per_rank)
 
 
 def _extract_text_from_messages(messages: Any) -> str | None:
