@@ -50,6 +50,7 @@ __all__ = [
 _RUNNER_OVERRIDES = frozenset(
     {
         "dtype",
+        "gdn_prefill_backend",
         "gpu_memory_utilization",
         "limit_mm_per_prompt",
         "max_model_len",

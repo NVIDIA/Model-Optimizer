@@ -5,7 +5,13 @@ The Qwen 3.5 0.8B VLM example has two experiment files with distinct jobs:
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
 | `full_vlm_smoke.yaml` | Check the complete lifecycle on one GPU | `execution.single_gpu.yaml` |
-| `vlm_campaign.yaml` | Run an illustrative multi-axis campaign | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `vlm_campaign.yaml` | Run the longer scheduled multi-axis example | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+
+Both recipes select vLLM's Triton GDN prefill backend. On a fresh worker, the
+FlashInfer GDN kernels can still be compiling when the server readiness check
+expires. Selecting Triton avoids that cold-start failure and makes startup
+predictable in the reviewed worker image; it is not a general performance
+recommendation.
 
 Start with `full_vlm_smoke.yaml`. It uses small workloads to check dataset
 preparation, pruning, MIP, materialization, checkpoint evaluation, serving,
@@ -13,8 +19,9 @@ two-step VLM distillation, final evaluation, and resume. Its scores and
 throughput are integration observations, not model-quality or production
 performance results.
 
-The campaign is a larger illustrative experiment. It is not a recommended
-pruning recipe, training duration, or candidate-selection policy.
+The campaign is a larger illustrative experiment intended for scheduled
+integration validation, not routine development or presubmit use. It is not a
+recommended pruning recipe, training duration, or candidate-selection policy.
 
 Unit tests compile these recipes and verify their stage and resource contracts.
 They do not replace an end-to-end GPU run against the current model, data,
@@ -32,30 +39,41 @@ Prepare the setup and worker environments described in
 - a shared campaign output directory.
 
 If workers cannot access the network, populate those caches before launch and
-mount them through the runner. Do not replace the configured model identity
-with a machine-specific path.
+mount them through the runner. Keep the experiment's public model repository
+and revision unchanged; a local cache is only where workers obtain those files.
 
 ## Run the lifecycle smoke
 
-Set paths visible to every worker:
+Set the shared cache, source identity, and run paths:
 
 ```bash
-export PUZZLETRON_DATASET_PATH=/path/to/qwen3p5-vlm-smoke-data
+export HF_HOME=/path/to/huggingface-cache
+export PUZZLETRON_SOURCE_REVISION="$(git rev-parse HEAD)"
 export PUZZLETRON_DATASET_REVISION=51f4f4d219315c3283950994d4eb3d7fc30aa87b
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_smoke
+export PUZZLETRON_RUN_ROOT="$(python -c 'import os; print(os.path.realpath(os.environ["PUZZLETRON_RUN_ROOT"]))')"
+DATASET_PATH="$PUZZLETRON_RUN_ROOT/datasets/nemotron_vlm_v2"
 ```
 
-Prepare the eight image-conversation samples. This command is safe to rerun
-when the existing manifest matches the same request.
+`HF_HOME` is the shared destination for the evaluator cache and must be visible
+to workers. With network access, the campaign's `prepare_dataset` stage fills
+and validates that cache. For offline workers, populate it before launch using
+the cache command in [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md#cache-benchmark-data).
+Keep `PUZZLETRON_SOURCE_REVISION` exported for both dry-run and launch; submitted
+workers inherit it so controller and worker artifact identities stay identical.
+The run-root normalization keeps provenance checks reproducible on systems
+where a shared-storage alias traverses a symbolic link. Both canonical paths
+must be visible to workers through the runner's mounts.
 
-```bash
-python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
-  --output "$PUZZLETRON_DATASET_PATH" \
-  --revision "$PUZZLETRON_DATASET_REVISION" \
-  --subsets sparsetables plotqa_cot wiki_en \
-  --num-samples 8 \
-  --max-shards-per-subset 1
-```
+The launch includes a `prepare_dataset` worker stage that creates and validates
+the eight image-conversation samples at `DATASET_PATH`, inside the campaign
+root. It also prepares the configured evaluation cache. You do not need dataset
+or model dependencies in the lightweight controller venv, and there is no
+separate data-preparation command for the online first-run path.
+
+Unlike the text-only example, this VLM route does not publish a separate
+tokenized-dataset artifact. It keeps the image conversations in their native
+format so the model processor can construct text and image inputs together.
 
 Use the maintained experiment with the shared single-GPU execution profile and
 a site-specific runner:
@@ -87,9 +105,10 @@ After completion, inspect the campaign report and verify that:
 The smoke deliberately uses tiny workloads. Run a separate benchmark with
 representative requests before drawing performance conclusions.
 
-## Inspect the illustrative campaign
+## Run the longer illustrative campaign
 
-The campaign enables hidden width, heterogeneous FFN width, depth,
+The campaign enables hidden width (the model's shared transformer hidden size),
+heterogeneous FFN width (per-block feed-forward intermediate sizes), depth,
 grouped-attention geometry, and GDN geometry. All retained candidates use the
 same frozen evaluator rows, teacher checkpoint, and 128-step example KD budget.
 
@@ -106,13 +125,17 @@ The 128-step value demonstrates the integration. It is not a convergence
 criterion or recommended training duration. The aggregate-rank rule is also an
 example policy rather than a general definition of the best model.
 
-Compile the campaign before allocating resources:
+After the lifecycle smoke succeeds, keep its controller venv and runner, choose
+a new run root, and inspect the larger plan before allocating resources:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
 EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_campaign.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
+export HF_HOME=/path/to/huggingface-cache
+export PUZZLETRON_SOURCE_REVISION="$(git rev-parse HEAD)"
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
+export PUZZLETRON_RUN_ROOT="$(python -c 'import os; print(os.path.realpath(os.environ["PUZZLETRON_RUN_ROOT"]))')"
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -120,6 +143,14 @@ python examples/puzzletron/orchestrate.py \
   --execution "$EXECUTION" \
   --stage full --dry-run
 ```
+
+Remove `--dry-run` to launch the inspected plan. Rerun that identical launch
+command to resume it.
+
+The campaign's `prepare_dataset` worker stage creates its 512-sample dataset
+under this new run root. Do not point both recipes at the same run root: the
+smoke manifest records an eight-sample request and is intentionally not
+rewritten in place.
 
 The campaign has no checked-in expected-result baseline. Evaluate its output
 against decision thresholds chosen for the target workload.
@@ -130,7 +161,8 @@ Keep omitted architecture dimensions at their teacher values. When adding an
 axis, verify measurement and physical slicing on the target checkpoint before
 expanding the campaign. Use [MIP profiles](mip_profiles.md#search-space) for the
 search-space syntax and [configuration overrides](configuration_overrides.md)
-for temporary changes.
+for temporary changes. Change campaign inputs before launch; do not patch
+resolved or generated artifacts inside an existing run root.
 
 Keep the model revision, frozen evaluator profile, KD exposure, and serving
 workload fixed when comparing candidates. Changing any of them creates a

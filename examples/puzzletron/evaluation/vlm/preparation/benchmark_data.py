@@ -250,16 +250,24 @@ def _inventory_is_current(
         else:
             return False
         stat_result = inspected.stat()
-        if (
-            stat_result.st_size != entry.get("bytes")
-            or stat_result.st_mtime_ns != entry.get("mtime_ns")
-            or stat_result.st_ctime_ns != entry.get("ctime_ns")
+        if stat_result.st_size != entry.get("bytes") or stat_result.st_ctime_ns != entry.get(
+            "ctime_ns"
         ):
             return False
         expected_sha256 = entry.get("sha256")
-        if not isinstance(expected_sha256, str) or (
-            verify_content and _sha256(inspected) != expected_sha256
-        ):
+        if not isinstance(expected_sha256, str):
+            return False
+        mtime_changed = stat_result.st_mtime_ns != entry.get("mtime_ns")
+        if mtime_changed:
+            if repository_cache is not None:
+                return False
+            # A distributed filesystem can expose a metadata-server mtime after
+            # preparation that differs from the client-observed value recorded
+            # immediately after fsync. Confirm just that file by content so a
+            # benign timestamp reconciliation does not invalidate a large cache.
+            if _sha256(inspected) != expected_sha256:
+                return False
+        elif verify_content and _sha256(inspected) != expected_sha256:
             return False
     observed_paths = sorted(
         path.relative_to(root).as_posix()
@@ -963,7 +971,11 @@ def _prepare(
     with _task_lock(hf_home, task):
         target, complete = _inspect_prepare_target(hf_home, task, verify_content=verify_content)
         if complete is not None:
-            return complete
+            return {
+                **complete,
+                "snapshot": str(snapshot),
+                "media_root": str(target),
+            }
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.modelopt-staging.", dir=target.parent)
         )

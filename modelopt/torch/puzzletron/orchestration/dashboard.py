@@ -28,6 +28,7 @@ __all__ = [
     "StageView",
     "TerminalDashboard",
     "format_duration",
+    "format_eta",
     "progress_fraction",
     "progress_eta",
 ]
@@ -51,6 +52,7 @@ class StageView:
     eta_seconds: float | None = None
     current: float | None = None
     total: float | None = None
+    log_paths: tuple[str, ...] = ()
 
 
 def progress_fraction(detail: str | None) -> tuple[float, float] | None:
@@ -97,6 +99,14 @@ def format_duration(seconds: float | None, *, approximate: bool = False) -> str:
     minutes, secs = divmod(remainder, 60)
     value = f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
     return f"~{value}" if approximate else value
+
+
+def format_eta(seconds: float | None) -> str:
+    """Format a measured ETA without implying one when no estimate is available."""
+
+    if seconds is None:
+        return "unavailable"
+    return format_duration(seconds, approximate=True)
 
 
 def _progress_bar(current: float | None, total: float | None, *, width: int = 14) -> str:
@@ -205,6 +215,9 @@ class TerminalDashboard:
             bar = _progress_bar(stage.current, stage.total)
             if bar:
                 progress.append(f"  {bar}", style="blue")
+            if stage.log_paths:
+                suffix = f" (+{len(stage.log_paths) - 1} more)" if len(stage.log_paths) > 1 else ""
+                progress.append(f"\nlog: {stage.log_paths[0]}{suffix}", style="dim")
             allocation = f"{stage.nodes}n · {stage.tasks}t · {stage.gpus}g"
             table.add_row(
                 status_renderable,
@@ -212,7 +225,7 @@ class TerminalDashboard:
                 allocation,
                 progress,
                 format_duration(stage.elapsed_seconds),
-                format_duration(stage.eta_seconds, approximate=True),
+                format_eta(stage.eta_seconds),
             )
         footer = Text("Last event", style="dim")
         footer.append(f"  {self._last_event}")

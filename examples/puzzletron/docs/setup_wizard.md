@@ -10,7 +10,8 @@ does not submit jobs.
 The guided flow offers three profiles:
 
 - **Quick smoke** creates the smallest campaign for checking campaign shape.
-- **Balanced pruning** provides the recommended defaults for a first campaign.
+- **Balanced pruning** provides the recommended defaults for a generated
+  campaign after the maintained lifecycle smoke succeeds.
 - **High-confidence search** spends more runtime on scoring and sanity checks.
 
 The selected profile supplies pruning and search defaults from the detected

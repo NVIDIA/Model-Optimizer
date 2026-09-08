@@ -3582,7 +3582,11 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
     sequence = int(session.state.get_field("data.sequence_length", 4096))
     workloads = _mapping_copy(session.state.collection("serving_workloads"))
     first_workload = next(iter(workloads.values()), {})
+    serving_defaults = resolver.resolve("post_mip.serving", {}).value
+    if not isinstance(serving_defaults, Mapping):
+        raise SetupError("post_mip.serving defaults must be a mapping")
     serving = {
+        **deepcopy(dict(serving_defaults)),
         "input_tokens": int(first_workload.get("prefill_seq_len", sequence)),
         "output_tokens": int(first_workload.get("generation_seq_len", 1024)),
         "concurrency": [int(first_workload.get("max_num_seqs", 1))],

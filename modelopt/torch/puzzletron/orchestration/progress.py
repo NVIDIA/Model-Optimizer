@@ -422,6 +422,34 @@ def _post_mip_progress(
         return None
 
     executions_root = puzzle_dir / "artifacts" / "post_mip" / "nodes" / node_id / "executions"
+    if node_type in {"evaluation", "downstream_evaluation"}:
+        progress_paths = list(executions_root.rglob("lmms_eval/attempt_*/progress.json"))
+        if progress_paths:
+            progress_path = max(progress_paths, key=lambda path: path.stat().st_mtime_ns)
+            payload = _read_json(progress_path)
+            if (
+                isinstance(payload, Mapping)
+                and payload.get("schema") == "modelopt.puzzletron.evaluation-progress/v1"
+                and payload.get("unit") == "samples"
+            ):
+                current = payload.get("current")
+                total = payload.get("total")
+                rate = payload.get("rate_per_second")
+                task = payload.get("task")
+                prefix = "evaluation"
+                if isinstance(task, Mapping) and isinstance(task.get("name"), str):
+                    prefix += f" {task['name']}"
+                    current = task.get("current", current)
+                    total = task.get("total", total)
+                if isinstance(current, int) and isinstance(total, int) and total > 0:
+                    detail = f"{prefix} {current}/{total} samples"
+                elif isinstance(current, int):
+                    detail = f"{prefix} {current} samples (total unavailable)"
+                else:
+                    detail = f"{prefix} starting (total unavailable)"
+                if isinstance(rate, (int, float)) and rate > 0:
+                    detail += f" at {rate:.2f} samples/s"
+                return detail
     executions = [path for path in executions_root.glob("post_mip_execution_*") if path.is_dir()]
     rows_by_revision: dict[str, Mapping[str, Any]] = {}
     if executions:

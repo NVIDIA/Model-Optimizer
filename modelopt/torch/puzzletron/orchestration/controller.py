@@ -33,7 +33,7 @@ from .adapters.post_mip import ManualInputRequired
 from .adapters.registry import adapter_for_stage
 from .adapters.stage_compat import stage_is_complete
 from .compiler import _resolve_artifact_settling_timeout_seconds, plan_to_dict
-from .dashboard import StageView, format_duration, progress_eta, progress_fraction
+from .dashboard import StageView, format_duration, format_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
 from .executors.slurm import render_slurm_attempt_script
 from .identity import stable_hash
@@ -237,6 +237,7 @@ class CampaignController:
         self._active: dict[str, tuple[JobHandle, str, str]] = {}
         self._last_states: dict[str, JobState] = {}
         self._last_heartbeat = 0.0
+        self._progress_samples: dict[str, tuple[float, float, float]] = {}
         self._campaign_started_monotonic = time.monotonic()
         self._shutdown_requested = False
         self._shutdown_signal: int | None = None
@@ -1018,17 +1019,24 @@ class CampaignController:
         running = sum(state is JobState.RUNNING for state in self._last_states.values())
         self.logger.wait(
             f"progress {completed}/{len(self.plan.stages)} stages; "
-            f"jobs: {running} running, {pending} pending"
+            f"jobs: {running} running, {pending} pending; "
+            f"elapsed={format_duration(time.monotonic() - self._campaign_started_monotonic)}"
         )
         for view in self._stage_views():
             if self._shutdown_requested:
                 return
             if view.status not in {"running", "pending"}:
                 continue
+            log_path = "unavailable"
+            if view.log_paths:
+                log_path = view.log_paths[0]
+                if len(view.log_paths) > 1:
+                    log_path += f" (+{len(view.log_paths) - 1} more)"
             self.logger.progress(
                 f"{view.stage_id} {view.nodes}n/{view.tasks}t/{view.gpus}g "
-                f"{view.progress}; elapsed={format_duration(view.elapsed_seconds)}, "
-                f"eta={format_duration(view.eta_seconds, approximate=True)}"
+                f"state={view.status}; {view.progress}; "
+                f"elapsed={format_duration(view.elapsed_seconds)}, "
+                f"eta={format_eta(view.eta_seconds)}; log={log_path}"
             )
 
     def _failed_ancestor_ids(self, stage_id: str) -> list[str]:
@@ -1053,8 +1061,20 @@ class CampaignController:
         visit(stage_id)
         return [node.stage_id for node in self.plan.stages if node.stage_id in failed]
 
-    def _stage_elapsed(self, stage_id: str, *, active: bool) -> float | None:
+    def _stage_elapsed(
+        self,
+        stage_id: str,
+        *,
+        active: bool,
+        active_attempt_ids: set[str] | None = None,
+    ) -> float | None:
         attempts = self.store.list_attempts(stage_id)
+        if active and active_attempt_ids:
+            attempts = [
+                attempt
+                for attempt in attempts
+                if str(attempt.get("attempt_id")) in active_attempt_ids
+            ]
         starts = [
             float(attempt["submitted_at"])
             for attempt in attempts
@@ -1071,6 +1091,29 @@ class CampaignController:
             if isinstance(attempt.get("completed_at"), (int, float))
         ]
         return max(0.0, max(ends) - start) if ends else None
+
+    def _measured_progress_eta(
+        self,
+        stage_id: str,
+        current: float | None,
+        total: float | None,
+    ) -> float | None:
+        """Estimate remaining time only after observing progress in this controller run."""
+
+        if current is None or total is None or total <= 0 or current >= total:
+            self._progress_samples.pop(stage_id, None)
+            return None
+        now = time.monotonic()
+        sample = self._progress_samples.get(stage_id)
+        if sample is None or sample[2] != total or current < sample[1]:
+            self._progress_samples[stage_id] = (now, current, total)
+            return None
+        started_at, started_current, _sample_total = sample
+        completed = current - started_current
+        elapsed = now - started_at
+        if completed <= 0 or elapsed <= 0:
+            return None
+        return elapsed * (total - current) / completed
 
     def _stage_views(self) -> list[StageView]:
         """Build dashboard rows from durable state, DAG state, and progress artifacts."""
@@ -1097,7 +1140,12 @@ class CampaignController:
                 self._last_states.get(handle_id, JobState.UNKNOWN)
                 for handle_id, _entry in stage_entries
             ]
-            elapsed = self._stage_elapsed(node.stage_id, active=stage_active)
+            active_attempt_ids = {entry[2] for _handle_id, entry in stage_entries}
+            elapsed = self._stage_elapsed(
+                node.stage_id,
+                active=stage_active,
+                active_attempt_ids=active_attempt_ids,
+            )
             progress = ""
             current = total = None
             if completed:
@@ -1162,9 +1210,10 @@ class CampaignController:
                     gpus=node.total_gpus,
                     progress=progress,
                     elapsed_seconds=elapsed,
-                    eta_seconds=progress_eta(elapsed, current, total),
+                    eta_seconds=self._measured_progress_eta(node.stage_id, current, total),
                     current=current,
                     total=total,
+                    log_paths=tuple(stage_logs) if stage_active else (),
                 )
             )
         return views

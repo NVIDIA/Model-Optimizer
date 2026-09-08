@@ -334,8 +334,7 @@ def recommended_flow(
         **({"topology": deepcopy(serving["topology"])} if serving.get("topology") else {}),
     }
     serving_metric = (
-        f"{serving_id}.images_{max(image_batch_sizes)}.concurrency_{concurrency[0]}."
-        "image_throughput"
+        f"{serving_id}.images_{max(image_batch_sizes)}.image_throughput"
         if multimodal
         else f"{serving_id}.output_token_throughput"
     )

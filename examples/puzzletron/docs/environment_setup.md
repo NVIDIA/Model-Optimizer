@@ -14,13 +14,21 @@ an optional Slurm container.
 ## Local Puzzletron environment
 
 The setup wizard and `orchestrate.py` do not import PyTorch or initialize CUDA.
-Create one environment for both:
+Use Python 3.10 through 3.14 to create one environment for both. Upgrade the
+venv's bundled `pip` before resolving the controller dependencies:
 
 ```bash
+python3 --version  # must report Python 3.10 through 3.14
 python3 -m venv .venv-puzzletron
 source .venv-puzzletron/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r examples/puzzletron/requirements-setup.txt
 ```
+
+Setup resolves a Hugging Face model name to a commit before writing campaign
+files. If that lookup is temporarily unavailable, setup can reuse a sole cached
+model snapshot and still records its commit. With multiple cached snapshots it
+keeps the network error instead of guessing which revision to use.
 
 Only one local virtual environment is needed for a first campaign.
 `requirements-setup.txt` includes the packages required to generate, launch,
@@ -33,16 +41,18 @@ ModelOpt, CUDA, the worker container, or the worker virtual environment.
 
 ## Worker environment
 
-The repository [`Dockerfile`](../Dockerfile) builds the worker image. It
+Use your cluster's reviewed Puzzletron worker image when one is available. The
+repository [`Dockerfile`](../Dockerfile) is the source for that image. It
 installs ModelOpt, the pinned vLLM and AutoModel sources, AIPerf, LMMS-Eval,
 the required CUDA extensions, and the teacher-evaluation resources. Its
 LMMS-Eval install includes the pinned native Qwen 3.5 image and video backend.
 Do not maintain a second set of worker installation commands or evaluator
 overlays outside the Dockerfile.
 
-Build the Linux amd64 image from the repository root by following the
-[image build and validation guide](worker_image.md). That guide provides the
-build command and the revision-specific image tag.
+Ask your cluster administrator for its registry reference or cluster-readable
+path and enter it during setup. Build a Linux amd64 image only when your site
+does not provide one; the [image build and validation guide](worker_image.md)
+provides the build command and revision-specific image tag.
 
 The amd64 platform is required because the current CUDA extension set and
 Linux `eva-decord 0.6.1` dependency do not have a validated ARM build path.

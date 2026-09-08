@@ -1660,6 +1660,24 @@ def _write_reused_sort_equivalence(
     return merged
 
 
+def _resolve_parent_sweep_sort_equivalence(
+    *,
+    parent_equivalence: dict[str, Any],
+    sort_summary_path: Path,
+    reuse_summary_path: Path,
+    reuse_sort_equivalence: bool,
+) -> dict[str, Any]:
+    """Resolve sort evidence from the already-qualified stage when reuse is requested."""
+
+    if not reuse_sort_equivalence:
+        return parent_equivalence
+    return _write_reused_sort_equivalence(
+        sort_summary_path,
+        reuse_summary_path,
+        {"reused_source_summary": str(sort_summary_path)},
+    )
+
+
 def _parent_sweep_sanity_verdict(width_summary: dict[str, Any], sort_summary: dict[str, Any]):
     """Combine advisory width quality with blocking reused-sort correctness."""
 
@@ -2723,18 +2741,24 @@ def _activation_diagnostic_parent_sweep(
                 diag_cfg=diag_cfg,
             )
 
-            activation_equivalence = (
+            parent_equivalence = (
                 (sweep_manifest.get("parents") or {}).get("activation") or {}
             ).get("equivalence") or {}
+            sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
+            sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
+            sort_summary_path = sort_equivalence_dir / "summary.json"
+            reused_sort_summary_path = artifacts_dir / "reused_sort_equivalence.json"
+            activation_equivalence = _resolve_parent_sweep_sort_equivalence(
+                parent_equivalence=parent_equivalence,
+                sort_summary_path=sort_summary_path,
+                reuse_summary_path=reused_sort_summary_path,
+                reuse_sort_equivalence=bool(diag_cfg.get("reuse_sort_equivalence", False)),
+            )
             equivalence_findings = [
                 {**finding, "stage": "sort_sanity", "severity": "error"}
                 for finding in activation_equivalence.get("findings") or ()
             ]
             sort_passed = activation_equivalence.get("passed") is True
-            sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
-            sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
-            sort_summary_path = sort_equivalence_dir / "summary.json"
-            reused_sort_summary_path = artifacts_dir / "reused_sort_equivalence.json"
             reuse_sort_summary = {
                 "passed": sort_passed,
                 "reused_parent_sweep": True,

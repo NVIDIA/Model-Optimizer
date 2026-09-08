@@ -42,7 +42,6 @@ CAMPAIGN_EXECUTION_PATH = (
 
 def _compile(monkeypatch, tmp_path: Path, experiment: Path, execution: Path):
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / experiment.stem))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
     return compile_campaign_plan(
@@ -60,8 +59,12 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
+    serving_args = nodes["vlm_serving"]["config"]["topology"]["extra_vllm_args"]
 
     assert "tokenize_data" not in stages
+    assert config["dataset_path"] == str(tmp_path / "full_vlm_smoke/datasets/nemotron_vlm_v2")
+    assert config["prepare_dataset"]["output"] == config["dataset_path"]
+    assert serving_args[serving_args.index("--gdn-prefill-backend") + 1] == "triton"
     assert tuple(node for node in stages if node.startswith("post.")) == (
         "post.params-90.image_eval",
         "post.params-90.best_vlm_loss",
@@ -75,10 +78,16 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
         "post.params-90.best",
     )
     assert config["prepare_dataset"]["num_samples"] == 8
+    assert config["sort_sanity"]["max_abs_lm_loss_delta"] == 0.003
+    assert config["sort_sanity"]["max_abs_reverse_lm_loss_delta"] == 0.003
     assert nodes["image_eval"]["config"]["eval_samples"] == 2
     assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_core3_24row_smoke_v2"
+    assert nodes["checkpoint_eval"]["config"]["gdn_prefill_backend"] == "triton"
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["vlm_serving"]["config"]["request_count"] == 1
+    assert nodes["fastest_vlm"]["metric"] == (
+        "vlm_serving.images_12.concurrency_1.image_throughput"
+    )
     assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
     cpu_stages = [stage for stage in stages.values() if stage.resource == "cpu"]
     assert cpu_stages
@@ -90,11 +99,16 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
-    assert set(config["post_mip"]["flows"]) == {"candidates"}
+    assert config["dataset_path"] == str(tmp_path / "vlm_campaign/datasets/nemotron_vlm_v2")
+    assert config["prepare_dataset"]["output"] == config["dataset_path"]
     assert config["prepare_dataset"]["evaluation_hf_home"] == str(tmp_path / "hf-home")
+    assert set(config["post_mip"]["flows"]) == {"candidates"}
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
+    serving_args = candidates["serving"]["config"]["topology"]["extra_vllm_args"]
+    assert serving_args[serving_args.index("--gdn-prefill-backend") + 1] == "triton"
 
     assert set(config["mip"]["runs"]) == {"params-90"}
+    assert config["replacement_scoring"]["eval_samples"] == 16
     assert candidates["best_image_loss"]["top_k"] == 5
     assert candidates["kd"]["config"]["max_steps"] == 128
     assert candidates["pre_kd_eval"]["config"] == config["vlm_quality_evaluation"]
@@ -105,7 +119,8 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     assert candidates["selected"]["input"] == "post_kd_eval"
     assert candidates["selected"]["top_k"] == 1
     assert stages["post.candidates.serving"].parents == ("post.candidates.result",)
-    assert stages["post.candidates.kd"].total_gpus == 2
+    assert stages["post.candidates.kd"].total_gpus == 1
+    assert max(stage.total_gpus for stage in stages.values()) == 1
 
     profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None

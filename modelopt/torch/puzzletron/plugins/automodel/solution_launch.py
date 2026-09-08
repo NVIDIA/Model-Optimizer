@@ -47,7 +47,7 @@ import modelopt.torch.utils.distributed as dist
 from ...replacement_library.replacement_utils import parse_layer_replacement
 from ...tools.logger import mprint
 from ...tools.validate_puzzle_with_multi_replacements import load_puzzle_solutions
-from ...tools.validation_utils import write_results
+from ...tools.validation_utils import scoring_result_matches, write_results
 from .config import build_solution_recipe_config, solution_scoring_params
 from .launch import _free_scoring_memory
 from .module_trace import synchronized_module_trace
@@ -81,11 +81,7 @@ def _can_skip_parent_model_load(
     needs_parent_evaluation: bool,
 ) -> bool:
     """Skip completed candidates, but always rebuild the run-local teacher cache."""
-    return (
-        role != "original"
-        and not pending_ids
-        and not needs_parent_evaluation
-    )
+    return role != "original" and not pending_ids and not needs_parent_evaluation
 
 
 def _solution_output_location(scoring, output_dir: Path, solution_id: int) -> tuple[Path, str]:
@@ -100,9 +96,7 @@ def _solution_output_location(scoring, output_dir: Path, solution_id: int) -> tu
 
 
 def _solution_result_path(scoring, output_dir: Path, solution_id: int) -> Path:
-    solution_output, solution_name = _solution_output_location(
-        scoring, output_dir, solution_id
-    )
+    solution_output, solution_name = _solution_output_location(scoring, output_dir, solution_id)
     return solution_output / f"{solution_name}.json"
 
 
@@ -132,7 +126,11 @@ def _load_solution_work(scoring, output_dir: Path) -> tuple[list[dict], list[int
         ids = [
             i
             for i in ids
-            if not _solution_result_path(scoring, output_dir, i).exists()
+            if not scoring_result_matches(
+                _solution_result_path(scoring, output_dir, i),
+                scoring,
+                expected_payload={"puzzle_solution": solutions[i]},
+            )
         ]
     return solutions, ids
 
@@ -204,7 +202,9 @@ def _run_recipe(
     return recipe
 
 
-def _extract_teacher_targets(recipe, cache: TeacherTargetCache, params: dict | None = None) -> dict | None:
+def _extract_teacher_targets(
+    recipe, cache: TeacherTargetCache, params: dict | None = None
+) -> dict | None:
     """Phase 1: fill the cache and optionally compute the teacher baseline metrics."""
     if recipe.has_outputs:
         cache.set_lm_head_weight(recipe.lm_head_weight())
@@ -345,7 +345,9 @@ def _score_candidate(
         synchronized_module_trace(recipe),
     ):
         for batch_idx, (hidden, targets) in enumerate(recipe.iterate_captures()):
-            _trace_batch("candidate_capture_yield", batch_idx, has_hidden=hidden is not None, name=name)
+            _trace_batch(
+                "candidate_capture_yield", batch_idx, has_hidden=hidden is not None, name=name
+            )
             if hidden is not None:
                 torch.cuda.synchronize(hidden.device)
             forward_seconds = time.perf_counter() - batch_started
@@ -379,8 +381,13 @@ def _score_candidate(
             metric_started = time.perf_counter()
             per_batch.append(
                 score_batch(
-                    candidate_hidden, candidate_w, teacher_hidden, teacher_w, targets,
-                    temperature=params["temperature"], chunk_size=params["chunk_size"],
+                    candidate_hidden,
+                    candidate_w,
+                    teacher_hidden,
+                    teacher_w,
+                    targets,
+                    temperature=params["temperature"],
+                    chunk_size=params["chunk_size"],
                     lm_head_backend=params["lm_head_backend"],
                     tp_group=tp_group,
                     flash_kld_token_chunk_size=params["flash_kld_token_chunk_size"],
@@ -461,12 +468,8 @@ def _validate_parent_equivalence(
         "normalized_mse_loss_hidden_states": float(
             tolerances.get("max_normalized_mse_loss_hidden_states", 2.0e-2)
         ),
-        "mse_loss_hidden_states": float(
-            tolerances.get("max_mse_loss_hidden_states", 1.0e-1)
-        ),
-        "mae_loss_hidden_states": float(
-            tolerances.get("max_mae_loss_hidden_states", 5.0e-1)
-        ),
+        "mse_loss_hidden_states": float(tolerances.get("max_mse_loss_hidden_states", 1.0e-1)),
+        "mae_loss_hidden_states": float(tolerances.get("max_mae_loss_hidden_states", 5.0e-1)),
     }
     for metric, limit in metric_limits.items():
         value = _metric_average(parent, metric)
@@ -544,7 +547,9 @@ def _solution_hidden_width(solution: dict) -> int | None:
     return None if value is None else int(value)
 
 
-def _solution_prune_target(layer_replacements, teacher_block_configs, num_q_heads, head_dim) -> dict | None:
+def _solution_prune_target(
+    layer_replacements, teacher_block_configs, num_q_heads, head_dim
+) -> dict | None:
     """Resolve a single-block replacement into prune_block_context kwargs (orig + target dims).
 
     Attention targets are interpreted as sorted-prefix removal: reducing KV groups also removes
@@ -568,25 +573,11 @@ def _solution_prune_target(layer_replacements, teacher_block_configs, num_q_head
     teacher_ffn = teacher.get_subblock("ffn")
     teacher_attn = teacher.get_subblock("attention")
 
-    t_ffn = (
-        child_ffn.intermediate_size
-        if child_ffn is not None and not child_ffn.no_op
-        else None
-    )
-    t_kv = (
-        child_attn.num_kv_heads
-        if child_attn is not None and not child_attn.no_op
-        else None
-    )
-    t_q = (
-        child_attn.num_query_heads
-        if child_attn is not None and not child_attn.no_op
-        else None
-    )
+    t_ffn = child_ffn.intermediate_size if child_ffn is not None and not child_ffn.no_op else None
+    t_kv = child_attn.num_kv_heads if child_attn is not None and not child_attn.no_op else None
+    t_q = child_attn.num_query_heads if child_attn is not None and not child_attn.no_op else None
     orig_kv = (
-        teacher_attn.num_kv_heads
-        if teacher_attn is not None and not teacher_attn.no_op
-        else None
+        teacher_attn.num_kv_heads if teacher_attn is not None and not teacher_attn.no_op else None
     )
     target_num_q = None
     if t_kv is not None:
@@ -731,9 +722,7 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
         if dist.is_master():
             mprint(f"[solution/automodel] building sorted teacher -> {default_sorted_dir}")
             sort_cfg = hydra_cfg.get("sort", {})
-            embedding_widths = tuple(
-                hydra_cfg.get("embedding_pruning", {}).get("widths", ()) or ()
-            )
+            embedding_widths = tuple(hydra_cfg.get("embedding_pruning", {}).get("widths", ()) or ())
             build_sorted_teacher(
                 teacher_dir,
                 activations_log_dir,
@@ -807,10 +796,8 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
         return
 
     # ---- Cache teacher targets, then score candidates from the requested source. ----
-    mprint(
-        "[solution/automodel] checkpoint roles | "
-        f"target={target_dir} source={source_dir}"
-    )
+    mprint(f"[solution/automodel] checkpoint roles | target={target_dir} source={source_dir}")
+
     def score_pending(recipe, cache) -> None:
         sliced_teacher_baseline = None
         if baseline_only or bool(scoring.get("score_source_baseline", True)):
@@ -847,7 +834,11 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
                 f"as {solution_output / solution_name} {prune_target}"
             )
             _score_candidate(
-                recipe, cache, params, solution_output, scoring,
+                recipe,
+                cache,
+                params,
+                solution_output,
+                scoring,
                 name=solution_name,
                 payload={
                     "i_solution": 0 if solution_name == "solution_0" else i_solution,
@@ -864,7 +855,10 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
 
     recipe = _run_recipe(
         build_solution_recipe_config(hydra_cfg, target_dir),
-        scoring, params["eval_iters"], params["use_puzzletron_dataloader"], params["data_cfg"],
+        scoring,
+        params["eval_iters"],
+        params["use_puzzletron_dataloader"],
+        params["data_cfg"],
     )
     try:
         mprint("[solution/automodel] Phase 1: caching teacher targets")
@@ -886,7 +880,10 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
 
     recipe = _run_recipe(
         build_solution_recipe_config(hydra_cfg, source_dir),
-        scoring, params["eval_iters"], params["use_puzzletron_dataloader"], params["data_cfg"],
+        scoring,
+        params["eval_iters"],
+        params["use_puzzletron_dataloader"],
+        params["data_cfg"],
     )
     try:
         score_pending(recipe, cache)
@@ -971,13 +968,32 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
             pending_ids = [
                 idx
                 for idx in range(len(solutions))
-                if force_rescore or not (output_dir / f"solution_{idx}.json").is_file()
+                if force_rescore
+                or not scoring_result_matches(
+                    output_dir / f"solution_{idx}.json",
+                    scoring,
+                    expected_payload={
+                        "puzzle_solution": solutions[idx],
+                        "parent_role": role,
+                        "checkpoint_dir": str(checkpoint_dir),
+                    },
+                )
             ]
             parent_result_path = output_dir / "parent.json"
             needs_parent_evaluation = (
                 evaluation_mode != "realized_baseline"
                 and not skip_parent_equivalence
-                and (force_rescore or not parent_result_path.is_file())
+                and (
+                    force_rescore
+                    or not scoring_result_matches(
+                        parent_result_path,
+                        scoring,
+                        expected_payload={
+                            "parent_role": role,
+                            "checkpoint_dir": str(checkpoint_dir),
+                        },
+                    )
+                )
             )
             if _can_skip_parent_model_load(
                 role,
@@ -1000,17 +1016,13 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
             )
             try:
                 if not (checkpoint_dir / "config.json").is_file():
-                    raise FileNotFoundError(
-                        f"{role} parent missing config.json: {checkpoint_dir}"
-                    )
+                    raise FileNotFoundError(f"{role} parent missing config.json: {checkpoint_dir}")
                 parent_config = _load_model_config_distributed(
                     checkpoint_dir,
                     descriptor,
                     loader=load_model_config,
                 )
-                parent_width = int(
-                    descriptor.get_language_model_config(parent_config).hidden_size
-                )
+                parent_width = int(descriptor.get_language_model_config(parent_config).hidden_size)
                 retained_hidden_indices = _source_hidden_channel_indices(
                     checkpoint_dir,
                     parent_width,
@@ -1035,7 +1047,9 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                 raise
             manifest["checkpoint_loads"][role] += 1
             if manifest["checkpoint_loads"][role] != 1:
-                raise RuntimeError(f"parent {role} loaded more than once: {manifest['checkpoint_loads']}")
+                raise RuntimeError(
+                    f"parent {role} loaded more than once: {manifest['checkpoint_loads']}"
+                )
             write_manifest()
 
             parent_summary = None
@@ -1065,7 +1079,9 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                     parent_summary = {"passed": True, "reference": True}
                 elif evaluation_mode == "runtime_slice" and not skip_parent_equivalence:
                     if original_result_path is None or len(cache) == 0 and recipe.has_outputs:
-                        raise RuntimeError("original teacher cache is unavailable for sorted parent")
+                        raise RuntimeError(
+                            "original teacher cache is unavailable for sorted parent"
+                        )
                     if needs_parent_evaluation:
                         mprint(
                             "[solution/automodel] parent sweep equivalence | "
@@ -1090,9 +1106,7 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                         teacher_result_path=original_result_path,
                         parent_result_path=parent_result_path,
                         tolerances=tolerances,
-                        hidden_basis_permuted=bool(
-                            parent.get("hidden_basis_permuted", False)
-                        ),
+                        hidden_basis_permuted=bool(parent.get("hidden_basis_permuted", False)),
                     )
                     mprint(
                         "[solution/automodel] parent equivalence | "

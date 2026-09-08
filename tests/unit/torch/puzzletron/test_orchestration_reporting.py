@@ -200,6 +200,20 @@ def test_clean_completion_regenerates_tampered_final_report(tmp_path: Path):
     assert result["report_status"] == "completed"
 
 
+def test_clean_completion_regenerates_after_stage_state_changes(tmp_path: Path):
+    plan = _plan(tmp_path)
+    executor = _ReportExecutor(JobState.COMPLETED)
+    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+    stage_root = plan.puzzle_dir / "orchestration/stages"
+    stage_root.mkdir(parents=True)
+    (stage_root / "later-stage.json").write_text('{"status": "completed"}\n')
+
+    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+
+    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
+    assert result["report_status"] == "completed"
+
+
 def test_clean_completion_regenerates_oversized_completion_record(tmp_path: Path):
     plan = _plan(tmp_path)
     executor = _ReportExecutor(JobState.COMPLETED)

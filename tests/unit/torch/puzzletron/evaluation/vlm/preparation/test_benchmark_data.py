@@ -18,6 +18,7 @@
 import hashlib
 import io
 import json
+import os
 import stat
 import tarfile
 import threading
@@ -82,6 +83,15 @@ def _emulate_atomic_exchange(first: Path, second: Path) -> bool:
     first.rename(second)
     displaced.rename(first)
     return True
+
+
+def _rewrite_with_distinct_mtime(path: Path, payload: bytes) -> None:
+    """Make metadata-based invalidation deterministic on coarse-clock filesystems."""
+    before = path.stat()
+    path.write_bytes(payload)
+    after = path.stat()
+    if after.st_mtime_ns == before.st_mtime_ns:
+        os.utime(path, ns=(after.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
 
 
 def test_atomic_exchange_directories_when_supported(tmp_path):
@@ -158,19 +168,13 @@ def test_prepare_benchmark_datasets_dispatches_media_only_for_media_tasks(tmp_pa
     assert prepared == ["mvbench"]
 
 
-def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path):
+@pytest.mark.parametrize("dangling", [False, True])
+def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path, dangling):
     target = tmp_path / "target"
-    target.mkdir()
+    if not dangling:
+        target.mkdir()
     alias = tmp_path / "hf-home"
     alias.symlink_to(target, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="must not be a symlink"):
-        preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
-
-
-def test_prepare_benchmark_datasets_rejects_dangling_symlinked_hf_home(tmp_path):
-    alias = tmp_path / "hf-home"
-    alias.symlink_to(tmp_path / "missing", target_is_directory=True)
 
     with pytest.raises(ValueError, match="must not be a symlink"):
         preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
@@ -226,6 +230,36 @@ def test_prepared_media_reuses_metadata_unless_content_verification_is_requested
     assert hashed == [hf_home / "mmvu/videos/sample.mp4"]
 
 
+def test_prepared_media_reuse_tolerates_distributed_filesystem_mtime_skew(tmp_path):
+    root = tmp_path / "prepared"
+    root.mkdir()
+    (root / "sample.mp4").write_bytes(b"video")
+    inventory = preparation._inventory(root)
+    inventory[0]["mtime_ns"] += 1_000_000_000
+
+    assert preparation._inventory_is_current(root, inventory)
+    inventory[0]["sha256"] = "0" * 64
+    assert not preparation._inventory_is_current(root, inventory)
+
+
+def test_prepared_media_reuse_reports_paths_from_the_current_mount(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    preparation._prepare(hf_home, "mmvu_val", snapshot)
+    marker = hf_home / "mmvu" / preparation._MARKER_NAME
+    payload = json.loads(marker.read_text())
+    payload["snapshot"] = "/stale-mount/snapshot"
+    payload["media_root"] = "/stale-mount/media"
+    marker.write_text(json.dumps(payload))
+
+    reused = preparation._prepare(hf_home, "mmvu_val", snapshot)
+
+    assert reused["snapshot"] == str(snapshot)
+    assert reused["media_root"] == str(hf_home / "mmvu")
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "unexpected"])
 def test_complete_media_marker_repairs_owned_root_from_pinned_snapshot(
     tmp_path, monkeypatch, damage
@@ -242,7 +276,7 @@ def test_complete_media_marker_repairs_owned_root_from_pinned_snapshot(
     if damage == "missing":
         media.unlink()
     elif damage == "corrupt":
-        media.write_bytes(b"wrong")
+        _rewrite_with_distinct_mtime(media, b"wrong")
     elif damage == "unexpected":
         (target / "unexpected.bin").write_bytes(b"stale")
     report = preparation._prepare(hf_home, "mmvu_val", snapshot)
@@ -265,7 +299,7 @@ def test_repair_without_atomic_exchange_preserves_live_root(monkeypatch, tmp_pat
     preparation._prepare(hf_home, "mmvu_val", snapshot)
     target = hf_home / "mmvu"
     media = target / "videos/sample.mp4"
-    media.write_bytes(b"wrong")
+    _rewrite_with_distinct_mtime(media, b"wrong")
     monkeypatch.setattr(preparation, "_atomic_exchange_directories", lambda *_args: False)
 
     with pytest.raises(RuntimeError, match="atomic media-directory exchange is unavailable"):
@@ -343,7 +377,7 @@ def test_snapshot_inventory_rejects_partial_and_same_size_corruption(tmp_path):
     second.write_bytes(b"two")
     report = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
     assert preparation._snapshot_inventory_is_current(report)
-    first.write_bytes(b"bad")
+    _rewrite_with_distinct_mtime(first, b"bad")
     assert not preparation._snapshot_inventory_is_current(report)
 
 
@@ -376,7 +410,7 @@ def test_snapshot_inventory_reuses_metadata_unless_content_verification_is_reque
     assert hashed == [sample]
 
     hashed.clear()
-    sample.write_bytes(b"two")
+    _rewrite_with_distinct_mtime(sample, b"two")
     refreshed = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
     assert hashed == [sample]
     assert refreshed["files"][0]["sha256"] == hashlib.sha256(b"two").hexdigest()
@@ -552,7 +586,8 @@ def test_concurrent_media_preparation_is_task_locked_and_publishes_only_complete
     second.join(timeout=5)
 
     assert not errors
-    assert not first.is_alive() and not second.is_alive()
+    assert not first.is_alive()
+    assert not second.is_alive()
     assert extraction_count == 1
     assert len(results) == 2
     assert all(result["status"] == "complete" for result in results)

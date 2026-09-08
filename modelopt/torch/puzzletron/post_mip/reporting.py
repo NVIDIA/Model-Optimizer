@@ -119,7 +119,7 @@ def _candidate_label(
         width = width if width is not None else artifact.get("hidden_width")
         kind = kind or artifact.get("kind")
         current_id = str(revision.get("parent_revision_id") or "")
-    prefix = f"h{width} · " if width is not None else ""
+    prefix = f"hidden width {width} · " if width is not None else ""
     suffix = architecture_id.removeprefix("architecture_")[:8]
     return f"{prefix}{kind} · {suffix}" if kind else f"{prefix}{suffix}"
 
@@ -185,6 +185,7 @@ def build_post_mip_report_payloads(
 
     registry = _json(root / "artifacts" / "post_mip" / "candidate_registry.json")
     revisions = dict(registry.get("revisions") or {})
+    architectures = dict(registry.get("architectures") or {})
     raw: dict[str, dict[str, Any]] = {}
     selected_by: dict[str, list[str]] = {}
     for node in nodes:
@@ -222,12 +223,24 @@ def build_post_mip_report_payloads(
         for row in payload["observations"]:
             revision_id = str(row.get("input_revision_id") or row.get("source_revision_id") or "")
             architecture_id = _architecture_id(row, revisions)
+            architecture = architectures.get(architecture_id)
+            if not isinstance(architecture, Mapping):
+                architecture = {}
+            origin_kinds = sorted(
+                {
+                    str(origin["kind"])
+                    for origin in architecture.get("origins", ())
+                    if isinstance(origin, Mapping)
+                    and origin.get("kind") in {"heterogeneous", "homogeneous"}
+                }
+            )
             observations.append(
                 {
                     **row,
                     "architecture_id": architecture_id,
                     "label": _candidate_label(architecture_id, revision_id, revisions),
                     "color": _candidate_color(architecture_id),
+                    "origin_kinds": origin_kinds,
                     "selected_by": sorted(set(selected_by.get(revision_id, ()))),
                 }
             )
@@ -277,34 +290,130 @@ def _status_summary(payload: Mapping[str, Any]) -> str:
     return f"<p>status={status}{f' · {outcomes}' if outcomes else ''}</p>"
 
 
+_EVALUATION_METRIC_ORDER = (
+    "lm_loss",
+    "token_accuracy_top_1",
+    "token_accuracy_top_10",
+    "token_accuracy_top_5",
+)
+
+_EVALUATION_METRIC_LABELS = {
+    "lm_loss": "LM loss",
+    "token_accuracy_top_1": "Top-1 token accuracy",
+    "token_accuracy_top_10": "Top-10 token accuracy",
+    "token_accuracy_top_5": "Top-5 token accuracy",
+}
+
+
+def _ordered_evaluation_metrics(names: set[str]) -> list[str]:
+    ordered = [name for name in _EVALUATION_METRIC_ORDER if name in names]
+    return ordered + sorted(names - set(ordered))
+
+
+def _evaluation_comparison_rows(
+    observations: list[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Project structured observations into comparable alternative rows."""
+
+    candidate_metrics = {
+        str(name).removeprefix("candidate.")
+        for row in observations
+        for name in dict(row.get("metrics") or {})
+        if str(name).startswith("candidate.")
+    }
+    reference_metrics = {
+        str(name).removeprefix("reference.")
+        for row in observations
+        for name in dict(row.get("metrics") or {})
+        if str(name).startswith("reference.")
+    }
+    has_teacher = bool(reference_metrics)
+    has_namespaced_metrics = bool(candidate_metrics or reference_metrics)
+    metric_names = (
+        candidate_metrics | reference_metrics
+        if has_namespaced_metrics
+        else {
+            str(name)
+            for row in observations
+            for name, value in dict(row.get("metrics") or {}).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+    )
+    rows: list[dict[str, Any]] = []
+    teacher_signatures: set[str] = set()
+    for row in observations:
+        metrics = dict(row.get("metrics") or {})
+        if has_teacher and any(str(name).startswith("reference.") for name in metrics):
+            reference = {name: metrics.get(f"reference.{name}") for name in metric_names}
+            if any(value is not None for value in reference.values()):
+                signature = json.dumps(reference, sort_keys=True, default=str)
+                if signature not in teacher_signatures:
+                    rows.append(
+                        {
+                            "alternative": "Teacher",
+                            "candidate": "Reference checkpoint",
+                            "status": row.get("status") or "pending",
+                            "metrics": reference,
+                            "evidence": "Matched reference measurement",
+                            "error": row.get("error") or "",
+                        }
+                    )
+                    teacher_signatures.add(signature)
+        candidate_values = (
+            {name: metrics.get(f"candidate.{name}") for name in metric_names}
+            if has_namespaced_metrics
+            else metrics
+        )
+        origins = list(row.get("origin_kinds") or ()) or ["candidate"]
+        shared = len(origins) > 1
+        candidate_label = (
+            row.get("architecture_id") if shared else row.get("label") or row.get("architecture_id")
+        )
+        for origin in origins:
+            rows.append(
+                {
+                    "alternative": str(origin).replace("_", " ").title(),
+                    "candidate": candidate_label or "unknown",
+                    "status": row.get("status") or "pending",
+                    "metrics": candidate_values,
+                    "evidence": (
+                        "Shared physical measurement (same architecture)"
+                        if shared
+                        else "Measured candidate"
+                    ),
+                    "error": row.get("error") or "",
+                }
+            )
+    return rows, _ordered_evaluation_metrics(metric_names), has_teacher
+
+
 def render_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str:
     """Render one candidate-evaluation node."""
 
     observations = list(payload.get("observations") or ())
-    metric_names = sorted(
-        {
-            str(metric)
-            for row in observations
-            for metric, value in dict(row.get("metrics") or {}).items()
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
-        }
-    )
+    comparison_rows, metric_names, has_teacher = _evaluation_comparison_rows(observations)
     rows = []
-    for row in observations:
+    for row in comparison_rows:
         metrics = dict(row.get("metrics") or {})
         cells = "".join(f"<td>{_number(metrics.get(metric))}</td>" for metric in metric_names)
         rows.append(
             "<tr>"
-            f"<td>{_text(row.get('label') or row.get('architecture_id') or 'unknown')}</td>"
+            f"<td>{_text(row.get('alternative') or 'Candidate')}</td>"
+            f"<td>{_text(row.get('candidate') or 'unknown')}</td>"
             f"<td>{_text(row.get('status') or 'pending')}</td>"
             f"{cells}"
+            f"<td>{_text(row.get('evidence') or '')}</td>"
             f"<td>{_text(row.get('error') or '')}</td>"
             "</tr>"
         )
-    headings = "".join(f"<th>{_text(metric)}</th>" for metric in metric_names)
+    headings = "".join(
+        f"<th title='{_text(metric)}'>{_text(_EVALUATION_METRIC_LABELS.get(metric, metric))}</th>"
+        for metric in metric_names
+    )
     table = (
         "<div class='table-wrap'><table><thead><tr>"
-        f"<th>Candidate</th><th>Status</th>{headings}<th>Error</th>"
+        f"<th>Alternative</th><th>Candidate</th><th>Status</th>{headings}"
+        "<th>Evidence</th><th>Error</th>"
         f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         if rows
         else "<p class='empty'>No evaluation observations are available yet.</p>"
@@ -315,7 +424,15 @@ def render_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str
         if metric_names
         else ""
     )
-    return f"<h3>Candidate evaluation</h3>{_status_summary(payload)}{plot}{table}"
+    comparison_note = (
+        "<p class='note'>Teacher and candidate values come from the matched structured "
+        "evaluation observation. When heterogeneous and homogeneous solver results resolve "
+        "to the same architecture, both rows intentionally cite one shared physical "
+        "measurement.</p>"
+        if has_teacher or any(len(row.get("origin_kinds") or ()) > 1 for row in observations)
+        else ""
+    )
+    return f"<h3>Candidate evaluation</h3>{_status_summary(payload)}{comparison_note}{plot}{table}"
 
 
 def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:

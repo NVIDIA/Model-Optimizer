@@ -97,6 +97,17 @@ def _completion_path(plan: CampaignPlan) -> Path:
     return report_path.parent / "completion.json"
 
 
+def _stage_state_sha256(plan: CampaignPlan) -> str:
+    """Fingerprint durable stage records consumed by the progress report."""
+
+    digest = hashlib.sha256()
+    stage_root = plan.puzzle_dir / "orchestration" / "stages"
+    for path in sorted(stage_root.glob("*.json")):
+        digest.update(path.name.encode())
+        digest.update(_sha256(path).encode())
+    return digest.hexdigest()
+
+
 def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
     """Return a sealed final report when its contract and artifact hashes still match."""
 
@@ -109,8 +120,9 @@ def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
         payload = json.loads(record_bytes)
         log_paths = payload["log_paths"]
         if (
-            payload["schema_version"] != 1
+            payload["schema_version"] != 2
             or payload["contract_hash"] != plan.contract_hash
+            or payload["stage_state_sha256"] != _stage_state_sha256(plan)
             or payload["report_sha256"] != _sha256(report_path)
             or payload["manifest_sha256"] != _sha256(manifest_path)
             or not isinstance(log_paths, list)
@@ -134,8 +146,9 @@ def record_completed_final_report(
 
     report_path, manifest_path = final_report_paths(plan)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract_hash": plan.contract_hash,
+        "stage_state_sha256": _stage_state_sha256(plan),
         "report_sha256": _sha256(report_path),
         "manifest_sha256": _sha256(manifest_path),
         "log_paths": list(log_paths),
