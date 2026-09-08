@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NVFP4 operand helpers for the attention ``P @ V`` matmul (BMM2).
+"""NVFP4 operand helpers for the attention BMM matmuls.
 
-P and V share the low-level ``nvfp4_scalar_qdq`` primitive, but retain thin
-operand-specific wrappers because their layouts and amax reductions differ.
-P is nonnegative with layout ``[M, K]``; V is signed with layout ``[K, N]``.
-Both use block-16 scaling along the BMM2 contraction axis.
+P, V, and the signed A-side share the low-level ``nvfp4_scalar_qdq``
+primitive, but retain thin operand-specific wrappers because their layouts
+and amax reductions differ. P is nonnegative with layout ``[M, K]``; V is
+signed with layout ``[K, N]``; the signed A-side (Q of BMM1) is ``[M, K]``.
+All use block-16 scaling along the BMM contraction axis.
 """
 
 import math
@@ -68,6 +69,21 @@ def _v_qdq_nvfp4(v, global_scale, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr):
     grouped = tl.reshape(v, (BLOCK_N // 16, 16, BLOCK_D))
     block_amax = tl.expand_dims(tl.max(tl.abs(grouped), axis=1), 1)
     return tl.reshape(nvfp4_scalar_qdq(grouped, block_amax, global_scale, 16), (BLOCK_N, BLOCK_D))
+
+
+@triton.jit
+def _a_qdq_nvfp4(x, global_scale, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
+    """Fake-quantize a signed A-side operand ``[M, K]`` in block-16 groups along K.
+
+    The BMM1 Q-operand counterpart of :func:`_p_qdq_nvfp4`: same ``[M, K]``
+    layout and contraction-axis blocking, but signed, so the block amax uses
+    ``abs``. Zero-padded lanes (masked loads) form all-zero blocks that
+    ``nvfp4_scalar_qdq`` guards to zero.
+    """
+    tl.static_assert(BLOCK_K % 16 == 0, "BLOCK_K must be divisible by 16 for NVFP4")
+    grouped = tl.reshape(x, (BLOCK_M, BLOCK_K // 16, 16))
+    block_amax = tl.expand_dims(tl.max(tl.abs(grouped), axis=2), 2)
+    return tl.reshape(nvfp4_scalar_qdq(grouped, block_amax, global_scale, 16), (BLOCK_M, BLOCK_K))
 
 
 @triton.jit

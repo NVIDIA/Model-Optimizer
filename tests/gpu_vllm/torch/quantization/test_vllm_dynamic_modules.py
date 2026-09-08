@@ -498,6 +498,71 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
 
 
+@pytest.fixture(scope="module")
+def tiny_deepseek_triton_mla_llm(tmp_path_factory):
+    """Tiny DeepSeek pinned to TRITON_MLA for the fused NVFP4 attention path."""
+    tmp = tmp_path_factory.mktemp("tiny_deepseek_triton_mla")
+    model_dir = create_tiny_deepseek_v3_dir(
+        tmp, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+    )
+    llm = _boot_llm(
+        model_dir,
+        moe_backend="triton",
+        enable_expert_parallel=True,
+        attention_backend="TRITON_MLA",
+        enable_prefix_caching=False,  # rejected by the attention installer
+    )
+    try:
+        yield llm
+    finally:
+        _shutdown_llm(llm)
+
+
+def _install_mla_nvfp4_attention(self):
+    """Worker-side: install fused NVFP4 MLA attention and summarize the result."""
+    from modelopt.torch.sparsity.attention_sparsity.plugins import vllm_mla
+    from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
+        install_vllm_nvfp4_attention,
+    )
+
+    report = install_vllm_nvfp4_attention(self.model_runner, sparse_cfg=None)
+    model = self.model_runner.model
+    mla_modules = [m for m in model.modules() if isinstance(m, VllmMLAAttention)]
+    return {
+        "installed_layers": list(report.installed_layers),
+        "backend_counts": dict(report.backend_counts),
+        "mla_count": len(mla_modules),
+        "all_modelopt_impl": all(isinstance(m.impl, vllm_mla.ModelOptMLAImpl) for m in mla_modules),
+        "query_in_kernel": all(getattr(m, "_query_quant_in_kernel", False) for m in mla_modules),
+    }
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 9),
+    reason="NVFP4 attention install requires compute capability >= 8.9",
+)
+def test_tiny_deepseek_mla_nvfp4_attention_install_and_generate(tiny_deepseek_triton_mla_llm):
+    """End-to-end: install fused NVFP4 Q/K/P/V MLA attention, then prefill + decode."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    llm = tiny_deepseek_triton_mla_llm
+    summaries = llm.collective_rpc(_install_mla_nvfp4_attention)
+    summary = summaries[0]
+    assert summary["mla_count"] >= 2, summary
+    assert summary["all_modelopt_impl"], summary
+    assert summary["query_in_kernel"], summary
+    assert summary["backend_counts"] == {"ModelOptMLAImpl": summary["mla_count"]}, summary
+
+    # Prefill (17 tokens) + decode (8 steps) through the ModelOpt MLA kernels.
+    outputs = llm.generate(
+        [TokensPrompt(prompt_token_ids=list(range(1, 18)))],
+        SamplingParams(max_tokens=8, temperature=0.0),
+    )
+    token_ids = outputs[0].outputs[0].token_ids
+    assert len(token_ids) == 8, outputs
+
+
 def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
     monkeypatch.setattr(
         vllm_plugin,
