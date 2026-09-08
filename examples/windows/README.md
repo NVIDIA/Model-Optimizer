@@ -41,6 +41,12 @@ Model Optimizer is available for free for all developers on [NVIDIA PyPI](https:
 
 ModelOpt-Windows can be installed either as a standalone toolkit or through Microsoft's Olive.
 
+### Windows on Arm
+
+WoA Installation Guide is here
+[Windows on Arm installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_windows_arm64.html),
+WoA support the same feature as Windows x64, please refer the [Support Matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html#support-matrix)
+
 ### Standalone Toolkit Installation (with CUDA 12.x)
 
 To install ModelOpt-Windows as a standalone toolkit on CUDA 12.x systems, run the following commands:
