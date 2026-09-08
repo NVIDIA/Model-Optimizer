@@ -792,12 +792,22 @@ def process_layer_quant_config(layer_config_dict):
     return per_layer_config
 
 
-def pack_int4_in_uint8(weight, weights_scaling_factor):
+def _validate_int4_block_size(in_dim, block_size):
+    if not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError(f"Block size must be a positive integer, got {block_size}.")
+    if in_dim % block_size != 0:
+        raise NotImplementedError(
+            f"Cannot pack weight with input dimension {in_dim} and block size {block_size}: "
+            "partial blocks are not supported."
+        )
+
+
+def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
-    block_size = weight.shape[-1] // weights_scaling_factor.shape[-1]
+    _validate_int4_block_size(in_dim, block_size)
 
     # Scale, round, and clamp to the signed 4-bit range [-8..7].
     int8_tensor = (
@@ -852,6 +862,8 @@ def to_quantized_weight(
 
     # For compressed weights, we directly return the data from wrapper
     if isinstance(weight, QTensorWrapper):
+        if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
+            _validate_int4_block_size(weight.metadata["shape"][-1], block_size)
         return weight.data
 
     if quantization == QUANTIZATION_FP8:
@@ -912,7 +924,7 @@ def to_quantized_weight(
         return (weight / weights_scaling_factor[:, None]).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
-        return pack_int4_in_uint8(weight, weights_scaling_factor)
+        return pack_int4_in_uint8(weight, weights_scaling_factor, block_size)
 
     if quantization in [
         QUANTIZATION_NVFP4,

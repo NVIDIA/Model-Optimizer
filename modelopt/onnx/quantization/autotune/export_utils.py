@@ -16,6 +16,7 @@
 """Utilities for Q/DQ model export and insertion in ONNX autotune."""
 
 import dataclasses
+from collections.abc import Callable
 
 import numpy as np
 import onnx
@@ -318,6 +319,7 @@ def export_qdq_onnx(
     *,
     insert_qdq: bool = True,
     needs_fp8_conversion: bool = False,
+    model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
 ) -> onnx.ModelProto:
     """Export ONNX model with optional Q/DQ insertion and optional INT8→FP8 conversion.
 
@@ -329,6 +331,7 @@ def export_qdq_onnx(
         config: Config for Q/DQ parameters and dtypes.
         insert_qdq: If True, insert Q/DQ at resolved points before exporting.
         needs_fp8_conversion: If True, build as INT8 then convert to FP8 (e.g. when config.default_quant_type is fp8).
+        model_transform: Optional transform applied before INT8-to-FP8 conversion.
 
     Returns:
         Exported ONNX ModelProto (with Q/DQ and/or FP8 as requested).
@@ -352,6 +355,9 @@ def export_qdq_onnx(
 
     if insert_qdq and resolved_insertion_points:
         fix_zero_point_initializers(model)
+
+    if model_transform is not None:
+        model = model_transform(model)
 
     if needs_fp8_conversion:
         logger.debug("Converting INT8 to FP8")
