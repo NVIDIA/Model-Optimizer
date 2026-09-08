@@ -23,6 +23,12 @@ index 89978777..57a31642 100644
 @@ -55,2 +40,0 @@ class WandbLogger:
 -        self.printer = get_wandb_printer()
 -
+diff --git a/lmms_eval/models/simple/vllm.py b/lmms_eval/models/simple/vllm.py
+index 22946997..e0af27ef 100644
+--- a/lmms_eval/models/simple/vllm.py
++++ b/lmms_eval/models/simple/vllm.py
+@@ -521 +520,0 @@ class VLLM(lmms):
+-                sampling_params = SamplingParams(**params)
 diff --git a/lmms_eval/tasks/emma/utils.py b/lmms_eval/tasks/emma/utils.py
 index 001d70c8..d90a88fe 100644
 --- a/lmms_eval/tasks/emma/utils.py

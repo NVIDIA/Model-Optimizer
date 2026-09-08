@@ -151,6 +151,8 @@ def positive_float(value: str) -> float:
 
 def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> str:
     """Return the imported evaluator revision after matching its source and patch pin."""
+    if expected_revision != LMMS_EVAL_REVISION:
+        raise RuntimeError(f"unsupported lmms-eval revision: {expected_revision}")
     revision = _imported_lmms_eval_revision()
     if revision is not None:
         if revision != expected_revision:
@@ -172,7 +174,7 @@ def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> st
             ci_environment.verify_installed_vcs_source("lmms-eval", LMMS_EVAL_SOURCE)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError("installed lmms-eval source provenance is unavailable") from error
-        revision = LMMS_EVAL_REVISION
+        revision = expected_revision
     else:
         revision = None
     if revision != expected_revision:

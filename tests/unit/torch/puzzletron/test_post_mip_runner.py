@@ -512,22 +512,26 @@ def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_p
         return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": "result.json"}]}
 
     monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
-    result = post_mip.evaluate_short_v1_checkpoint(
-        checkpoint,
-        output_root=tmp_path / "output",
-        settings={
-            "row_manifest": str(manifest),
-            "row_manifest_sha256": "a" * 64,
-            "batch_size": 1,
-        },
-    )
+    with pytest.warns(DeprecationWarning, match="qwen35_vlm_short_v1 is deprecated"):
+        result = post_mip.evaluate_short_v1_checkpoint(
+            checkpoint,
+            output_root=tmp_path / "output",
+            settings={
+                "row_manifest": str(manifest),
+                "row_manifest_sha256": "a" * 64,
+                "batch_size": 1,
+            },
+        )
 
     assert captured["args"].suite == "quick"
     assert captured["args"].quick_manifest == manifest
     assert captured["settings"] == {}
     assert result["checkpoint"] == str(checkpoint)
 
-    with pytest.raises(ValueError, match="differs from the campaign identity"):
+    with (
+        pytest.warns(DeprecationWarning, match="qwen35_vlm_short_v1 is deprecated"),
+        pytest.raises(ValueError, match="differs from the profile identity"),
+    ):
         post_mip.evaluate_short_v1_checkpoint(
             checkpoint,
             output_root=tmp_path / "mismatch",

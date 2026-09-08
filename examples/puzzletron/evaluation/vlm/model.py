@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from jinja2 import TemplateError
@@ -72,7 +73,7 @@ def _render_template(content: str, *, source: Path) -> str:
         raise ValueError(f"Qwen 3.5 chat template is invalid: {source}") from error
 
 
-def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
+def verify_checkpoint(checkpoint: Path, *, profile: str, model_backend: str = "qwen3_5") -> None:
     """Verify a Qwen 3.5 VLM-family checkpoint and its local processor assets."""
     config = _checkpoint_config(checkpoint)
     if config.get("model_type") != _MODEL_TYPE:
@@ -90,6 +91,42 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     text_config = config.get("text_config")
     if not isinstance(text_config, dict) or text_config.get("model_type") != "qwen3_5_text":
         raise ValueError(f"{profile} checkpoint text_config.model_type must be qwen3_5_text")
+    if model_backend == "qwen3_5" and realized_checkpoint:
+        # Keep torch-dependent Puzzletron imports out of the lightweight preflight import path.
+        from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
+        from modelopt.torch.puzzletron.utils.vllm_adapter import (
+            convert_block_configs_to_per_layer_config,
+        )
+
+        block_configs = config.get("block_configs")
+        homogeneity_error = (
+            f"{profile} native qwen3_5 backend cannot prove that an AnyModel checkpoint "
+            "is homogeneous; use a vLLM evaluation profile"
+        )
+        derived_config = deepcopy(config)
+        derived_text_config = derived_config["text_config"]
+        derived_text_config.pop("per_layer_config", None)
+        if not isinstance(block_configs, list) or len(block_configs) != text_config.get(
+            "num_hidden_layers"
+        ):
+            raise ValueError(homogeneity_error)
+        try:
+            typed_block_configs = maybe_cast_block_configs(block_configs)
+        except (TypeError, ValueError) as error:
+            raise ValueError(homogeneity_error) from error
+        if typed_block_configs is None or any(
+            len(block.subblock_configs) < 2 for block in typed_block_configs
+        ):
+            raise ValueError(homogeneity_error)
+        derived_config["block_configs"] = typed_block_configs
+        convert_block_configs_to_per_layer_config(derived_config, keep_block_configs=True)
+        derived_per_layer_config = derived_text_config.get("per_layer_config")
+        declared_per_layer_config = text_config.get("per_layer_config")
+        if derived_per_layer_config or declared_per_layer_config not in (None, {}):
+            raise ValueError(
+                f"{profile} native qwen3_5 backend cannot load a heterogeneous AnyModel "
+                "per_layer_config; use a vLLM evaluation profile"
+            )
     invalid_geometry = {
         key: text_config.get(key)
         for key in _TEXT_GEOMETRY_FIELDS

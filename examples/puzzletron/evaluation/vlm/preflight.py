@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,16 +55,53 @@ def _backend_policy(
 ) -> dict[str, object]:
     """Return the selected profile's backend contract or the legacy default."""
     if profile_contract is None:
-        return {"name": "vllm"}
+        return {
+            "enable_thinking": False,
+            "name": "vllm",
+            "reasoning_parser": "qwen3",
+        }
     return cast("dict[str, object]", profile_contract.manifest["backend"])
+
+
+def _output_budget_contract(
+    source_tasks: tuple[str, ...], *, model_backend: str
+) -> dict[str, dict[str, object]]:
+    """Describe the output-token budget that each adapter will actually apply."""
+    if model_backend == "vllm":
+        resolution = "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        limitation = (
+            "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor"
+        )
+    else:
+        resolution = "task_max_new_tokens_overrides_adapter_default"
+        limitation = None
+    return {
+        task: {
+            "adapter": model_backend,
+            "effective_max_new_tokens": profile.VLM_BENCHMARK_DATASETS[task].max_new_tokens,
+            "limitation": limitation,
+            "requested_max_new_tokens": profile.VLM_BENCHMARK_DATASETS[task].max_new_tokens,
+            "resolution": resolution,
+        }
+        for task in source_tasks
+    }
 
 
 def prepare(args: argparse.Namespace) -> PreparedSuite:
     """Resolve and validate everything needed before model loading starts."""
     profile_name = getattr(args, "profile", None)
+    if profile_name is not None:
+        contracts.warn_deprecated_profile(profile_name)
     profile_contract = contracts.load_profile(profile_name) if profile_name is not None else None
     suite, source_tasks, profile_task_leaves = _resolve_task_selection(args, profile_contract)
-    model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
+    backend = _backend_policy(profile_contract)
+    model.verify_checkpoint(
+        args.checkpoint,
+        profile="VLM benchmark",
+        model_backend=str(backend["name"]),
+    )
+    hf_home = _hf_home(args.hf_home)
+    _verify_profile_model(args.checkpoint, profile_contract, hf_home=hf_home)
 
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
@@ -83,7 +122,6 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     for task in source_tasks:
         tasks.task_config(profile.VLM_BENCHMARK_DATASETS[task].task_config)
 
-    hf_home = _hf_home(args.hf_home)
     _verify_media_roots(hf_home, source_tasks)
     dataset_snapshots = {
         task: suites.offline_dataset_snapshot(hf_home, task, revisions[task])
@@ -138,8 +176,18 @@ def _resolve_task_selection(
     if profile_task is not None:
         if profile_contract is None:
             raise ValueError("--profile-task requires a versioned evaluation profile")
-        if profile_contract.name not in {"full-v1", "short-all-native-v1"}:
-            raise ValueError("--profile-task is supported only for full-v1 and short-all-native-v1")
+        if profile_contract.name not in {
+            "full-v1",
+            "core-3_full_r1-native",
+            "core-3_full_r1-vllm",
+            "short-all-native-v1",
+            "judge-free-8_690-examples_r1-native",
+        }:
+            raise ValueError(
+                "--profile-task is supported only for full-v1, core-3_full_r1-native, "
+                "core-3_full_r1-vllm, short-all-native-v1, and "
+                "judge-free-8_690-examples_r1-native"
+            )
     if profile_task_shard is not None and profile_task is None:
         raise ValueError("--profile-task-shard requires --profile-task")
 
@@ -149,6 +197,34 @@ def _resolve_task_selection(
             raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
         source_tasks = (profile_task,)
     return suite, source_tasks, _profile_task_leaves(profile_task, profile_task_shard)
+
+
+def _verify_profile_model(
+    checkpoint_path: Path,
+    profile_contract: contracts.ProfileContract | None,
+    *,
+    hf_home: Path,
+) -> None:
+    """Require a model-pinned profile to use its exact local Hub snapshot."""
+    if profile_contract is None:
+        return
+    model_pin = profile_contract.manifest.get("model")
+    if not isinstance(model_pin, dict):
+        return
+    repository = cast("str", model_pin["repository"])
+    revision = cast("str", model_pin["revision"])
+    configured_hub_cache = os.environ.get("HF_HUB_CACHE")
+    hub_cache = (
+        Path(configured_hub_cache).expanduser().absolute()
+        if configured_hub_cache
+        else (hf_home / "hub").absolute()
+    )
+    repository_cache = f"models--{repository.replace('/', '--')}"
+    expected_snapshot = hub_cache / repository_cache / "snapshots" / revision
+    if checkpoint_path.resolve() != expected_snapshot.resolve():
+        raise ValueError(
+            f"{profile_contract.name} requires the exact local Hub snapshot {repository}@{revision}"
+        )
 
 
 def _row_manifest(
@@ -171,12 +247,11 @@ def _row_manifest(
             manifest_tasks = cast("dict[str, object]", exact_rows["tasks"])
             task_entry = cast("dict[str, object]", manifest_tasks[profile_task])
             if profile_task_leaves is not None:
-                selected_leaves = {f"{profile_task}_{leaf}" for leaf in profile_task_leaves}
-                rows = cast("list[dict[str, object]]", task_entry["rows"])
-                task_entry = {
-                    **task_entry,
-                    "rows": [row for row in rows if row.get("leaf_task") in selected_leaves],
-                }
+                task_entry = _shard_exact_row_task(
+                    task_entry,
+                    task=profile_task,
+                    leaves=profile_task_leaves,
+                )
             exact_rows = {**exact_rows, "tasks": {profile_task: task_entry}}
         return suites.validate_exact_rows_manifest(
             exact_rows,
@@ -188,6 +263,47 @@ def _row_manifest(
     if args.quick_manifest is not None:
         raise ValueError("--quick-manifest is valid only for the quick suite")
     return None
+
+
+def _shard_exact_row_task(
+    entry: dict[str, object], *, task: str, leaves: tuple[str, ...]
+) -> dict[str, object]:
+    """Filter grouped rows and derive a self-consistent sampling audit."""
+    selected_leaf_tasks = {f"{task}_{leaf}" for leaf in leaves}
+    rows = [
+        row
+        for row in cast("list[dict[str, object]]", entry["rows"])
+        if row.get("leaf_task") in selected_leaf_tasks
+    ]
+    selection = entry.get("selection")
+    if not isinstance(selection, dict):
+        return {**entry, "rows": rows}
+    strata = [
+        stratum
+        for stratum in cast("list[dict[str, object]]", selection["strata"])
+        if stratum.get("name") in leaves
+    ]
+    indices = sorted(cast("int", row["source_row_index"]) for row in rows)
+    if not indices:
+        return {**entry, "rows": rows}
+    quantiles = {
+        "method": "lower-order-statistic",
+        **{
+            f"p{percentile}": indices[(len(indices) - 1) * percentile // 100]
+            for percentile in (0, 25, 50, 75, 100)
+        },
+    }
+    derived_selection = {
+        **selection,
+        "population_rows": sum(cast("int", stratum["population_rows"]) for stratum in strata),
+        "selected_rows": len(rows),
+        "strata": strata,
+        "selected_index_quantiles": quantiles,
+        "selected_row_identities_sha256": hashlib.sha256(
+            json.dumps(rows, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest(),
+    }
+    return {**entry, "selection": derived_selection, "rows": rows}
 
 
 def _profile_task_leaves(
@@ -294,6 +410,16 @@ def _report(
     profile_task_shard = getattr(args, "profile_task_shard", None)
     backend = _backend_policy(profile_contract)
     model_backend = str(backend["name"])
+    output_budget_contract = _output_budget_contract(
+        source_tasks,
+        model_backend=model_backend,
+    )
+    profile_population_rows = None
+    if profile_contract is not None and profile_contract.manifest.get("model") is not None:
+        profile_tasks = cast("dict[str, dict[str, object]]", profile_contract.manifest["tasks"])
+        profile_population_rows = {
+            task: profile_tasks[task]["population_rows"] for task in source_tasks
+        }
     return {
         "schema": "modelopt.vlm-evaluation-preflight/v1",
         "profile": suites.EVALUATION_PROFILE,
@@ -304,15 +430,30 @@ def _report(
         "profile_fingerprint": (
             profile_contract.fingerprint if profile_contract is not None else None
         ),
+        "sample_set": profile_contract.sample_set if profile_contract is not None else None,
+        "backend_profile": (
+            profile_contract.backend_profile if profile_contract is not None else None
+        ),
+        "evaluator_profile": (
+            profile_contract.evaluator_profile if profile_contract is not None else None
+        ),
+        "model_pin": (
+            profile_contract.manifest.get("model") if profile_contract is not None else None
+        ),
+        "profile_population_rows": profile_population_rows,
         "suite": suite,
         "checkpoint": str(args.checkpoint),
         "lmms_eval_revision": lmms_eval_revision,
         "model_backend": model_backend,
         "backend_limitations": (
-            ["generic vLLM video messages do not preserve native Qwen 3.5 timestamps"]
+            [
+                "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+                "pinned generic vLLM max_new_tokens is a model-level lower bound",
+            ]
             if model_backend == "vllm"
             else []
         ),
+        "output_budget_contract": output_budget_contract,
         "source_tasks": list(source_tasks),
         "profile_task": getattr(args, "profile_task", None),
         "profile_task_shard": (
@@ -334,6 +475,14 @@ def _report(
         "timeout_seconds": execution_policy["timeout_seconds"],
         "quick_selected_rows": (
             suites.manifest_selected_rows(quick_manifest) if quick_manifest is not None else None
+        ),
+        "quick_row_identities": (
+            suites.manifest_row_identities(quick_manifest) if quick_manifest is not None else None
+        ),
+        "quick_task_denominators": (
+            suites.manifest_task_denominators(quick_manifest)
+            if quick_manifest is not None
+            else None
         ),
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
@@ -370,7 +519,10 @@ def settings(
         "batch_size": args.batch_size,
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "log_samples": prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE},
+        "log_samples": (
+            "mmmu_val" in prepared.source_tasks
+            or prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE}
+        ),
         "gen_kwargs": {
             "temperature": generation_policy["temperature"],
             "do_sample": generation_policy["do_sample"],
@@ -393,7 +545,7 @@ def settings(
                 "attn_implementation": backend["attention_implementation"],
                 "device": "cuda",
                 "device_map": "cuda",
-                "enable_thinking": backend["enable_thinking"],
+                "enable_thinking": generation_policy["enable_thinking"],
                 "fps": frame_policy["fps"],
                 "max_frames": frame_policy["max_frames"],
             },
@@ -404,9 +556,18 @@ def settings(
         "checkpoint_arg": "model",
         "reasoning_parser": backend.get("reasoning_parser", "qwen3"),
         "model_args": {
+            **(
+                {"attention_config": backend["attention_config"]}
+                if "attention_config" in backend
+                else {}
+            ),
             "chat_template": str(chat_template),
             "fps": frame_policy["fps"],
+            # The pinned adapter takes max(task value, model value). A positive floor of one
+            # leaves every task-level output budget authoritative.
+            "max_new_tokens": 1,
             "max_frame_num": frame_policy["max_frames"],
+            **({"enforce_eager": backend["enforce_eager"]} if "enforce_eager" in backend else {}),
         },
     }
 
@@ -427,6 +588,6 @@ def _verify_backend_dependencies(model_backend: str) -> None:
     """Fail before native Qwen evaluation when its vision utilities are unavailable."""
     if model_backend == "qwen3_5" and importlib.util.find_spec("qwen_vl_utils") is None:
         raise RuntimeError(
-            "native Qwen 3.5 evaluation requires qwen-vl-utils; install the native VLM "
-            "requirements or use the supported Puzzletron environment"
+            "native Qwen 3.5 evaluation requires qwen-vl-utils; use the supported "
+            "Puzzletron worker image"
         )

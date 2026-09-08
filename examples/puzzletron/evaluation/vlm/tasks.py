@@ -62,6 +62,7 @@ def _write_task_config(
     process_docs: str | None = None,
     process_docs_module: str = "modelopt_quick_selection",
     process_results: str | None = None,
+    process_results_module: str = "modelopt_mmvu_guard",
 ) -> None:
     values = {
         "include": str(include),
@@ -80,8 +81,20 @@ def _write_task_config(
     if doc_to_visual is not None:
         lines.append(f"doc_to_visual: !function modelopt_video_paths.{doc_to_visual}")
     if process_results is not None:
-        lines.append(f"process_results: !function modelopt_mmvu_guard.{process_results}")
+        lines.append(f"process_results: !function {process_results_module}.{process_results}")
     checkpoint.write_generated(path, "\n".join(lines) + "\n")
+
+
+def _manifest_group_leaves(
+    manifest: dict[str, object], task: str, leaves: tuple[str, ...]
+) -> tuple[str, ...]:
+    manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
+    rows = cast("list[dict[str, object]]", manifest_tasks[task]["rows"])
+    selected_leaf_tasks = {cast("str", row["leaf_task"]) for row in rows}
+    selected = tuple(leaf for leaf in leaves if f"{task}_{leaf}" in selected_leaf_tasks)
+    if not selected:
+        raise ValueError(f"exact-row manifest selects no leaves for grouped task {task}")
+    return selected
 
 
 def _write_quick_selection_module(tasks_root: Path, manifest: dict[str, object]) -> None:
@@ -89,20 +102,37 @@ def _write_quick_selection_module(tasks_root: Path, manifest: dict[str, object])
     functions: list[str] = []
     manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
     for task in manifest_tasks:
-        rows = cast("list[dict[str, object]]", manifest_tasks[task]["rows"])
+        task_entry = manifest_tasks[task]
+        rows = cast("list[dict[str, object]]", task_entry["rows"])
+        sampling = task_entry.get("selection")
+        audited = cast("dict[str, object]", sampling) if isinstance(sampling, dict) else None
         if task in {"mvbench", "video_mmmu"}:
-            leaves = (
+            all_leaves = (
                 suites.MVBENCH_LEAF_TASKS if task == "mvbench" else suites.VIDEO_MMMU_LEAF_TASKS
             )
+            leaves = _manifest_group_leaves(manifest, task, all_leaves)
             for leaf in leaves:
                 leaf_task = f"{task}_{leaf}"
                 selected = [row for row in rows if row["leaf_task"] == leaf_task]
                 key = suites.task_name(task, leaf=leaf)
+                stratum = (
+                    next(
+                        item
+                        for item in cast("list[dict[str, object]]", audited["strata"])
+                        if item["name"] == leaf
+                    )
+                    if audited is not None
+                    else None
+                )
                 entries[key] = {
                     "kind": task,
                     "config": leaf,
                     "indices": [row["source_row_index"] for row in selected],
                     "source_ids": [row["source_sample_id"] for row in selected],
+                    "population_rows": stratum["population_rows"] if stratum else None,
+                    "strata": {leaf: stratum["population_rows"]} if stratum else None,
+                    "upstream_ids": [row.get("upstream_sample_id") for row in selected],
+                    "sampling_positions": None,
                 }
                 functions.append(
                     f"def select_{key}(documents):\n    return _select(documents, {key!r})\n"
@@ -113,20 +143,101 @@ def _write_quick_selection_module(tasks_root: Path, manifest: dict[str, object])
                 "kind": task,
                 "indices": [row["source_row_index"] for row in rows],
                 "source_ids": [row["source_sample_id"] for row in rows],
+                "population_rows": audited.get("population_rows") if audited else None,
+                "strata": (
+                    {
+                        item["name"]: item["population_rows"]
+                        for item in cast("list[dict[str, object]]", audited["strata"])
+                    }
+                    if audited
+                    else None
+                ),
+                "upstream_ids": [row.get("upstream_sample_id") for row in rows],
+                "sampling_positions": (
+                    [(row["sampling_stratum"], row["source_stratum_index"]) for row in rows]
+                    if all(
+                        "sampling_stratum" in row and "source_stratum_index" in row for row in rows
+                    )
+                    else None
+                ),
             }
             functions.append(
                 f"def select_{key}(documents):\n    return _select(documents, {key!r})\n"
             )
     source = f'''"""Generated exact-row selectors for a VLM benchmark profile."""
 
+from collections import Counter
+
 _SELECTIONS = {entries!r}
+
+
+def _column(documents, name):
+    values = documents[name]
+    if len(values) != len(documents):
+        raise ValueError(f"exact-row manifest source column {{name}} has the wrong length")
+    return values
+
+
+def _source_strata(documents, kind):
+    if kind == "mmmu_val":
+        return [value.removeprefix("validation_").rsplit("_", 1)[0] for value in _column(documents, "id")]
+    if kind == "videomme":
+        return [f"{{duration}}|{{domain}}" for duration, domain in zip(
+            _column(documents, "duration"), _column(documents, "domain"), strict=True
+        )]
+    if kind == "mlvu_dev":
+        return list(_column(documents, "task_type"))
+    if kind == "perceptiontest_val_mc":
+        return [f"{{area}}|{{reasoning}}" for area, reasoning in zip(
+            _column(documents, "area"), _column(documents, "reasoning"), strict=True
+        )]
+    return None
+
+
+def _verify_population(documents, name, selection):
+    expected_rows = selection["population_rows"]
+    if expected_rows is None:
+        return None
+    if len(documents) != expected_rows:
+        raise ValueError(
+            f"exact-row manifest source population drifted for {{name}}: "
+            f"{{len(documents)}} != {{expected_rows}}"
+        )
+    observed_strata = _source_strata(documents, selection["kind"])
+    if observed_strata is not None and Counter(observed_strata) != selection["strata"]:
+        raise ValueError(f"exact-row manifest source strata drifted for {{name}}")
+    return observed_strata
+
+
+def _stratum_ranks(strata):
+    counts = Counter()
+    ranks = []
+    for stratum in strata:
+        ranks.append(counts[stratum])
+        counts[stratum] += 1
+    return ranks
+
+
+def _upstream_id(document, kind):
+    if kind in {{"videomme", "mlvu_dev"}}:
+        return str(document["question_id"])
+    if kind == "perceptiontest_val_mc":
+        return f"{{document['video_name']}}:{{document['question_id']}}"
+    return None
 
 
 def _select(documents, name):
     selection = _SELECTIONS[name]
+    observed_strata = _verify_population(documents, name, selection)
     indices = selection["indices"]
+    expected_positions = selection["sampling_positions"]
+    if observed_strata is not None and expected_positions is not None:
+        ranks = _stratum_ranks(observed_strata)
+        observed_positions = [(observed_strata[index], ranks[index]) for index in indices]
+        if observed_positions != expected_positions:
+            raise ValueError(f"exact-row manifest source sampling positions drifted for {{name}}")
     observed = []
-    for index in indices:
+    for position, index in enumerate(indices):
         if index >= len(documents):
             raise ValueError(f"exact-row manifest row {{index}} is outside {{name}}")
         document = documents[index]
@@ -138,6 +249,9 @@ def _select(documents, name):
             observed.append(f"{{selection['config']}}:{{index}}")
         else:
             observed.append(f"{{selection['kind']}}:{{index}}")
+        expected_upstream_id = selection["upstream_ids"][position]
+        if expected_upstream_id is not None and _upstream_id(document, selection["kind"]) != expected_upstream_id:
+            raise ValueError(f"exact-row manifest upstream identity drifted for {{name}}")
     if observed != selection["source_ids"]:
         raise ValueError(f"exact-row manifest source identities drifted for {{name}}")
     return documents.select(indices)
@@ -218,6 +332,64 @@ def process_results(document, results):
     )
 
 
+def _write_mmmu_audit(tasks_root: Path) -> None:
+    checkpoint.write_generated(
+        tasks_root / "modelopt_mmmu_audit.py",
+        '''"""Expose whether the pinned MMMU parser used its random fallback."""
+
+import ast
+import random
+
+from lmms_eval.tasks.mmmu import utils as _upstream
+
+
+class _TrackedChoices(list):
+    def __init__(self, choices):
+        super().__init__(choices)
+        self.used_random_fallback = False
+
+    def __getitem__(self, index):
+        self.used_random_fallback = True
+        return super().__getitem__(index)
+
+
+def _multiple_choice_status(document, response):
+    index_to_answer, choices = _upstream.get_multi_choice_info(
+        ast.literal_eval(document["options"])
+    )
+    tracked_choices = _TrackedChoices(choices)
+    random_state = random.getstate()
+    try:
+        _upstream.parse_multi_choice_response(response, tracked_choices, index_to_answer)
+    finally:
+        random.setstate(random_state)
+    return "fallback_random" if tracked_choices.used_random_fallback else "parsed"
+
+
+def process_results(document, results):
+    processed = _upstream.mmmu_process_results(document, results)
+    accuracy = processed.get("mmmu_acc")
+    if not isinstance(accuracy, dict):
+        raise RuntimeError("MMMU result is missing its per-sample accuracy leaf")
+    parsed_predictions = accuracy.get("parsed_pred")
+    if not isinstance(parsed_predictions, list) or len(parsed_predictions) != len(results):
+        raise RuntimeError("MMMU result has invalid parsed predictions")
+    if document.get("question_type") == "multiple-choice":
+        statuses = [
+            _multiple_choice_status(document, response)
+            for response in results
+        ]
+    else:
+        statuses = [
+            "parsed_open" if str(prediction).strip() else "invalid_open"
+            for prediction in parsed_predictions
+        ]
+    accuracy["parser_status"] = statuses
+    return processed
+''',
+    )
+
+
 def _write_video_path_adapter(tasks_root: Path) -> None:
     alias_root = tasks_root / "video_path_aliases"
     checkpoint.write_generated(
@@ -275,6 +447,7 @@ def verify_offline(
     hf_home: Path,
     timeout_seconds: float,
     model_name: str = "vllm",
+    expected_populations: dict[str, int] | None = None,
 ) -> dict[str, object]:
     """Instantiate every generated task with network access disabled."""
     script = """
@@ -285,7 +458,8 @@ from pathlib import Path
 
 from lmms_eval.tasks import TaskManager
 
-model_name, root, *tasks = sys.argv[1:]
+model_name, root, expected_json, *tasks = sys.argv[1:]
+expected_populations = json.loads(expected_json)
 credential_names = ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 if inherited := [name for name in credential_names if name in os.environ]:
     raise RuntimeError(f"offline task preflight inherited Hub credentials: {inherited}")
@@ -311,10 +485,16 @@ image_tasks = {
     "modelopt_vlm_benchmark_mmmu_val",
 }
 media_documents = 0
+document_counts = {}
+seen_task_objects = set()
 for task in task_objects(loaded):
-    task_name = task.config.task
-    if task_name in image_tasks:
+    task_object_id = id(task)
+    if task_object_id in seen_task_objects:
         continue
+    seen_task_objects.add(task_object_id)
+    task_name = task.config.task
+    if task_name in document_counts:
+        raise RuntimeError(f"distinct task objects share configured task name: {task_name}")
     if task.has_test_docs():
         documents = task.test_docs()
     elif task.has_validation_docs():
@@ -322,7 +502,11 @@ for task in task_objects(loaded):
     elif task.has_training_docs():
         documents = task.training_docs()
     else:
-        raise RuntimeError(f"configured media task has no evaluation split: {task_name}")
+        raise RuntimeError(f"configured task has no evaluation split: {task_name}")
+    document_counts[task_name] = len(documents)
+    if task_name in image_tasks:
+        _ = len(documents)
+        continue
     for document in documents:
         visuals = task.doc_to_visual(document)
         if not visuals:
@@ -337,11 +521,21 @@ for task in task_objects(loaded):
                     )
         media_documents += 1
 
+observed_populations = {
+    task_name: document_counts.get(task_name, 0) for task_name in expected_populations
+}
+if observed_populations != expected_populations:
+    raise RuntimeError(
+        f"configured task population mismatch: {observed_populations} != {expected_populations}"
+    )
+
 print(
     json.dumps(
         {
             "configured_tasks": tasks,
+            "document_counts": document_counts,
             "media_documents": media_documents,
+            "observed_populations": observed_populations,
             "status": "passed",
         },
         sort_keys=True,
@@ -361,7 +555,15 @@ print(
     # A child interpreter is required to import lmms-eval in a clean offline environment. The
     # fixed interpreter/script and argument-vector invocation avoid shell parsing or interpolation.
     completed = subprocess.run(
-        [sys.executable, "-c", script, model_name, str(tasks_root), *configured_tasks],
+        [
+            sys.executable,
+            "-c",
+            script,
+            model_name,
+            str(tasks_root),
+            json.dumps(expected_populations or {}, sort_keys=True),
+            *configured_tasks,
+        ],
         check=False,
         capture_output=True,
         env=env,
@@ -399,6 +601,8 @@ def prepare(
         _write_mmvu_smoke_selection_module(tasks_root)
     if suite == "full":
         _write_mmvu_guard(tasks_root)
+    if "mmmu_val" in source_tasks:
+        _write_mmmu_audit(tasks_root)
     if set(source_tasks) & {"videomme", "perceptiontest_val_mc"}:
         _write_video_path_adapter(tasks_root)
 
@@ -449,6 +653,8 @@ def _write_task_group(
     dataset_path: Path,
     quick_manifest: dict[str, object] | None,
 ) -> str:
+    if quick_manifest is not None:
+        leaves = _manifest_group_leaves(quick_manifest, task, leaves)
     generated_leaves = []
     for leaf in leaves:
         leaf_task = suites.task_name(task, leaf=leaf)
@@ -498,6 +704,13 @@ def _write_single_task(
         doc_to_visual=doc_to_visual,
         process_docs=process_docs,
         process_docs_module=process_docs_module,
-        process_results="process_results" if suite == "full" and task == "mmvu_val" else None,
+        process_results=(
+            "process_results"
+            if task == "mmmu_val" or (suite == "full" and task == "mmvu_val")
+            else None
+        ),
+        process_results_module=(
+            "modelopt_mmmu_audit" if task == "mmmu_val" else "modelopt_mmvu_guard"
+        ),
     )
     return configured_task

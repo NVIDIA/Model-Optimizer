@@ -20,22 +20,51 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import argparse
     from collections.abc import Callable
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import preflight, tasks
+from examples.puzzletron.evaluation.vlm import preflight, suites, tasks
 
 __all__ = ["evaluate"]
 
 _COMPLETED_RUN_SCHEMA = "modelopt.vlm-evaluation-completed-run/v1"
 _COMPLETED_RUN_FILENAME = "completed_run.json"
+_MMMU_TASK = suites.task_name("mmmu_val")
+_MMMU_PARSER_STATUSES = {"fallback_random", "invalid_open", "parsed", "parsed_open"}
+
+
+def _expected_task_populations(
+    prepared: preflight.PreparedSuite,
+    configured_tasks: tuple[str, ...],
+) -> dict[str, int] | None:
+    """Map a full-data profile to the exact generated task objects it loads."""
+    contract = prepared.profile_contract
+    if contract is None or contract.manifest["selection"] != "all":
+        return None
+    profile_tasks = cast("dict[str, dict[str, object]]", contract.manifest["tasks"])
+    expected: dict[str, int] = {}
+    for source_task, configured_task in zip(prepared.source_tasks, configured_tasks, strict=True):
+        entry = profile_tasks[source_task]
+        leaf_populations = entry.get("leaf_populations")
+        if isinstance(leaf_populations, dict):
+            selected_leaves = prepared.profile_task_leaves or tuple(leaf_populations)
+            expected.update(
+                {
+                    suites.task_name(source_task, leaf=leaf): cast("int", leaf_populations[leaf])
+                    for leaf in selected_leaves
+                }
+            )
+        elif "population_rows" in entry:
+            expected[configured_task] = cast("int", entry["population_rows"])
+    return expected or None
 
 
 def _completion_identity(
@@ -203,6 +232,96 @@ def _write_completed_run(
             temporary_path.unlink(missing_ok=True)
 
 
+def _attach_mmmu_parser_audit(run_result: Mapping[str, object]) -> None:
+    """Summarize auditable per-sample MMMU parser outcomes in the normalized result."""
+    result_path_value = run_result.get("result_path")
+    if not isinstance(result_path_value, str):
+        raise RuntimeError("VLM evaluation result is missing its normalized result path")
+    result_path = Path(result_path_value)
+    try:
+        summary = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid VLM evaluation summary: {result_path}") from error
+    if not isinstance(summary, dict):
+        raise RuntimeError(f"invalid VLM evaluation summary: {result_path}")
+
+    raw_result_path_value = run_result.get("raw_result_path")
+    if not isinstance(raw_result_path_value, str):
+        raise RuntimeError("VLM evaluation result is missing its raw result path")
+    raw_result_path = Path(raw_result_path_value).resolve()
+    output_root = result_path.parent.resolve()
+    try:
+        raw_result_path.relative_to(output_root)
+    except ValueError as error:
+        raise RuntimeError("VLM raw result path escapes its evaluation output") from error
+    result_suffix = "_results.json"
+    if not raw_result_path.name.endswith(result_suffix):
+        raise RuntimeError(f"invalid lmms-eval raw result filename: {raw_result_path.name}")
+    invocation_prefix = raw_result_path.name[: -len(result_suffix)]
+    sample_logs = [raw_result_path.with_name(f"{invocation_prefix}_samples_{_MMMU_TASK}.jsonl")]
+    if not sample_logs[0].is_file():
+        raise RuntimeError("MMMU evaluation wrote no auditable sample log for its invocation")
+    statuses: Counter[str] = Counter()
+    sample_count = 0
+    for sample_log in sample_logs:
+        try:
+            lines = sample_log.read_text().splitlines()
+        except OSError as error:
+            raise RuntimeError(f"cannot read MMMU sample log: {sample_log}") from error
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                sample = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"invalid MMMU sample log record: {sample_log}:{line_number}"
+                ) from error
+            accuracy = sample.get("mmmu_acc") if isinstance(sample, Mapping) else None
+            parser_status = accuracy.get("parser_status") if isinstance(accuracy, Mapping) else None
+            if (
+                not isinstance(parser_status, list)
+                or not parser_status
+                or any(status not in _MMMU_PARSER_STATUSES for status in parser_status)
+            ):
+                raise RuntimeError(
+                    f"MMMU sample log has no valid parser status: {sample_log}:{line_number}"
+                )
+            statuses.update(cast("list[str]", parser_status))
+            sample_count += 1
+
+    sample_counts = summary.get("sample_counts")
+    expected_samples = sample_counts.get(_MMMU_TASK) if isinstance(sample_counts, Mapping) else None
+    if expected_samples != sample_count:
+        raise RuntimeError(
+            f"MMMU parser audit covers {sample_count}/{expected_samples} evaluated samples"
+        )
+    summary["mmmu_parser_audit"] = {
+        "sample_count": sample_count,
+        "sample_logs": [
+            _file_identity(sample_log, root=result_path.parent) for sample_log in sample_logs
+        ],
+        "status_counts": dict(sorted(statuses.items())),
+    }
+    content = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=result_path.parent,
+            prefix=f".{result_path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, result_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def evaluate(
     args: argparse.Namespace,
     *,
@@ -212,6 +331,12 @@ def evaluate(
     """Prepare and run one pinned VLM profile invocation."""
 
     prepared = preflight.prepare(args)
+    if (
+        settings_overrides
+        and prepared.profile_contract is not None
+        and prepared.profile_contract.manifest.get("model") is not None
+    ):
+        raise ValueError("model-pinned evaluation profiles do not allow settings overrides")
     task_root, configured_tasks = tasks.prepare(
         args.output_dir,
         suite=prepared.suite,
@@ -233,6 +358,7 @@ def evaluate(
         hf_home=prepared.hf_home,
         timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
         model_name=str(settings["model"]),
+        expected_populations=_expected_task_populations(prepared, configured_tasks),
     )
     report = dict(prepared.report)
     report.update(
@@ -263,6 +389,7 @@ def evaluate(
         "profile_fingerprint": report.get("profile_fingerprint"),
         "profile_name": report.get("profile_name"),
         "profile_schema": report.get("profile_schema"),
+        "output_budget_contract": report["output_budget_contract"],
     }
     chat_template_sha256 = _chat_template_sha256(settings)
     if chat_template_sha256 is not None:
@@ -286,6 +413,8 @@ def evaluate(
                     output_root=output_root,
                     settings=settings,
                 )
+                if "mmmu_val" in prepared.source_tasks:
+                    _attach_mmmu_parser_audit(run_result)
                 _write_completed_run(output_root, identity=identity, result=run_result)
             runs.append(run_result)
     return {

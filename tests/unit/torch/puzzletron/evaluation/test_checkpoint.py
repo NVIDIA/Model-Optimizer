@@ -45,7 +45,7 @@ def test_load_runner_restores_import_state(monkeypatch):
     assert "modelopt.torch.puzzletron.evaluation.lmms" not in sys.modules
 
 
-def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
+def test_verify_lmms_eval_revision_rejects_unpatched_current_vcs_install(monkeypatch):
     provenance = {
         "url": checkpoint.LMMS_EVAL_SOURCE["repository"],
         "vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION},
@@ -57,6 +57,11 @@ def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
 
     with pytest.raises(RuntimeError, match="requires a verified editable"):
         checkpoint.verify_lmms_eval_revision()
+
+
+def test_verify_lmms_eval_revision_rejects_unsupported_revision():
+    with pytest.raises(RuntimeError, match="unsupported lmms-eval revision"):
+        checkpoint.verify_lmms_eval_revision("different")
 
 
 def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkeypatch, tmp_path):

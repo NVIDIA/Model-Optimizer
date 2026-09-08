@@ -1,0 +1,7 @@
+{
+  "schema": "modelopt.vlm-evaluation-profile/v2",
+  "name": "core-3_344-examples_r1-vllm",
+  "sample_set": "core-3_344-examples_r1",
+  "backend_profile": "anymodel-vllm_r1",
+  "evaluator_profile": "lmms-eval-modelopt_r1"
+}

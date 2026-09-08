@@ -1,7 +1,7 @@
 {
   "schema": "modelopt.vlm-evaluation-profile/v2",
-  "name": "short-native-v1",
-  "sample_set": "core-3_344-examples_legacy-r1",
+  "name": "core-3_344-examples_r1-native",
+  "sample_set": "core-3_344-examples_r1",
   "backend_profile": "qwen-3.5-native_r1",
   "evaluator_profile": "lmms-eval-modelopt_r1"
 }

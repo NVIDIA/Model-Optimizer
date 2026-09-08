@@ -571,10 +571,17 @@ def test_post_mip_compiler_topologically_orders_serialized_nodes() -> None:
                         "best": {
                             "type": "filter",
                             "input": "final_eval",
+                            "mode": "top_k",
                             "metric": "final_eval.kl_div",
+                            "top_k": 1,
                         },
                         "final_eval": {"type": "evaluation", "input": "initial"},
-                        "initial": {"type": "filter", "metric": "mip.score"},
+                        "initial": {
+                            "type": "filter",
+                            "mode": "top_k",
+                            "metric": "mip.score",
+                            "top_k": 1,
+                        },
                     },
                 }
             }

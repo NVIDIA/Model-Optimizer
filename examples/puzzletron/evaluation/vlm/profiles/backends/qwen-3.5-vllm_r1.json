@@ -1,0 +1,9 @@
+{
+  "schema": "modelopt.vlm-backend-profile/v1",
+  "name": "qwen-3.5-vllm_r1",
+  "settings": {
+    "enable_thinking": false,
+    "name": "vllm",
+    "reasoning_parser": "qwen3"
+  }
+}

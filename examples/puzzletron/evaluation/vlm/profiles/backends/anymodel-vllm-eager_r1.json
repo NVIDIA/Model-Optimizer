@@ -1,0 +1,13 @@
+{
+  "schema": "modelopt.vlm-backend-profile/v1",
+  "name": "anymodel-vllm-eager_r1",
+  "settings": {
+    "attention_config": {
+      "flash_attn_version": 2
+    },
+    "enable_thinking": false,
+    "enforce_eager": true,
+    "name": "vllm",
+    "reasoning_parser": "qwen3"
+  }
+}

@@ -1,7 +1,7 @@
 {
   "schema": "modelopt.vlm-evaluation-profile/v2",
-  "name": "full-v1",
-  "sample_set": "judge-free-8_full_legacy-r1",
+  "name": "core-3_full_r1-vllm",
+  "sample_set": "core-3_full_r1",
   "backend_profile": "qwen-3.5-vllm_r1",
   "evaluator_profile": "lmms-eval-modelopt_r1"
 }

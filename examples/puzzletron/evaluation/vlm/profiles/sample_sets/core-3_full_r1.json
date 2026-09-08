@@ -1,0 +1,54 @@
+{
+  "schema": "modelopt.vlm-sample-set/v1",
+  "name": "core-3_full_r1",
+  "model": {
+    "repository": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17"
+  },
+  "selection": "all",
+  "tasks": {
+    "realworldqa": {
+      "dataset_repository": "lmms-lab/RealWorldQA",
+      "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+      "max_new_tokens": 16,
+      "population_rows": 765,
+      "scoring_task_config": "tasks/realworldqa/realworldqa.yaml"
+    },
+    "mmmu_val": {
+      "dataset_repository": "lmms-lab/MMMU",
+      "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+      "max_new_tokens": 128,
+      "population_rows": 900,
+      "scoring_task_config": "tasks/mmmu/mmmu_val.yaml"
+    },
+    "mvbench": {
+      "dataset_repository": "OpenGVLab/MVBench",
+      "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc",
+      "leaf_populations": {
+        "action_sequence": 200,
+        "moving_count": 200,
+        "action_prediction": 200,
+        "episodic_reasoning": 200,
+        "action_antonym": 200,
+        "action_count": 200,
+        "scene_transition": 200,
+        "object_shuffle": 200,
+        "object_existence": 200,
+        "fine_grained_pose": 200,
+        "unexpected_action": 200,
+        "moving_direction": 200,
+        "state_change": 200,
+        "object_interaction": 200,
+        "character_order": 200,
+        "action_localization": 200,
+        "counterfactual_inference": 200,
+        "fine_grained_action": 200,
+        "moving_attribute": 200,
+        "egocentric_navigation": 200
+      },
+      "max_new_tokens": 16,
+      "population_rows": 4000,
+      "scoring_task_config": "tasks/mvbench/mvbench.yaml"
+    }
+  }
+}

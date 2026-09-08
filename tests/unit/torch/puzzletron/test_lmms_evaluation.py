@@ -17,6 +17,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -478,6 +479,36 @@ def test_run_checkpoint_preserves_timeout_artifacts(monkeypatch, tmp_path):
     checkpoint.mkdir()
 
     def time_out(argv, **_kwargs):
+        raise lmms.LmmsEvalTimeoutError(
+            argv,
+            7,
+            output="partial evaluator output\n",
+            stderr="evaluation timed out\n",
+        )
+
+    monkeypatch.setattr(lmms, "_run_process", time_out)
+
+    with pytest.raises(lmms.LmmsEvalTimeoutError) as exc_info:
+        lmms.run_lmms_eval_checkpoint(
+            checkpoint,
+            output_root=tmp_path / "results",
+            settings=_settings("ifeval"),
+        )
+
+    error = exc_info.value
+    assert Path(error.command_path).is_file()
+    assert Path(error.stdout_path).read_text() == "partial evaluator output\n"
+    assert Path(error.stderr_path).read_text() == "evaluation timed out\n"
+
+
+def test_run_checkpoint_preserves_timeout_artifacts_if_attempt_directory_disappears(
+    monkeypatch, tmp_path
+):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+
+    def time_out(argv, *, cwd, **_kwargs):
+        shutil.rmtree(cwd)
         raise lmms.LmmsEvalTimeoutError(
             argv,
             7,
