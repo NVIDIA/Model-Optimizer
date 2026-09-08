@@ -40,10 +40,9 @@
 # checkpoint was evaluated against the BF16 baseline on GPQA, AA-LCR, SciCode, IFBench
 # and Terminal-Bench 2.1, with no meaningful accuracy regression on any of them.
 #
-# This deliberately diverges from `configs/ptq/units/default_disabled_quantizers` and the
-# `qwen3_5` / `qwen3_5_moe` family recipes, which keep `linear_attn.conv1d`, `in_proj_a`,
-# and `in_proj_b` disabled. Here all three are intentionally FP8 to reproduce the published
-# checkpoint (validated above) -- do not "fix" them back to the family default.
+# `linear_attn.conv1d`, `in_proj_a`, and `in_proj_b` are FP8 in this recipe. The shared
+# `configs/ptq/units/default_disabled_quantizers` and the `qwen3_5` / `qwen3_5_moe` family
+# recipes leave those three disabled; this recipe enables them to match the published checkpoint.
 #
 # The source checkpoint ships as native block-FP8 (`quant_method=fp8`,
 # `weight_block_size [128, 128]`, dynamic activations). The loader dequantizes it to
