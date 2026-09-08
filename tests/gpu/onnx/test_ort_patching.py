@@ -153,6 +153,21 @@ class TestHistogramCollection:
         assert "tensor1" in mock_histogram_collector.histogram_dict
         assert "tensor2" in mock_histogram_collector.histogram_dict
 
+    def test_collect_value_fp16_narrow_range(self, mock_histogram_collector):
+        # fp16 activations with a small range (threshold ~1e-5) used to raise
+        # "Too many bins for data range" on numpy >= 2.0, because the fp16 range
+        # produced a fp16 linspace where consecutive bin edges rounded together.
+        activations = np.zeros(1000, dtype=np.float16)
+        activations[0] = np.float16(1e-5)
+        name_to_arr = {"narrow_fp16_tensor": [activations]}
+
+        _collect_value(mock_histogram_collector, name_to_arr)
+
+        hist, edges, _, _, _ = mock_histogram_collector.histogram_dict["narrow_fp16_tensor"]
+        assert hist.sum() == activations.size
+        assert len(edges) == mock_histogram_collector.num_bins + 1
+        assert not np.any(np.diff(edges) == 0), "fp16 bin edges collapsed"
+
     def test_collect_absolute_value(self, mock_histogram_collector, sample_tensor_data):
         """Test _collect_absolute_value function."""
         # Convert to float32 to avoid the float64 assertion error

@@ -1,0 +1,202 @@
+# NeMo Evaluator Launcher config for Nemotron-3-Nano-30B-A3B and pruned variants
+# ------------------------------------------------------------------------------
+# Before running, update the following fields in the yaml:
+# - `execution.hostname` — your Slurm login node hostname
+# - `execution.account` — your Slurm account
+# - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
+#
+# This config is set up for a BF16 checkpoint. For quantized checkpoints, also apply the deployment changes below:
+# - FP8:   add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
+#            VLLM_USE_FLASHINFER_MOE_FP8: "1"
+#            VLLM_FLASHINFER_MOE_BACKEND: throughput
+# - NVFP4: add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
+#            VLLM_USE_FLASHINFER_MOE_FP4: "1"
+#            VLLM_FLASHINFER_MOE_BACKEND: throughput
+#          (NVFP4 deployment requires a Blackwell GPU)
+#
+# Usage:
+#   pip install "nemo-evaluator-launcher[all]==0.1.82"
+#
+#   # Set required environment variables:
+#   export HF_TOKEN=<your_huggingface_token>
+#   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
+#   export HF_HOME=<path_to_huggingface_cache>
+#   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
+#
+#   # Set additional unused but required environment variables:
+#   export API_KEY=xxxxxx
+#   export INFERENCE_API_KEY=xxxxxx
+#   export OPENAI_CLIENT_ID=xxxxxx
+#   export OPENAI_CLIENT_SECRET=xxxxxx
+#
+#   nemo-evaluator-launcher run --config nemo_evaluator.yaml
+#
+
+defaults:
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+execution:
+  type: slurm
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  partition: batch
+  num_nodes: 1
+  ntasks_per_node: 1
+  gpus_per_node: 8
+  gres: "gpu:8"
+  walltime: 04:00:00
+  sbatch_comment: "{\"OccupiedIdleGPUsJobReaper\":{\"exemptIdleTimeMins\":\"1920\",\"reason\":\"benchmarking\",\"description\":\"Some evals need idle time\
+    \ else gets cancelled\"}}"
+  subproject: nel
+  output_dir: ${oc.env:SLURM_JOB_DIR}
+  mode: sequential
+
+  mounts:
+    mount_home: false
+  deployment:
+    n_tasks: 1
+
+# Note: Only tp=1 works for Nano (Mamba-based hybrid architecture)
+deployment:
+  # Update this to your Hugging Face checkpoint path (original, pruned or quantized)
+  checkpoint_path: ???
+  served_model_name: Nemotron-3-Nano-30B-A3B
+  port: 8000
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  data_parallel_size: 8
+  gpu_memory_utilization: 0.90
+  # extra_args is for the BF16 checkpoint. For FP8/NVFP4 checkpoints, append `--kv-cache-dtype fp8`.
+  extra_args: "--max-model-len 262144 --max-num-seqs 8 --enable-log-requests --no-enable-prefix-caching --trust-remote-code --mamba_ssm_cache_dtype float32\
+    \ --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /checkpoint/nano_v3_reasoning_parser.py --reasoning-parser nano_v3"
+  # env_vars is for the BF16 checkpoint (no MoE backend flags needed). For a quantized
+  # checkpoint, replace `{}` with the block matching your format (see notes at top of file):
+  #   FP8:
+  #     VLLM_USE_FLASHINFER_MOE_FP8: "1"
+  #     VLLM_FLASHINFER_MOE_BACKEND: throughput
+  #   NVFP4:
+  #     VLLM_USE_FLASHINFER_MOE_FP4: "1"
+  #     VLLM_FLASHINFER_MOE_BACKEND: throughput
+  env_vars: {}
+  endpoints:
+    chat: /v1/chat/completions
+    completions: /v1/completions
+    health: /health
+  multiple_instances: true
+
+evaluation:
+  nemo_evaluator_config:
+    target:
+      api_endpoint:
+        adapter_config:
+          use_system_prompt: true
+          use_reasoning: false
+          # vLLM rejects both max_tokens and max_completion_tokens for these tasks
+          params_to_remove:
+            - max_tokens
+            - max_completion_tokens
+          params_to_add:
+            chat_template_kwargs:
+              enable_thinking: true
+            skip_special_tokens: false
+          use_caching: true
+          tracking_requests_stats: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 10
+          use_response_logging: true
+          max_logged_responses: 10
+    config:
+      params:
+        parallelism: 64
+        max_new_tokens: 131072
+        temperature: 1.0
+        top_p: 1.0
+        request_timeout: 3600
+        max_retries: 10
+        extra:
+          tokenizer_backend: huggingface
+          # Auto-derived from deployment.checkpoint_path below
+          tokenizer: ${deployment.checkpoint_path}
+  env_vars:
+    HF_TOKEN: HF_TOKEN
+    HF_HOME: HF_HOME
+    VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
+    API_KEY: API_KEY
+    INFERENCE_API_KEY: INFERENCE_API_KEY
+    OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
+    OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
+
+  # For no-tools results: in ns_gpqa and ns_aime2025 below, remove `use_sandbox: true` and the `++tool_modules=[...]` token from `args`
+  tasks:
+    # 1. MMLU Pro
+    - name: ns_mmlu_pro
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 1
+              args: "++prompt_config=eval/aai/mcq-10choices-boxed ++inference.tokens_to_generate=null"
+
+    # 2. GPQA Diamond
+    - name: ns_gpqa
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 8
+              # Tool calling: run the Python sandbox tool during generation
+              use_sandbox: true
+              args: "++prompt_config=eval/aai/mcq-4choices ++inference.tokens_to_generate=null ++tool_modules=[nemo_skills.mcp.servers.python_tool::PythonTool]"
+
+    # 3. LiveCodeBench
+    - name: ns_livecodebench
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 4
+              dataset_split: test_v6_2408_2505
+
+    # 4. AIME 2025
+    - name: ns_aime2025
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 32
+              # Tool calling: run the Python sandbox tool during generation
+              use_sandbox: true
+              args: "++prompt_config=/nemo_run/code/eval_factory_prompts/math-oai.yaml ++inference.tokens_to_generate=null ++tool_modules=[nemo_skills.mcp.servers.python_tool::PythonTool]"
+
+    # 5. IFBench
+    - name: ns_ifbench
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 8
+
+    # 6. SciCode
+    - name: ns_scicode
+      env_vars:
+        HF_TOKEN: HF_TOKEN
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 8
+              args: "++eval_config.num_parallel_requests=20"

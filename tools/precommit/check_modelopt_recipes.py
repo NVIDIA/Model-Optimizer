@@ -22,11 +22,12 @@ validates each recipe exactly once.
 Checks performed:
 
 1. ``quant_cfg`` must use the list-of-dicts format with explicit
-   ``quantizer_name`` keys (legacy dict format is rejected).
+   ``quantizer_name`` keys (legacy dict format is rejected). PTQ recipes only.
 2. PTQ recipes must use ``quantize`` as the top-level key
    (not ``ptq_cfg`` or other variants).
-3. Each recipe is loaded via ``load_recipe()`` to catch structural and
-   validation errors (skipped if modelopt is not installed).
+3. Each recipe (PTQ, EAGLE, DFlash, Medusa) is loaded via ``load_recipe()``
+   to catch structural and Pydantic-validation errors (skipped if modelopt is
+   not installed).
 """
 
 from __future__ import annotations
@@ -37,6 +38,13 @@ from pathlib import Path
 import yaml
 
 _YAML_PARSE_ERROR = object()
+
+# Recipe types this hook validates via load_recipe(). Mirrors RecipeType in
+# modelopt.recipe.config; kept as a literal set so the hook can run without
+# importing modelopt (which is also why _try_load_recipe gates on ImportError).
+_SUPPORTED_RECIPE_TYPES = frozenset(
+    {"ptq", "speculative_eagle", "speculative_dflash", "speculative_medusa"}
+)
 
 
 def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
@@ -161,8 +169,8 @@ def _is_dir_recipe(dir_path: Path) -> bool:
 def _is_recipe_file(path: Path) -> bool:
     """Return True if *path* looks like a recipe file that should be validated.
 
-    Currently only PTQ recipes are checked; other recipe types (e.g. QAT) can
-    be added here in the future.
+    Covers PTQ + speculative-decoding (EAGLE/DFlash/Medusa) recipes; extend
+    ``_SUPPORTED_RECIPE_TYPES`` for new types (e.g. QAT).
 
     Malformed or unparseable files return True so that ``load_recipe()`` can
     report the actual error.
@@ -175,11 +183,15 @@ def _is_recipe_file(path: Path) -> bool:
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all
-    return metadata["recipe_type"] == "ptq"
+    return metadata["recipe_type"] in _SUPPORTED_RECIPE_TYPES
 
 
 def _is_metadata_file(path: Path) -> bool:
-    """Return True if *path* looks like a directory recipe metadata file."""
+    """Return True if *path* looks like a directory recipe metadata file.
+
+    Directory-format recipes are PTQ-only (speculative-decoding recipes are
+    always single YAML files), so the check is limited to ``recipe_type: ptq``.
+    """
     data = _load_yaml(path)
     if data is _YAML_PARSE_ERROR:
         return True  # let load_recipe report the parse error

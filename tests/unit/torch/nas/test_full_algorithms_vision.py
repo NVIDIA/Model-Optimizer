@@ -28,13 +28,20 @@ from modelopt.torch.nas.algorithms import ConstraintsFunc
 from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.utils import random
 
+# These full end-to-end fastnas/autonas vision-algorithm tests are slow (~5-21s each,
+# dominated by search/profile/tracing) and exercise rarely-used paths. Heavier cases are
+# marked ``@pytest.mark.manual`` (run with ``--run-manual``); one representative case per
+# test stays enabled for sanity, preferring the fastnas variant over autonas where a test
+# covers both. Core NAS behavior (convert / search-space / save-restore) is also covered by
+# the lighter sibling test_nas.py and test_search_space*.py.
+
 
 @pytest.mark.parametrize(
     ("get_model_and_input", "variant"),
     [
-        (get_tiny_mobilenet_and_input, 0),
-        (get_tiny_resnet_and_input, 1),
-        (get_tiny_resnet_and_input, 2),
+        pytest.param(get_tiny_mobilenet_and_input, 0, marks=pytest.mark.manual),  # autonas
+        (get_tiny_resnet_and_input, 1),  # fastnas — kept enabled for sanity
+        pytest.param(get_tiny_resnet_and_input, 2, marks=pytest.mark.manual),  # autonas
     ],
 )
 def test_searched_model_constraints(get_model_and_input, variant):
@@ -101,8 +108,15 @@ def test_searched_model_constraints(get_model_and_input, variant):
                 assert check_constraint(subnet_stat, limits)
 
 
-@pytest.mark.parametrize("flops_only", [True, False])
-@pytest.mark.parametrize("bounded_latency", [True, False])
+@pytest.mark.parametrize(
+    ("flops_only", "bounded_latency"),
+    [
+        (False, True),  # fast representative kept enabled for sanity
+        pytest.param(True, True, marks=pytest.mark.manual),
+        pytest.param(True, False, marks=pytest.mark.manual),
+        pytest.param(False, False, marks=pytest.mark.manual),
+    ],
+)
 def test_search_constraints(flops_only: bool, bounded_latency: bool):
     def _fake_latency(self, model, precomputed=None):
         coeff_params = 0.00 if flops_only else 0.75
@@ -176,7 +190,11 @@ def test_search_constraints(flops_only: bool, bounded_latency: bool):
 
 
 @pytest.mark.parametrize(
-    "get_model_and_input", [get_tiny_resnet_and_input, get_tiny_mobilenet_and_input]
+    "get_model_and_input",
+    [
+        get_tiny_resnet_and_input,  # fast representative kept enabled for sanity
+        pytest.param(get_tiny_mobilenet_and_input, marks=pytest.mark.manual),
+    ],
 )
 def test_profile_same_max(get_model_and_input):
     """checks if the max/original subnet of the profiled model is the same as the original model."""
@@ -226,8 +244,8 @@ def test_profile_same_max(get_model_and_input):
 @pytest.mark.parametrize(
     ("get_model_and_input", "mode"),
     [
-        (get_tiny_resnet_and_input, "autonas"),
-        (get_tiny_mobilenet_and_input, "fastnas"),
+        pytest.param(get_tiny_resnet_and_input, "autonas", marks=pytest.mark.manual),
+        (get_tiny_mobilenet_and_input, "fastnas"),  # fastnas — kept enabled for sanity
     ],
 )
 def test_profile_search_space(get_model_and_input, mode):

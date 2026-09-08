@@ -13,12 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
+
 import numpy as np
+import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
-from modelopt.onnx.export.nvfp4_exporter import _cast_fp4, _cast_fp8
+from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
+from modelopt.onnx.quantization.qdq_utils import (
+    _cast_fp8,
+    apply_column_major_transformation,
+    fp4qdq_to_2dq,
+    insert_transpose_nodes_for_column_major,
+    qdq_to_dq,
+    quantize_weights_to_int4,
+    quantize_weights_to_mxfp8,
+    replace_zero_scale_with_smallest_nonzero,
+)
+from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
 
 
 def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool = False):
@@ -637,8 +652,6 @@ def create_test_model_with_int4_dq_matmul():
 
     Returns the model and original weight/scale arrays for verification.
     """
-    from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
-
     # Create INT4 quantized weight tensor (K=32, N=16)
     # Using int8 storage for INT4 values in range [-8, 7]
     weight_data = np.random.randint(-8, 8, size=(32, 16), dtype=np.int8)
@@ -699,13 +712,6 @@ class TestColumnMajorTransformation:
 
         Verifies: DQ(W) -> MatMul becomes DQ(W^T) -> Transpose -> MatMul
         """
-        import onnx_graphsurgeon as gs
-
-        from modelopt.onnx.quantization.qdq_utils import (
-            apply_column_major_transformation,
-            insert_transpose_nodes_for_column_major,
-        )
-
         model, original_weight, original_scale = create_test_model_with_int4_dq_matmul()
 
         # Get weights and scales as dicts (simulating what int4.py does)
@@ -770,10 +776,6 @@ class TestColumnMajorTransformation:
 
         Verifies both produce the same output for the same input.
         """
-        import onnxruntime as ort
-
-        from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
-
         # Create original model
         original_model, original_weight, original_scale = create_test_model_with_int4_dq_matmul()
 
@@ -873,14 +875,6 @@ class TestColumnMajorTransformation:
         should have transB flipped to 0 instead of inserting a Transpose node.
         Also verifies output equivalence between original and transformed models.
         """
-        import onnx_graphsurgeon as gs
-        import onnxruntime as ort
-
-        from modelopt.onnx.quantization.qdq_utils import (
-            apply_column_major_transformation,
-            insert_transpose_nodes_for_column_major,
-        )
-        from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
 
         # Original model: weight (N=16, K=32) with Gemm transB=1
         # Gemm computes: A @ B^T = (4, 32) @ (16, 32)^T = (4, 16)
@@ -1057,8 +1051,6 @@ class TestReplaceZeroScaleWithSmallestNonzero:
 
     @pytest.mark.parametrize("dq_op_type", ["DequantizeLinear", "TRT_INT4DequantizeLinear"])
     def test_zero_scale_initializer_fed_to_dq_is_patched(self, dq_op_type):
-        from modelopt.onnx.quantization.qdq_utils import replace_zero_scale_with_smallest_nonzero
-
         model = _build_model_with_zero_scale_initializer(dq_op_type)
         scale_before = numpy_helper.to_array(
             next(init for init in model.graph.initializer if init.name == "scale")
@@ -1075,7 +1067,6 @@ class TestReplaceZeroScaleWithSmallestNonzero:
 
     def test_constant_node_scale_path_still_patched(self):
         """Legacy Constant-node QDQ path must continue to be patched."""
-        from modelopt.onnx.quantization.qdq_utils import replace_zero_scale_with_smallest_nonzero
 
         scale_data = np.array([1e-3, 0.0, 2e-3], dtype=np.float16)
         scale_const = helper.make_node(
@@ -1110,6 +1101,23 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         assert (scale_arr > 0).all()
 
 
+class TestQdqToDqValidation:
+    """Regression tests for qdq_to_dq input validation."""
+
+    def test_quantize_linear_without_inputs_raises_value_error(self):
+        q_node = helper.make_node("QuantizeLinear", inputs=[], outputs=["q_output"], name="bad_q")
+        graph = helper.make_graph(
+            nodes=[q_node],
+            name="test_graph",
+            inputs=[],
+            outputs=[helper.make_tensor_value_info("q_output", TensorProto.INT8, [1])],
+        )
+        model = helper.make_model(graph)
+
+        with pytest.raises(ValueError, match="QuantizeLinear node bad_q has no inputs"):
+            qdq_to_dq(model)
+
+
 class TestLegacyEdgeLLMShims:
     """Smoke tests for the deprecated top-level shims kept for TensorRT-Edge-LLM 0.6.1.
 
@@ -1120,10 +1128,6 @@ class TestLegacyEdgeLLMShims:
     """
 
     def test_quantize_weights_to_int4_shim(self):
-        import warnings
-
-        from modelopt.onnx.quantization.qdq_utils import quantize_weights_to_int4
-
         model = create_test_model_with_int4_dq_reshape_transpose_matmul()
 
         with warnings.catch_warnings(record=True) as caught:
@@ -1146,10 +1150,6 @@ class TestLegacyEdgeLLMShims:
         assert "Transpose" not in node_types
 
     def test_quantize_weights_to_mxfp8_shim(self):
-        import warnings
-
-        from modelopt.onnx.quantization.qdq_utils import quantize_weights_to_mxfp8
-
         model = create_test_model_with_mxfp8_dq()
 
         with warnings.catch_warnings(record=True) as caught:
@@ -1173,10 +1173,6 @@ class TestLegacyEdgeLLMShims:
 
     @pytest.mark.parametrize("with_transpose", [False, True])
     def test_fp4qdq_to_2dq_shim(self, with_transpose):
-        import warnings
-
-        from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
-
         model = create_test_model_with_nvfp4_qdq(with_transpose=with_transpose)
 
         with warnings.catch_warnings(record=True) as caught:

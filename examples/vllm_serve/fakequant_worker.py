@@ -21,6 +21,7 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
+from vllm_mlflow_utils import FakeQuantMlflowTracker
 from vllm_ptq_utils import calibrate_fun, get_quant_config
 from vllm_reload_utils import (
     convert_dict_to_vllm,
@@ -51,7 +52,7 @@ quant_config: dict[str, Any] = {
 }
 
 
-def _fakequant_run_prolog_worker(self) -> None:
+def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -> None:
     trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "false").lower() == "true"
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -124,6 +125,8 @@ def _fakequant_run_prolog_worker(self) -> None:
         calibrate_loop = calibrate_fun(calib_dataloader, self)
 
         quant_cfg = get_quant_config(quant_config, model)
+        # Before calibration, which is the run this artifact is most wanted for if it dies.
+        mlflow_tracker.log_quant_config(quant_cfg)
 
         with disable_compilation(model):
             print("Quantizing model...")
@@ -141,6 +144,7 @@ def _fakequant_run_prolog_worker(self) -> None:
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
+        mlflow_tracker.log_quant_summary(model)
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():
@@ -152,23 +156,40 @@ def _fakequant_run_prolog_worker(self) -> None:
 
 
 class FakeQuantWorker(BaseWorker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Inert unless a tracking URI was published and this is the rank-0 worker.
+        self.mlflow_tracker = FakeQuantMlflowTracker(self, quant_config)
+
+    def load_model(self, *args, **kwargs) -> None:
+        # The run opens here, before the weights load: an unreachable tracking server or a
+        # missing token then fails in seconds instead of after the load and calibration,
+        # and the log it captures covers both.
+        self.mlflow_tracker.start()
+        with self.mlflow_tracker.fail_on_error():
+            return super().load_model(*args, **kwargs)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         model = self.model_runner.model
         if hasattr(model, "unwrap"):
             model = model.unwrap()
-        with disable_compilation(model):
+        with self.mlflow_tracker.fail_on_error(), disable_compilation(model):
             return super().determine_available_memory()
 
     def compile_or_warm_up_model(self) -> float:
-        if (
-            quant_config["quant_cfg"]
-            or quant_config["kv_quant_cfg"]
-            or quant_config["modelopt_state_path"]
-            or quant_config["recipe_path"]
-        ):
-            _fakequant_run_prolog_worker(self)
-        # Must return the base worker's compilation time (seconds). Returning None
-        # breaks vLLM V1 executor: initialize_from_config does max(compilation_times)
-        # across TP workers.
-        return super().compile_or_warm_up_model()
+        with self.mlflow_tracker.fail_on_error():
+            if (
+                quant_config["quant_cfg"]
+                or quant_config["kv_quant_cfg"]
+                or quant_config["modelopt_state_path"]
+                or quant_config["recipe_path"]
+            ):
+                _fakequant_run_prolog_worker(self, self.mlflow_tracker)
+            # Must return the base worker's compilation time (seconds). Returning None
+            # breaks vLLM V1 executor: initialize_from_config does max(compilation_times)
+            # across TP workers.
+            compilation_time = super().compile_or_warm_up_model()
+        # The model is quantized and warmed up; everything after this is serving.
+        self.mlflow_tracker.finish("FINISHED")
+        return compilation_time

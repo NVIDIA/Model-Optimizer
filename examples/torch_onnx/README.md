@@ -69,6 +69,11 @@ python torch_quant_to_onnx.py \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
 
+Quantization configs are loaded from the YAML preset recipes under
+`modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass
+`--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
+recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
+
 ### Conv2d Quantization Override
 
 TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:
@@ -92,6 +97,72 @@ python ../onnx_ptq/evaluate.py \
     --engine_precision=stronglyTyped \
     --model_name=<timm model name>
 ```
+
+## HF Embedding and Reranking Models
+
+> **Experimental:** Accuracy has not yet been validated for this example.
+
+`hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding or reranking
+model (bidirectional Llama encoders such as
+[nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2)
+and
+[nvidia/llama-nemotron-rerank-1b-v2](https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2))
+with a PTQ recipe and exports it to ONNX. Embedding models are exported with
+mean pooling and L2 normalization on top of the encoder; reranking
+(sequence-classification) models are exported to their relevance logits. Both
+graphs take `input_ids` and `attention_mask` with dynamic batch/sequence axes.
+
+The default recipe
+(`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
+quantizes weights and activations to NVFP4 and additionally quantizes the
+projection-Linear outputs. Without output-side quantization, quantized GEMMs
+emit FP16 activations, so FP8/FP4 engines can use as much or more activation
+memory than an unquantized FP16 engine; quantizing the projection outputs keeps
+inter-layer activations in the low-precision format. An FP8 twin of the recipe
+(`fp8_output_quant_proj.yaml`, pass it via `--recipe`) applies the same idea to
+the FP8 preset. With TensorRT 10.16 on RTX PRO 6000 Blackwell (strongly-typed
+engines, 5 dynamic-shape profiles up to 32x512), engine activation memory:
+
+| Model | FP16 | `fp8` preset | fp8 recipe | `nvfp4` preset | nvfp4 recipe |
+|-------|-----:|-------------:|-----------:|---------------:|-------------:|
+| llama-nemotron-embed-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 1040 MiB | 516 MiB |
+| llama-nemotron-rerank-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 520 MiB | 331 MiB |
+
+### Usage
+
+```bash
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-embed-1b-v2 \
+    --trust_remote_code \
+    --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
+    --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
+
+# Reranking variant (auto-detected from the model architecture)
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-rerank-1b-v2 \
+    --trust_remote_code \
+    --onnx_save_path=llama_nemotron_rerank_nvfp4.onnx
+```
+
+### Building a TensorRT engine with trtexec
+
+NVFP4 requires a Blackwell GPU (SM100+) and TensorRT 10.11 or later. Build a
+strongly-typed engine with dynamic shapes (add optimization profiles matching
+your serving batch sizes and sequence lengths):
+
+```bash
+trtexec --onnx=llama_nemotron_embed_nvfp4.onnx \
+    --stronglyTyped \
+    --saveEngine=llama_nemotron_embed_nvfp4.plan \
+    --minShapes=input_ids:1x2,attention_mask:1x2 \
+    --optShapes=input_ids:32x128,attention_mask:32x128 \
+    --maxShapes=input_ids:32x512,attention_mask:32x512
+```
+
+The exported `.onnx` references a sibling weights file (`<name>.onnx_data`);
+keep the two files in the same directory when building. To inspect the chosen
+kernels and per-profile activation memory, add
+`--profilingVerbosity=detailed --exportLayerInfo=<path>.json --verbose`.
 
 ## LLM Quantization and Export with TensorRT-Edge-LLM
 
@@ -122,8 +193,8 @@ source venv/bin/activate
 pip3 install .
 
 # Verify installation
-tensorrt-edgellm-quantize-llm --help
-tensorrt-edgellm-export-llm --help
+tensorrt-edgellm-quantize --help
+tensorrt-edgellm-export --help
 ```
 
 **System requirements:**
@@ -137,11 +208,8 @@ tensorrt-edgellm-export-llm --help
 
 | Tool | Purpose |
 | :--- | :--- |
-| `tensorrt-edgellm-quantize-llm` | Quantize LLM models using ModelOpt (FP8, INT4 AWQ, NVFP4) |
-| `tensorrt-edgellm-export-llm` | Export LLM to ONNX with precision-specific optimizations |
-| `tensorrt-edgellm-export-visual` | Export visual encoders for multimodal VLM models |
-| `tensorrt-edgellm-quantize-draft` | Quantize EAGLE draft models for speculative decoding |
-| `tensorrt-edgellm-export-draft` | Export EAGLE draft models to ONNX |
+| `tensorrt-edgellm-quantize` | Quantize models using ModelOpt (FP8, INT4 AWQ, NVFP4); subcommands: `llm`, `draft` |
+| `tensorrt-edgellm-export` | Export quantized or FP16/BF16 checkpoint to ONNX; auto-detects VLM and audio components |
 | `tensorrt-edgellm-insert-lora` | Insert LoRA patterns into existing ONNX models |
 | `tensorrt-edgellm-process-lora` | Process LoRA adapter weights for runtime loading |
 
@@ -149,64 +217,58 @@ tensorrt-edgellm-export-llm --help
 
 ```bash
 # Step 1: Quantize with ModelOpt
-tensorrt-edgellm-quantize-llm \
+tensorrt-edgellm-quantize llm \
     --model_dir Qwen/Qwen2.5-3B-Instruct \
     --quantization fp8 \
     --output_dir quantized/qwen2.5-3b-fp8
 
 # Step 2: Export to ONNX
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/qwen2.5-3b-fp8 \
-    --output_dir onnx_models/qwen2.5-3b
+tensorrt-edgellm-export \
+    quantized/qwen2.5-3b-fp8 \
+    onnx_models/qwen2.5-3b
 ```
 
 ### Example: Quantize and Export a VLM
 
 ```bash
-# Quantize the language model component
-tensorrt-edgellm-quantize-llm \
+# Quantize with ModelOpt (handles both LLM and visual components)
+tensorrt-edgellm-quantize llm \
     --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
     --quantization fp8 \
     --output_dir quantized/qwen2.5-vl-3b
 
-# Export the language model
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/qwen2.5-vl-3b \
-    --output_dir onnx_models/qwen2.5-vl-3b/llm
-
-# Export the visual encoder
-tensorrt-edgellm-export-visual \
-    --model_dir Qwen/Qwen2.5-VL-3B-Instruct \
-    --output_dir onnx_models/qwen2.5-vl-3b/visual
+# Export to ONNX (auto-detects VLM and exports LLM + visual encoder to separate subdirs)
+tensorrt-edgellm-export \
+    quantized/qwen2.5-vl-3b \
+    onnx_models/qwen2.5-vl-3b
 ```
 
 ### Example: EAGLE Speculative Decoding
 
 ```bash
 # Quantize base model
-tensorrt-edgellm-quantize-llm \
+tensorrt-edgellm-quantize llm \
     --model_dir meta-llama/Llama-3.1-8B-Instruct \
     --quantization fp8 \
     --output_dir quantized/llama3.1-8b-base
 
 # Export base model with EAGLE flag
-tensorrt-edgellm-export-llm \
-    --model_dir quantized/llama3.1-8b-base \
-    --output_dir onnx_models/llama3.1-8b/base \
-    --is_eagle_base
+tensorrt-edgellm-export \
+    quantized/llama3.1-8b-base \
+    onnx_models/llama3.1-8b/base \
+    --eagle-base
 
 # Quantize EAGLE draft model
-tensorrt-edgellm-quantize-draft \
+tensorrt-edgellm-quantize draft \
     --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
     --draft_model_dir EAGLE3-LLaMA3.1-Instruct-8B \
     --quantization fp8 \
     --output_dir quantized/llama3.1-8b-draft
 
 # Export draft model
-tensorrt-edgellm-export-draft \
-    --draft_model_dir quantized/llama3.1-8b-draft \
-    --base_model_dir meta-llama/Llama-3.1-8B-Instruct \
-    --output_dir onnx_models/llama3.1-8b/draft
+tensorrt-edgellm-export \
+    quantized/llama3.1-8b-draft \
+    onnx_models/llama3.1-8b/draft
 ```
 
 ### Quantization Methods
@@ -292,7 +354,7 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 python torch_quant_to_onnx.py \
     --timm_model_name=vit_base_patch16_224 \
     --quantize_mode=auto \
-    --auto_quantization_formats NVFP4_AWQ_LITE_CFG FP8_DEFAULT_CFG \
+    --auto_quantization_formats nvfp4_awq_lite fp8 \
     --effective_bits=4.8 \
     --num_score_steps=128 \
     --calibration_data_size=512 \
@@ -311,7 +373,7 @@ python torch_quant_to_onnx.py \
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)

@@ -1,0 +1,108 @@
+# DFlash online speculative decoding training for MiniMax-M2.7 (229B MoE).
+#
+# 3-step pipeline:
+#   task_0: Online DFlash training (8 nodes x 8 GPU, FSDP2 HYBRID_SHARD)
+#   task_1: vLLM smoke test with the exported DFlash draft
+#   task_2: HF AR (acceptance-length) evaluation on MT-Bench (1 GPU)
+#
+# MiniMax-M2.7 specifics:
+#   - trust_remote_code model whose code requires transformers 4.57.x, so FSDP2 is
+#     configured via an accelerate config (accelerate_fsdp2_hybrid.yaml) rather than
+#     transformers-native ParallelismConfig. Hence OVERRIDE_TRANSFORMERS + ACCELERATE_CONFIG
+#     + dp_shard_size=1 (keeps main.py from building a ParallelismConfig) + PATCH_FSDP2_BUFFERS_TF457.
+#   - 229B in FP8 needs cpu_ram_efficient_loading (set in the accelerate config) and
+#     MIXED_PRECISION=no (the recipe / checkpoint already carry the right dtypes).
+#   - The DFlash draft is Qwen3-architecture (5 layers); the target/draft architectures
+#     are independent by design.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/MiniMax/MiniMax-M2.7-DFlash/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/MiniMax/MiniMax-M2.7-DFlash/hf_online_dflash.yaml --yes
+
+job_name: MiniMax-M2.7-DFlash_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/MiniMaxAI/MiniMax-M2.7
+
+  # Step 1: Online DFlash training.
+  task_0:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.trust_remote_code=true
+      - data.data_path=/hf-local/modelopt/MiniMax-M2.7-synthetic-data-clean-v2
+      - data.chat_template=examples/MiniMax/MiniMax-M2.7-DFlash/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_minimax_m2.7
+      - training.num_train_epochs=10
+      - training.per_device_train_batch_size=2
+      - training.learning_rate=1.2e-3
+      - training.warmup_steps=100
+      - training.training_seq_len=4096
+      - training.logging_steps=100
+      - training.save_steps=400
+      - training.disable_tqdm=true
+      # dp_shard_size=1 stops main.py from creating a ParallelismConfig; the
+      # accelerate config below owns FSDP2 sharding.
+      - training.dp_shard_size=1
+      - training.answer_only_loss=true
+      - training.ddp_timeout=3600
+      - training.bf16=false
+      - dflash.dflash_self_logit_distillation=true
+      - dflash.dflash_block_size=8
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=4.0
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+      # Mask token id. The draft reuses the target's embed_tokens, so this must be an id
+      # that exists in the target embedding; 200054 is a reserved row in MiniMax-M2.7.
+      - dflash.dflash_mask_token_id=200054
+      # YaRN rope_scaling injected at export for long context (factor = 196608/4096 = 48).
+      - dflash.dflash_export_rope_scaling.type=yarn
+      - dflash.dflash_export_rope_scaling.factor=48.0
+      - dflash.dflash_export_rope_scaling.original_max_position_embeddings=4096
+      - dflash.dflash_export_rope_scaling.beta_fast=1.0
+      - dflash.dflash_export_rope_scaling.beta_slow=1.0
+      - dflash.dflash_export_rope_scaling.mscale=1.0
+      - dflash.dflash_export_rope_scaling.mscale_all_dim=1.0
+    environment:
+      - NUM_NODES: "8"
+      - OVERRIDE_TRANSFORMERS: "4.57.1"
+      - ACCELERATE_CONFIG: examples/MiniMax/MiniMax-M2.7-DFlash/accelerate_fsdp2_hybrid.yaml
+      - PATCH_FSDP2_BUFFERS_TF457: "1"
+      - MIXED_PRECISION: "no"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 8
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: vLLM smoke test with the exported DFlash draft.
+  task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dflash_minimax_m2.7
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - TP_SIZE: "4"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:nightly
+
+  # Step 3: HF AR (acceptance-length) evaluation on MT-Bench.
+  task_2:
+    script: common/specdec/ar_eval_mtbench.sh
+    args:
+      - --ckpt_dir /scratchspace/dflash_minimax_m2.7
+      - --osl 512
+      - --steps 7
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8

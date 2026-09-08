@@ -55,11 +55,10 @@ def init_process(rank, size, job=None, backend="gloo", port=None):
 
 def spawn_multiprocess_job(size, job, backend="gloo"):
     port = get_free_port()
-
+    ctx = mp.get_context("spawn")
     processes = []
-    mp.set_start_method("spawn", force=True)
     for rank in range(size):
-        p = mp.Process(target=init_process, args=(rank, size, job, backend, port))
+        p = ctx.Process(target=init_process, args=(rank, size, job, backend, port))
         p.start()
         processes.append(p)
 

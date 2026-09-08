@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
+from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
@@ -45,13 +45,13 @@ class DiffuserModel(NamedTuple):
     def _format_args(self) -> list[str]:
         return [
             "--calib-size",
-            "8",
+            "4",
             "--percentile",
             "1.0",
             "--alpha",
             "0.8",
             "--n-steps",
-            "20",
+            "2",
             "--batch-size",
             "2",
             "--format",
@@ -93,6 +93,8 @@ class DiffuserModel(NamedTuple):
             str(tmp_path / f"{self.name}_{self.format_type}_onnx/model.onnx"),
             "--dq-only",
             "--torch-autocast",
+            "--num-inference-steps",
+            "2",
         )
 
 
@@ -118,7 +120,7 @@ class DiffuserModel(NamedTuple):
         pytest.param(
             DiffuserModel(
                 name="sdxl-1.0",
-                path=SDXL_1_0_PATH,
+                path=SDXL_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",
@@ -128,7 +130,7 @@ class DiffuserModel(NamedTuple):
         ),
         DiffuserModel(
             name="sdxl-1.0",
-            path=SDXL_1_0_PATH,
+            path=SDXL_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -271,8 +273,8 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
         ("flux-schnell", FLUX_SCHNELL_PATH, True),
         ("sd3-medium", SD3_PATH, False),
         ("sd3-medium", SD3_PATH, True),
-        ("sdxl-1.0", SDXL_1_0_PATH, False),
-        ("sdxl-1.0", SDXL_1_0_PATH, True),
+        ("sdxl-1.0", SDXL_PATH, False),
+        ("sdxl-1.0", SDXL_PATH, True),
     ],
     ids=[
         "flux_schnell_torch",
@@ -296,6 +298,8 @@ def test_diffusion_trt_torch(
         "--override-model-path",
         model_path,
         "--torch",
+        "--num-inference-steps",
+        "2",
     ]
     if torch_compile:
         cmd_args.append("--torch-compile")

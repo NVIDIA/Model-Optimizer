@@ -16,6 +16,7 @@
 
 """Custom Megatron mapping and safetensors utility."""
 
+import copy
 import json
 import math
 import os
@@ -127,6 +128,18 @@ class GroupedMLPSlicing(CustomModuleMapping):
         )
 
 
+class GroupedMLPPacking(CustomModuleMapping):
+    """A custom module mapping that packs grouped MoE experts into one stacked tensor."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that packs grouped experts."""
+        super().__init__(
+            func_name="grouped_mlp_packing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 
@@ -170,6 +183,18 @@ class GatedMLPSlicing(CustomModuleMapping):
         """Create a custom module mapping that slices gate_proj and up_proj."""
         super().__init__(
             func_name="gated_mlp_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
+class GatedDeltaNetSlicing(CustomModuleMapping):
+    """A custom module mapping that splits GatedDeltaNet's fused ``in_proj``."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that splits the fused GatedDeltaNet input projection."""
+        super().__init__(
+            func_name="gated_delta_net_slicing",
             target_name_or_prefix=target_name_or_prefix,
             func_kwargs=func_kwargs,
         )
@@ -223,6 +248,29 @@ class UnpackNameRemappingGPT(CustomModuleMapping):
         )
 
 
+# LLaVA-style checkpoints keep the vision tower under these prefixes; see
+# ``all_mcore_hf_vision_passthrough_mapping`` for the per-architecture overrides.
+LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
+
+
+def with_language_model_prefix(
+    mapping: dict[str, CustomModuleMapping],
+) -> dict[str, CustomModuleMapping]:
+    """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
+    result = {}
+    for key, m in mapping.items():
+        if not isinstance(m, CustomModuleMapping):
+            result[key] = m  # plain flags such as ``use_packed_local_experts``
+            continue
+        prefix = m.target_name_or_prefix
+        if prefix.startswith("model."):
+            prefix = "model.language_model." + prefix[len("model.") :]
+        result[key] = type(m)(
+            target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
+        )
+    return result
+
+
 def save_safetensors(state_dict, save_directory: str | os.PathLike):
     """Save safetensors with pipeline model parallel support."""
     pp_rank = get_pipeline_model_parallel_rank()
@@ -251,10 +299,14 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
+        # Freeze a per-shard snapshot so safetensors and JSON are emitted from the same view.
+        frozen_tensors = dict(tensors)
+        save_file(frozen_tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
+
         weight_map = {}
         local_total_size = 0
 
-        for key, val in tensors.items():
+        for key, val in frozen_tensors.items():
             local_total_size += val.numel() * val.element_size()
             weight_map[key] = ckpt_filename
 
@@ -264,7 +316,6 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
                 f,
                 indent=4,
             )
-        save_file(tensors, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
     # Barrier to ensure all ranks have written the metadata
     torch.distributed.barrier()
@@ -305,9 +356,17 @@ def save_safetensors_by_layer_index(
         meta_filename = filename + ".json"
         ckpt_filename = filename + ".safetensors"
 
+        # Freeze a per-layer snapshot so safetensors and JSON are emitted from the same view.
+        frozen_layer_state_dict = dict(layer_state_dict)
+        save_file(
+            frozen_layer_state_dict,
+            save_directory + "/" + ckpt_filename,
+            metadata={"format": "pt"},
+        )
+
         weight_map = {}
         layer_total_size = 0
-        for key, val in layer_state_dict.items():
+        for key, val in frozen_layer_state_dict.items():
             tensor_size = val.numel() * val.element_size()
             layer_total_size += tensor_size
             weight_map[key] = ckpt_filename
@@ -318,7 +377,6 @@ def save_safetensors_by_layer_index(
                 f,
                 indent=4,
             )
-        save_file(layer_state_dict, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
 
     # [TODO]: this global barrier needs to be replaced with something safer
     torch.distributed.barrier()

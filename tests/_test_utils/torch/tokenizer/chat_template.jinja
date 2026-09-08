@@ -1,0 +1,21 @@
+{# Terse generation-tagged chat template for the tiny test tokenizer.
+
+   Uses plain-text "Q:/A:" role prefixes rather than ChatML special tokens
+   (<|im_start|> etc.): the 128-vocab tiny tokenizer has no such tokens, so it
+   byte-encodes them into ~70 extra tokens, which blows past tight max-seq-len
+   limits in example tests (e.g. compute_hidden_states with max-seq-len=32 on a
+   32-position tiny model). The {% generation %} blocks still let unit tests
+   exercise answer-only-loss assistant masking via return_assistant_tokens_mask. #}
+{{- bos_token -}}
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{- 'Q: ' + message['content'] + '\n' -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- 'A: ' -}}
+        {%- generation -%}
+            {{- message['content'] -}}
+        {%- endgeneration -%}
+        {{- '\n' -}}
+    {%- endif -%}
+{%- endfor -%}
+{{- eos_token -}}

@@ -82,14 +82,14 @@ class TestLoadFromCheckpointMetadata:
 
     def test_returns_none_for_unknown_algo(self):
         """Test that an unrecognized sparse_algo returns None."""
-        meta = {"config_groups": {"group_0": {"sparse_algo": "future_algo_v9000"}}}
+        meta = {"config_groups": {"group_0": {"algorithm": "future_algo_v9000"}}}
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
         assert load_from_checkpoint_metadata(hf_config) is None
 
     def test_maps_uncalibrated_softmax_skip_to_preset(self):
         """Test that uncalibrated softmax_skip uses the static Triton preset."""
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
+            "config_groups": {"group_0": {"algorithm": "skip_softmax"}},
             "producer": {"name": "modelopt", "version": "0.37.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -107,9 +107,13 @@ class TestLoadFromCheckpointMetadata:
             "decode": {"a": 5.0, "b": 7.0},
         }
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "softmax_skip"}},
-            "threshold_scale_factor": threshold_scale_factor,
-            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "threshold_scale_factor": threshold_scale_factor,
+                    "target_sparsity": {"prefill": 0.4, "decode": 0.6},
+                }
+            },
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -131,12 +135,14 @@ class TestLoadFromCheckpointMetadata:
     def test_maps_sparse_softmax_to_dynamic_config(self):
         """Test that checkpoint N:M sparse-softmax metadata restores layer params."""
         meta = {
-            "config_groups": {"group_0": {"sparse_algo": "sparse_softmax"}},
-            "sparse_softmax": {
-                "sparsity_n": 2,
-                "sparsity_m": 4,
-                "dense_sink_tokens": 4,
-                "dense_recent_tokens": 128,
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "dense_sink_tokens": 4,
+                    "dense_recent_tokens": 128,
+                }
             },
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
@@ -166,12 +172,17 @@ class TestLoadFromCheckpointMetadata:
         }
         meta = {
             "config_groups": {
-                "group_0": {"sparse_algo": "softmax_skip"},
-                "group_1": {"sparse_algo": "sparse_softmax"},
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "threshold_scale_factor": threshold_scale_factor,
+                    "target_sparsity": {"prefill": 0.4, "decode": 0.6},
+                },
+                "group_1": {
+                    "algorithm": "sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                },
             },
-            "threshold_scale_factor": threshold_scale_factor,
-            "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
-            "sparse_softmax": {"sparsity_n": 2, "sparsity_m": 4},
             "producer": {"name": "modelopt", "version": "0.45.0"},
         }
         hf_config = types.SimpleNamespace(sparse_attention_config=meta)
@@ -203,3 +214,31 @@ class TestLoadFromCheckpointMetadata:
         """Test that an empty config_groups returns None."""
         hf_config = types.SimpleNamespace(sparse_attention_config={"config_groups": {}})
         assert load_from_checkpoint_metadata(hf_config) is None
+
+    def test_calibrated_softmax_skip_honors_ignore(self):
+        """Layers recorded under ``ignore`` stay dense on load; others are sparsified."""
+        meta = {
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "ignore": ["blocks.0.attn1", "blocks.0.attn2"],
+                    "threshold_scale_factor": {
+                        "formula": "a * exp(b * target_sparsity)",
+                        "prefill": {"a": 2.0, "b": 3.0},
+                    },
+                    "target_sparsity": {"prefill": 0.5},
+                }
+            },
+            "producer": {"name": "modelopt", "version": "0.45.0"},
+        }
+        hf_config = types.SimpleNamespace(sparse_attention_config=meta)
+        result = load_from_checkpoint_metadata(hf_config)
+        assert result is not None
+        cfg, _ = result
+        # ``ignore``'d layers stay dense.
+        assert match_sparse_config("transformer.blocks.0.attn1", cfg) == {"enable": False}
+        assert match_sparse_config("transformer.blocks.0.attn2", cfg) == {"enable": False}
+        # A non-ignored self-attention layer is sparsified.
+        sparsified = match_sparse_config("transformer.blocks.2.attn1", cfg)
+        assert sparsified["method"] == "triton_skip_softmax"
+        assert sparsified["enable"] is True

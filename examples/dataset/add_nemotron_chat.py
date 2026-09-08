@@ -157,7 +157,7 @@ def parse_nemotron_conversation(raw_conversations: list) -> list[dict] | None:
         if content:
             msgs.append({"role": role, "content": content})
 
-    return msgs if msgs else None
+    return msgs or None
 
 
 async def main(args: argparse.Namespace) -> None:

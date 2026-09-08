@@ -212,11 +212,9 @@ def _build_subblocks_df(
         master_puzzle_dir, trust_remote_code=trust_remote_code
     )
     checkpoint_dirs = [teacher_checkpoint_dir] + list(checkpoint_dirs - {teacher_checkpoint_dir})
-    checkpoints_to_split = [teacher_checkpoint_dir]
-
     subblock_rows = []
     for checkpoint_dir in checkpoint_dirs:
-        subblocks_to_extract = _infer_subblocks_to_extract(checkpoint_dir, checkpoints_to_split)
+        subblocks_to_extract = _infer_subblocks_to_extract(checkpoint_dir)
         if len(subblocks_to_extract) > 0:
             subblock_rows_from_current_checkpoint = (
                 _construct_subblock_rows_from_current_checkpoint(
@@ -447,27 +445,10 @@ def _get_last_checkpoint_from_each_experiment(
     return deduped_checkpoint_dirs
 
 
-def _infer_subblocks_to_extract(
-    checkpoint_dir: Path,
-    checkpoints_to_split: list[Path],
-) -> list[str]:
+def _infer_subblocks_to_extract(checkpoint_dir: Path) -> list[str]:
     if (checkpoint_dir / "replacement_library.json").exists():
         return []
-    bypass_config_path = checkpoint_dir / "bypass_config.json"
-    if (checkpoint_dir in checkpoints_to_split) or (not bypass_config_path.exists()):
-        subblocks_to_extract = ["block", "attention", "ffn"]
-    else:
-        bypass_config = json.loads(bypass_config_path.read_text())
-        keys_to_learn = bypass_config.get("keys_to_learn", "entire_block")
-        if keys_to_learn == "entire_block":
-            subblocks_to_extract = ["block"]
-        elif "mlp" in keys_to_learn and "attn" not in keys_to_learn:
-            subblocks_to_extract = ["ffn"]
-        elif "attn" in keys_to_learn and "mlp" not in keys_to_learn:
-            subblocks_to_extract = ["attention"]
-        else:
-            raise ValueError(f"Unrecognized {keys_to_learn=}")
-    return subblocks_to_extract
+    return ["block", "attention", "ffn"]
 
 
 def _init_empty_subblock_row(block_idx: int) -> dict[str, Any]:

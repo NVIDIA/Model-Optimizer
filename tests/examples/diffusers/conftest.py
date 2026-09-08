@@ -14,18 +14,12 @@
 # limitations under the License.
 
 import pytest
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
 
 
 @pytest.fixture(scope="session")
-def tiny_wan22_path(tmp_path_factory):
-    """Create a tiny Wan 2.2 (14B-style) pipeline and return its path.
-
-    Built once per session and shared across all tests that need it.
-    """
-    try:
-        from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
-    except ImportError:
-        pytest.skip("Wan 2.2 diffusers models not available (requires diffusers with WanPipeline)")
-
-    tmp_path = tmp_path_factory.mktemp("wan22")
-    return str(create_tiny_wan22_pipeline_dir(tmp_path))
+def tiny_qwen_image_path(tmp_path_factory):
+    tmp_path = tmp_path_factory.mktemp("qwen_image")
+    with assert_unmodified_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
+        yield str(path)

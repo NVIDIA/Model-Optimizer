@@ -15,10 +15,12 @@
 
 # NOTE: This test requires modelopt.torch.quantization to be installed as well.
 
+import builtins
 import copy
 import os
 from functools import partial
 
+import numpy
 import torch
 from _test_utils.import_helper import skip_if_no_libcudnn
 from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx, find_init
@@ -41,10 +43,6 @@ else:
 
 def test_safe_cupy_array(monkeypatch):
     """Comprehensive test for safe_cupy_array covering all code paths."""
-    import builtins
-
-    import numpy  # Import actual numpy for creating int4 tensors
-
     # Test 1: Regular numpy array (should hit line 122)
     result = int4.safe_cupy_array(numpy.array([1, 2, 3, 4], dtype=numpy.float32))
     assert isinstance(result, np.ndarray)

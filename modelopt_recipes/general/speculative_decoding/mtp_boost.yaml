@@ -2,7 +2,7 @@
 
 metadata:
   recipe_type: speculative_mtp_boost
-  description: Cache-free online, streaming, or offline boosting of checkpoint-native MTP.
+  description: Cache-free online or offline boosting of checkpoint-native MTP.
 
 model:
   model_name_or_path:
@@ -11,13 +11,9 @@ model:
 data:
   # This placeholder selects the offline data flow. Set it to DSV4 MTP feature dumps.
   offline_data_path: input_mtp_features/
-  # For vLLM streaming, set offline_data_path=null and provide all four fields below.
+  # For online training, set offline_data_path=null and provide data_path.
   data_path:
   chat_template:
-  streaming_server_url:
-  streaming_model_name:
-  streaming_shared_storage_path:
-  streaming_prefetch: 64
   sample_size: -1
 
 training:

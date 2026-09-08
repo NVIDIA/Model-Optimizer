@@ -24,9 +24,14 @@ from modelopt.onnx.quantization import quantize
 
 @pytest.fixture
 def model_and_input():
-    """Create model and dummy input."""
+    """Create model and dummy input.
+
+    Input kept small (32x32) — this asserts QDQ placement around ConvTranspose
+    weights, which is independent of spatial size, so a tiny input keeps the ORT
+    calibration pass fast. UNet downsamples by 8, so 32 is the minimum sensible size.
+    """
     model = UNet()
-    dummy_input = torch.randn(2, 1, 256, 256)
+    dummy_input = torch.randn(1, 1, 32, 32)
     return model, dummy_input
 
 

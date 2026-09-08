@@ -27,10 +27,15 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
-from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -126,24 +131,13 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
         if not isinstance(module, QuantModule):
             continue
         for attr_name, quantizer in module.named_children():
-            if attr_name.endswith("weight_quantizer") and isinstance(
-                quantizer, (TensorQuantizer, SequentialQuantizer)
-            ):
+            if attr_name.endswith("weight_quantizer") and isinstance(quantizer, AnyQuantizer):
                 if quantizer.is_enabled:
                     raise RuntimeError(
                         f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
                         f"quantizer_state (weights already folded). "
                         f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
                     )
-
-
-def disable_rotate(quantizer: TensorQuantizer):
-    """Return a disabled copy of the quantizer's ``_rotate`` field, preserving its type."""
-    if isinstance(quantizer._rotate, RotateConfig):
-        return RotateConfig(enable=False)
-    if isinstance(quantizer._rotate, dict):  # backward compat: old checkpoints stored a dict
-        return dict(quantizer._rotate, enable=False)
-    return False
 
 
 def _fakequant_fused_experts_weights(
@@ -161,8 +155,9 @@ def _fakequant_fused_experts_weights(
     expert) that the base loop skips, leaving the fused 3-D weight unquantized
     in the export and breaking weight-fold round-trips.
     """
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     for w_attr, q_attr in (
-        ("gate_up_proj", "gate_up_proj_weight_quantizers"),
+        (first_proj_attr, f"{first_proj_attr}_weight_quantizers"),
         ("down_proj", "down_proj_weight_quantizers"),
     ):
         quantizers = getattr(module, q_attr, None)
@@ -634,19 +629,18 @@ def export_hf_vllm_fq_checkpoint(
                 for attr_name, quantizer in module.named_children():
                     if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
                         continue
-                    if isinstance(quantizer, SequentialQuantizer):
+                    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
+                        # GroupedQuantizer (per-expert TEGroupedLinear) and SequentialQuantizer
+                        # both hold sub-quantizers; disable each so the widened
+                        # _check_all_weight_quantizers_disabled(AnyQuantizer) check passes.
                         quantizer.disable()
                         for sub in quantizer:
-                            orig_rotate = sub._rotate
-                            if sub.rotate_is_enabled:
-                                sub._rotate = disable_rotate(sub)
-                            wqs_to_restore.append((sub, orig_rotate))
+                            wqs_to_restore.append((sub, sub._rotate))
+                            sub.disable_rotate()
                     elif isinstance(quantizer, TensorQuantizer):
                         quantizer.disable()
-                        orig_rotate = quantizer._rotate
-                        if quantizer.rotate_is_enabled:
-                            quantizer._rotate = disable_rotate(quantizer)
-                        wqs_to_restore.append((quantizer, orig_rotate))
+                        wqs_to_restore.append((quantizer, quantizer._rotate))
+                        quantizer.disable_rotate()
 
         quantizer_state_dict = get_quantizer_state_dict(model)
         for key in list(quantizer_state_dict):

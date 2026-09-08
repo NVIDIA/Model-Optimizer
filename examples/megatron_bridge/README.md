@@ -1,6 +1,6 @@
 # Megatron Bridge
 
-This directory contains examples of using Model Optimizer with [NeMo Megatron-Bridge](https://github.com/NVIDIA-Nemo/Megatron-Bridge) framework for quantization, distillation, pruning, etc.
+This directory contains examples of using Model Optimizer with the [NeMo Megatron-Bridge](https://github.com/NVIDIA-Nemo/Megatron-Bridge) framework for quantization, pruning, and distillation. These workflows can be used on their own or combined.
 
 <div align="center">
 
@@ -10,13 +10,17 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 | Post-Training Quantization | Quantizing a model | \[[Link](#post-training-quantization)\] |
 | Distillation | Distilling a pruned or quantized model | \[[Link](#distillation)\] |
 | Pruning | Pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
+| Sanity-Check Generation | Quick generation check with vLLM | \[[Link](#sanity-check-generation)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
 
+> [!TIP]
+> Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.08`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -26,7 +30,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.04
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.08
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -43,12 +47,6 @@ docker run \
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
-Also install additional dependencies from the [requirements.txt](./requirements.txt) file.
-
-```bash
-python -m pip install -r requirements.txt
-```
-
 You also need to login with your HuggingFace token to download gated datasets / models.
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
 
@@ -56,40 +54,73 @@ Note that the default dataset for pruning and quantization is [`nemotron-post-tr
 hf auth login --token <your token>
 ```
 
+### Importing a HuggingFace Checkpoint (optional)
+
+The scripts below take a HuggingFace checkpoint directly, but if you want a Megatron distributed
+checkpoint (e.g. to reuse across runs), convert it with Megatron-Bridge's conversion script — use
+`--tp` / `--pp` / `--ep` to shard a model that does not fit on one GPU (`--ep` for MoE models), or
+`--device cpu` to convert in a single process without GPUs:
+
+```bash
+bash /opt/Megatron-Bridge/scripts/conversion/convert.sh import \
+    --executor local \
+    --device gpu \
+    --gpus-per-node 8 \
+    --hf-model Qwen/Qwen3-8B \
+    --megatron-path /tmp/Qwen3-8B-megatron
+```
+
 ## Post-Training Quantization
 
 This section shows how to quantize a HuggingFace model using ModelOpt in the Megatron-Bridge framework. Quantization is a two-step flow:
 
 1. [quantize.py](quantize.py) applies post-training quantization (PTQ) with calibration and saves a **Megatron checkpoint** (with ModelOpt state). Tensor / pipeline / expert parallelism are all supported, and the checkpoint can be reloaded for further training (Quantization Aware Training / Quantization Aware Distillation).
-2. [export.py](export.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
+2. [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) converts that Megatron checkpoint to a **HuggingFace (unified) checkpoint** that deploys directly with TensorRT-LLM, vLLM, or SGLang.
 
-`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `FP8_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/fp8_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
+`quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_smoothquant`, `int4_awq`, `w4a8_awq_beta`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `NVFP4_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/nvfp4_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-**Step 1 — quantize** Qwen3-8B to FP8 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration:
+**Step 1 — quantize** Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 4096):
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --quant_cfg fp8 \
+    --quant_cfg nvfp4 \
     --tp_size 2 \
-    --export_megatron_path /tmp/Qwen3-8B-FP8-megatron
+    --calib_batch_size 1 \
+    --seq_length 4096 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 ```
+
+> [!NOTE]
+> Data parallelism is implicit: `DP = world_size / (tp_size * pp_size * cp_size)`. Launching with more GPUs than `tp_size * pp_size * cp_size` shards calibration across the extra data-parallel ranks (e.g. `torchrun --nproc_per_node 8 quantize.py --tp_size 2` runs with DP=4).
 
 **Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
-torchrun --nproc_per_node 1 export.py \
+torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --megatron_path /tmp/Qwen3-8B-FP8-megatron \
-    --export_unified_hf_path /tmp/Qwen3-8B-FP8-hf
+    --megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --pp_size 2 \
+    --export_unified_hf_path /tmp/Qwen3-8B-NVFP4-hf
 ```
 
 > [!NOTE]
-> The HuggingFace unified exporter does not gather tensor-parallel-sharded weights. Use `--pp_size` on `export.py` to shard a large model with pipeline parallelism across GPUs for export.
+> The HuggingFace unified exporter can't split weights across GPUs with tensor parallelism. For large models, use `--pp_size` on `export_quantized_megatron_to_hf.py` to shard the export across GPUs with pipeline parallelism instead.
 
-To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export.py --help`).
+> [!TIP]
+> To recover the accuracy lost during quantization, fine-tune the quantized Megatron checkpoint (from step 1) with [Quantization Aware Distillation (QAD)](#quantization-aware-distillation-qad) before running the step 2 export.
 
-For Quantization scripts covering VLMs, QAT, and resuming quantized checkpoints, see the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
+To see the full usage for advanced configurations, run `torchrun --nproc_per_node 1 quantize.py --help` (or `export_quantized_megatron_to_hf.py --help`).
+
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automatically quantizes only the **language model** and leaves the vision tower and vision-language projector in full precision, then saves the full VLM back as a Megatron checkpoint. The calibration modality is inferred from `--calib_dataset_name`:
+
+- An **image-text** dataset (the default for VLMs, `nemotron_vlm_dataset_v2`) drives the full VLM forward, so the language model is calibrated on vision-conditioned activations.
+- A **text** dataset runs text-only calibration of the language model (vision tower idle).
+
+> [!NOTE]
+> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** and **Qwen3.5-VL**. Other VLMs such as Gemma3-VL are saved in Megatron checkpoint format only.
 
 ## Distillation
 
@@ -99,12 +130,29 @@ This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quant
 
 The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
+To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
+
 ### Data Preparation
 
 The distillation script expects pre-tokenized data in Megatron's binary format (`.bin` / `.idx` files).
 
 See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
+
+Alternatively, pass `--sft --sft_dataset_root <dir>` to distill on **raw prompt-completion JSONL**
+with the loss masked to the completion. The directory must hold `training.jsonl` (and
+`validation.jsonl` when `--eval_iters > 0`) of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
+the model's own HuggingFace tokenizer. Both fields are tokenized **as written**, except that
+leading and trailing spaces on each field are stripped — no chat template is applied. So if your
+model expects role/turn markers, include them in the `"input"` field yourself, and express any
+significant separator as a newline rather than a trailing space. A BOS token is prepended
+automatically when the tokenizer prepends one at inference, so do not add it yourself; an EOS
+token is appended after the response. A record longer than `--seq_length` is truncated from the
+**start** of `"input"`, which drops any system prompt or opening role marker baked in there, so
+pre-filter or pre-truncate the corpus if that matters.
+
+Teacher and student must share a tokenizer — distillation scores the teacher on the student's
+token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
 
 ### Distillation with Real Data
 
@@ -134,6 +182,9 @@ Tensorboard logging is enabled by default and logs are saved to `<output_dir>/te
 To use Weights & Biases for logging, set the `WANDB_API_KEY` environment variable and pass the `--wandb_project` argument.
 Optionally, you can also pass `--wandb_entity` and `--wandb_exp_name` arguments to group runs under a project and experiment name.
 
+To measure the initial student's CE and distillation losses, add `--validate_only` to the command.
+This skips training and evaluates the student at iteration 0.
+
 To see all available arguments:
 
 ```bash
@@ -159,35 +210,102 @@ torchrun --nproc_per_node 8 distill.py \
     --output_dir /tmp/test_distill
 ```
 
-### Slurm Usage
+### Vision-Language Models (VLMs)
 
-To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `distill.py` distills only the **language model** (on text data) and leaves the vision tower and projector untouched — matching the pruning and quantization behavior. It composes with pruning and QAD (`--student_megatron_path`) exactly as for LLMs, and the HF export reuses `--student_hf_path` (no `--student_hf_model` needed).
+
+```bash
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 8 \
+    --teacher_hf_path Qwen/Qwen3-VL-2B-Thinking \
+    --student_hf_path Qwen/Qwen3-VL-2B-Thinking \
+    ...
+```
 
 ### Converting to Hugging Face format (optional)
 
-The distilled checkpoint is saved in Megatron distributed format. If you need a HuggingFace checkpoint, there are two ways to convert it:
+A **non-quantized** distilled checkpoint (LLM or VLM) is saved in Megatron distributed format. If you need a HuggingFace checkpoint, there are two ways to convert it (for a **QAD** checkpoint, which retains quantization state, use [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) instead — see [QAD](#quantization-aware-distillation-qad)):
 
-**Inline** -- add `--hf_export_path` and `--student_hf_model` to the `distill.py` command to automatically convert the final checkpoint after distillation:
+**Inline** -- add `--hf_export_path` to the `distill.py` command to automatically convert the **final** checkpoint after distillation:
 
 ```bash
 torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     ... \
-    --hf_export_path /path/to/save/distilled_hf_ckpt \
-    --student_hf_model Qwen/Qwen3-4B
+    --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-`--student_hf_model` should match the base architecture of the student (used as a template for export). For non-Puzzletron (i.e. standard) models, it should be same as `--student_hf_path`.
+`--student_hf_path` builds the student and provides the exported config / tokenizer. `--student_hf_model` is a reference HF model with a **homogeneous** architecture, used as the export template only for **heterogeneous** (Puzzletron/NAS) students; for homogeneous models and VLMs, omit it -- it defaults to `--student_hf_path`.
 
-**Separate conversion** -- convert any saved iteration using the Megatron-Bridge conversion script:
+**Separate conversion** -- convert **any** saved iteration (intermediate or final) with [export_distilled_megatron_to_hf.py](export_distilled_megatron_to_hf.py):
 
 ```bash
-uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
-    --hf-model <path_to_pruned_hf_ckpt> \
-    --megatron-path <distill_output_dir>/checkpoints/iter_<iter_number> \
-    --hf-path <path_to_save_distilled_hf_ckpt>
+torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+    --student_hf_path <student_hf_model_or_path> \
+    --megatron_path <distill_output_dir>/checkpoints/iter_<iter_number> \
+    --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-For more details, see the [Megatron-Bridge conversion README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+Use `--export_iterations` to export multiple saved checkpoints, for example to evaluate how model
+quality changes during distillation. To export multiple iterations, keep those Megatron checkpoints
+during distillation. The default is to keep the last 5 checkpoints; set `--checkpoint_keep_last -1`
+to keep all saved checkpoints.
+
+Then export all retained checkpoints, with one Hugging Face checkpoint written per
+`iter_<iteration>` subdirectory:
+
+```bash
+torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+    --student_hf_path <student_hf_model_or_path> \
+    --megatron_path <distill_output_dir>/checkpoints \
+    --hf_export_path /path/to/save/hf_validation_checkpoints \
+    --export_iterations all
+```
+
+The export path contains one loadable Hugging Face checkpoint per exported iteration:
+
+```text
+hf_validation/
+├── iter_0000100/
+├── iter_0000200/
+└── iter_0000300/
+```
+
+To export selected iterations instead, use `--export_iterations 200 400 600`.
+
+### Quantization Aware Distillation (QAD)
+
+To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model.
+
+If you do not already have a suitable QAD dataset, start with
+[data/nemotron-cascade-2-blend.yaml](data/nemotron-cascade-2-blend.yaml). It defines a general-purpose
+mixture of SFT data for QAD. Copy it, set the tokenizer for the target model, and adjust the output directory,
+sources, and weights as needed before preparing data. Its default 17.3-billion-token budget covers 1000
+iterations at global batch size 512 and sequence length 32768, including a 1% validation holdout and margin.
+Recalculate the budget when changing those settings, and keep the prepared data unchanged when resuming.
+
+We also use a smaller learning rate for QAD:
+
+```bash
+torchrun --nproc_per_node 8 distill.py \
+    --tp_size 8 \
+    --teacher_hf_path Qwen/Qwen3-8B \
+    --student_hf_path Qwen/Qwen3-8B \
+    --student_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
+    --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
+    --seq_length 8192 \
+    --gbs 768 \
+    --train_iters 1000 \
+    --lr 1e-5 \
+    --min_lr 5e-6 \
+    --output_dir /output/qwen3_8b_nvfp4_qad
+```
+
+The distilled checkpoint retains the ModelOpt quantization state, so it can be converted to a deployable HuggingFace checkpoint with [export_quantized_megatron_to_hf.py](export_quantized_megatron_to_hf.py) (point `--megatron_path` at `/output/qwen3_8b_nvfp4_qad/checkpoints`), exactly like the PTQ checkpoint in [step 2 above](#post-training-quantization).
+
+### Slurm Usage
+
+To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.
 
 ### Distillation Results
 
@@ -265,9 +383,45 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > uneven PP by setting `--num_layers_in_first_pipeline_stage` and `--num_layers_in_last_pipeline_stage`.
 > E.g. for Qwen3-8B with 36 layers and 8 GPUs, you can set both to 3 to get 3-5-5-5-5-5-5-3 layers per GPU.
 
+> [!NOTE]
+> NAS-based pruning requires ~2x the GPU memory of Manual pruning because it needs to simultaneously hold original model while evaluating each pruned candidate.
+
+> [!NOTE]
+> Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a short MTP SFT on the pruned model.
+
+### Vision-Language Models (VLMs)
+
+For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged, with two VLM-specific caveats:
+
+- The `--prune_target_params` / `--prune_target_active_params` / `--prune_target_memory_mb` targets (and `export_config` dimensions) apply to the **language model only** — the (unpruned) vision tower's parameters are *not* counted, so the full saved VLM will be larger than the target.
+- `hidden_size` is never pruned for VLMs (it is shared with the vision projector).
+
+```bash
+torchrun --nproc_per_node 2 prune_minitron.py \
+    --pp_size 2 \
+    --hf_model_name_or_path Qwen/Qwen3.5-4B \
+    --prune_target_params 3e9 \
+    --output_hf_path /tmp/Qwen3.5-4B-Pruned-3B
+```
+
+## Sanity-Check Generation
+
+[generate_vllm.py](generate_vllm.py) runs a quick generation check on an exported HuggingFace checkpoint using vLLM — a useful smoke test for a **quantized**, **pruned**, or **distilled** model to confirm it still produces coherent text. For quantized checkpoints, vLLM auto-detects the ModelOpt quantization from the exported `hf_quant_config.json`, so no extra flags are needed:
+
+```bash
+# Quantized model
+python generate_vllm.py --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4 --trust_remote_code
+
+# Pruned model
+python generate_vllm.py --model /tmp/Qwen3-8B-Pruned-6B
+```
+
+> [!NOTE]
+> `--trust_remote_code` is only needed for models that ship custom modeling code (e.g. Nemotron); Qwen models don't require it.
+
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
 - 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 - 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)

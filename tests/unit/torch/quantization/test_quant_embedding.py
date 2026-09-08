@@ -108,6 +108,42 @@ class TestQuantEmbedding:
         # Forward still works — input_quantizer is disabled and never applied.
         qemb(torch.randint(0, VOCAB_SIZE, (4, 6)))
 
+    def test_disable_update_clears_hard_disabled_input_quantizer_rotate_state(self):
+        qemb = _make_quant_embedding()
+        set_quantizer_attributes_partial(
+            qemb,
+            "*input_quantizer",
+            {"enable": True, "num_bits": 4, "rotate": {"enable": True, "mode": "rotate_back"}},
+        )
+        assert not qemb.input_quantizer.is_enabled
+        assert qemb.input_quantizer.num_bits == 4
+        assert qemb.input_quantizer.rotate_is_enabled
+        assert qemb.input_quantizer.extra_repr() == "disabled rotated (rotate_back)"
+
+        set_quantizer_attributes_partial(qemb, "*input_quantizer", {"enable": False})
+
+        assert not qemb.input_quantizer.is_enabled
+        assert qemb.input_quantizer.num_bits == 4
+        assert not qemb.input_quantizer.rotate_is_enabled
+        assert qemb.input_quantizer.extra_repr() == "disabled"
+
+    def test_disable_update_clears_weight_quantizer_rotate_state(self):
+        qemb = _make_quant_embedding()
+        set_quantizer_attributes_partial(
+            qemb,
+            "*weight_quantizer",
+            {"enable": True, "num_bits": 4, "rotate": {"enable": True, "mode": "rotate_back"}},
+        )
+        assert qemb.weight_quantizer.is_enabled
+        assert qemb.weight_quantizer.rotate_is_enabled
+        assert "rotated (rotate_back)" in qemb.weight_quantizer.extra_repr()
+
+        set_quantizer_attributes_partial(qemb, "*weight_quantizer", {"enable": False})
+
+        assert not qemb.weight_quantizer.is_enabled
+        assert not qemb.weight_quantizer.rotate_is_enabled
+        assert "rotated" not in qemb.weight_quantizer.extra_repr()
+
 
 # Export-path tests for QuantEmbedding live in tests/gpu/torch/export/test_export_embedding.py
 # because _export_quantized_weight bottoms out in torch.cuda.empty_cache(), which raises on

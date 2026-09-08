@@ -1,0 +1,80 @@
+# DMD2 distillation recipe for Qwen-Image (text-to-image).
+#
+# Maps to :class:`modelopt.torch.fastgen.DMDConfig`. Load with::
+#
+#     from modelopt.torch.fastgen import load_dmd_config
+#     cfg = load_dmd_config("general/distillation/dmd2_qwen_image")
+#
+# Reference: NeMo AutoModel's Qwen-Image flow-matching config
+# (Automodel/examples/diffusion/finetune/qwen_image_t2i_flow.yaml).
+
+# Qwen-Image is rectified-flow. Under RF, "flow" and "v" are equivalent.
+pred_type: flow
+
+# Qwen-Image normalises timesteps to [0, 1] internally (see
+# QwenImageAdapter.prepare_inputs: ``timesteps = context.timesteps / 1000``).
+# QwenImageDMDPipeline asserts num_train_timesteps is null so the continuous RF
+# time ``t ∈ [0, 1]`` is forwarded verbatim.
+num_train_timesteps:
+
+# Classifier-free guidance strength applied to the teacher during the student update.
+# null disables CFG (skips the negative-conditioning teacher forward).
+guidance_scale:
+
+# Phase 2: 4-step student to match FastGen's Qwen-Image DMD2 default
+# (config_dmd2.py:52). ``sample_t_cfg.t_list`` below pins the per-step schedule.
+student_sample_steps: 4
+student_sample_type: ode
+# Default keeps FastGen Qwen parity: train each rung from noised real latents.
+# Override with ``--dmd2.backward_simulation=true`` to no-grad unroll the current
+# student from the first rung before training the selected rung.
+backward_simulation: false
+
+# One student step per N fake-score / discriminator steps.
+student_update_freq: 5
+
+# Fake score trains in x0 space while the student/teacher operate in flow space.
+fake_score_pred_type: x0
+
+# GAN generator weight. 0 disables the discriminator branch (Phase 1).
+gan_loss_weight_gen: 0.0
+gan_use_same_t_noise: false
+gan_r1_reg_weight: 0.0
+gan_r1_reg_alpha: 0.1
+
+sample_t_cfg:
+  # ``time_dist_type`` governs the *perturbation* timestep ``t`` sampled on
+  # every loss path — VSD perturbation in compute_student_loss (dmd.py:417),
+  # fake-score DSM perturbation in compute_fake_score_loss (dmd.py:529), and
+  # GAN/discriminator perturbation in compute_discriminator_loss
+  # (dmd.py:605). All three call ``self.sample_timesteps`` → ``sample_t`` →
+  # reads ``time_dist_type``.
+  #
+  # It does NOT govern the student's *starting* timestep ``t_student``: under
+  # student_sample_steps > 1, ``_build_student_input`` calls
+  # ``sample_from_t_list`` (dmd.py:346) which samples uniformly from
+  # ``t_list[:-1]`` regardless of ``time_dist_type``. So ``time_dist_type``
+  # is a knob that's active at every loss path; the 4-step setup just makes
+  # it irrelevant for ``t_student`` specifically.
+  time_dist_type: logitnormal
+  min_t: 0.001
+  max_t: 0.999
+  p_mean: 0.0
+  p_std: 1.0
+  # Exact ``torch.linspace(max_t=0.999, 0.0, 5).tolist()`` — the inference
+  # pipeline's default schedule when no t_list is passed (see
+  # ``inference_dmd2_qwen_image.py:259``). Stride = 0.999 / 4 = 0.249975, so
+  # the four training timesteps drawn from ``t_list[:-1]`` exactly match the
+  # four inference sample points. The previous values
+  # ``[0.999, 0.75, 0.5, 0.25, 0.0]`` looked like a uniform 0.25 stride but
+  # were really ``linspace(1.0, 0, 5)`` with t=1 shaved to 0.999, leaving a
+  # silent ~0.3% train↔inference skew on each non-endpoint timestep.
+  t_list: [0.999, 0.74925, 0.4995, 0.24975, 0.0]
+
+# Student EMA. Omit this block to disable EMA tracking entirely.
+ema:
+  decay: 0.9999
+  type: constant
+  start_iter: 0
+  fsdp2: true
+  mode: full_tensor

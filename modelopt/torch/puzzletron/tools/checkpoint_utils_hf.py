@@ -21,7 +21,10 @@ Utilities for loading and saving Hugging Face-format checkpoints (``AutoConfig``
 import concurrent.futures
 import dataclasses
 import fcntl
+import inspect
 import os
+import re
+import shutil
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -88,8 +91,18 @@ def force_cache_dynamic_modules(
         and "AutoConfig" in config.auto_map.keys()
     )
     if has_remote_code and trust_remote_code:
-        for class_reference in config.auto_map.values():
+        for class_reference in _iter_auto_map_class_refs(config.auto_map):
             _ = get_class_from_dynamic_module(class_reference, checkpoint_dir)
+
+
+def _iter_auto_map_class_refs(auto_map: Mapping[str, Any]):
+    for value in auto_map.values():
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, str):
+                    yield item
 
 
 def load_model_config(
@@ -135,16 +148,23 @@ def load_model_config(
     return config
 
 
+_FALLBACK_WARNED_CLASSES: set[str] = set()
+
+
 def _get_model_class_from_config(config: PretrainedConfig) -> type:
     """Resolve HuggingFace model class from ``config.architectures`` (see puzzletron checkpoint_utils_hf)."""
     if hasattr(config, "architectures") and config.architectures:
         model_class_name = config.architectures[0]
         if hasattr(transformers, model_class_name):
             return getattr(transformers, model_class_name)
-        mprint(
-            f"Warning: {model_class_name} not found in transformers, "
-            "falling back to AutoModelForCausalLM"
-        )
+        # Warn at most once per missing class per process — the fallback path
+        # may be hit thousands of times during scoring/realize loops.
+        if model_class_name not in _FALLBACK_WARNED_CLASSES:
+            _FALLBACK_WARNED_CLASSES.add(model_class_name)
+            mprint(
+                f"Warning: {model_class_name} not found in transformers, "
+                "falling back to AutoModelForCausalLM"
+            )
     return AutoModelForCausalLM
 
 
@@ -209,10 +229,9 @@ def save_checkpoint_from_shards(
     """
     Save a checkpoint when the model's weights are sharded across distributed ranks.
 
-    Gathers each rank's partial state dictionary onto rank 0 and writes a complete checkpoint
-    (including the safetensors index and subblocks) from the merged weights. On a single-process
-    run, saves directly from the local state dict. Only rank 0 performs the filesystem write;
-    non-master ranks only participate in the gather.
+    On distributed runs, rank 0 gathers only tensor-name metadata up front and then gathers
+    tensors one safetensors file at a time. This avoids materializing the full model from all
+    ranks on rank 0 while still producing a single HF-compatible checkpoint/index.
 
     Parameters:
         model (PreTrainedModel): The model instance whose local state_dict contains this rank's
@@ -222,31 +241,113 @@ def save_checkpoint_from_shards(
         the safetensors index.
     """
 
-    local_sd = {k: v.cpu() for k, v in model.state_dict().items()}
+    local_sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     if dist_utils.size() > 1:
-        save_err: str | None = None
-        if dist_utils.is_master():
-            gathered: list[dict] = [None] * dist_utils.size()
-            tdist.gather_object(local_sd, gathered, dst=0)
-            full_sd: dict[str, torch.Tensor] = {}
-            for shard_sd in gathered:
-                if shard_sd is None:
-                    continue
-                full_sd.update(shard_sd)
-            try:
-                _save_checkpoint(model.config, full_sd, checkpoint_dir, descriptor)
-            except Exception as e:
-                save_err = repr(e)
-        else:
-            tdist.gather_object(local_sd, dst=0)
-        err_box = [save_err]
-        tdist.broadcast_object_list(err_box, src=0)
-        # Barrier ensures all ranks wait until file I/O completes before continuing
+        _save_checkpoint_from_distributed_shards(model.config, local_sd, checkpoint_dir, descriptor)
         dist_utils.barrier()
-        if err_box[0] is not None:
-            raise RuntimeError(f"Checkpoint save failed on rank 0: {err_box[0]}")
     else:
         _save_checkpoint(model.config, local_sd, checkpoint_dir, descriptor)
+
+
+def _save_checkpoint_from_distributed_shards(
+    model_config: PretrainedConfig,
+    local_state_dict: dict[str, torch.Tensor],
+    checkpoint_dir: Path | str,
+    descriptor: "ModelDescriptor",
+) -> None:
+    if not isinstance(checkpoint_dir, Path):
+        checkpoint_dir = Path(checkpoint_dir)
+
+    local_keys = list(local_state_dict.keys())
+    gathered_keys: list[list[str] | None] | None = (
+        [None] * dist_utils.size() if dist_utils.is_master() else None
+    )
+    tdist.gather_object(local_keys, gathered_keys, dst=0)
+
+    owner_by_key = None
+    weight_map = None
+    setup_err = None
+    if dist_utils.is_master():
+        try:
+            assert gathered_keys is not None
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            save_model_config(model_config, checkpoint_dir)
+
+            # Match the old full_sd.update(rank_order) behavior for duplicate tied
+            # weights by letting the highest rank that owns a key supply it.
+            owner_by_key = {
+                key: rank
+                for rank, keys in enumerate(gathered_keys)
+                if keys is not None
+                for key in keys
+            }
+            full_keys = list(owner_by_key)
+
+            output_emb_weight_name = f"{descriptor.output_embedding_name()}.weight"
+            if getattr(model_config, "tie_word_embeddings", False):
+                owner_by_key.pop(output_emb_weight_name, None)
+                full_keys = [key for key in full_keys if key != output_emb_weight_name]
+
+            lm_config = descriptor.get_language_model_config(model_config)
+            subblock_keys = descriptor.get_weight_groups(
+                layer_names=full_keys,
+                num_hidden_layers=lm_config.num_hidden_layers,
+            )
+            weight_map = {
+                key: f"subblocks_safetensors/{subblock}.safetensors"
+                for subblock, layer_keys in subblock_keys.items()
+                for key in layer_keys
+            }
+
+            index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
+            _write_file_process_safe(json_dumps(index), checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME)
+            (checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            setup_err = repr(e)
+            owner_by_key = {}
+            weight_map = {}
+
+    payload = [setup_err, owner_by_key, weight_map]
+    tdist.broadcast_object_list(payload, src=0)
+    setup_err, owner_by_key, weight_map = payload
+    if setup_err is not None:
+        raise RuntimeError(f"Checkpoint setup failed on rank 0: {setup_err}")
+    assert owner_by_key is not None
+    assert weight_map is not None
+
+    for relative_filename in sorted(set(weight_map.values())):
+        local_file_tensors = {
+            key: tensor.contiguous()
+            for key, tensor in local_state_dict.items()
+            if owner_by_key.get(key) == dist_utils.rank()
+            and weight_map.get(key) == relative_filename
+        }
+        gathered_tensors: list[dict[str, torch.Tensor] | None] | None = (
+            [None] * dist_utils.size() if dist_utils.is_master() else None
+        )
+        tdist.gather_object(local_file_tensors, gathered_tensors, dst=0)
+        if dist_utils.is_master():
+            assert gathered_tensors is not None
+            file_state_dict: dict[str, torch.Tensor] = {}
+            for shard_tensors in gathered_tensors:
+                if shard_tensors:
+                    file_state_dict.update(shard_tensors)
+            file_err = None
+            if file_state_dict:
+                try:
+                    safe_save_file(
+                        tensors=file_state_dict,
+                        filename=checkpoint_dir / relative_filename,
+                        metadata={"format": "pt"},
+                    )
+                except Exception as e:
+                    file_err = repr(e)
+        else:
+            file_err = None
+        err_box = [file_err]
+        tdist.broadcast_object_list(err_box, src=0)
+        if err_box[0] is not None:
+            raise RuntimeError(f"Checkpoint save failed for {relative_filename}: {err_box[0]}")
 
 
 def _save_checkpoint(
@@ -265,9 +366,10 @@ def _save_checkpoint(
     save_model_config(model_config, checkpoint_dir)
 
     # Phase 2: Build weight map using descriptor and write index
+    lm_config = descriptor.get_language_model_config(model_config)
     subblock_keys = descriptor.get_weight_groups(
         layer_names=state_dict.keys(),
-        num_hidden_layers=model_config.num_hidden_layers,
+        num_hidden_layers=lm_config.num_hidden_layers,
     )
 
     weight_map = {}
@@ -490,6 +592,47 @@ def _build_safetensors_weight_map(
     return weight_map
 
 
+def _copy_auto_map_code_files(model_config: PretrainedConfig, checkpoint_dir: Path) -> None:
+    """Copy custom modeling Python files referenced in ``auto_map`` to the checkpoint dir.
+
+    ``PretrainedConfig.save_pretrained()`` only copies the config class's own source file
+    (e.g. ``configuration_nemotron_h.py``). Trust-remote-code models also need ``modeling_*.py``
+    (and any other auto_map-referenced ``.py``) present alongside ``config.json``, otherwise
+    later ``AutoConfig.from_pretrained(..., trust_remote_code=True)`` calls fail with
+    "does not appear to have a file named modeling_*.py".
+
+    We discover the source directory from the config class itself (via ``inspect.getfile``)
+    and copy every distinct ``.py`` referenced by the auto_map values.
+    """
+    if not hasattr(model_config, "auto_map") or not isinstance(model_config.auto_map, dict):
+        return
+
+    try:
+        source_dir = Path(inspect.getfile(type(model_config))).parent
+    except (TypeError, OSError):
+        # Built-in / non-file-backed config class — nothing to copy.
+        return
+
+    # Module names must look like Python identifiers — refuse anything with separators
+    # or relative-path components so a malformed/hostile auto_map can't drive shutil.copy
+    # outside source_dir / checkpoint_dir.
+    _module_name_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    module_names = {
+        class_ref.split("--", 1)[-1].split(".")[0]
+        for class_ref in _iter_auto_map_class_refs(model_config.auto_map)
+    }
+
+    for module_name in module_names:
+        if not _module_name_re.match(module_name):
+            mprint(f"Warning: skipping non-identifier auto_map module name: {module_name!r}")
+            continue
+        filename = f"{module_name}.py"
+        src = source_dir / filename
+        dst = Path(checkpoint_dir) / filename
+        if src.exists() and not dst.exists():
+            shutil.copy(src, dst)
+
+
 def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str) -> None:
     if hasattr(model_config, "block_configs"):
         model_config.block_configs = [
@@ -497,3 +640,4 @@ def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str
             for conf in model_config.block_configs
         ]
     model_config.save_pretrained(checkpoint_dir)
+    _copy_auto_map_code_files(model_config, Path(checkpoint_dir))

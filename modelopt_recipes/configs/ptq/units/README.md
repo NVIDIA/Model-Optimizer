@@ -30,4 +30,5 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `w4a4_nvfp4_nvfp4.yaml` | NVFP4 weight + activation quantizer entries (W4A4); supported on Blackwell+ GPUs |
 | `block_sparse_moe_nvfp4.yaml` | NVFP4 W4A4 on `*block_sparse_moe*` weight/input quantizers |
 | `experts_nvfp4.yaml` | NVFP4 W4A4 on `*.experts.*` weight/input quantizers |
+| `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |

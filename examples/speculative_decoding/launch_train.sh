@@ -19,9 +19,8 @@
 #   Multi-node:   ./launch_train.sh --config ../../modelopt_recipes/general/speculative_decoding/eagle3.yaml --num_nodes 2 --head_node_ip <IP>
 #   With overrides: ./launch_train.sh --config my.yaml model.model_name_or_path=xxx training.output_dir=yyy
 #
-# Extra key=value args are forwarded as OmegaConf dotlist overrides to main.py.
-# All training config (model, data, hyperparams, eagle, fsdp) lives in the YAML file.
-# Only multi-node routing args are passed here; mixed_precision is fixed to bf16.
+# Extra key=value args are forwarded as OmegaConf dotlist overrides to main.py; all
+# training config lives in the YAML. mixed_precision is fixed to bf16.
 
 set -eo pipefail
 
@@ -30,12 +29,14 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 CONFIG_FILE=""
 NUM_NODES=1
 HEAD_NODE_IP=""
+MACHINE_RANK=""
 EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --config*)     if [[ "$1" != *=* ]]; then shift; fi; CONFIG_FILE="${1#*=}" ;;
     --num_nodes*)  if [[ "$1" != *=* ]]; then shift; fi; NUM_NODES="${1#*=}" ;;
     --head_node_ip*) if [[ "$1" != *=* ]]; then shift; fi; HEAD_NODE_IP="${1#*=}" ;;
+    --machine_rank*) if [[ "$1" != *=* ]]; then shift; fi; MACHINE_RANK="${1#*=}" ;;
     *) EXTRA_ARGS+=("$1") ;;
   esac
   shift
@@ -46,7 +47,6 @@ if [ -z "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-# GPU count detection
 if [[ "$NUM_NODES" != "1" ]]; then
   GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
   TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
@@ -56,20 +56,28 @@ else
   echo "Total GPUs: $TOTAL_GPU (single node)"
 fi
 
-# Multi-node routing args (accelerate only; training config comes from the YAML)
-MULTI_NODE_ARGS=""
+MULTI_NODE_ARGS=()
 if [[ "$NUM_NODES" != "1" ]]; then
-  MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
-                   --num_machines $NUM_NODES \
-                   --machine_rank $SLURM_PROCID \
-                   --rdzv_backend c10d \
-                   --main_process_ip $HEAD_NODE_IP \
-                   --main_process_port 29500"
+  # --multi_gpu is required even at 1 GPU/node, else accelerate won't form the DDP group.
+  # machine_rank defaults to $SLURM_PROCID; override --machine_rank if node 0 isn't a trainer.
+  MULTI_NODE_ARGS=(
+    --multi_gpu
+    --num_processes "$TOTAL_GPU"
+    --num_machines "$NUM_NODES"
+    --machine_rank "${MACHINE_RANK:-$SLURM_PROCID}"
+    --main_process_ip "$HEAD_NODE_IP"
+    --main_process_port 29500
+  )
 fi
 
 export TOKENIZERS_PARALLELISM=False
 
+# argv array, not `sh -c` (which would word-split overrides and run embedded substitutions).
+CMD=(accelerate launch --mixed_precision bf16
+     "${MULTI_NODE_ARGS[@]}"
+     "${SCRIPT_DIR}/main.py" --config "$CONFIG_FILE" "${EXTRA_ARGS[@]}")
+
 set -x
 start_time=$(date +%s)
-sh -c "accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS ${SCRIPT_DIR}/main.py --config $CONFIG_FILE ${EXTRA_ARGS[*]}"
+"${CMD[@]}"
 echo "Total time: $(( $(date +%s) - $start_time )) seconds"

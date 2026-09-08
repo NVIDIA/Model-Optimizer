@@ -64,14 +64,18 @@ def quantize():
         print_rank_0(f"Loading quantization recipe: {quant_args.recipe}")
     ptq_cfg = resolve_quant_cfg_from_args(quant_args)
     if ptq_cfg is None:
-        raise ValueError("--recipe or --quant_cfg is required for quantization.")
+        raise ValueError("--recipe is required for quantization.")
 
     # Load model and tokenizer
     print_rank_0(f"Loading model: {model_args.model_name_or_path}")
+    model_kwargs = {}
+    if model_args.attn_implementation:
+        model_kwargs["attn_implementation"] = model_args.attn_implementation
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         dtype=torch.bfloat16,
         device_map="auto",
+        **model_kwargs,
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, model_max_length=model_args.model_max_length

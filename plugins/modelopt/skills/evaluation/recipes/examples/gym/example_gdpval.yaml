@@ -1,0 +1,368 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# GDPVal (NeMo Gym "Stirrup" agent) — STANDALONE gym eval, RUBRIC mode.
+# Self-deploys a checkpoint via vLLM on one SLURM node. One gym eval per config.
+#
+# Read recipes/tasks/gym/gdpval.md + references/gym-gdpval.md first — they
+# cover the SIF sandbox, scoring modes, judge panel, preflight and failure modes.
+#
+# Before running: `.env` needs HF_TOKEN, INFERENCE_API_KEY, TAVILY_API_KEY,
+# INFERENCE_JUDGE_URL, GDPVAL_SIF_DIR, NEMO_EVALUATOR_TRUST_PRE_CMD=1; and the
+# SIF must exist (prefer a site-provided one, else
+# `srun -p cpu -t 01:00:00 --pty "$SKILL_DIR/scripts/gdpval-sif.sh"`).
+#
+#   nel run --config example_gdpval.yaml --env-file .env
+#
+# `limit_samples` is INERT here — the gym always runs all 220 tasks. There is no
+# cheap smoke test; see the recipe's Canary section.
+# =============================================================================
+defaults:
+  # slurm/default works anywhere; if your install ships a predefined
+  # internal/slurm/<cluster> config, prefer it (pre-fills hostname/partition/
+  # gres — see SKILL.md Step 4).
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+# GDPVal scoring mode. This template is RUBRIC-ONLY, deliberately: rubric needs no
+# reference deliverables and runs on the public gym image, so it works standalone.
+#   rubric     — standalone LLM-judge scoring, 0-1 reward per deliverable. (this template)
+#   comparison — pairwise vs anchored reference deliverables; the only mode that yields
+#                an AA-comparable ELO / win-rate. It needs a reference set, a newer gym
+#                image, and its own overrides — do NOT just flip reward_mode here.
+# To run comparison, NVIDIA-internal users should follow `modelopttools:eval-config`
+# Step 3c, which converts this config (container override + reference_models map +
+# mounts + multistage). See references/gym-gdpval.md "Scoring modes".
+gdpval:
+  reward_mode: rubric
+
+# GDPVal pairwise judge. base_url is config (from .env), not a secret, so no
+# export needed; only api_key (INFERENCE_API_KEY) is exported and read by the
+# harness. Keep the judge fixed across comparable runs.
+gdpval_judge:
+  base_url: <INFERENCE_JUDGE_URL>              # from .env (/v1 base); shared inference host
+  model: gcp/google/gemini-3.1-pro-preview     # Gemini 3.1 Pro; use an equivalent on your endpoint if needed
+  api_key: INFERENCE_API_KEY   # doc only; common_params injects the VALUE ($INFERENCE_API_KEY).
+                               # An env-var NAME reaches the proxy as a literal -> opaque judge 500.
+
+cluster:
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
+
+execution:
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  output_dir: ???        # absolute host path; keeps deliverables + response cache across resumes
+  walltime: "04:00:00"
+  # gres: a predefined internal/slurm/<cluster> config sets this. On slurm/default
+  # it's gpu:8 — set to the node's GPU count (match --tensor/--data-parallel-size)
+  # or sbatch fails "Requested node configuration is not available".
+  mounts:
+    # mount_home ALWAYS false — see example_eval.yaml / SKILL Step 4 for why.
+    mount_home: false
+    deployment:
+      # Real HF cache -> /hf-cache (paired with HF_HOME below).
+      <HOST_HF_CACHE>: /hf-cache
+    evaluation:
+      <HOST_HF_CACHE>: /hf-cache
+      <HOST_UV_CACHE>: /cache/uv
+      # SIF dir -> /gdpval/sif, so the file lands at GDPVAL_CONTAINER_PATH below.
+      # Literal path only: mount KEYS are never interpolated.
+      <GDPVAL_SIF_DIR>: /gdpval/sif
+      # Writable shared-FS staging for ref files. Node-local /tmp breaks multi-node Ray.
+      <HOST_REF_FILES>: /gdpval_ref_files
+      # Comparison mode additionally mounts one dir per reference model at
+      # /gdpval/refs/<key> (both `deployment` and `evaluation`) — added by
+      # modelopttools:eval-config Step 3c, not here.
+  auto_export:            # REQUIRED trigger for MLflow upload (see example_eval.yaml).
+    destinations:
+      - mlflow
+  # Auto-export is a separate CPU-only sbatch; GPU-only partitions reject it.
+  cpu_partition: ???
+
+deployment:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache
+    # vLLM backend toggles go HERE (not in command). Uncomment per model card —
+    # e.g. NVFP4 MoE on Blackwell needs FlashInfer FP4 kernels:
+    #   VLLM_USE_FLASHINFER_MOE_FP4: lit:1
+    #   VLLM_FLASHINFER_MOE_BACKEND: lit:throughput
+  checkpoint_path: ???           # prefer a path already on the cluster over hf_model_handle
+  hf_model_handle:
+  served_model_name: ???
+  image: vllm/vllm-openai:v0.19.1   # bump to the EXACT model's recipes.vllm.ai minimum (SKILL Step 3)
+  # GDPVal REQUIRES thinking mode from the policy (non-thinking loses ~86% of
+  # pairwise judgements). Serve with the model's --reasoning-parser so vLLM emits
+  # a separate reasoning channel; thinking is forced on via the adapter_config
+  # chat_template_kwargs below. Add --enable-expert-parallel for MoE, and
+  # --trust-remote-code for custom-code models.
+  # --max-num-seqs: on the GYM path derive it from the agent's concurrency, NOT from
+  # `parallelism` (which is gym-internal, not an in-flight request count — the generic
+  # SKILL rule would give an absurd cap). N = ceil(stirrup_agent.concurrency / DP).
+  command: >-
+    vllm serve /checkpoint
+    --served-model-name ${deployment.served_model_name}
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --tensor-parallel-size 1
+    --data-parallel-size 1
+    --max-model-len 131072
+    --reasoning-parser <PARSER>
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'
+    --max-num-batched-tokens 8192
+    --enable-chunked-prefill
+
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache
+    DUMMY_API_KEY: lit:dummy                   # the deployed vLLM endpoint's (policy) key
+    INFERENCE_API_KEY: host:INFERENCE_API_KEY  # GDPVal judge auth (shared inference host)
+    TAVILY_API_KEY: host:TAVILY_API_KEY        # Stirrup agent web search
+    UV_CACHE_DIR: lit:/cache/uv
+    # Apptainer SIF for the Stirrup per-task code-exec sandbox (must match the mount above).
+    GDPVAL_CONTAINER_PATH: lit:/gdpval/sif/python-3.13.gdpval.sif
+    # Shared-FS staging for ref files; node-local /tmp breaks multi-node Ray.
+    GDPVAL_REF_FILES_DIR: lit:/gdpval_ref_files
+    # Deliverables land under /results (already mounted) so they persist. The
+    # "*cache*" basename matches the mlflow exporter's exclusion, so the (large)
+    # deliverables are NOT auto-uploaded — they stay on disk for inspection.
+    # Drop "_cache" if you WANT them uploaded as artifacts.
+    PERSIST_DELIVERABLES_DIR: lit:/results/gdpval/deliverables_cache
+    # Use the currently validated launcher via $SKILL_DIR/scripts/nel-gdpval.sh. It
+    # assigns this stable ID before the runtime re-export (including across resumes).
+    NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
+  # Installs apptainer + squashfuse into the eval container (needs
+  # NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the launching shell). See references/gym-gdpval.md.
+  # Installs the apptainer RUNTIME into the eval container (it is not baked in) so the
+  # Stirrup agent can exec the prebuilt SIF. ARCH-AWARE: Blackwell/Grace clusters are
+  # aarch64, so never hardcode an amd64 .deb — the Ubuntu PPA builds both arches.
+  pre_cmd: |
+    set -ex
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq software-properties-common squashfuse fuse3 ca-certificates || true
+    add-apt-repository -y ppa:apptainer/ppa
+    apt-get update -qq
+    # Unpinned on purpose: the PPA is the only source with current arm64 builds. The
+    # resolved version is echoed below for the record.
+    apt-get install -y -qq apptainer
+    apptainer --version
+    mkdir -p /usr/local/var/apptainer/mnt/session
+  nemo_evaluator_config:
+    config:
+      params:
+        temperature: 1.0
+        top_p: 0.95
+        parallelism: 16384         # gym-internal concurrency, NOT a model-server cap
+        request_timeout: 36000      # gym rollouts are long-running
+        max_retries: 10
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
+        adapter_config:
+          use_system_prompt: false
+          process_reasoning_traces: true
+          params_to_remove:
+            - max_tokens
+            - max_completion_tokens
+          # Thinking mode MUST be on — non-thinking loses ~86% of pairwise
+          # judgements. Keep the toggle key your model family uses (enable_thinking
+          # -> Qwen3.x/GLM; thinking -> Kimi/DeepSeek); see SKILL "Reasoning adapter config".
+          params_to_add:
+            chat_template_kwargs:
+              enable_thinking: true
+            skip_special_tokens: false
+          use_caching: false
+          use_progress_tracking: true
+          tracking_requests_stats: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 10
+          use_response_logging: true
+          max_logged_responses: 10
+  # STANDALONE: exactly one gym task. Do NOT add other tasks to this list.
+  tasks:
+    - name: nemo_gym
+      # Public image — fine for RUBRIC mode (this template's default).
+      # COMPARISON mode needs a NEWER Gym than this image ships and must OVERRIDE this
+      # line; see references/gym-gdpval.md "Scoring modes". NOTE: this image bakes Gym
+      # as a non-git directory, so `install_on_the_fly.commit` below is silently
+      # ignored here (the prepare step logs "/opt/Gym is not a git repo; using baked-in
+      # Gym version") — the pin only applies on images where /opt/Gym IS a git repo.
+      container: nvcr.io/nvidia/eval-factory/nemo-gym:26.05   # pin a verified tag
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              nemo_gym:
+                install_on_the_fly:
+                  url: https://github.com/NVIDIA-NeMo/Gym
+                  # Gym version. BUMPING THIS REQUIRES REBUILDING THE SIF from the matching
+                  # commit — gdpval.def (the sandbox) is versioned with the gym repo, and an
+                  # old SIF + new gym silently degrades deliverables. Rebuild with
+                  # `gdpval-sif.sh --commit <sha>` to a new name + repoint GDPVAL_CONTAINER_PATH.
+                  # See references/gym-gdpval.md "Rebuild the SIF when the Gym version changes".
+                  # Current golden pin (updated GDPVal task-sampling algo, which drives
+                  # multistage stage-1 selection). Its gdpval.def is byte-identical to
+                  # 049b1fd0…, so a python-3.13 SIF built from either commit is valid —
+                  # no rebuild when moving between them.
+                  # NOTE: this pin is INERT on the public nemo-gym image (see the
+                  # `container:` comment above) — it only takes effect on an image where
+                  # /opt/Gym is a git repo. Confirm via "=== NeMo Gym commit ===" + SHA
+                  # in the client log before crediting it with any behaviour change.
+                  commit: dd41196f620f2af99947d776cbe5da9439d2a08d  # pragma: allowlist secret
+                command: |
+                  set -ex
+                  cd /opt/Gym
+                  # Honour a mounted uv cache if injected, else image-local. Plain $VAR, no braces.
+                  [ -n "$UV_CACHE_DIR" ] || export UV_CACHE_DIR=/opt/cache/uv
+                  source .venv/bin/activate
+                  # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
+                  # images bake Gym at a fixed version (not a git repo) — use it as-is.
+                  if [ -d .git ]; then
+                    git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
+                    git fetch oss_pin
+                    git checkout "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
+                    echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+                  else
+                    echo "=== /opt/Gym is not a git repo; using baked-in Gym version ==="
+                  fi
+                  # Pin sub-venv ray to whatever the IMAGE already has. Hardcoding a
+                  # version breaks when the image moves: a 2.49.2 pin against an image
+                  # carrying ray[default]==2.55.1 makes uv unsatisfiable and the gym
+                  # server dies at startup. Empty => leave ray unpinned.
+                  _ray_ver="$(/opt/Gym/.venv/bin/python -c 'import ray,sys; sys.stdout.write(ray.__version__)' 2>/dev/null || true)"
+                  echo "=== image ray version: $_ray_ver ==="
+                  for r in /opt/Gym/responses_api_models/*/requirements.txt \
+                           /opt/Gym/responses_api_agents/*/requirements.txt \
+                           /opt/Gym/resources_servers/*/requirements.txt; do
+                    [ -f "$r" ] || continue
+                    grep -vE '^[[:space:]]*-e ' "$r" > "$r.fixed" || true
+                    [ -n "$_ray_ver" ] && { grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo "ray[default]==$_ray_ver" >> "$r.fixed"; }
+                    grep -qiE '^tqdm' "$r.fixed" 2>/dev/null || echo 'tqdm' >> "$r.fixed"
+                    mv "$r.fixed" "$r" 2>/dev/null || true
+                  done
+                  for v in /opt/Gym/responses_api_models/*/.venv \
+                           /opt/Gym/responses_api_agents/*/.venv \
+                           /opt/Gym/resources_servers/*/.venv; do
+                    [ -d "$v" ] || continue
+                    d="$(dirname "$v")"
+                    [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
+                  done
+                  # Preserve inherited PYTHONPATH. Plain $VAR only -- OmegaConf parses brace syntax.
+                  _gym_sp="$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+                  if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
+                  else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi
+
+                  # Writable staging dir for ref files (bind-mounted, see execution).
+                  mkdir -p /gdpval_ref_files
+
+                  # SECRETS: `set -x` traces AFTER expansion, so without this the params'
+                  # $HF_TOKEN / $INFERENCE_API_KEY / $TAVILY_API_KEY land in the log (and in
+                  # MLflow via log_logs). The rollout call below is already safe via the heredoc.
+                  set +x
+                  ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
+                  set -x
+                  # The rollout command is written to a script and run from it, rather than passed
+                  # to `bash -c '...'`. Gym params legitimately CONTAIN single quotes — comparison
+                  # mode's ++multistage.stages='[{num_tasks: 45}, ...]' and ++...judge_panel='[{...}]'
+                  # — and those would close a single-quoted `bash -c` wrapper early, so Hydra then
+                  # receives the value split on spaces and dies with
+                  # "no viable alternative at input '[{num_tasks:'".
+                  # The heredoc delimiter is QUOTED ('GYM_RUN_EOF') so nothing expands while writing:
+                  # $$ and $TAVILY_API_KEY / $INFERENCE_API_KEY land in the script literally and are
+                  # expanded at run time by the shell that executes it, which is what we want.
+                  cat > /tmp/gym_run.sh <<'GYM_RUN_EOF'
+                  echo $$ > /tmp/gym_eval_pgid
+                  exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}
+                  GYM_RUN_EOF
+                  setsid --wait bash /tmp/gym_run.sh &
+                  __ev=$!
+                  __rc=0; wait "$__ev" || __rc=$?
+                  echo "Evaluator Gym finished!"
+                  __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
+                  [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
+                  timeout 60 ray stop --force >/dev/null 2>&1 || true
+                  # uid-scoped: an unscoped pkill would kill other jobs' Ray daemons.
+                  pkill -9 -u "$(id -u)" -f raylet >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f gcs_server >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f plasma_store >/dev/null 2>&1 || true
+                  exit $__rc
+                data_prep_params: >-
+                  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]"
+                  +hf_token=$HF_TOKEN
+                  ++use_cached_prepared_benchmarks=true
+                collect_rollout_params: >-
+                  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]"
+                  ++port_range_low=63000
+                  ++port_range_high=64000
+                  ++global_aiohttp_connector_limit_per_host={{config.params.parallelism}}
+                  ++uv_cache_dir=$UV_CACHE_DIR
+                  ++skip_venv_if_present=true
+                  ++output_jsonl_fpath={{config.output_dir}}/evaluator_rollouts.jsonl
+                  ++nemo_gym_log_dir={{config.output_dir}}/nemo_gym_logs
+                  ++overwrite_metrics_conflicts=true
+                  ++split=benchmark
+                  ++resume_from_cache=true
+                  ++reuse_existing_data_preparation=true
+                  ++upload_rollouts_to_wandb=false
+                  ++responses_create_params.temperature={{config.params.temperature}}
+                  ++responses_create_params.top_p={{config.params.top_p}}
+                # No judge_responses_create_params_overrides.model here: the judge model is
+                # already set by openai_model=${gdpval_judge.model}, and pinning it a second
+                # way silently collapses comparison mode's 3-member judge panel to one judge.
+                # num_repeats=1 — both current goldens. No reference_* overrides here:
+                # the single-reference keys conflict with comparison mode's reference_models
+                # map (added by modelopttools:eval-config Step 3c).
+                # NEVER put '#' inside this folded (>-) scalar — it folds to one line and
+                # comments out every override after it.
+                common_params: >-
+                  ++use_absolute_ip=true
+                  ++policy_base_url={{target.api_endpoint.url}}
+                  ++policy_api_key=$DUMMY_API_KEY
+                  ++policy_model_name={{target.api_endpoint.model_id}}
+                  ++gdpval_judge_model.responses_api_models.openai_model.openai_base_url=${gdpval_judge.base_url}
+                  ++gdpval_judge_model.responses_api_models.openai_model.openai_model=${gdpval_judge.model}
+                  ++gdpval_judge_model.responses_api_models.openai_model.openai_api_key=$INFERENCE_API_KEY
+                  ++gdpval_judge_model.responses_api_models.openai_model.max_concurrent_requests=10
+                  ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.concurrency=220
+                  ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.tavily_api_key=$TAVILY_API_KEY
+                  ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.agent_max_turns=${oc.env:GDPVAL_MAX_TURNS,250}
+                  ++num_repeats=1
+                  ++gdpval_resources_server.resources_servers.gdpval.reward_mode=${gdpval.reward_mode}
+                  ++gdpval_resources_server.resources_servers.gdpval.persist_raw_judge_responses=true
+                  ++gdpval_resources_server.resources_servers.gdpval.preconvert_max_concurrent=30
+                  ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=true
+
+export:
+  # LITERAL values only (auto_export resolves this block at submit time in a scope
+  # without deployment/evaluation nodes; ${oc.env:...} is fine). Keep the sampling
+  # tags EQUAL to evaluation params above — they're the only MLflow record of them.
+  mlflow:
+    tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config
+    experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
+    description: 'CHANGEME-served-model-name | GDPVal rubric | T=1.0, top_p=0.95, num_repeats=1'
+    log_logs: true
+    only_required: false
+    tags:
+      framework: vllm
+      model: CHANGEME-served-model-name
+      benchmark: nemo_gym.gdpval
+      temperature: '1.0'
+      top_p: '0.95'

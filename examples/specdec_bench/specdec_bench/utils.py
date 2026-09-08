@@ -35,7 +35,20 @@ _SENSITIVE_KEY_ALLOWLIST = frozenset(
 
 
 def get_tokenizer(path, trust_remote_code=False):
-    return AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
+    extra_special_tokens = None
+    tokenizer_config_path = os.path.join(path, "tokenizer_config.json")
+    if os.path.exists(tokenizer_config_path):
+        with open(tokenizer_config_path) as f:
+            tokenizer_config = json.load(f)
+        extra_special_tokens = tokenizer_config.get("extra_special_tokens")
+
+    kwargs = {"trust_remote_code": trust_remote_code}
+    if isinstance(extra_special_tokens, list):
+        kwargs["extra_special_tokens"] = {
+            token.strip("<|>").replace("|", "_") + "_token": token for token in extra_special_tokens
+        }
+
+    return AutoTokenizer.from_pretrained(path, **kwargs)
 
 
 def encode_chat(tokenizer, messages, chat_template_args={}, completions=False):
@@ -196,6 +209,10 @@ def _checkpoint_provenance(model_dir):
 
 
 def _is_sensitive_key(key):
+    # Engine configs can carry non-string dict keys (e.g. int layer ids in a
+    # serving_config); those are never sensitive field *names*, so skip them.
+    if not isinstance(key, str):
+        return False
     klow = key.lower()
     if klow in _SENSITIVE_KEY_ALLOWLIST:
         return False

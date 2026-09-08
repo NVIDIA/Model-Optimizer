@@ -37,13 +37,32 @@ from modelopt.torch.utils import standardize_model_args, unflatten_tree
 deploy_benchmark_all = get_deploy_models()
 deploy_benchmark_dynamo = get_deploy_models(dynamic_control_flow=False)
 
+# `torch.onnx.export(dynamo=True)` is expensive (~1.5s/export), so the dynamo matrix is
+# trimmed to representatives that cover each distinct input/output container shape plus
+# the compile-failure path. Full structural and numeric-type coverage still runs in the
+# (cheap) non-dynamo ``test_onnx_export_and_inputs`` below.
+_DYNAMO_REPRESENTATIVE_MODELS = {
+    "TensorModel",  # plain single tensor
+    "ListMultiModel",  # list of tensors (arg flattening)
+    "ListDictModel",  # mixed list + dict nesting
+    "NestedModel",  # deeply nested inputs
+    "DictMultiModel",  # dict inputs
+    "ArgsKwargsModel1",  # args + kwargs (success)
+    "ArgsKwargsModel2",  # args + kwargs (compile_fail path)
+    "TwoOutModel",  # multiple outputs
+    "NestedOutModel",  # nested outputs
+}
+deploy_benchmark_dynamo = {
+    k: v for k, v in deploy_benchmark_dynamo.items() if k in _DYNAMO_REPRESENTATIVE_MODELS
+}
+
 
 @pytest.mark.parametrize(
     "model", deploy_benchmark_dynamo.values(), ids=deploy_benchmark_dynamo.keys()
 )
 def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
-    # try it for all potential numeric types
-    for active in range(model.get.num_choices):
+    # One numeric type is enough here — numeric-type coverage is in test_onnx_export_and_inputs.
+    for active in range(1):
         # retrieve args
         model.get.active = active
         model.get.set_default_counter()

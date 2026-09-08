@@ -15,10 +15,11 @@
 
 import subprocess
 
+import pytest
 from _test_utils.examples.run_command import (
     extend_cmd_parts,
     run_example_command,
-    run_llm_ptq_command,
+    run_hf_ptq_command,
 )
 from _test_utils.torch.misc import minimum_sm
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
@@ -35,24 +36,36 @@ def test_lm_eval_hf(tmp_path):
         num_fewshot=5,
         limit=0.1,
         batch_size=8,
+        # Exercise the accuracy gate: reads the results file and enforces the bound
+        output_path=str(tmp_path / "results"),
+        accuracy_lower_bound=0.1,
     )
     run_example_command(cmd_parts, "llm_eval")
 
 
 @minimum_sm(89)
+@pytest.mark.timeout(900)
 def test_qwen3_eval_fp8(tmp_path):
-    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than
-    # max_seq_len, and the default (32) is shorter than even simple MMLU prompts.
-    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=2048)
+    # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than max_seq_len.
+    # The default (32) is shorter than even simple MMLU prompts, and 2048 is shorter than
+    # 5-shot gsm8k prompts (~3.9k tokens). huggingface_example.sh sizes the lm_eval engine
+    # at max_input_len 4096 + max_output_len, so 8192 leaves headroom for the longest
+    # prompts we evaluate.
+    model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=8192)
     try:
-        run_llm_ptq_command(
+        run_hf_ptq_command(
             model=str(model_dir),
             quant="fp8",
             tasks="mmlu,lm_eval,simple_eval",
             calib=64,
             lm_eval_tasks="hellaswag,gsm8k",
             simple_eval_tasks="humaneval",
-            lm_eval_limit=0.1,
+            lm_eval_limit=16,
+            simple_eval_limit=16,
+            # MMLU has no inherent sample cap and otherwise evaluates the full ~14k-question
+            # test set; limit it like lm_eval/simple_eval to keep this a fast smoke test.
+            mmlu_limit=16,
+            output=128,  # Cap generation length: gsm8k/humaneval otherwise generate up to 1024 tokens/sample
             batch=8,
         )
     finally:

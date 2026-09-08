@@ -56,6 +56,11 @@ def parse_args():
         required=True,
         help="Directory to save the merged (fused) base model.",
     )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow loading models that define custom code on the HF Hub. Off by default.",
+    )
     return parser.parse_args()
 
 
@@ -79,9 +84,14 @@ def main():
     # Load the original base model
     print(f"Loading base model from {args.base_model_path}...")
     model = AutoModelForCausalLM.from_pretrained(
-        args.base_model_path, torch_dtype="auto", device_map="cpu", trust_remote_code=True
+        args.base_model_path,
+        torch_dtype="auto",
+        device_map="cpu",
+        trust_remote_code=args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model_path, trust_remote_code=args.trust_remote_code
+    )
 
     # Load LoRA adapter into the base model (export dir uses standard peft naming)
     print("Loading LoRA adapter via PeftModel.from_pretrained...")

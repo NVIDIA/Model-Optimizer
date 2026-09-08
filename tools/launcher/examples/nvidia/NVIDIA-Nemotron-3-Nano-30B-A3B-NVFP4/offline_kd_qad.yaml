@@ -1,0 +1,212 @@
+# Nemotron-3-Nano-30B-A3B NVFP4 Offline-KD QAD pipeline (cached-teacher-logits KD).
+#   task_0 quantize : PTQ BF16 -> NVFP4 MCore ckpt (in-domain calibration).
+#   task_1 dump     : frozen BF16 teacher, save top-K logits to /scratchspace/logits.
+#   task_2 student  : train NVFP4 student with --logits-load-dir.
+#   task_3 export   : trained student -> HF format.
+#   task_4 eval     : TRT-LLM MMLU.
+#
+# Key constraints:
+#   - Container nvcr.io/nvidia/nemo:26.06 (needs nvidia-resiliency-ext>=0.6.0 for
+#     task_1's --async-save). It uses a uv venv, so point modelopt_install_path at
+#     the venv site-packages and put the packaged Megatron-LM/Model-Optimizer on
+#     PYTHONPATH so they override the container's copies (see task_3).
+#   - task_0/task_2/task_3 must all pass --export-default-te-spec (TEGroupedMLP):
+#     NVFP4 expert _amax scales are keyed by MoE layout, so a save/load spec
+#     mismatch silently drops ~93k _amax keys (log_all) -> uncalibrated model
+#     (MMLU ~25%). task_2 needs TE spec regardless (its default SequentialMLP
+#     wrapper forbids TP>1 & EP>1, needed to avoid a KD-loss OOM);
+#     --dist-ckpt-strictness log_all then only tolerates benign _extra_state.
+#   - task_0 RUN_MMLU/RUN_EXPORT=false: quantize.sh's inline sub-steps drop
+#     --export-default-te-spec and would KeyError on the TE-spec ckpt (task_3 exports).
+#   - PREREQUISITE: task_1's teacher loads a BF16 MCore ckpt at MLM_MODEL_CKPT
+#     (NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore); this pipeline does not create
+#     it -- import it from HF first (e.g. common/megatron_bridge/import/import.sh).
+#   - task_1 --finetune: MLM_MODEL_CKPT is a shared path that may hold another run's
+#     completed ckpt; without it the sampler asserts "no samples left to consume".
+#   - 4-GPU nodes (OCI-HSG B100): task_4's NVFP4 TRT-LLM eval needs Blackwell (Hopper
+#     segfaults in the fused MoE FP4 GEMM); the whole pipeline shares that cluster.
+#   - seq 32768: the SFT corpus is raw jsonl with very long samples (~30k-360k tok),
+#     so it's truncation-bound (no padding waste); position-embedding-type=none makes
+#     >8192 context safe. teacher & student MUST share seq-length AND CP (logits are
+#     CP-sharded). CP=8 keeps per-GPU seq/CP=4096 (the validated footprint): task_1
+#     TP1 on 2 nodes, task_2 TP2 on 4 nodes (TP*CP=16=world). DP resolves to 1; a DP
+#     env var is inert under NeMo Run's python launcher.
+#
+# Usage:
+#   source .env-slurm && cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4/offline_kd_qad.yaml --yes
+
+job_name: NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-QAD-OfflineKD
+pipeline:
+  task_0:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      # In-domain calibration on the SFT corpus (raw .jsonl, read via the calib
+      # loader's "messages" branch) instead of cnn_dailymail -- better-matched amax.
+      - --calib-dataset-path-or-name /hf-local/modelopt/nemotron-3-super-sft/train.jsonl
+      - --calib-size 512
+      - --calib-max-sequence-length 8192
+      - --skip-generate
+      - --export-default-te-spec
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      - EP: 4
+      - RUN_MMLU: "false"
+      - RUN_EXPORT: "false"
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  task_1:
+    script: common/megatron_lm/train/sft.sh
+    args:
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --train-samples 2048
+      - --lr-decay-samples 512
+      - --lr-warmup-samples 256
+      - --sft
+      - --sft-tokenizer-prompt-format identity
+      - --tokenizer-type SFTTokenizer
+      - --no-create-attention-mask-in-dataloader
+      - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
+      - --data-cache-path /hf-local/modelopt/nemotron-3-super-sft/cache
+      - --micro-batch-size 1
+      # Must match task_2's --global-batch-size: cached logits are indexed per
+      # (iteration, microbatch), so teacher and student must see the same samples
+      # per iteration (else "microbatch index out of range").
+      - --global-batch-size 8
+      - --attention-dropout 0.0
+      - --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --lr 5.0e-5
+      - --min-lr 5.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0
+      - --weight-decay 0.0
+      - --adam-beta1 0.9
+      - --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      - --eval-iters 4
+      - --eval-interval 1000
+      - --save-interval 1000
+      - --log-interval 100
+      - --finetune
+      - --freeze-all-layers
+      - --logits-save-top-k 16
+      - --logits-save-dir /scratchspace/logits
+      - --async-save
+      - --use-persistent-ckpt-worker
+    environment:
+      - CP: 8
+      - TP: 1
+      - PP: 1
+      - EP: 4
+      - ETP: 1
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - MLM_DATA_ARGS: --sft
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 2
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  task_2:
+    script: common/megatron_lm/train/sft.sh
+    args:
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --train-samples 2048
+      - --lr-decay-samples 512
+      - --lr-warmup-samples 256
+      - --sft
+      - --sft-tokenizer-prompt-format identity
+      - --tokenizer-type SFTTokenizer
+      - --no-create-attention-mask-in-dataloader
+      - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
+      - --data-cache-path /hf-local/modelopt/nemotron-3-super-sft/cache
+      - --micro-batch-size 1
+      - --global-batch-size 8
+      - --attention-dropout 0.0
+      - --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --lr 5.0e-5
+      - --min-lr 5.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0
+      - --weight-decay 0.0
+      - --adam-beta1 0.9
+      - --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      - --eval-iters 4
+      - --eval-interval 1000
+      # = train-samples / global-batch-size (2048/8): one save, at the final iter.
+      - --save-interval 256
+      - --log-interval 100
+      - --export-default-te-spec
+      - --dist-ckpt-strictness log_all
+      - --sequence-parallel
+      - --logits-load-dir /scratchspace/logits
+    environment:
+      - CP: 8
+      - TP: 2
+      - PP: 1
+      - EP: 4
+      - ETP: 1
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_DATA_ARGS: --sft
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 4
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  task_3:
+    script: common/megatron_lm/export/export.sh
+    args:
+      - --export-default-te-spec
+      - --dist-ckpt-strictness log_all
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - EXPORT_DIR: /scratchspace/export
+      - PP: 4
+      # Force the packaged modelopt onto PYTHONPATH: nemo:26.06's uv venv can
+      # shadow the /opt/venv bind-mount with its own older modelopt, which lacks
+      # modelopt.torch.sparsity.weight_sparsity.config that export imports.
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM:/nemo_run/code/modules/Model-Optimizer
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  task_4:
+    script: common/tensorrt_llm/eval.sh
+    environment:
+      - HF_MODEL_CKPT: /scratchspace/export
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4

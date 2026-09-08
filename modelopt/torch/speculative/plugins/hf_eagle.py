@@ -26,7 +26,7 @@ from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.utils import ModelOutput
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingExporter
 from ..eagle.conversion import EagleDMRegistry
@@ -40,7 +40,13 @@ from ..utils import (
     temporary_set_config_value,
 )
 from .modeling_eagle import EagleBaseModelOutput, EagleModule
-from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
+from .modeling_fakebase import (
+    _BASE_MODEL_PATHS,
+    _EMBED_TOKENS_PATHS,
+    _FINAL_NORM_PATHS,
+    _LM_HEAD_PATHS,
+)
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 __all__ = ["HFARValidation", "HFEagleModel", "default_eagle_aux_layer_ids"]
 
@@ -61,6 +67,9 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
 
+    # Context-parallel degree, set by the training script when it launches with cp_size > 1.
+    eagle_cp_size: int = 1
+
     @property
     def _base_model(self):
         return self.get_submodule(self.base_model_path)
@@ -72,6 +81,16 @@ class HFEagleModel(EagleModel):
     @property
     def _base_model_lm_head(self):
         return self.get_submodule(self.base_model_lm_head_path)
+
+    @property
+    def _base_model_norm(self):
+        """Base model's final pre-lm_head norm, or None if none was located.
+
+        Applied before lm_head in the offline/streaming distillation path only when the
+        producer captured a pre-norm hidden (base_hidden_prenorm), to reconstruct true logits.
+        """
+        path = getattr(self, "base_model_norm_path", None)
+        return self.get_submodule(path) if path else None
 
     @property
     def _base_llm_config(self):
@@ -117,12 +136,23 @@ class HFEagleModel(EagleModel):
             if not found_submodule:
                 raise ValueError(f"Part {name} not found in model")
 
+        # Final pre-lm_head norm is OPTIONAL (set None if absent): used to re-normalize the
+        # un-normed final hidden captured by vLLM in the offline/streaming path.
+        self.base_model_norm_path = None
+        for path in _FINAL_NORM_PATHS:
+            try:
+                assert isinstance(self.get_submodule(path), torch.nn.Module)
+                self.base_model_norm_path = path
+                break
+            except Exception:
+                continue
+
     def _activate_torch_compile(self):
         import torch._dynamo
 
         torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
 
-        compile_targets = [
+        compile_targets: list[tuple[str, dict[str, Any]]] = [
             ("_prepare_eagle_inputs", {}),
             ("_eagle_forward", {"mode": "max-autotune"}),
             ("_eagle_loss", {"fullgraph": True}),
@@ -165,7 +195,7 @@ class HFEagleModel(EagleModel):
 
     def _enable_cp_ttt(self):
         if self.training and not self.eagle_mix_hidden_states:
-            return enable_cp_ttt_patch()
+            return enable_cp_ttt_patch(self.eagle_cp_size)
         return contextlib.nullcontext()
 
     @staticmethod
@@ -233,10 +263,36 @@ class HFEagleModel(EagleModel):
 
     def _inject_base_lora(self):
         """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
+        import re
+
         from peft import LoraConfig
         from peft.mapping import inject_adapter_in_model
 
         target_modules = self.eagle_base_lora_target_modules or None
+
+        # If start_layer is set, enumerate matching modules explicitly so only
+        # the desired layers get LoRA adapters.
+        if self.eagle_base_lora_start_layer is not None:
+            if target_modules is None:
+                raise ValueError(
+                    "eagle_base_lora_start_layer requires eagle_base_lora_target_modules "
+                    "to be set explicitly (the start-layer filter matches module-name "
+                    "suffixes, so it cannot be combined with PEFT's default/regex targeting)."
+                )
+            explicit_targets = []
+            for name, _ in self._base_model.named_modules():
+                m = re.search(r"layers\.(\d+)\.", name)
+                if m and int(m.group(1)) >= self.eagle_base_lora_start_layer:
+                    if any(name.endswith(mod) for mod in target_modules):
+                        explicit_targets.append(name)
+            if not explicit_targets:
+                raise ValueError(
+                    f"No base model modules matched eagle_base_lora_target_modules="
+                    f"{target_modules} at or beyond layer {self.eagle_base_lora_start_layer}. "
+                    "Check the start layer index and target module names."
+                )
+            target_modules = explicit_targets
+
         lora_config = LoraConfig(
             r=self.eagle_base_lora_rank,
             lora_alpha=self.eagle_base_lora_alpha,
@@ -244,11 +300,16 @@ class HFEagleModel(EagleModel):
             bias="none",
         )
         inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
-        # Unfreeze LoRA parameters unless we have a warmup phase
-        freeze_lora = self.eagle_base_lora_warmup_steps > 0
+
+        # Always mark LoRA params as trainable so they are included in the
+        # optimizer from the start.  During warmup, _lora_cotraining_active
+        # stays False which prevents any gradient from flowing to LoRA via the
+        # forward path (hidden states detached, logits detached, preservation
+        # loss skipped).  This keeps the optimizer param-group count constant
+        # across checkpoints, avoiding the mismatch on resume.
         for name, param in self._base_model.named_parameters():
             if "lora_" in name:
-                param.requires_grad = not freeze_lora
+                param.requires_grad = True
 
     def _set_base_lora_enabled(self, enabled: bool) -> None:
         """Enable or disable LoRA adapters in the base model."""
@@ -669,7 +730,12 @@ class HFEagleModel(EagleModel):
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None:
-                base_outputs.logits = self._base_model_lm_head(base_outputs.out_hiddens)
+                # Re-apply the base final norm when the producer captured a pre-norm hidden
+                # (vLLM streaming); fails loud if pre-norm is declared but no norm was located.
+                out_hiddens = _maybe_apply_base_final_norm(
+                    base_outputs.out_hiddens, kwargs["base_model_outputs"], self._base_model_norm
+                )
+                base_outputs.logits = self._base_model_lm_head(out_hiddens)
             past_key_values = None
         else:
             with self._nvtx_range("base_model_forward"):
@@ -721,12 +787,21 @@ class HFEagleModel(EagleModel):
             else None
         )
         for ttt_step in range(num_ttt_steps):
-            # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
             eagle_attention_mask = (
                 eagle_attn_mask_0
                 if (self.eagle_mix_hidden_states or ttt_step == 0)
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
+            # Under CP the dense mask is unused and fatal (plain tensor vs DTensor scores);
+            # causal masking comes from is_causal and TTT masking from the ring-attention patch.
+            if self.eagle_cp_size > 1:
+                warn_rank_0(
+                    "Context-parallel EAGLE training does not mask padded positions: the dense "
+                    "mask cannot be applied to the sharded (DTensor) sequence, so the draft model "
+                    "attends to any pad tokens. Pack or truncate samples to a fixed length under "
+                    "cp_size > 1."
+                )
+                eagle_attention_mask = None
             cache_to_pass = None if self.eagle_mix_hidden_states else eagle_cache
             with self._enable_cp_ttt(), self._nvtx_range("eagle_forward"):
                 _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
@@ -789,7 +864,12 @@ class HFEagleModel(EagleModel):
             loss = None
             assert not self.training, "At least one loss must be computed for training."
         else:
-            loss = (base_outputs.loss or 0) + (eagle_loss or 0)
+            # Test for None, not truthiness: a 0.0 loss tensor is falsy, and `or 0` would
+            # replace it with an int and detach the graph.
+            loss = None
+            for term in (base_outputs.loss, eagle_loss):
+                if term is not None:
+                    loss = term if loss is None else loss + term
 
         return ModelOutput(
             loss=loss,

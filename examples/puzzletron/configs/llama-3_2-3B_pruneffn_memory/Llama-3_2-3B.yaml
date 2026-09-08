@@ -2,7 +2,6 @@ defaults:
   - pruning: ffn_pruning
   - scoring: ../validate_solutions_defaults
   - realize_model: ../validate_solutions_defaults
-  - bypass:
   - override hydra/hydra_logging: disabled
   - _self_
 
@@ -107,4 +106,3 @@ nccl_timeout_minutes: ${timedelta_minutes:10}
 hydra:
   run:
     dir: ${puzzle_dir}/hydra_logs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-

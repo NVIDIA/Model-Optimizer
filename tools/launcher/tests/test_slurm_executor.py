@@ -20,20 +20,127 @@ Note: actual SSH tunnel and sbatch submission are not tested (require live infra
 We mock run.SSHTunnel and run.SlurmExecutor to verify the arguments passed.
 """
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
-from core import build_slurm_executor
+import pytest
+from core import ControlMasterSSHTunnel, build_slurm_executor
 
 
 class TestBuildSlurmExecutor:
     """Tests for build_slurm_executor mount construction and executor params."""
 
     @patch("core.run.SlurmExecutor")
-    @patch("core.run.SSHTunnel")
-    def test_scratch_and_modelopt_mounts(self, mock_tunnel, mock_executor):
+    @patch("core.ControlMasterSSHTunnel")
+    def test_controlmaster_env_selects_controlmaster_tunnel(
+        self, mock_tunnel, mock_executor, monkeypatch
+    ):
+        """MFA clusters reuse OpenSSH ControlMaster instead of Paramiko SSHTunnel."""
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", "/tmp/mfa.sock")
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
+            host="mfa-login.example.com",
+            port=22,
+            account="test_account",
+            partition="batch",
+            container="ubuntu:24.04",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=None,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="alice-mfa",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="exp_001",
+            job_dir="/lustre/experiments",
+            task_name="job_0",
+            packager=MagicMock(),
+        )
+
+        mock_tunnel.assert_called_once()
+        assert mock_tunnel.call_args.kwargs["host"] == "mfa-login.example.com"
+        assert mock_tunnel.call_args.kwargs["user"] == "alice-mfa"
+        mock_executor.assert_called_once()
+
+
+class TestControlMasterSSHTunnel:
+    """Tests for the OpenSSH ControlMaster-backed tunnel shim."""
+
+    def test_connect_reuses_live_controlmaster(self, monkeypatch, tmp_path):
+        sock = tmp_path / "cm.sock"
+        sock.touch()
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(sock))
+
+        def fake_run(argv, **kwargs):
+            assert argv[:5] == ["ssh", "-p", "22", "-O", "check"]
+            assert f"ControlPath={sock}" in argv
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("core.subprocess.run", fake_run)
+
+        tunnel = ControlMasterSSHTunnel(
+            host="mfa-login.example.com",
+            user="alice-mfa",
+            job_dir="/tmp/job",
+        )
+        tunnel.connect()
+
+        assert tunnel.session.is_connected is True
+        assert tunnel.session.host == "mfa-login.example.com"
+
+    def test_connect_requires_reauth_when_controlmaster_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(tmp_path / "missing.sock"))
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh mfa-cluster")
+
+        tunnel = ControlMasterSSHTunnel(
+            host="mfa-login.example.com",
+            user="alice-mfa",
+            job_dir="/tmp/job",
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            tunnel.connect()
+        assert "mfa_reauth_required" in str(exc_info.value)
+
+    def test_connect_requires_reauth_when_controlmaster_check_times_out(
+        self, monkeypatch, tmp_path
+    ):
+        sock = tmp_path / "cm.sock"
+        sock.touch()
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_CONTROL_PATH", str(sock))
+        monkeypatch.setenv("MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND", "ssh mfa-cluster")
+
+        def fake_run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, timeout=15)
+
+        monkeypatch.setattr("core.subprocess.run", fake_run)
+
+        tunnel = ControlMasterSSHTunnel(
+            host="mfa-login.example.com",
+            user="alice-mfa",
+            job_dir="/tmp/job",
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            tunnel.connect()
+        assert "mfa_reauth_required" in str(exc_info.value)
+        assert "ssh mfa-cluster" in str(exc_info.value)
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_installed_mode_skips_modelopt_source_mounts(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+
+        slurm_config = MagicMock(
+            requeue=False,
             host="test-host",
             port=22,
             account="test_account",
@@ -63,13 +170,60 @@ class TestBuildSlurmExecutor:
         mock_executor.assert_called_once()
         call_kwargs = mock_executor.call_args[1]
 
-        # Verify container mounts include scratch, modelopt, and experiment title
+        # Installed package mode packages only launcher examples/common. Do not
+        # mount ModelOpt source overlays that were not packaged into remote code.
         mounts = call_kwargs["container_mounts"]
         assert any("/scratchspace" in m for m in mounts)
-        assert any("/opt/modelopt" in m for m in mounts)
         assert any("/cicd" in m for m in mounts)
+        assert not any("/opt/modelopt" in m for m in mounts)
+        assert not any("modelopt_recipes" in m for m in mounts)
         # Original mount preserved
         assert any("/hf-local:/hf-local" in m for m in mounts)
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_source_mode_adds_modelopt_source_mounts(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+
+        slurm_config = MagicMock(
+            requeue=False,
+            host="test-host",
+            port=22,
+            account="test_account",
+            partition="batch",
+            container="nvcr.io/test:latest",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=["--no-container-mount-home"],
+            nodes=1,
+            ntasks_per_node=4,
+            gpus_per_node=4,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="testuser",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="exp_001",
+            job_dir="/lustre/experiments",
+            task_name="job_0",
+            packager=MagicMock(),
+            modelopt_src_path="/checkout/modelopt",
+            experiment_title="cicd",
+        )
+
+        mounts = mock_executor.call_args[1]["container_mounts"]
+        assert any(
+            "/lustre/experiments/cicd/exp_001/job_0/code/modules/Model-Optimizer/modelopt:"
+            "/opt/modelopt" in m
+            for m in mounts
+        )
+        assert any(
+            "/lustre/experiments/cicd/exp_001/job_0/code/modules/Model-Optimizer/"
+            "modelopt_recipes:/opt/modelopt_recipes" in m
+            for m in mounts
+        )
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
@@ -77,6 +231,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="host",
             port=22,
             account="acct",
@@ -112,6 +267,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="login.cluster.com",
             port=30022,
             account="acct",
@@ -150,6 +306,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="h",
             port=22,
             account="my_acct",
@@ -163,6 +320,7 @@ class TestBuildSlurmExecutor:
             gpus_per_node=8,
             array="0-3",
             time="04:00:00",
+            mem="128G",
         )
 
         packager = MagicMock()
@@ -187,7 +345,47 @@ class TestBuildSlurmExecutor:
         assert kw["array"] == "0-3"
         assert kw["packager"] is packager
         assert kw["time"] == "04:00:00"
+        assert kw["mem"] == "128G"
         assert kw["retries"] == 0
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_default_mem_remains_all_node_memory(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+
+        for mem in ("missing", "", None):
+            slurm_config = MagicMock(
+                requeue=False,
+                host="h",
+                port=22,
+                account="a",
+                partition="b",
+                container="c",
+                modelopt_install_path="/m",
+                container_mounts=[],
+                srun_args=[],
+                nodes=1,
+                ntasks_per_node=1,
+                gpus_per_node=1,
+                array=None,
+            )
+            if mem == "missing":
+                del slurm_config.mem
+            else:
+                slurm_config.mem = mem
+
+            build_slurm_executor(
+                user="u",
+                identity=None,
+                slurm_config=slurm_config,
+                experiment_id="e",
+                job_dir="/j",
+                task_name="t",
+                packager=MagicMock(),
+            )
+
+            assert mock_executor.call_args[1]["mem"] == "0"
+            mock_executor.reset_mock()
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
@@ -195,6 +393,7 @@ class TestBuildSlurmExecutor:
         mock_tunnel.return_value = MagicMock()
 
         slurm_config = MagicMock(
+            requeue=False,
             host="h",
             port=22,
             account="a",
@@ -219,6 +418,46 @@ class TestBuildSlurmExecutor:
             packager=MagicMock(),
         )
 
-        # Should not crash; mounts should still include scratch + modelopt + title
+        # Should not crash; installed mode still includes scratch + title mounts.
         mounts = mock_executor.call_args[1]["container_mounts"]
-        assert len(mounts) >= 3
+        assert "/j/cicd/e:/scratchspace" in mounts
+        assert "/j/cicd:/cicd" in mounts
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_requeue_sets_param_and_bumps_retries(self, mock_tunnel, mock_executor):
+        mock_tunnel.return_value = MagicMock()
+        executor = mock_executor.return_value
+        executor.retries = 0
+        executor.additional_parameters = {}
+
+        slurm_config = MagicMock(
+            requeue=True,
+            host="h",
+            port=22,
+            account="a",
+            partition="b",
+            container="c",
+            modelopt_install_path="/m",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=1,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="u",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="e",
+            job_dir="/j",
+            task_name="t",
+            packager=MagicMock(),
+        )
+
+        # requeue=True flags the additional parameter and bumps retries above 0 so
+        # nemo-run's sbatch wrapper actually issues `scontrol requeue` on preemption.
+        assert executor.additional_parameters["requeue"] is True
+        assert executor.retries == 3

@@ -240,7 +240,7 @@ def is_control_flow_op(op_type: str):
 
 def is_multiclass_op(op_type: str):
     """Returns whether the given op type is of Multiclass category or not."""
-    return op_type in ["Einsum"]
+    return op_type == "Einsum"
 
 
 def is_recurrent_op(op_type: str):

@@ -499,23 +499,34 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 W4A4, FP8 KV cache with data-driven calibration
    * - ``general/ptq/nvfp4_default-kv_nvfp4_cast``
      - NVFP4 W4A4, NVFP4 KV cache with constant amax, max calibration
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp8_cast``
+     - NVFP4 for MLP layers only, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_mlp_only-kv_fp8``
      - NVFP4 for MLP layers only, FP8 KV cache
+   * - ``general/ptq/nvfp4_experts_only-kv_fp8_cast``
+     - NVFP4 for MoE expert layers only, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_experts_only-kv_fp8``
      - NVFP4 for MoE expert layers only, FP8 KV cache
    * - ``general/ptq/nvfp4_experts_only-kv_fp8_layerwise``
      - NVFP4 for MoE expert layers only, FP8 KV cache, layerwise calibration
+   * - ``general/ptq/nvfp4_omlp_only-kv_fp8_cast``
+     - NVFP4 for output projection + MLP layers, FP8 KV cache with constant amax
    * - ``general/ptq/nvfp4_omlp_only-kv_fp8``
      - NVFP4 for output projection + MLP layers, FP8 KV cache
+   * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
+     - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
 
 Model-specific recipes
 ----------------------
 
-Model-specific recipes are tuned for a particular Hugging Face ``model_type``
-(or a specific released model) and live under
-``huggingface/<model_type>/[<specific_model>/]<task>/``. See
+Model-specific recipes come in two tiers: architecture recipes keyed by a
+Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
+checkpoint mirrors keyed by a model-hub path under
+``models/<org>/<model_id>/<task>/``. See
 `modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
-for the layout convention and recipe-lookup order.
+and
+`modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
+for the layout conventions and recipe-lookup order.
 
 .. list-table::
    :header-rows: 1
@@ -523,8 +534,10 @@ for the layout convention and recipe-lookup order.
 
    * - Recipe path
      - Description
-   * - ``huggingface/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only``
+   * - ``models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
+   * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
+     - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
 
 Loading recipes
@@ -562,7 +575,7 @@ Some example scripts accept a ``--recipe`` flag.  For instance, the PTQ example:
 
 .. code-block:: bash
 
-   python examples/llm_ptq/hf_ptq.py \
+   python examples/hf_ptq/hf_ptq.py \
        --model Qwen/Qwen3-8B \
        --recipe general/ptq/fp8_default-kv_fp8_cast \
        --export_path build/fp8 \
@@ -668,12 +681,20 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_default-kv_fp8_cast.yaml
    |       +-- nvfp4_default-kv_fp8.yaml
    |       +-- nvfp4_default-kv_nvfp4_cast.yaml
+   |       +-- nvfp4_mlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_mlp_only-kv_fp8.yaml
+   |       +-- nvfp4_experts_only-kv_fp8_cast.yaml
    |       +-- nvfp4_experts_only-kv_fp8.yaml
    |       +-- nvfp4_experts_only-kv_fp8_layerwise.yaml
+   |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
-   +-- huggingface/                # Model-specific recipes
+   |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
+   +-- huggingface/                # Architecture-specific recipes (by model_type)
    |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   |       +-- <task>/
+   |           +-- <recipe>.yaml
+   +-- models/                     # Checkpoint-specific recipes (by model-hub path)
+   |   +-- <org>/<model_id>/       # see modelopt_recipes/models/README.md
    |       +-- <task>/
    |           +-- <recipe>.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)

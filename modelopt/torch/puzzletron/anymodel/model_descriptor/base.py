@@ -171,7 +171,7 @@ class ModelDescriptor(ABC):
 
     @staticmethod
     def pruning_mixins() -> Dict[str, Any]:
-        """Return available pruning mixins for bypass distillation.
+        """Return available pruning mixins for child-checkpoint initialization.
 
         Override in subclasses to provide model-specific pruning mixins, e.g.
         ``{"kv_heads": KVHeadsPruningMixIn(...), "experts_removal": ExpertRemovalPruningMixIn(...)}``.

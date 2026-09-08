@@ -57,14 +57,19 @@ def _cast_fp4(array: np.ndarray) -> np.ndarray:
     return array_f4
 
 
-def _cast_fp8(array: np.ndarray) -> np.ndarray:
-    """Cast a numpy array to FLOAT8E4M3FN using PyTorch."""
+def _encode_nvfp4_block_scale(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return FP8-rounded block scales as FP32 values and encoded bytes."""
+    if not np.all(np.isfinite(array)) or np.any(array < 0):
+        raise ValueError("NVFP4 block scales must be finite and nonnegative.")
+
     array_f32_t = torch.from_numpy(array)
     if torch.cuda.is_available():
         array_f32_t = array_f32_t.cuda()
-    array_f8_t = array_f32_t.clamp(min=-448, max=448).to(torch.float8_e4m3fn).view(torch.uint8)
-    array_f8 = array_f8_t.cpu().numpy().astype(np.uint8)
-    return array_f8
+    array_f8_t = NVFP4QTensor._cast_per_block_scale_to_fp8(array_f32_t)
+    array_f32 = array_f8_t.float().cpu().numpy()
+    array_f8 = array_f8_t.view(torch.uint8).cpu().numpy().astype(np.uint8)
+
+    return array_f32, array_f8
 
 
 def _replace_fp4qdq_with_2dq(
@@ -295,12 +300,9 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
             sw_f32_per_block = sw_f32_per_block.reshape(sw_per_block_shape)
 
-            # Quantize weights
+            sw_f32_per_block, sw_f8_per_block = _encode_nvfp4_block_scale(sw_f32_per_block)
             w_f32 = quantize(w32, block_size, sw_f32_per_block, sw_f32_per_tensor)
-
-            # Cast to FP4 and FP8
             w_f4 = _cast_fp4(w_f32)
-            sw_f8_per_block = _cast_fp8(sw_f32_per_block)
 
             # Store compressed data as node attributes for post_process
             w_f4_attr = node.attribute.add()
@@ -331,6 +333,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         }
         value_info_map = {vi.name: vi for vi in graph.value_info}
         graph_inputs = {inp.name for inp in graph.input}
+        cast_output_cache: dict[tuple[str, str], str] = {}
 
         def _get_precision_dtype() -> str:
             # Check initializers to determine the precision of the weights
@@ -350,18 +353,22 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
             # Create Cast nodes for each input of the target node except bias
             for i, input_name in enumerate(node.input[:2]):
-                cast_output_name = input_name + "_f16"  # Unique name for the cast output
+                cast_output_name = cast_output_cache.get((input_name, precision_dtype))
+                if cast_output_name is None:
+                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
+                    cast_output_name = f"{input_name}_{cast_output_suffix}"
+                    cast_output_cache[(input_name, precision_dtype)] = cast_output_name
 
-                # Create a Cast node to convert the input to FP16/BF16
-                cast_node = onnx.helper.make_node(
-                    "Cast",
-                    inputs=[input_name],  # Original input of the target node
-                    outputs=[cast_output_name],
-                    to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
-                )
+                    # Create a Cast node to convert the input to FP16/BF16
+                    cast_node = onnx.helper.make_node(
+                        "Cast",
+                        inputs=[input_name],  # Original input of the target node
+                        outputs=[cast_output_name],
+                        to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
+                    )
 
-                # Insert the Cast node into the graph
-                graph.node.extend([cast_node])
+                    # Insert the Cast node into the graph
+                    graph.node.extend([cast_node])
 
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
@@ -420,5 +427,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.ClearField("initializer")
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
+
+        utils.topologically_sort_graph_nodes(graph)
 
         return onnx_model

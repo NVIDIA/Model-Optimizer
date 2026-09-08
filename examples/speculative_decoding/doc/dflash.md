@@ -162,10 +162,17 @@ See [`modelopt_recipes/general/speculative_decoding/dflash.yaml`](../../../model
 | `dflash.dflash_block_size` | 8 | Block size for parallel prediction |
 | `dflash.dflash_num_anchors` | 512 | Random anchor positions per sample (see below) |
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma (0 disables, see below) |
+| `dflash.dflash_loss_objective` | `dpace` | Position weighting: `decay` (static) or `dpace` (dynamic, see below) |
+| `dflash.dflash_dpace_alpha` | 0.5 | D-PACE smoothing factor in (0, 1]; only used when objective is `dpace` |
 | `dflash.dflash_self_logit_distillation` | true | Use target model logits as soft labels (vs hard CE) |
+| `dflash.dflash_mask_token_id` | auto | Token ID for masked positions (see note below) |
 | `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers |
-| `dflash.dflash_architecture_config.mask_token_id` | auto | Token ID for masked positions |
 | `training.answer_only_loss` | false | Mask loss on non-assistant tokens |
+
+> **Note on `dflash_mask_token_id`:** the draft reuses the target's `embed_tokens`, so the
+> mask id must be a token that exists in the target embedding. Pin it to an existing
+> reserved token id — e.g. MiniMax-M2.7 uses `200054` (embedding is 200064 rows; tokens
+> 0..200053 are real, 200054+ reserved).
 
 > **Note on `answer_only_loss` and chat templates:** When `answer_only_loss=true`, the
 > tokenizer's chat template must include `{% generation %}` / `{% endgeneration %}` tags
@@ -238,6 +245,35 @@ much as position 1. Paper recommendation: gamma=7 for block_size=16, gamma=4 for
 Note: this is different from EAGLE3's `eagle_loss_decay_factor` which multiplies loss by
 `alpha^step` across TTT steps. DFlash decay operates within a single block, weighting
 early positions higher because they gate acceptance of all later positions.
+
+### D-PACE (Dynamic Position-Aware Cross-Entropy)
+
+**D-PACE** ([arXiv:2605.18810](https://arxiv.org/abs/2605.18810)) is the default position-weighting
+objective (`dflash_loss_objective: dpace`). It derives per-position weights from a differentiable
+surrogate of expected accepted block length. Where the static decay above uses a fixed schedule,
+D-PACE adapts to the draft's own per-position confidence and shifts training signal toward
+whichever positions currently limit acceptance as the drafter improves. Set
+`dflash_loss_objective: decay` to fall back to the static schedule.
+
+For each block, let `q_i = exp(-CE_i)` be the draft confidence on the target token at
+predicted position `i`. D-PACE smooths it (Eq.7) and weights each position by the suffix-sum
+of prefix products (Eq.8):
+
+```text
+q~_i  = (1 - alpha) * q_i + alpha
+w_j   = sum_{m >= j}  prod_{i <= m} q~_i        # detached; multiplies the per-token CE
+```
+
+The weight factors into the prefix-acceptance probability (`prod_{i<=j} q~_i`) times the
+remaining accepted-length value, so it directly targets expected accepted length. The
+weights are detached from the gradient — D-PACE only reshapes credit assignment and adds
+~2.3% training overhead with no change to the draft architecture or inference.
+
+- `dflash_dpace_alpha` is the asymmetric smoothing floor (`q~_i >= alpha`) that keeps later
+  weights from vanishing. Stable in `[0.3, 0.7]`; `alpha=0` is rejected (cumulative product
+  collapses), and `alpha → 1` flattens toward uniform weighting. Default `0.5`.
+- D-PACE is mutually exclusive with `dflash_loss_decay_factor`; when objective is `dpace`,
+  the decay factor is ignored.
 
 ### Checkpoint Resume
 

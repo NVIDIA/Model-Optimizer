@@ -15,9 +15,33 @@
 
 """Shared fixtures and helpers for Triton flash attention tests."""
 
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
+
+_KERNELS_DIR = Path(__file__).parent
+
+
+def pytest_collection_modifyitems(items):
+    """Silence noisy third-party warnings (triton/torch) for all kernel tests.
+
+    Consolidated here so individual kernel test modules don't each repeat the same
+    ``pytest.mark.filterwarnings`` block. Scoped to this directory only — the rest of
+    the suite keeps surfacing warnings.
+    """
+    ignore_marks = [
+        pytest.mark.filterwarnings("ignore::UserWarning"),
+        pytest.mark.filterwarnings("ignore::RuntimeWarning"),
+        pytest.mark.filterwarnings("ignore::DeprecationWarning"),
+    ]
+    for item in items:
+        if item.path.is_relative_to(_KERNELS_DIR):
+            for mark in ignore_marks:
+                item.add_marker(mark)
 
 
 def make_qkv(total, num_heads, num_kv_heads, head_dim, device="cuda", dtype=torch.float16):
@@ -58,9 +82,7 @@ def sdpa_reference(q, k, v, b_start_loc, b_seq_len, is_causal=True):
 @pytest.fixture(scope="module")
 def tiny_llama_dir(tmp_path_factory):
     """Tiny Llama: 2 layers, 64 hidden, 4 q-heads, 2 kv-heads, head_dim=16."""
-    from _test_utils.torch.transformers_models import create_tiny_llama_dir
-
-    return create_tiny_llama_dir(
+    model_dir = create_tiny_llama_dir(
         tmp_path_factory.mktemp("tiny_llama"),
         with_tokenizer=True,
         num_hidden_layers=2,
@@ -70,3 +92,5 @@ def tiny_llama_dir(tmp_path_factory):
         intermediate_size=64,
         max_position_embeddings=64,
     )
+    with assert_unmodified_tree(model_dir) as path:
+        yield path

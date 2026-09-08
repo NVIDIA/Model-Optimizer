@@ -85,6 +85,7 @@ compatibility issues with complex nested message types.
 
 import argparse
 import gzip
+import itertools
 import json
 import multiprocessing
 import time
@@ -95,7 +96,12 @@ from datasets import get_dataset_config_names, get_dataset_split_names, load_dat
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
-from modelopt.torch.utils import num2hrb
+from modelopt.torch.utils import (
+    REASONING_CONTENT_MODES,
+    ReasoningContentMode,
+    num2hrb,
+    prepare_messages_for_chat_template,
+)
 
 __all__ = ["megatron_preprocess_data"]
 
@@ -121,7 +127,7 @@ class _Encoder:
         json_keys: list[str],
         append_eod: bool,
         max_sequence_length: int | None,
-        reasoning_content: str = "strip",
+        reasoning_content: ReasoningContentMode = "strip",
         strip_newlines: bool = False,
     ):
         self.tokenizer_name_or_path = tokenizer_name_or_path
@@ -159,53 +165,11 @@ class _Encoder:
         - ``"native"``: pass messages unchanged; the tokenizer's chat template must
           handle ``reasoning_content`` itself (e.g. Qwen3).
         """
-        if self.reasoning_content == "native":
-            return messages
-
-        def _fix_arguments(args):
-            """Ensure tool_call.arguments is a dict for Jinja2 |items compatibility."""
-            if isinstance(args, dict):
-                return args
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                    return parsed if isinstance(parsed, dict) else {}
-                except (json.JSONDecodeError, TypeError):
-                    return {}
-            return {}
-
-        processed = []
-        for msg in messages:
-            has_tool_calls = "tool_calls" in msg and isinstance(msg.get("tool_calls"), list)
-            needs_copy = "reasoning_content" in msg or has_tool_calls
-            if not needs_copy:
-                processed.append(msg)
-                continue
-            msg = dict(msg)  # shallow copy — don't mutate the original
-            rc = msg.pop("reasoning_content", None)
-            if self.reasoning_content == "inline" and rc:
-                msg["content"] = f"<think>\n{rc}\n</think>\n{msg.get('content', '')}"
-            # Always normalize tool_call.arguments to dict so Jinja2 |items doesn't crash.
-            # The Nemotron v3 chat template reassigns tool_call = tool_call.function when
-            # the nested OpenAI format is used, so we fix both the direct and nested levels.
-            if has_tool_calls:
-                fixed_tool_calls = []
-                for tc in msg["tool_calls"]:
-                    if not isinstance(tc, dict):
-                        fixed_tool_calls.append(tc)
-                        continue
-                    tc = dict(tc)
-                    if "arguments" in tc and not isinstance(tc["arguments"], dict):
-                        tc["arguments"] = _fix_arguments(tc["arguments"])
-                    if isinstance(tc.get("function"), dict):
-                        fn = dict(tc["function"])
-                        if "arguments" in fn and not isinstance(fn["arguments"], dict):
-                            fn["arguments"] = _fix_arguments(fn["arguments"])
-                        tc["function"] = fn
-                    fixed_tool_calls.append(tc)
-                msg["tool_calls"] = fixed_tool_calls
-            processed.append(msg)
-        return processed
+        return prepare_messages_for_chat_template(
+            messages,
+            reasoning_content=self.reasoning_content,
+            normalize_tool_calls=self.reasoning_content != "native",
+        )
 
     def encode(self, json_line: str):
         try:
@@ -298,13 +262,71 @@ class _Partition:
                 flush=True,
             )
 
+    @staticmethod
+    def _encode_in_batches(pool, encoder: "_Encoder", lines, batch_size: int):
+        """Encode finite batches for a run bounded by ``max_tokens``.
+
+        Once the token target is reached, the caller stops without consuming the remaining input.
+        Batches run one at a time, while documents within each batch are encoded in parallel. Unlike
+        ``imap``, ``map`` collects every result from the current batch before returning. Therefore,
+        no worker is writing a pending result when the caller stops at the token target.
+        The final batch may encode documents that the caller does not use after reaching its limit.
+        """
+        lines = iter(lines)
+        while True:
+            batch = list(itertools.islice(lines, batch_size))
+            if not batch:
+                break
+
+            encoded_batch = pool.map(encoder.encode, batch, chunksize=1)
+            yield from encoded_batch
+
+    def _encode_docs(self, encoder: "_Encoder", lines, may_stop_early: bool = False):
+        """Tokenize ``lines``, forking worker processes only when ``workers > 1``.
+
+        ``multiprocessing.Pool`` always ``fork()``s, even for a single worker. Forking a
+        process that has already initialized a CUDA context / many native threads (e.g. when
+        this is called in-process after GPU work) is unsafe and can segfault the children.
+        The single-worker path avoids the fork entirely by tokenizing inline in this process.
+
+        When ``may_stop_early`` is true, wait for finite batches so no worker results are pending
+        if the caller stops consuming documents after reaching its token limit.
+
+        Returns ``(pool, encoded_docs)``; ``pool`` is ``None`` in the inline case.
+        """
+        if self.workers == 1:
+            encoder.initializer()
+            return None, map(encoder.encode, lines)
+        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        if may_stop_early:
+            batch_size = self.workers * 4  # Balance throughput against unused final-batch work.
+            encoded_docs = self._encode_in_batches(pool, encoder, lines, batch_size)
+        else:
+            encoded_docs = pool.imap(encoder.encode, lines, 32)
+        return pool, encoded_docs
+
+    @staticmethod
+    def _cached_token_count(prefixes: list[str]) -> int:
+        """Return the number of tokens represented by cached Megatron datasets."""
+        token_count = 0
+        for prefix in prefixes:
+            # Avoid memory-mapping the token file because a cached split can be empty.
+            dataset = indexed_dataset.IndexedDataset(prefix, mmap=False)
+            token_count += int(dataset.sequence_lengths.sum())
+        return token_count
+
     def process_json_file(
-        self, input_file_name: str | Path, output_dir: str | Path, encoder: _Encoder
+        self,
+        input_file_name: str | Path,
+        output_dir: str | Path,
+        encoder: _Encoder,
+        max_tokens: int | None = None,
     ) -> tuple[int, list[str]]:
         input_path = Path(input_file_name)
         stem = input_path.stem if input_path.suffix != ".gz" else Path(input_path.stem).stem
         output_prefix = Path(output_dir) / stem
-        prefixes = [f"{output_prefix}_{key}" for key in self.json_keys]
+        token_tag = f"_tokens{max_tokens}" if max_tokens is not None else ""
+        prefixes = [f"{output_prefix}_{key}{token_tag}" for key in self.json_keys]
 
         print(f"\nOpening {input_file_name}")
         if input_path.suffix == ".gz":
@@ -312,16 +334,17 @@ class _Partition:
         else:
             fin = open(input_path, encoding="utf-8")
 
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        encoded_docs = pool.imap(encoder.encode, fin, 32)
+        # Workers encode asynchronously; iterating encoded_docs waits for results in input order.
+        pool, encoded_docs = self._encode_docs(encoder, fin, may_stop_early=max_tokens is not None)
 
         output_bin_files = {}
         output_idx_files = {}
         builders = {}
 
         for key in self.json_keys:
-            output_bin_files[key] = f"{output_prefix}_{key}.bin"
-            output_idx_files[key] = f"{output_prefix}_{key}.idx"
+            prefix = f"{output_prefix}_{key}{token_tag}"
+            output_bin_files[key] = f"{prefix}.bin"
+            output_idx_files[key] = f"{prefix}.idx"
             if Path(output_bin_files[key]).exists() and Path(output_idx_files[key]).exists():
                 continue
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
@@ -331,10 +354,11 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
         start_time = time.time()
-        total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
+        total_doc_len, total_enc_len = 0, 0
+        final_enc_len = 0  # Tokens written to output, including appended EOD tokens.
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
             total_doc_len += doc_len
             total_enc_len += enc_len
@@ -342,9 +366,14 @@ class _Partition:
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
             self._print_processing_stats(i, total_doc_len, total_enc_len, start_time)
+            if max_tokens is not None and final_enc_len >= max_tokens:
+                break
         self._print_processing_stats(i, total_doc_len, total_enc_len, start_time, force_print=True)
 
         fin.close()
+        if pool is not None:
+            pool.close()
+            pool.join()
         for key in builders:
             builders[key].finalize(output_idx_files[key])
 
@@ -364,6 +393,7 @@ class _Partition:
         config: str | None,
         split: str,
         max_samples: int | None = None,
+        max_tokens: int | None = None,
         streaming: bool = False,
     ) -> tuple[int, list[str]]:
         """Load a HF dataset split and tokenize directly without writing an intermediate JSONL.
@@ -376,11 +406,12 @@ class _Partition:
         """
         print(f"\nLoading HF dataset {dataset_name=}, {config=}, {split=}, {streaming=}")
         ds = load_dataset(path=dataset_name, name=config, split=split, streaming=streaming)
-        if max_samples is not None:
+        if max_samples is not None or max_tokens is not None:
             # Shuffle first so the selected subset is random, not a biased prefix.
             # Non-streaming: global index shuffle (memory-mapped, efficient) then .select(N).
             # Streaming: buffer shuffle (approximate) then .take(N).
             ds = ds.shuffle(seed=42)
+        if max_samples is not None:
             if streaming:
                 ds = ds.take(max_samples)
             else:
@@ -397,6 +428,7 @@ class _Partition:
 
         safe_name = dataset_name.replace("/", "--")
         sample_tag = f"_max{max_samples}" if max_samples is not None else ""
+        token_tag = f"_tokens{max_tokens}" if max_tokens is not None else ""
         output_prefix = Path(output_dir) / f"{safe_name}_{config}_{split}"
 
         prefixes = []
@@ -404,7 +436,7 @@ class _Partition:
         output_idx_files = {}
         builders = {}
         for key in self.json_keys:
-            prefix = f"{output_prefix}_{key}{sample_tag}"
+            prefix = f"{output_prefix}_{key}{sample_tag}{token_tag}"
             prefixes.append(prefix)
             output_bin_files[key] = f"{prefix}.bin"
             output_idx_files[key] = f"{prefix}.idx"
@@ -417,13 +449,16 @@ class _Partition:
 
         if not builders:
             print(f"\t[SKIP] Output files for {dataset_name} {config}/{split} already exist")
-            return 0, prefixes
+            return self._cached_token_count(prefixes), prefixes
 
-        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
-        encoded_docs = pool.imap(encoder.encode, self._iter_hf_as_json(ds), 32)
+        # Workers encode asynchronously; iterating encoded_docs waits for results in input order.
+        pool, encoded_docs = self._encode_docs(
+            encoder, self._iter_hf_as_json(ds), may_stop_early=max_tokens is not None
+        )
 
         start_time = time.time()
-        total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
+        total_doc_len, total_enc_len = 0, 0
+        final_enc_len = 0  # Tokens written to output, including appended EOD tokens.
         i = 0
         for i, (doc, sentence_lens, (doc_len, enc_len)) in enumerate(encoded_docs, start=1):
             total_doc_len += doc_len
@@ -432,14 +467,17 @@ class _Partition:
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
             self._print_processing_stats(i, total_doc_len, total_enc_len, start_time)
+            if max_tokens is not None and final_enc_len >= max_tokens:
+                break
 
         if i:
             self._print_processing_stats(
                 i, total_doc_len, total_enc_len, start_time, force_print=True
             )
 
-        pool.close()
-        pool.join()
+        if pool is not None:
+            pool.close()
+            pool.join()
         for key in builders:
             builders[key].finalize(output_idx_files[key])
 
@@ -481,6 +519,7 @@ def megatron_preprocess_data(
     hf_split: str | None = None,
     hf_max_samples_per_split: int | None = None,
     hf_streaming: bool = False,
+    max_tokens: int | None = None,
     # Other arguments
     output_dir: str | Path,
     tokenizer_name_or_path: str,
@@ -489,12 +528,17 @@ def megatron_preprocess_data(
     max_sequence_length: int | None = None,
     workers: int = 1,
     log_interval: int = 100000,
-    reasoning_content: str = "strip",
+    reasoning_content: ReasoningContentMode = "strip",
     strip_newlines: bool = False,
 ):
     """Process large data for pretraining.
 
     Exactly one of ``input_dir``, ``jsonl_paths``, or ``hf_dataset`` must be provided.
+
+    Important: When ``max_tokens`` is set, JSONL records are consumed from the beginning of each
+    file rather than selected randomly. Pre-shuffle JSONL files to obtain a random subset. Hugging
+    Face datasets are shuffled deterministically before applying the limit; streaming datasets use
+    an approximate buffer shuffle.
 
     Args:
         input_dir: Directory containing JSONL files to tokenize.
@@ -507,6 +551,8 @@ def megatron_preprocess_data(
             downloaded — useful for very large pretraining datasets or datasets with complex
             nested message schemas that cause Arrow type-cast errors in non-streaming mode.
             Note: streaming does not cache to disk, so re-runs re-download. Defaults to False.
+        max_tokens: Stop after processing at least this many tokens across the source files or
+            selected Hugging Face splits. The final document may make the result slightly larger.
         output_dir: Path to directory to save binary output files.
         tokenizer_name_or_path: Name or path of the Hugging Face tokenizer to use.
         json_keys: Key or list of keys to extract from json. Defaults to ["text"].
@@ -534,11 +580,16 @@ def megatron_preprocess_data(
         raise ValueError(
             "Exactly one of `input_dir`, `jsonl_paths`, or `hf_dataset` must be provided."
         )
-    if hf_streaming and hf_max_samples_per_split is None and _is_main_or_first_worker():
+    if (
+        hf_streaming
+        and hf_max_samples_per_split is None
+        and max_tokens is None
+        and _is_main_or_first_worker()
+    ):
         warnings.warn(
-            "--hf_streaming is set but --hf_max_samples_per_split is not. "
-            "Streaming without a sample cap re-downloads the full dataset on every run with no "
-            "disk cache, which is slower than the cached non-streaming path.",
+            "--hf_streaming is set but neither --hf_max_samples_per_split nor --max_tokens is "
+            "set. Streaming without a sample or token cap re-downloads the full dataset on "
+            "every run with no disk cache, which is slower than the cached non-streaming path.",
             stacklevel=2,
         )
 
@@ -555,12 +606,16 @@ def megatron_preprocess_data(
     )
     partition = _Partition(vocab_size, json_keys, log_interval, workers)
 
+    # Tokens written across all input files or Hugging Face splits.
     final_enc_len = 0
     all_prefixes: list[str] = []
     overall_start = time.time()
 
     if hf_dataset is not None:
         for config, split in _enumerate_hf_splits(hf_dataset, hf_name, hf_split):
+            remaining_tokens = None if max_tokens is None else max_tokens - final_enc_len
+            if remaining_tokens is not None and remaining_tokens <= 0:
+                break
             enc_len, prefixes = partition.process_hf_split(
                 output_dir,
                 encoder,
@@ -568,6 +623,7 @@ def megatron_preprocess_data(
                 config,
                 split,
                 hf_max_samples_per_split,
+                remaining_tokens,
                 hf_streaming,
             )
             final_enc_len += enc_len
@@ -585,9 +641,17 @@ def megatron_preprocess_data(
             file_names = list(jsonl_paths)  # type: ignore[arg-type]
 
         for name in file_names:
-            enc_len, prefixes = partition.process_json_file(name, output_dir, encoder)
+            remaining_tokens = None if max_tokens is None else max_tokens - final_enc_len
+            if remaining_tokens is not None and remaining_tokens <= 0:
+                break
+            enc_len, prefixes = partition.process_json_file(
+                name, output_dir, encoder, remaining_tokens
+            )
             final_enc_len += enc_len
             all_prefixes.extend(prefixes)
+
+    if max_tokens is not None and final_enc_len >= max_tokens:
+        print(f"\n>>> Early stopping: {max_tokens=} achieved with {final_enc_len} tokens.")
 
     elapsed = (time.time() - overall_start) / 60
     print(
@@ -652,13 +716,19 @@ def main():
     parser.add_argument(
         "--max_sequence_length", type=int, default=None, help="Maximum sequence length"
     )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=None,
+        help="Stop after processing at least this many tokens",
+    )
     parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
     parser.add_argument("--log_interval", type=int, default=100000, help="Log interval")
     parser.add_argument(
         "--reasoning_content",
         type=str,
         default="strip",
-        choices=["strip", "inline", "native"],
+        choices=sorted(REASONING_CONTENT_MODES),
         help=(
             "How to handle the reasoning_content field in Nemotron v3 datasets. "
             "'strip': discard (default, safe for any tokenizer). "
@@ -694,6 +764,7 @@ def main():
         json_keys=args.json_keys,
         append_eod=args.append_eod,
         max_sequence_length=args.max_sequence_length,
+        max_tokens=args.max_tokens,
         workers=args.workers,
         log_interval=args.log_interval,
         reasoning_content=args.reasoning_content,

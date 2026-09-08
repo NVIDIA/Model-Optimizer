@@ -19,12 +19,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from conftest import make_qkv, make_varlen_meta, sdpa_reference
-
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::UserWarning"),
-    pytest.mark.filterwarnings("ignore::RuntimeWarning"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning"),
-]
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
@@ -247,9 +242,6 @@ class TestHFIntegration:
 
     def test_triton_matches_eager(self, tiny_llama_dir):
         """Triton attention produces same logits and generated tokens as eager."""
-        pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
         if tok.pad_token_id is None:
             tok.pad_token_id = tok.eos_token_id
@@ -295,9 +287,6 @@ class TestHFIntegration:
 
     def test_triton_padded_batch(self, tiny_llama_dir):
         """Padded batch produces valid logits."""
-        pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         model = AutoModelForCausalLM.from_pretrained(
             tiny_llama_dir,
             attn_implementation="modelopt_triton",

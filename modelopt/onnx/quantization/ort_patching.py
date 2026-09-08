@@ -130,8 +130,12 @@ def _collect_value(histogram_collector, name_to_arr):
                 old_histogram, data_arr, min_value, max_value, threshold
             )
         else:
+            # Cast range endpoints to Python float so numpy computes bin edges in
+            # float64. A fp16 threshold here can underflow the 128-bin linspace
+            # and trip "Too many bins for data range" on numpy >= 2.0.
+            range_max = float(threshold)
             hist, hist_edges = np.histogram(
-                data_arr, histogram_collector.num_bins, range=(-threshold, threshold)
+                data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
             )
             histogram_collector.histogram_dict[tensor] = (
                 hist,
@@ -1111,8 +1115,12 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
                 threshold,
             )
         else:
+            # Cast range endpoints to Python float so numpy computes bin edges in
+            # float64. A fp16 threshold here can underflow the 128-bin linspace
+            # and trip "Too many bins for data range" on numpy >= 2.0.
+            range_max = float(threshold)
             hist, hist_edges = np.histogram(
-                data_arr, histogram_collector.num_bins, range=(-threshold, threshold)
+                data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
             )
             histogram_collector.histogram_dict[tensor] = (
                 hist,

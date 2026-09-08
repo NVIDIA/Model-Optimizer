@@ -1,0 +1,21 @@
+# Minimal Slurm smoke test for launcher/MCP integration.
+#
+# This intentionally avoids model downloads and HF cache mounts. It verifies:
+#   MCP submit_job -> launcher YAML parse -> Slurm submit -> container start -> GPU visibility.
+
+job_name: nvidia_smi_smoke
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Slurm container GPU smoke test"
+
+  task_0:
+    script: common/smoke/nvidia_smi.sh
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "00:10:00"
+      container: nvcr.io/nvidia/cuda:12.4.1-base-ubuntu22.04
+      container_mounts: []

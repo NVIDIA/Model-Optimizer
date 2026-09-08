@@ -17,6 +17,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 pytest.importorskip("transformers")
 
@@ -348,8 +349,6 @@ class TestFlashSkipSoftmaxMethod:
 
     def test_get_sparse_context_patches_softmax(self):
         """get_sparse_context returns an ExitStack that patches F.softmax."""
-        import torch.nn.functional as F
-
         method = FlashSkipSoftmax(
             {
                 "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
@@ -376,8 +375,6 @@ class TestFlashSkipSoftmaxMethod:
 
     def test_calibration_mode_skips_apply(self):
         """In calibration mode, sparse_softmax wrapper does not apply mask."""
-        import torch.nn.functional as F
-
         method = FlashSkipSoftmax(
             {
                 "thresholds": {"prefill": [1e-3], "decode": [1e-4]},

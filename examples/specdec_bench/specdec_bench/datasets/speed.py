@@ -14,6 +14,8 @@
 # limitations under the License.
 
 # mypy: disable-error-code="index"
+# Paper-derived prompt strings carry intentional whitespace/long lines; keep them verbatim.
+# ruff: noqa: E501, W291, W293, PLR1704
 import random
 import re
 from enum import Enum
@@ -74,13 +76,15 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
     BenchmarkDataset.CNN_DAILYMAIL.value: lambda dataset_name, config_name: load_dataset(
         dataset_name, config_name, split="test"
     ),
-    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: load_dataset(
-        dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-    )
-    if config_name != "train_test_split"
-    else load_dataset(
-        dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
-    ).train_test_split(test_size=0.5, shuffle=True, seed=42),
+    BenchmarkDataset.HLE.value: lambda dataset_name, config_name: (
+        load_dataset(
+            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
+        )
+        if config_name != "train_test_split"
+        else load_dataset(
+            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
+        ).train_test_split(test_size=0.5, shuffle=True, seed=42)
+    ),
     BenchmarkDataset.LIVECODEBENCH.value: lambda dataset_name, config_name: load_dataset(
         "json",
         data_files={
@@ -243,7 +247,7 @@ An: The reason why you do not choose this answer.
         answers_to_add = (
             answers[: answers_to_add_stop + 1]
             if answers_to_add_stop >= correct_answer_i
-            else [answers[correct_answer_i]] + answers[: answers_to_add_stop + 1]
+            else [answers[correct_answer_i], *answers[: answers_to_add_stop + 1]]
         )
         random.shuffle(answers_to_add)
         for i, answer in enumerate(answers_to_add):
@@ -368,7 +372,7 @@ The content of the dialogue(s) is given below.
             if message["role"] == "user"
         ]
 
-        return [prompt.format(context=context, question=questions[0])] + questions[1:]
+        return [prompt.format(context=context, question=questions[0]), *questions[1:]]
 
     @staticmethod
     def _generate_coser_prompt(external_dataset: "Dataset") -> str:
@@ -519,11 +523,9 @@ her fear and anger)."""
                 hle_train = hle_train.to_pandas()
                 hle_train = hle_train[hle_train["image"] == ""]
                 hle_train["demonstration"] = hle_train.apply(
-                    lambda e: "Question: "
-                    + e["question"]
-                    + "\n\nAnswer: "
-                    + e["rationale"]
-                    + "\n\n",
+                    lambda e: (
+                        "Question: " + e["question"] + "\n\nAnswer: " + e["rationale"] + "\n\n"
+                    ),
                     axis=1,
                 )
                 hle_train["tokens"] = hle_train["demonstration"].apply(

@@ -23,7 +23,7 @@ speculative decoding draft-model training, etc.
 | --- | --- |
 | `make_nemotron_ptv3_dataset.py` | Build a dataset from the [Nemotron PT v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3) using a configurable YAML mix |
 | `make_nemotron_ptv2_dataset.py` | Build a dataset from [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) |
-| `make_dataset.py` | General-purpose mixer for arbitrary HuggingFace datasets (mtbench, sharegpt, ultrachat, magpie, etc.) |
+| `make_dataset.py` | General-purpose mixer for arbitrary HuggingFace datasets (mtbench, sharegpt, magpie, etc.) |
 | `conversation_utils.py` | Shared utilities: augmentation, role normalization, assistant-turn stripping |
 | `add_nemotron_chat.py` | Add Nemotron v2 chat conversations to an existing dataset |
 | `augmentations.yaml` | Augmentation variants (language redirects, style hints) for `make_nemotron_pt*.py` |

@@ -38,6 +38,9 @@ TINY_EAGLE_CFG = {
 
 EAGLE_LORA_CONFIG = {
     "eagle_architecture_config": {**default_eagle_config, **TINY_EAGLE_CFG},
+    # torch.compile(max-autotune) is a GPU training-throughput optimization; on CPU it
+    # adds ~40s of compile time with no benefit, so disable it for these unit tests.
+    "eagle_use_torch_compile": False,
     "eagle_base_lora": True,
     "eagle_base_lora_rank": 4,
     "eagle_base_lora_alpha": 8.0,
@@ -46,7 +49,7 @@ EAGLE_LORA_CONFIG = {
 }
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def lora_eagle_model():
     model = get_tiny_llama(num_hidden_layers=4)
     mtsp.convert(model, mode=[("eagle", deepcopy(EAGLE_LORA_CONFIG))])

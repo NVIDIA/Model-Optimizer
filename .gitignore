@@ -28,9 +28,11 @@ docs/source/reference/generated
 # Jupyter Notebook
 **/.ipynb_checkpoints
 
+# Agent session workspaces (see plugins/modelopt/skills/common/workspace-management.md)
+workspaces/
+
 # Environments
-.env
-.env-*
+.env*
 .venv
 env/
 venv/
@@ -68,3 +70,6 @@ AGENTS.override.md
 
 # Ignore SonarQube analysis
 .sonar/
+
+# Claude Code runtime lock (ephemeral process state — never commit)
+.claude/scheduled_tasks.lock

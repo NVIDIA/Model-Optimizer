@@ -39,11 +39,19 @@ TORCH_VERSIONS = {
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
+    "torch_213": "torchvision~=0.28.0",
+    "torch_214": "torchvision~=0.29.0",
 }
 
+# Extra install pins applied per transformers matrix entry (installed after the base
+# ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.9.0",
-    "tf_min": "transformers~=4.56.0",
+    "tf_latest": ("transformers~=5.14.0",),
+    # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
+    # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
+    # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
+    # models silently misroute to the LLM path on export.
+    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
 }
 
 
@@ -53,16 +61,19 @@ def _cov_args():
 
 
 # ─── CPU unit tests ───────────────────────────────────────────────────────────
+_CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
+
+
 @nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
     session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
-    tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
-    if tf_pin:
-        session.install(tf_pin)
-    session.run("python", "-m", "pytest", "tests/unit", *_cov_args())
+    tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
+    if tf_pins:
+        session.install(*tf_pins)
+    session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
 
 
 @nox.session(python="3.12")
@@ -71,7 +82,7 @@ def partial_unit(session, subset):
     """Unit tests with partial installs."""
     if subset == "onnx":
         session.install("torchvision~=0.26.0", ".[onnx,dev-test]")
-        session.run("python", "-m", "pytest", "tests/unit/onnx")
+        session.run("python", "-m", "pytest", "tests/unit/onnx", env=_CPU_ONLY_ENV)
     elif subset == "torch":
         session.install("megatron-core", ".[dev-test]")
         session.run(
@@ -81,10 +92,11 @@ def partial_unit(session, subset):
             "tests/unit/torch",
             "--ignore=tests/unit/torch/deploy",
             "--ignore=tests/unit/torch/puzzletron",
+            env=_CPU_ONLY_ENV,
         )
     else:  # torch_deploy
         session.install(".[onnx,dev-test]")
-        session.run("python", "-m", "pytest", "tests/unit/torch/deploy")
+        session.run("python", "-m", "pytest", "tests/unit/torch/deploy", env=_CPU_ONLY_ENV)
 
 
 # ─── GPU sessions (run inside containers — no new venv) ──────────────────────
@@ -114,16 +126,17 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        "git+https://github.com/state-spaces/mamba.git",
-        "git+https://github.com/Dao-AILab/causal-conv1d.git",
+        # Install the latest *released* sdists (built against the container torch)
+        "mamba_ssm",
+        "causal-conv1d",
     )
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 
-# Container: nvcr.io/nvidia/nemo:26.04 or later
+# Container: nvcr.io/nvidia/nemo:26.08 or later
 @nox.session(venv_backend="none")
 def gpu_megatron(session):
-    # nemo:26.04 has transformers 5.x but system-wide installed trtllm 1.2.0 which does not support it causing import errors
+    # NeMo containers have transformers 5.x but a system-wide installed trtllm which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")
@@ -142,7 +155,7 @@ def gpu_trtllm(session):
 # Pin must stay in sync with examples/vllm_serve/Dockerfile.
 @nox.session(venv_backend="none")
 def gpu_vllm(session):
-    session.run("python3", "-m", "pip", "install", "-e", ".[hf,dev-test]")
+    session.run("python3", "-m", "pip", "install", "-e", ".[hf,puzzletron,dev-test]")
     session.run("python3", "-m", "pytest", "tests/gpu_vllm", *_cov_args())
 
 

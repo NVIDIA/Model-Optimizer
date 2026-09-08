@@ -155,6 +155,16 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    initial_disabled_steps: int = ModeloptField(
+        default=0,
+        title="Initial disabled steps.",
+        description=(
+            "User-specified number of initial disabled steps recorded in the exported "
+            "sparse attention config. Passed straight through; not interpreted by "
+            "sparsify or calibration; only written to the checkpoint when > 0."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -546,6 +556,35 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
+# RULER calibration via the fused Triton calibration kernel (prefill + decode).
+# Computes the same exponential-model calibration as SKIP_SOFTMAX_CALIB but
+# measures tile-skip statistics with the Triton ``attention_calibrate`` kernel
+# (the way the Triton inference kernel actually skips tiles) instead of the
+# PyTorch F.softmax-patching block path. Faster on GPU since it avoids
+# materializing per-block tensors.
+SKIP_SOFTMAX_TRITON_CALIB = {
+    "sparse_cfg": {
+        "calibration": {
+            # Prefill calibration uses full-prefill forwards; decode calibration
+            # runs SDPA prefill followed by Triton-backend decode steps.
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+            "samples": 64,
+            "max_seqlen": 16384,
+            # Full prefill (seq_q == seq_k, uniform batch=1) — what
+            # attention_calibrate was validated against. Chunked prefill would
+            # exercise an untested KV-cache causal-offset path in the kernel.
+            "chunk_size": -1,
+        },
+        "*attn*": {
+            "method": "triton_skip_softmax",
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 class VSAAttributeConfig(ModeloptBaseConfig):
     """Video Sparse Attention (VSA) attribute configuration.
 
@@ -738,6 +777,7 @@ __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_CALIB_SPARSE24",
     "SKIP_SOFTMAX_DEFAULT",
+    "SKIP_SOFTMAX_TRITON_CALIB",
     "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
     "VSA_DEFAULT",

@@ -26,7 +26,6 @@ A global limit can also be placed on the total number of conversations in each o
 The dataset choices available are:
 - "mtbench"
 - "sharegpt"
-- "ultrachat"
 - "daring-anteater"
 - "magpie"
 - "nemotron-post-training-v2"
@@ -40,11 +39,10 @@ outputs:
     sources:
       - name: "mtbench"
         splits: ["all"]
-      - name: "ultrachat"
+      - name: "magpie"
         splits:
-          train_gen: 0.5 # 50% of examples from train_gen split
-          train_sft: 100 # 100 examples from train_sft split
-          test_gen: "all" # all examples from test_gen split
+          300k: 0.5 # 50% of examples from the 300k split
+          500k: 100 # 100 examples from the 500k split
 ```
 """
 
@@ -269,24 +267,6 @@ async def _load_sharegpt_conversations(
     logger.info("Finished loading ShareGPT conversations.")
 
 
-async def _load_ultrachat_conversations(
-    split_name: str,
-) -> AsyncGenerator[int | dict[str, Any], None]:
-    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split=split_name)
-    ds = ds.shuffle(seed=42)
-    yield len(ds)
-    for i in range(len(ds)):
-        prompt = ds[i]["prompt"].strip()
-        prompt_id = ds[i]["prompt_id"].strip()
-        if prompt:
-            msgs = [{"role": "user", "content": prompt}]
-            if not prompt_id:
-                prompt_id = id_for_conversation(msgs)
-            prompt_id = f"ultrachat-{split_name}-{prompt_id}"
-            yield {"conversation_id": prompt_id, "conversations": msgs}
-    logger.info(f"Finished loading UltraChat {split_name} conversations.")
-
-
 def _parse_daring_anteater_conversation(daring_anteater_conv: list) -> list[dict] | None:
     """Parse a DaringAnteater conversation into a list of messages."""
     msgs = []
@@ -410,8 +390,6 @@ async def load_conversations_for_split(
         samples_it = _load_mtbench_conversations(split_name)
     elif dataset_name == "sharegpt":
         samples_it = _load_sharegpt_conversations(split_name)
-    elif dataset_name == "ultrachat":
-        samples_it = _load_ultrachat_conversations(split_name)
     elif dataset_name == "daring-anteater":
         samples_it = _load_daring_anteater_conversations(split_name)
     elif dataset_name == "magpie":

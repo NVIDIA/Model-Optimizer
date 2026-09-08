@@ -35,7 +35,13 @@ def simple_conv_model():
     return _test_models._create_simple_conv_onnx_model()
 
 
-@pytest.mark.parametrize("use_trtexec", [True, False])
+@pytest.mark.parametrize(
+    "use_trtexec",
+    [
+        pytest.param(True, marks=pytest.mark.timeout(240)),  # trtexec build needs longer
+        False,
+    ],
+)
 def test_export_quantized_model(use_trtexec, simple_conv_model):
     """Test exporting quantized model with Q/DQ."""
     if use_trtexec:

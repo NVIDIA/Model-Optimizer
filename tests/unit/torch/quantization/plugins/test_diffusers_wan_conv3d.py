@@ -26,6 +26,7 @@ import pytest
 import torch
 
 pytest.importorskip("onnx")
+pytest.importorskip("diffusers")
 
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanCausalConv3d
 

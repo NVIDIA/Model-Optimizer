@@ -15,14 +15,17 @@
 
 """Shared Triton kernels for modelopt (attention, quantization, etc.)."""
 
+from collections.abc import Callable
+
 import torch
 
 from modelopt.torch.utils import import_plugin
 
 IS_AVAILABLE = False
-attention = None
-attention_calibrate = None
-register_triton_attention = None
+attention: Callable | None = None
+register_triton_attention: Callable | None = None
+triton_attention_forward: Callable | None = None
+validate_triton_attention_envelope: Callable | None = None
 
 if torch.cuda.is_available():
     with import_plugin(
@@ -32,26 +35,19 @@ if torch.cuda.is_available():
             "kernel. Try to install triton with `pip install triton`."
         ),
     ):
-        from .triton_fa import attention as _attention
-
-        attention = _attention
-        IS_AVAILABLE = True
-        from .hf_triton_attention import register_triton_attention as _register_triton_attention
-
-        register_triton_attention = _register_triton_attention
-
-        # Calibration lives in the sparsity subpackage (skip-softmax specific).
-        # Imported here so ``from modelopt.torch.kernels.common.attention import
-        # attention_calibrate`` keeps working.
-        from modelopt.torch.kernels.sparsity.attention.calibrate import (
-            attention_calibrate as _attention_calibrate,
+        from .hf_triton_attention import (
+            register_triton_attention,
+            triton_attention_forward,
+            validate_triton_attention_envelope,
         )
+        from .triton_fa import attention
 
-        attention_calibrate = _attention_calibrate
+        IS_AVAILABLE = True
 
 __all__ = [
     "IS_AVAILABLE",
     "attention",
-    "attention_calibrate",
     "register_triton_attention",
+    "triton_attention_forward",
+    "validate_triton_attention_envelope",
 ]

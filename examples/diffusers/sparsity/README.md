@@ -43,10 +43,11 @@ python wan22_skip_softmax.py \
     --skip-softmax-threshold 0.61557 \
     --prompt "A cat playing piano" --output out.mp4
 
-# With calibration
+# Calibrate + export for TRT-LLM deployment (typical flow)
 python wan22_skip_softmax.py \
     --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
-    --calibrate --target-sparsity 0.5 \
+    --calibrate --target-sparsity 0.5 --calib-size 4 \
+    --export-dir /path/to/wan22-skip-softmax-ckpt \
     --prompt "A cat playing piano" --output out.mp4
 
 # Dense baseline (no sparsity, for comparison)
@@ -62,6 +63,13 @@ python wan22_skip_softmax.py \
     --prompt "A cat playing piano" --output out.mp4
 ```
 
+`--export-dir` writes a Hugging Face checkpoint with the calibrated
+`threshold_scale_factor` block embedded in each component's `config.json`
+(under the `sparse_attention_config` key). TRT-LLM's
+`SkipSoftmaxAttentionConfig.resolve_for_target_sparsity` reads the
+`(a, b)` directly via `coeffs['a'] * math.exp(coeffs['b'] * sparsity)` —
+no extra conversion needed downstream.
+
 ## Threshold Modes
 
 | Mode | How threshold reaches the kernel | Use case |
@@ -73,4 +81,5 @@ python wan22_skip_softmax.py \
 ## Known Issues
 
 - **14B dual transformer calibration**: Transformers are calibrated sequentially — transformer_2's calibration runs while transformer_1 is already sparsified, introducing asymmetric calibration conditions.
+- **Resolution-dependent fit**: The kernel's intrinsic `S(λ)` curve depends on the spatial resolution (different attention statistics at 480×832 vs 720×1280). For tightest target ≈ achieved alignment, calibrate at the deployment `(height, width, frames)`. Within a fixed spatial resolution, achieved sparsity stays roughly aligned across frame counts.
 - **Minimum achievable sparsity**: Even the strictest threshold may yield 30-40% sparsity on diffusion models (many tiles are inherently negligible). Targets below this floor cause extrapolation; an inference-time warning is emitted.

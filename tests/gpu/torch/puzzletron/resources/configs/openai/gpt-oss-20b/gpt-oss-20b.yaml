@@ -3,7 +3,6 @@ defaults:
   - /openai/gpt-oss-20b/pruning@pruning: expert_removal  # TODO: Note: Works for unquantized test models, not MXFP4 quantized production models
   - /validate_solutions_defaults@scoring
   - /validate_solutions_defaults@realize_model
-  - bypass:
   - override /hydra/hydra_logging: disabled
   - _self_
 

@@ -14,6 +14,8 @@
 # limitations under the License.
 """Utility functions for model type detection and classification."""
 
+import warnings
+
 import torch.nn as nn
 
 MODEL_NAME_TO_TYPE = {
@@ -33,13 +35,15 @@ MODEL_NAME_TO_TYPE = {
     "Qwen3Next": "qwen3next",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
+    # DiffusionGemma must come before "Gemma" — get_model_type substring-matches
+    # in order, and "gemma" is a substring of "diffusiongemma".
+    "DiffusionGemma": "diffusion_gemma",
     "Gemma3": "gemma3",
     "Gemma2": "gemma2",
     "Gemma": "gemma",
     "phi3small": "phi3small",
     "phi3": "phi3",
     "PhiMoEForCausalLM": "phi3",
-    "Phi4MMForCausalLM": "phi4mm",
     "phi": "phi",
     "TLGv4ForCausalLM": "phi",
     "MixtralForCausalLM": "llama",
@@ -66,7 +70,12 @@ __doc__ = f"""Utility functions for model type detection and classification.
         {MODEL_NAME_TO_TYPE=}
 """
 
-__all__ = ["get_language_model_from_vl", "get_model_type", "is_multimodal_model"]
+__all__ = [
+    "TiedWeightMap",
+    "get_language_model_from_vl",
+    "get_model_type",
+    "is_multimodal_model",
+]
 
 
 def get_model_type(model):
@@ -83,10 +92,6 @@ def is_multimodal_model(model):
     This function detects various multimodal model architectures by checking for:
     - Standard vision configurations (vision_config)
     - Language model attributes (language_model)
-    - Specific multimodal model types (phi4mm)
-    - Vision LoRA configurations
-    - Audio processing capabilities
-    - Image embedding layers
     - Nemotron-Parse conditional generation models
 
     Args:
@@ -99,10 +104,6 @@ def is_multimodal_model(model):
         >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
         >>> is_multimodal_model(model)
         True
-
-        >>> model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-4-multimodal-instruct")
-        >>> is_multimodal_model(model)
-        True
     """
     config = model.config
 
@@ -113,12 +114,6 @@ def is_multimodal_model(model):
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or hasattr(model, "language_model")  # Language model attribute (e.g., LLaVA)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 
@@ -157,3 +152,64 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     # Pattern 4: No language_model found
     return None
+
+
+class TiedWeightMap:
+    """Name-based lookups over HF's ``{alias: canonical}`` tie map (``model.all_tied_weights_keys``).
+
+    Export sites ask for a *group key*: both sides of a tie share one key, an untied parameter
+    returns ``None``. The key is a name, so it survives packing / FSDP / offload, where a
+    ``data_ptr`` would not.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        """Source the tie map from HF's ``all_tied_weights_keys`` (transformers >=5.0).
+
+        HF's ``{target: source}`` == our ``{alias: canonical}``, resolved at load, config-gated,
+        ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on
+        transformers <5.0 -> empty map (the ``data_ptr`` backstop in postprocess is the net).
+        """
+        all_tied = getattr(model, "all_tied_weights_keys", None)
+        # Warn whenever a tie is declared (embedding tie or any ``_tied_weights_keys`` entry, e.g.
+        # encoder/decoder or fused-MoE) but the name-based map is missing, not just for embeddings.
+        declares_tie = bool(
+            getattr(getattr(model, "config", None), "tie_word_embeddings", False)
+        ) or bool(getattr(model, "_tied_weights_keys", None))
+        if all_tied is None and declares_tie:
+            warnings.warn(
+                "This model may contain tied/shared weights, but deduplicating them on export "
+                "requires transformers>=5.0 (it uses model.all_tied_weights_keys, which is only "
+                "supported in newer versions). On older versions the exported checkpoint may keep "
+                "duplicate copies of the tied weights (larger files), and tied weights may not be "
+                "deduplicated correctly during export. Upgrade to transformers>=5.0 for correct "
+                "tied-weight export."
+            )
+        # Drop any self-entry (alias == canonical): HF should not emit one, but a target==source
+        # pair would schedule the kept canonical for deletion, so filter it out defensively.
+        self.alias_to_canonical: dict[str, str] = {
+            alias: canonical for alias, canonical in (all_tied or {}).items() if alias != canonical
+        }
+        self.canonical_names: set[str] = set(self.alias_to_canonical.values())
+
+    def group_key(self, param_full_name: str) -> str | None:
+        """Canonical group key for a parameter name, or ``None`` if untied.
+
+        Both sides of a tie return the same key, so it does not matter which side export
+        visits first.
+        """
+        if param_full_name in self.alias_to_canonical:
+            return self.alias_to_canonical[param_full_name]
+        if param_full_name in self.canonical_names:
+            return param_full_name
+        return None
+
+    def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
+        """Group key for a fused-experts container, or ``None`` if untied.
+
+        The tie lives on the container's 3-D projection (e.g. ``…experts.gate_up_proj``);
+        stripping that suffix gives one key shared by all the container's projections.
+        """
+        gk = self.group_key(f"{container_name}.{first_proj_attr}")
+        if gk is None:
+            return None
+        return gk.removesuffix(f".{first_proj_attr}")

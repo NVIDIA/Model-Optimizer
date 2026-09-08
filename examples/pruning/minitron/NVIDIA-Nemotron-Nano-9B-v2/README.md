@@ -9,7 +9,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 2. **[Pruning](#2-pruning)** — Minitron structured pruning from 9B to 7B
 3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation (up to 80B tokens)
 4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
-5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
+5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/hf_ptq/hf_ptq.py` script
 6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
 
 ## Results
@@ -63,6 +63,10 @@ Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-
 ### 1. Data Preparation
 
 See [examples/dataset/MEGATRON_DATA_PREP.md](../../../dataset/MEGATRON_DATA_PREP.md) for tokenization commands for all datasets used in this blend.
+To prepare a token-limited subset, follow the
+[token-budgeted data blend workflow](../../../dataset/MEGATRON_DATA_PREP.md#prepare-token-budgeted-data-blends),
+but create a custom YAML configuration using this tutorial's tokenizer, sources, and weights below. The
+example configuration targets Nemotron 3 and should not be reused unchanged.
 
 For this experiment: `TOKENIZER=nvidia/NVIDIA-Nemotron-Nano-9B-v2`, `OUTPUT_DIR=tokenized_nemotron_v2`.
 
@@ -266,18 +270,17 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
 
 The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
-Before running, update the following fields in the yaml or overwrite them in the command line with `-o <option>=<value>`:
+<details>
+<summary>Evaluation launch steps (click to expand)</summary>
+
+Before running, update the following fields in the `nemo_evaluator.yaml` file or overwrite them in the command line with `-o <option>=<value>`:
 
 - `execution.hostname` — your Slurm login node hostname
 - `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned or quantized)
-- `evaluation.nemo_evaluator_config.config.params.extra.tokenizer` — same path as `checkpoint_path`
-
-> [!TIP]
-> Uncomment `limit_samples` under any task to run a small subset and verify the end-to-end eval pipeline before launching full evals.
+- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 
 ```bash
-pip install "nemo-evaluator-launcher[all]==0.1.90"
+pip install "nemo-evaluator-launcher[all]==0.1.82"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
@@ -291,11 +294,13 @@ export INFERENCE_API_KEY=xxxxxx
 export OPENAI_CLIENT_ID=xxxxxx
 export OPENAI_CLIENT_SECRET=xxxxxx
 
+# Run the evaluation
+# To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)
+# To restrict which tasks run, add `-t <task_name>` to the command.
 nemo-evaluator-launcher run --config nemo_evaluator.yaml
 ```
 
-> [!TIP]
-> Run same evals multiple times to get a more stable result.
+</details>
 
 **Tasks and exact metric names reported in the results table:**
 
@@ -304,8 +309,8 @@ nemo-evaluator-launcher run --config nemo_evaluator.yaml
 | MMLU | [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) (5-shot) | N/A | `mmlu` |
 | MMLU Pro | NeMo Evaluator | 1 | `mmlu-pro_pass_at_1_symbolic_correct` |
 | GPQA Diamond | NeMo Evaluator | 8 | `gpqa_pass_at_1_avg-of-8_symbolic_correct` |
-| LiveCodeBench v6 | NeMo Evaluator | 8 | `livecodebench_pass_at_1_avg-of-8_accuracy` |
-| AIME 2025 | NeMo Evaluator | 64 | `aime25_pass_at_1_avg-of-64_symbolic_correct` |
+| LiveCodeBench v6 | NeMo Evaluator | 4 | `livecodebench_pass_at_1_avg-of-4_accuracy` |
+| AIME 2025 | NeMo Evaluator | 32 | `aime25_pass_at_1_avg-of-32_symbolic_correct` |
 | Math 500 | NeMo Evaluator | 5 | `AA_math_test_500_score_micro_avg_of_5` |
 | IFEval | NeMo Evaluator | 1 | `ifeval_pass_at_1_average_score` |
 | SciCode (Subtask) | NeMo Evaluator | 8 | `scicode_pass_at_1_avg-of-8_subtask_accuracy` |
@@ -316,11 +321,11 @@ For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVI
 
 ### 5. Quantization
 
-ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/llm_ptq/README.md](../../../llm_ptq/README.md) for the full PTQ documentation.
+ModelOpt allows stacking multiple optimization techniques. Here we stack FP8 quantization on top of the pruned and distilled model to get an even more optimized model. See [examples/hf_ptq/README.md](../../../hf_ptq/README.md) for the full PTQ documentation.
 
 Similar to the official [Nemotron-Nano-9B-v2-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8) model, if you want to quantize the pruned 7B model to FP8, the Mamba and MLP layers are quantized to FP8, while all 4 attention layers and the Conv1d components within the Mamba layers are kept in BF16 to avoid accuracy degradation.
 
-This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/llm_ptq/hf_ptq.py`](../../../llm_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG`. For a faster model at the cost of a larger accuracy drop, you can use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
+This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`modelopt/torch/quantization/config.py`](../../../../modelopt/torch/quantization/config.py). To apply this, you need to modify `QUANT_CFG_CHOICES["fp8"]` in [`examples/hf_ptq/hf_ptq.py`](../../../hf_ptq/hf_ptq.py) to use `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG`. For a faster model at the cost of a larger accuracy drop, you can use `mtq.MAMBA_MOE_FP8_AGGRESSIVE_CFG` instead.
 
 > [!NOTE]
 > You can also quantize to NVFP4 using `mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` (default) or `mtq.MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop), which may require further distillation (QAD) to recover accuracy and Blackwell GPU for deployment.
@@ -328,7 +333,7 @@ This is done with the `mtq.MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`m
 Calibrate and export the HF checkpoint from iteration 12800 to FP8 (takes 1-2 mins on 8x H100):
 
 ```bash
-python /opt/Model-Optimizer/examples/llm_ptq/hf_ptq.py \
+python /opt/Model-Optimizer/examples/hf_ptq/hf_ptq.py \
     --pyt_ckpt_path <output_dir>/checkpoints/hf_iter_12800 \
     --export_path <output_dir>/checkpoints/hf_iter_12800_fp8 \
     --qformat fp8 \

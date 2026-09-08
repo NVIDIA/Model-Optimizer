@@ -41,6 +41,7 @@ class TestSlurmConfig:
         assert cfg.nodes == 1
         assert cfg.ntasks_per_node == 1
         assert cfg.gpus_per_node == 1
+        assert cfg.mem == "0"
         assert cfg.local is False
         assert cfg.container_mounts is None
         assert cfg.srun_args is None
@@ -52,6 +53,7 @@ class TestSlurmConfig:
             account="my_account",
             nodes=4,
             gpus_per_node=8,
+            mem="128G",
             container="nvcr.io/nvidia/pytorch:24.01-py3",
             container_mounts=["/data:/data"],
             srun_args=["--no-container-mount-home"],
@@ -60,7 +62,12 @@ class TestSlurmConfig:
         assert cfg.account == "my_account"
         assert cfg.nodes == 4
         assert cfg.gpus_per_node == 8
+        assert cfg.mem == "128G"
         assert cfg.container_mounts == ["/data:/data"]
+
+    def test_nullable_gpus_per_node(self):
+        cfg = SlurmConfig(gpus_per_node=None)
+        assert cfg.gpus_per_node is None
 
 
 class TestSlurmFactory:
@@ -79,6 +86,10 @@ class TestSlurmFactory:
         cfg = slurm_factory()
         assert cfg.srun_args == ["--no-container-mount-home"]
 
+    def test_default_mem(self):
+        cfg = slurm_factory()
+        assert cfg.mem == "0"
+
     def test_default_container_mounts_from_env(self, monkeypatch):
         monkeypatch.setenv("SLURM_HF_LOCAL", "/custom/hf-local")
         # Reload to pick up the env var — slurm_factory reads SLURM_HF_LOCAL at module-import
@@ -93,6 +104,10 @@ class TestSlurmFactory:
         cfg = slurm_factory(nodes=8)
         assert cfg.nodes == 8
 
+    def test_override_gpus_per_node_none(self):
+        cfg = slurm_factory(gpus_per_node=None)
+        assert cfg.gpus_per_node is None
+
     def test_override_partition(self):
         cfg = slurm_factory(partition="gpu")
         assert cfg.partition == "gpu"
@@ -102,3 +117,9 @@ class TestSlurmFactory:
         importlib.reload(slurm_config)
         cfg = slurm_config.slurm_factory()
         assert cfg.host == "test-host.example.com"
+
+    def test_env_var_mem(self, monkeypatch):
+        monkeypatch.setenv("SLURM_MEM", "100G")
+        importlib.reload(slurm_config)
+        cfg = slurm_config.slurm_factory()
+        assert cfg.mem == "100G"

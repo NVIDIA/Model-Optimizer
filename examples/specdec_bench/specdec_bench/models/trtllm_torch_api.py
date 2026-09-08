@@ -37,6 +37,11 @@ from .base import Model
 
 
 class TRTLLMPYTModel(Model):
+    # Cross-engine ``--max_seq_len`` (run.py) lands in kwargs under the
+    # TRT-LLM-native name ``max_seq_len`` (passthrough — same word, see
+    # run.py's ``_MAX_SEQ_LEN_KEY``) and is read by ``create_executor``
+    # below into ``LLM(max_seq_len=…)``.
+
     def __init__(
         self,
         model_path,
@@ -120,6 +125,8 @@ def create_executor(model_path: str, max_concurrent_requests, kwargs):
         )
     elif kwargs.get("speculative_algorithm", None) == "NONE":
         specdec = None
+    elif kwargs.get("speculative_algorithm", None) == "DSPARK":
+        raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
     else:
         specdec = None
 

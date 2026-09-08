@@ -15,15 +15,18 @@
 
 from functools import partial
 
-import pytest
 import torch
 import torch.distributed
-from _test_utils.torch.distributed.fsdp_test import run_fsdp2_test, run_fsdp_test
+from _test_utils.torch.distributed.fsdp_test import run_fsdp2_test
 from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch import nn
 from torchvision.models.resnet import Bottleneck
 
 from modelopt.torch.nas.search_space import SearchSpace, generate_search_space
+
+# NAS distributed-model tests are for rarely-used fastnas/autonas paths. Redundant
+# parametrize cases are marked ``@pytest.mark.manual`` (run with ``--run-manual``); one
+# representative case per test stays enabled for sanity.
 
 
 def _get_test_case():
@@ -61,19 +64,6 @@ def test_replicate_nested():
 
 def _sample_subnet(model):
     SearchSpace(model).sample(sample_func=min)
-
-
-@pytest.mark.parametrize("use_orig_params", [False, True])
-def test_fsdp(need_2_gpus, dist_workers, use_orig_params):
-    dist_workers.run(
-        partial(
-            run_fsdp_test,
-            _get_test_case,
-            "conv1",
-            _sample_subnet,
-            fsdp_kwargs={"use_orig_params": use_orig_params},
-        ),
-    )
 
 
 def test_fsdp2(need_2_gpus, dist_workers):

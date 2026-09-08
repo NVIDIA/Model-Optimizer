@@ -30,11 +30,13 @@ except Exception:
 from _test_utils.torch.quantization.models import SDPAAttention
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import (
     set_quantizer_by_cfg,
     set_quantizer_by_cfg_context,
 )
 from modelopt.torch.quantization.nn.functional import normalized_hadamard_transform
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
 
 
 @pytest.mark.parametrize(
@@ -48,6 +50,9 @@ def test_hadamard_transform(dim):
     xxt_h = x_h @ x_h.T
     # The numerical error can be large, especially for 16-bit floats.
     assert torch.allclose(xxt_h, xxt, atol=0.05)
+    x_roundtrip = normalized_hadamard_transform(x_h)
+    assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
+
     x_h_fp32 = normalized_hadamard_transform(x, rotate_fp32=True)
     xxt_h_fp32 = x_h_fp32 @ x_h_fp32.T
     assert torch.allclose(xxt_h_fp32, xxt, atol=0.05)
@@ -66,6 +71,8 @@ def test_hadamard_transform_block(dim, block_size):
     # Use rtol instead of atol: float32 accumulated error scales with value magnitude,
     # which grows with dim. 1e-3 relative tolerance is appropriate for float32 block RHT.
     assert torch.allclose(xxt_h, xxt, rtol=1e-3, atol=1e-6)
+    x_roundtrip = normalized_hadamard_transform(x_h, block_size=block_size)
+    assert torch.allclose(x_roundtrip, x, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -104,3 +111,24 @@ def test_kv_rotate(rotate_fp32):
     assert not torch.allclose(output_ref, output_test1, atol=0.05)
 
     mtq.unregister(SDPAAttention)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["rotate", "rotate_back"],
+)
+def test_rotate_backward(mode):
+    """Autograd backward should flow through a rotation-enabled TensorQuantizer."""
+    x = torch.randn(4, 64, device="cuda", requires_grad=True)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=8, axis=None, rotate={"enable": True, "mode": mode}),
+        amax=x.detach().abs().amax(),
+    ).cuda()
+
+    out = quantizer(x)
+    out.sum().backward()
+
+    assert x.grad is not None
+    assert x.grad.shape == x.shape
+    assert torch.isfinite(x.grad).all()
+    assert not torch.all(x.grad == 0)

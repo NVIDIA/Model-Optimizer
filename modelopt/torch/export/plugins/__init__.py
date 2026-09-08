@@ -15,16 +15,26 @@
 
 """Export package plugin."""
 
+from typing import Any
+
 from modelopt.torch.utils import import_plugin
 
 with import_plugin("megatron_importer"):
     from .megatron_importer import *
 
 from .hf_spec_export import *
+
+with import_plugin("hf_checkpoint_utils"):
+    from .hf_checkpoint_utils import *
+
+if "sanitize_hf_config_for_deployment" not in globals():
+
+    def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
+        """No-op fallback when Hugging Face checkpoint utilities are unavailable."""
+        return None
+
+
 from .vllm_fakequant_hf import *
 
 with import_plugin("vllm_fakequant_megatron"):
     from .vllm_fakequant_megatron import *
-
-with import_plugin("hf_checkpoint_utils"):
-    from .hf_checkpoint_utils import *

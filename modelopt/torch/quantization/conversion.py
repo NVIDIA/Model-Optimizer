@@ -37,16 +37,18 @@ from .config import (
     normalize_quant_cfg_list,
 )
 from .nn import (
-    NVFP4StaticQuantizer,
     QuantModule,
     QuantModuleRegistry,
     SequentialQuantizer,
+    StaticBlockScaleQuantizer,
     SVDQuantLinear,
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
+from .utils.shared_input import SharedWeightGlobalAmaxState
 
 __all__ = [
+    "preserve_quantizer_attributes_context",
     "register",
     "replace_quant_module",
     "set_quantizer_attribute",
@@ -99,10 +101,25 @@ def restore_quantized_model(
 
 
 def maybe_promote_nvfp4_static_quantizer(module: nn.Module, quantizer_state: dict) -> None:
-    if quantizer_state.get("_is_nvfp4_static_quantizer") and not isinstance(
-        module, NVFP4StaticQuantizer
-    ):
-        NVFP4StaticQuantizer.from_tensor_quantizer(module)
+    if (
+        quantizer_state.get("_is_static_block_scale_quantizer")
+        or quantizer_state.get("_is_nvfp4_static_quantizer")
+    ) and not isinstance(module, StaticBlockScaleQuantizer):
+        StaticBlockScaleQuantizer.from_tensor_quantizer(module)
+
+
+def _restore_shared_quant_state_aliases(
+    model: nn.Module, config: QuantizeConfig, metadata: MetadataDict
+) -> None:
+    """Rebuild shared-state ties before checkpoint tensor values are loaded."""
+    if not metadata.get("shared_quant_states"):
+        return
+    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
+    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
+    patterns = SharedWeightGlobalAmaxState.resolve_patterns(
+        shared_states=getattr(config, "shared_states", None)
+    )
+    SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
 
 def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
@@ -138,6 +155,7 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         if isinstance(module, TensorQuantizer):
             name = get_unwrapped_name(name, model)
             state = quantizer_state_dict[name]
+            # TODO: Add a registry for TensorQuantizers and avoid this manual conversion.
             maybe_promote_nvfp4_static_quantizer(module, state)
             module.set_from_modelopt_state(state)
 
@@ -145,6 +163,8 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         if isinstance(module, QuantModule):
             name = get_unwrapped_name(name, model)
             module.modelopt_post_restore(name)
+
+    _restore_shared_quant_state_aliases(model, config, metadata)
 
     return model
 
@@ -176,6 +196,10 @@ def update_quantize_metadata(
 ) -> None:
     """Update the quantizer state in the metadata dict."""
     metadata["quantizer_state"] = quantizer_state(model)
+    if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
+        metadata["shared_quant_states"] = shared_state_metadata
+    else:
+        metadata.pop("shared_quant_states", None)
 
 
 def quantizer_state(model: nn.Module) -> dict[str, Any]:
@@ -480,35 +504,15 @@ def set_quantizer_attributes_partial(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
-    """Context manager that temporarily applies a quantization config and restores the original state on exit.
+def preserve_quantizer_attributes_context(quant_model: nn.Module):
+    """Restore tensor-quantizer properties and Tensor/Sequential types on exit.
 
-    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
-    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
-    ``quant_model`` to its original attributes on exit.
-
-    .. caution::
-        Changing stateful attributes such as ``calibrator`` inside this context may produce
-        unexpected behavior because those objects are not deep-copied during save/restore.
+    Properties are saved with ``get_modelopt_state(properties_only=True)``. Parameters,
+    buffers, and referenced stateful objects such as calibrators are not copied.
 
     Args:
-        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
-        quant_cfg: A quantization config (or list of
-            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
-            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
-
-    Yields:
-        None — the context body runs with the new quantizer attributes active.
+        quant_model: Model whose quantizer attributes will be preserved.
     """
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
-
-    for entry in quant_cfg:
-        if isinstance(entry.get("cfg"), list):
-            raise ValueError(
-                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
-                "Use only single-dict cfg entries."
-            )
-
     original_attributes: dict[str, dict] = {}
     original_types: dict[str, type] = {}
     for name, module in quant_model.named_modules():
@@ -524,7 +528,6 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQ
             original_attributes[name] = module.get_modelopt_state(properties_only=True)
             original_types[name] = TensorQuantizer
 
-    set_quantizer_by_cfg(quant_model, quant_cfg)
     try:
         yield
     finally:
@@ -559,6 +562,41 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQ
                 saved = original_attributes[name]
                 for tq, sub_state in zip(module, saved["sub_states"]):
                     tq.set_from_modelopt_state(sub_state, properties_only=True)
+
+
+@contextmanager
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
+    """Context manager that temporarily applies a quantization config and restores the original state on exit.
+
+    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
+    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
+    ``quant_model`` to its original attributes on exit.
+
+    .. caution::
+        Changing stateful attributes such as ``calibrator`` inside this context may produce
+        unexpected behavior because those objects are not deep-copied during save/restore.
+
+    Args:
+        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
+        quant_cfg: A quantization config (or list of
+            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
+            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
+
+    Yields:
+        None — the context body runs with the new quantizer attributes active.
+    """
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+
+    for entry in quant_cfg:
+        if isinstance(entry.get("cfg"), list):
+            raise ValueError(
+                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
+                "Use only single-dict cfg entries."
+            )
+
+    with preserve_quantizer_attributes_context(quant_model):
+        set_quantizer_by_cfg(quant_model, quant_cfg)
+        yield
 
 
 def set_quantizer_attribute(

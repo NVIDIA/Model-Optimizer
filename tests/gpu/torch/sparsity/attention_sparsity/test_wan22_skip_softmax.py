@@ -31,12 +31,18 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
 
-diffusers = pytest.importorskip("diffusers")
+import numpy as np
+from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
+from diffusers import WanPipeline
 
+import modelopt.torch.opt as mto
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
     import modelopt.torch.sparsity.attention_sparsity as mtsa
+    from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
+        TritonSkipSoftmaxMethod,
+    )
     from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 
@@ -45,19 +51,9 @@ if TRITON_KERNEL_AVAILABLE:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def tiny_wan22_path(tmp_path_factory):
-    """Create and save a tiny Wan 2.2 pipeline to disk once per module."""
-    from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
-
-    return str(create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22")))
-
-
 @pytest.fixture
 def tiny_wan22_pipe(tiny_wan22_path):
     """Load a fresh copy of the tiny Wan 2.2 pipeline on CUDA (per test)."""
-    from diffusers import WanPipeline
-
     pipe = WanPipeline.from_pretrained(tiny_wan22_path, torch_dtype=torch.bfloat16)
     pipe.to("cuda")
     return pipe
@@ -145,8 +141,6 @@ class TestWan22PipelineE2E:
 
     def test_tight_threshold_matches_dense_within_tolerance(self, tiny_wan22_pipe, tiny_wan22_path):
         """A near-zero threshold is effectively dense and close to unsparsified."""
-        from diffusers import WanPipeline
-
         # Dense run: fresh pipe, no sparsification
         dense_pipe = WanPipeline.from_pretrained(tiny_wan22_path, torch_dtype=torch.bfloat16)
         dense_pipe.to("cuda")
@@ -159,8 +153,6 @@ class TestWan22PipelineE2E:
         sparse_frame0 = _run_pipe(tiny_wan22_pipe).frames[0][0]
 
         # Both are PIL images — convert to tensor and compare
-        import numpy as np
-
         d = np.asarray(dense_frame0, dtype=np.float32)
         s = np.asarray(sparse_frame0, dtype=np.float32)
         # Pixel-wise MAE should be small for tight threshold (but not bit-exact due to
@@ -170,10 +162,6 @@ class TestWan22PipelineE2E:
 
     def test_measure_sparsity_counts_accumulate(self, tiny_wan22_pipe):
         """measure_sparsity=True + a permissive threshold → nonzero sparsity counters."""
-        from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
-            TritonSkipSoftmaxMethod,
-        )
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg(threshold=0.25))
 
         # Enable measurement + reset counters on every sparse module
@@ -206,10 +194,6 @@ class TestWan22PipelineE2E:
         ``attn2`` modules keep the default method. The restored model must show the
         identical (module_name → method) mapping.
         """
-        from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
-
-        import modelopt.torch.opt as mto
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg())
         state = mto.modelopt_state(tiny_wan22_pipe.transformer)
 
@@ -251,10 +235,6 @@ class TestWan22Calibration:
 
     def test_calibration_collects_stats_per_module(self, tiny_wan22_pipe):
         """A forward pass under calibration_mode populates per-module _last_stats."""
-        from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
-            TritonSkipSoftmaxMethod,
-        )
-
         _sparsify_both_transformers(tiny_wan22_pipe, _skip_softmax_cfg())
 
         threshold_trials = [1e-3, 1e-2, 1e-1]

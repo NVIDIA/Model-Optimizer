@@ -43,6 +43,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 
+from modelopt.torch.utils.loss_mask import get_loss_mask_recovery
+
 __all__ = [
     "EagleOfflineDataCollator",
     "OfflineSupervisedDataset",
@@ -124,9 +126,14 @@ class OfflineSupervisedDataset(Dataset):
         dumped_files (list): A list of file paths to the dumped .pt files.
         answer_only_loss (bool): If True, use the ``loss_mask`` stored in each .pt
             file so that only assistant-produced tokens contribute to the loss.
-            Raises ``ValueError`` on ``__getitem__`` if the file lacks ``loss_mask``.
+            If a file lacks ``loss_mask`` and ``tokenizer`` has a registered
+            model-specific recovery (see ``modelopt.torch.utils.loss_mask``), the
+            mask is rebuilt from ``input_ids``; otherwise ``__getitem__`` raises
+            ``ValueError``.
             If False (default), a uniform all-ones mask is used regardless of what
             is stored in the file (backward compatible).
+        tokenizer: Optional tokenizer used to recover the assistant mask for dumps
+            that lack a stored ``loss_mask``.
         feature_key_mapping (dict[str, str] | None): Maps feature names in a dump to
             names returned to the collator. Defaults to EAGLE's ``hidden_states`` and
             ``aux_hidden_states`` contract. Native draft models can provide their own
@@ -137,12 +144,14 @@ class OfflineSupervisedDataset(Dataset):
         self,
         dumped_files,
         answer_only_loss: bool = False,
+        tokenizer=None,
         feature_key_mapping: Mapping[str, str] | None = None,
     ):
         """Initialize with a list of .pt file paths."""
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
+        self.tokenizer = tokenizer
         self.feature_key_mapping = feature_key_mapping or {
             "hidden_states": "base_model_hidden_states",
             "aux_hidden_states": "aux_hidden_states",
@@ -176,13 +185,23 @@ class OfflineSupervisedDataset(Dataset):
 
     def _get_loss_mask(self, offline_data: Mapping[str, torch.Tensor], path: str) -> torch.Tensor:
         if self.answer_only_loss:
-            if "loss_mask" not in offline_data:
+            recovery = get_loss_mask_recovery(self.tokenizer) if self.tokenizer else None
+            if "loss_mask" in offline_data:
+                loss_mask = offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+            elif recovery is not None:
+                # Dumps from tokenizers that cannot emit assistant masks carry no
+                # loss_mask; rebuild it from the token ids.
+                loss_mask = recovery.compute(self.tokenizer, offline_data["input_ids"]).to(
+                    offline_data["input_ids"].dtype
+                )
+            else:
                 raise ValueError(
                     f"answer_only_loss=True requires a 'loss_mask' entry in the offline "
                     f".pt file, but {path} does not have one. Re-dump "
-                    f"with --answer-only-loss in compute_hidden_states_*.py."
+                    f"with --answer-only-loss in compute_hidden_states_*.py, or pass a "
+                    f"tokenizer with a registered loss-mask recovery."
                 )
-            return offline_data["loss_mask"].to(offline_data["input_ids"].dtype)
+            return loss_mask
         return torch.ones_like(offline_data["input_ids"])
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
@@ -198,6 +217,9 @@ class OfflineSupervisedDataset(Dataset):
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
+            # Whether the dumped hidden is pre-(final-)norm (the consumer re-applies the base
+            # norm if so). Read from the dump; default False = post-norm, the prior behavior.
+            "base_hidden_prenorm": bool(offline_data.get("hidden_states_prenorm", False)),
         }
         ret.update(
             {
@@ -258,5 +280,18 @@ class EagleOfflineDataCollator:
             k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
             for k in self.feature_keys
         }
+        # Propagate the producer's pre-norm declaration. DFlash honors it to decide whether to
+        # re-apply the base final norm; other heads ignore it. It must be constant across the
+        # batch: a batch is normed as a whole, so mixing pre-norm (True) and post-norm (False)
+        # dumps — e.g. a directory blending pre-PR and pre-norm dumps — would silently feed
+        # un-normed hiddens to lm_head for the minority. Fail loud rather than corrupt the target.
+        if "base_hidden_prenorm" in features[0]:
+            prenorm_flags = {bool(f["base_hidden_prenorm"]) for f in features}
+            if len(prenorm_flags) > 1:
+                raise ValueError(
+                    "base_hidden_prenorm is not constant across the batch "
+                    f"(got {prenorm_flags}); do not mix pre-norm and post-norm dumps."
+                )
+            base_model_outputs["base_hidden_prenorm"] = prenorm_flags.pop()
 
         return {**base_batch, self.feature_output_key: model_features}

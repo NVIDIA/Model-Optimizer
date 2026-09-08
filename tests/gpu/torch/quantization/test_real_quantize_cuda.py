@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.quantize_common import save_restore_test
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
+from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -197,11 +198,6 @@ def test_compress_config(model_cls, quant_config, compress_config):
 
 @pytest.mark.parametrize("quant_config", [mtq.FP8_DEFAULT_CFG])
 def test_real_quantize_linear(quant_config, tmp_path):
-    try:
-        from transformers import AutoModelForCausalLM
-    except ImportError:
-        pytest.skip("transformers is not installed")
-
     tiny_llama_dir = create_tiny_llama_dir(tmp_path)
     with init_quantized_weights(quant_config):
         model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)

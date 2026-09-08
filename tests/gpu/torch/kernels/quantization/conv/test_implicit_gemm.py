@@ -18,6 +18,8 @@
 Tests both non-quantized path (vs cuDNN) and FP4-quantized path (vs Triton reference).
 """
 
+import math
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -552,7 +554,6 @@ def _py_fp4_fake_quant_ref(x_flat, global_amax, block_size):
     2. Per block: block_max = max(|x|), scale = fp8_e4m3_roundtrip(block_max / (6 * global_scale)) * global_scale
     3. Quantize each element to nearest E2M1 level, then dequantize.
     """
-    import math
 
     # E2M1 quantization levels: {0, 0.5, 1, 1.5, 2, 3, 4, 6}
     # Boundaries (midpoints): <=0.25->0, <0.75->0.5, <=1.25->1, <1.75->1.5, <=2.5->2, <3.5->3, <=5->4, >5->6

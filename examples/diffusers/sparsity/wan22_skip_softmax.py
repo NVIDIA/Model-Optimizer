@@ -59,6 +59,7 @@ from diffusers import AutoencoderKLWan, WanPipeline
 from diffusers.utils import export_to_video
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 DEFAULT_MODEL_PATH = os.environ.get("WAN22_MODEL_PATH", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
@@ -190,14 +191,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib-frames",
         type=int,
-        default=151,
-        help="Number of frames for calibration",
+        default=None,
+        help="Number of frames for calibration (default: same as --num-frames).",
     )
     parser.add_argument(
         "--calib-size",
         type=int,
         default=4,
         help="Number of calibration prompts from OpenVid-1M dataset",
+    )
+
+    # Export options
+    parser.add_argument(
+        "--export-dir",
+        type=str,
+        default=None,
+        help="Export sparsified model as a HuggingFace checkpoint to this directory. "
+        "The sparse_attention_config (calibration params, disabled layers, etc.) "
+        "is written into each component's config.json.",
+    )
+    parser.add_argument(
+        "--initial-disabled-steps",
+        type=int,
+        default=0,
+        help="User-specified initial-disabled-steps value carried into the exported "
+        "sparse attention config (config.json). Only emitted when > 0; not interpreted "
+        "at sparsify/calibration time.",
     )
     return parser.parse_args()
 
@@ -232,6 +251,10 @@ def build_sparse_config(args: argparse.Namespace, num_blocks: int) -> dict:
     # Fixed threshold bypasses calibration.
     if args.skip_softmax_threshold is not None:
         attn_cfg["skip_softmax_threshold"] = args.skip_softmax_threshold
+
+    # Opt-in initial-disabled-steps metadata — carried through to the exported config when > 0.
+    if args.initial_disabled_steps > 0:
+        attn_cfg["initial_disabled_steps"] = args.initial_disabled_steps
 
     sparse_cfg: dict = {
         "*.attn1*": attn_cfg,  # Self-attention only
@@ -415,11 +438,12 @@ def main() -> None:
             if args.calibrate:
                 print("Warning: --calibrate is ignored when --skip-softmax-threshold is set")
         elif args.calibrate:
+            calib_frames = args.calib_frames if args.calib_frames is not None else args.num_frames
             forward_loop = build_calibration_forward_loop(
                 pipe,
                 calib_size=args.calib_size,
                 num_steps=args.calib_steps,
-                num_frames=args.calib_frames,
+                num_frames=calib_frames,
                 height=args.height,
                 width=args.width,
                 seed=args.seed,
@@ -444,6 +468,11 @@ def main() -> None:
         gc.collect()
         torch.cuda.empty_cache()
         print("Cleared CUDA cache after calibration")
+
+    # ---- Export (optional) ----
+    if args.export_dir and not args.baseline:
+        print(f"Exporting sparsified checkpoint to {args.export_dir}...")
+        export_hf_checkpoint(pipe, export_dir=args.export_dir)
 
     # ---- Generate (optional) ----
     if args.prompt:
