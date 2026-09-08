@@ -172,8 +172,27 @@ def get_export_units(model):
     list.
     """
     decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
+    # A module object reused across layers (ALBERT-style sharing) would land in two units under one
+    # name, so two ranks would emit the same keys and the merged index would reference only one of
+    # the copies. Refuse rather than write a checkpoint whose index does not match its shards.
+    if len({id(layer) for layer in decoder_layers}) != len(decoder_layers):
+        raise NotImplementedError(
+            "Export does not support models that reuse the same decoder layer object more than "
+            "once: the shared layer has a single name, so its weights cannot be assigned to one "
+            "owner. Export without FSDP2, which builds the state dict in one process."
+        )
     in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
-    root_leaves = [m for m in model.modules() if id(m) not in in_layer and _owns_exported_state(m)]
+    owning = [m for m in model.modules() if id(m) not in in_layer and _owns_exported_state(m)]
+    # Drop any module that another owning module already contains: its state_dict covers the
+    # descendant, so keeping both would run the descendant's export handler twice.
+    owning_ids = {id(m) for m in owning}
+    covered = {
+        id(descendant)
+        for m in owning
+        for descendant in m.modules()
+        if descendant is not m and id(descendant) in owning_ids
+    }
+    root_leaves = [m for m in owning if id(m) not in covered]
     return [[layer] for layer in decoder_layers] + [root_leaves]
 
 

@@ -207,7 +207,11 @@ def _parse_shard_size(size: int | str) -> int:
 
 
 def _assert_no_split_rules(model: nn.Module) -> None:
-    """Refuse to stream a model whose conversion mapping needs tensor-level splits."""
+    """Refuse to stream a model whose conversion mapping needs tensor-level splits.
+
+    A split rule regroups tensors across the whole state dict, which per-tensor name reversal
+    cannot do.
+    """
     try:
         split_rules, _, _ = _build_reverse_rules(model)
     except Exception:

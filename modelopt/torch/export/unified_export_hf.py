@@ -1026,12 +1026,19 @@ def _export_transformers_checkpoint(
     :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
     time; :func:`export_hf_checkpoint` picks between the two.
 
+    Under FSDP2 the shards are gathered to rank 0: **every rank must call this**, since the
+    gather is a collective, but only rank 0 comes back with the weights -- the others get an
+    empty dict. Callers that write the result must therefore write from rank 0 only, and rank 0
+    must have room for the whole model. :func:`export_hf_checkpoint` never takes this path for
+    FSDP2; it streams each rank's own share to disk instead.
+
     Args:
         model: the full torch model to export. The actual quantized model may be a submodule.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
 
     Returns:
-        post_state_dict: Dict containing quantized weights
+        post_state_dict: Dict containing quantized weights. Under FSDP2 this is populated on
+            rank 0 only; every other rank gets an empty dict.
         quant_config: config information to export hf_quant_cfg.json
 
     Raises:
