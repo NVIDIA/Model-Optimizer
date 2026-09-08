@@ -1,0 +1,36 @@
+schema_version: 1
+site:
+  kind: slurm
+  environment:
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
+    container:
+    container_mounts:
+    prerun_commands: []
+    postrun_commands: []
+  paths:
+    hf_home: REPLACE_WITH_SHARED_HF_HOME
+  slurm:
+    account: REPLACE_WITH_SLURM_ACCOUNT
+    partition: REPLACE_WITH_SLURM_PARTITION
+    partition_cpu:
+    cpu_cpus_per_task: 4
+    cpu_memory_mb: 32768
+    time_limit: "4:00:00"
+resources:
+  single-gpu:
+    mode: per_attempt
+    gpus_per_node: 1
+    max_nodes: 1
+  smoke:
+    mode: reusable_allocation
+    gpus_per_node: 2
+    max_nodes: 1
+  campaign:
+    mode: reusable_allocation
+    gpus_per_node: 8
+    max_nodes: 1
+  multinode:
+    mode: per_attempt
+    gpus_per_node: 8
+    max_nodes: 64

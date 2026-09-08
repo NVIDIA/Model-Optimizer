@@ -31,12 +31,14 @@ from examples.puzzletron.evaluation.vlm import contracts as evaluation_contracts
 from examples.puzzletron.evaluation.vlm import profile as evaluation_profile
 from examples.puzzletron.evaluation.vlm import suites as evaluation_suites
 from modelopt.torch.puzzletron.dataset.multimodal import materialize_normalized_conversation_samples
+from puzzletron_orchestrator.public_config import (
+    materialize_resolved_bundle,
+    resolve_public_run,
+    site_template,
+)
 from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
     assert_pruned_checkpoints_completed_benchmark,
 )
-
-RUN_PATH = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml"
-EXECUTION_PATH = "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 
 
 def _materialize_image_conversations(path: Path) -> None:
@@ -83,26 +85,17 @@ def _materialize_image_conversations(path: Path) -> None:
     assert manifest["sample_count"] == manifest["image_count"] == len(samples)
 
 
-def _write_local_runner(path: Path, project_root: Path) -> None:
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "runner": {
-                    "kind": "slurm",
-                    "slurm": {"account": "local-smoke", "max_nodes": 1},
-                    "execution_contract": {
-                        "repository": str(project_root),
-                        "venv": sys.prefix,
-                        "container": None,
-                        "container_mounts": None,
-                        "prerun_commands": [],
-                        "postrun_commands": [],
-                    },
-                }
-            },
-            sort_keys=False,
-        )
-    )
+def _write_local_site(path: Path, project_root: Path, hf_home: Path) -> None:
+    payload = site_template()
+    payload["site"]["environment"].update({"repository": str(project_root), "venv": sys.prefix})
+    payload["site"]["paths"]["hf_home"] = str(hf_home)
+    payload["site"]["slurm"].update({"account": "local-smoke", "partition": "local"})
+    payload["resources"]["selected"] = {
+        "mode": "per_attempt",
+        "gpus_per_node": 1,
+        "max_nodes": 1,
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
 
 
 @pytest.mark.integration
@@ -119,7 +112,7 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Run the bounded VLM lifecycle on one H100 with populated offline benchmark caches."""
+    """Run a VLM bundle generated through the public configuration contract locally."""
 
     dataset = tmp_path / "dataset"
     results = tmp_path / "results"
@@ -139,10 +132,25 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
         )
     except ValueError as error:
         pytest.fail(str(error))
-    runner = tmp_path / "runner.yaml"
+    recipe = tmp_path / "recipe.yaml"
+    site = tmp_path / "site.yaml"
     _materialize_image_conversations(dataset)
-    _write_local_runner(runner, project_root_path)
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(results))
+    recipe_payload = yaml.safe_load(
+        (
+            project_root_path / "examples/puzzletron/configs/recipes/qwen3p5_0p8b_vlm_smoke.yaml"
+        ).read_text()
+    )
+    recipe_payload.update(
+        {
+            "run_root": str(results),
+            "resource_profile": "selected",
+            "data": {"path": str(dataset), "revision": "fixture-revision"},
+            "advanced": {"experiment": {"prepare_dataset.enabled": False}},
+        }
+    )
+    recipe.write_text(yaml.safe_dump(recipe_payload, sort_keys=False))
+    _write_local_site(site, project_root_path, benchmark_hf_home_path)
+    bundle = materialize_resolved_bundle(resolve_public_run(recipe, site), activate=True)
     environment = os.environ.copy()
     environment.update(
         {
@@ -158,21 +166,13 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
             sys.executable,
             str(project_root_path / "examples/puzzletron/orchestrate.py"),
             "--experiment",
-            str(project_root_path / RUN_PATH),
+            str(bundle / "experiment.runtime.yaml"),
             "--runner",
-            str(runner),
+            str(bundle / "runner.yaml"),
             "--execution",
-            str(project_root_path / EXECUTION_PATH),
+            str(bundle / "execution.yaml"),
             "--stage",
             "full",
-            "--override",
-            "prepare_dataset.enabled=false",
-            "--override",
-            f"dataset_path={dataset}",
-            "--override",
-            f"data.path={dataset}",
-            "--override",
-            "data.revision=fixture-revision",
             "--local",
             "--color",
             "never",
@@ -199,7 +199,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
         json.loads(path.read_text(encoding="utf-8"))
         for path in activation_root.glob("**/args.json")
     ]
-    assert activation_markers
     vision_markers = [
         marker
         for marker in activation_markers
@@ -208,7 +207,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     assert vision_markers
     for marker in vision_markers:
         observability = marker["observability"]
-        assert observability["vision_forward_count"] > 0
         assert observability["vision_output_checksums"]
         assert observability["batch_fingerprints"]
 

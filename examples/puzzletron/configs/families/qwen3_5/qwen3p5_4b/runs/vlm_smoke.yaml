@@ -1,10 +1,10 @@
 # @package _global_
 
 defaults:
-  - mip_vlm_smoke
+  - vlm_pruning_base
   - _self_
 
-# Opt-in lifecycle check of FFN pruning through physical materialization,
+# Bounded lifecycle check of FFN pruning through physical materialization,
 # checkpoint reload, bounded RealWorldQA evaluation, and two-step VLM KD.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 data:

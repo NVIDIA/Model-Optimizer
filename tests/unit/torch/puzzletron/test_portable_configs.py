@@ -21,17 +21,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from puzzletron_orchestrator.compiler import load_execution_config, load_runner_config
-from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOLDER
-from puzzletron_setup.v2.defaults import load_defaults
+from puzzletron_orchestrator.public_config import ROUTES, recipe_template, site_template
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-SLURM_RUNNER_CONFIGS = (
-    "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
-    "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
-    "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml",
-)
-NAMED_SLURM_RUNNER_CONFIGS = SLURM_RUNNER_CONFIGS[1:]
 NEMOTRON3_NANO_30B_MODEL_CONFIG = (
     "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml"
 )
@@ -42,97 +34,54 @@ QWEN3P6_35B_A3B_MODEL_CONFIG = (
 )
 
 
-def test_slurm_runner_example_is_portable() -> None:
-    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
-    slurm = load_runner_config(path)
-    assert slurm.contract.repository == "/opt/puzzletron/src/modelopt"
-    assert slurm.contract.venv == "/venv"
-    assert slurm.contract.container.startswith("REPLACE_WITH_")
-    assert slurm.contract.container_mounts is None
-    assert not slurm.contract.prerun_commands
-    assert slurm.slurm is not None
-    assert slurm.slurm.account.startswith("REPLACE_WITH_")
-    assert slurm.slurm.partition == (
-        "REPLACE_WITH_PRIMARY_SLURM_PARTITION,REPLACE_WITH_ALTERNATE_SLURM_PARTITION"
+def test_site_example_is_the_only_portable_environment_contract() -> None:
+    checked_in = yaml.safe_load(
+        (REPOSITORY_ROOT / "examples/puzzletron/configs/site.example.yaml").read_text()
     )
-    assert slurm.slurm.log_dir == "logs"
+
+    assert checked_in == site_template()
+    environment = checked_in["site"]["environment"]
+    assert environment["repository"].startswith("REPLACE_WITH_")
+    assert environment["venv"].startswith("REPLACE_WITH_")
+    assert environment["container"] is None
+    assert environment["container_mounts"] is None
+    assert not environment["prerun_commands"]
+    assert checked_in["site"]["slurm"]["account"].startswith("REPLACE_WITH_")
+    assert checked_in["site"]["slurm"]["partition"].startswith("REPLACE_WITH_")
+    assert checked_in["resources"]["multinode"] == {
+        "mode": "per_attempt",
+        "gpus_per_node": 8,
+        "max_nodes": 64,
+    }
 
 
-def test_baremetal_runner_example_is_portable() -> None:
-    baremetal = load_runner_config(
-        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
+@pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.route_id)
+def test_recipe_template_is_small_and_has_no_inheritance(route) -> None:
+    recipe = recipe_template(
+        model=route.model,
+        workflow=route.workflow,
+        mode=route.mode,
     )
-    assert baremetal.contract.repository == WORKER_REPOSITORY_PLACEHOLDER
-    assert baremetal.contract.venv == WORKER_VENV_PLACEHOLDER
-    assert baremetal.contract.setup_env is None
-    assert baremetal.baremetal is not None
-    hostnames = [host.hostname for host in baremetal.baremetal.hosts]
-    assert hostnames
-    assert baremetal.baremetal.rendezvous_host in hostnames
-    assert all(hostname.startswith("REPLACE_WITH_") for hostname in hostnames)
 
-
-def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
-    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml"
-    runner = load_runner_config(path)
-
-    contract_values = (
-        runner.contract.repository,
-        runner.contract.venv,
-        runner.contract.container,
-        runner.contract.container_mounts,
+    expected = {
+        "schema_version",
+        "name",
+        "model",
+        "workflow",
+        "mode",
+        "run_root",
+        "resource_profile",
+    }
+    if route.requires_data:
+        expected.add("data")
+        assert recipe["data"]["path"].startswith("REPLACE_WITH_")
+        assert recipe["data"]["revision"].startswith("REPLACE_WITH_")
+    assert set(recipe) == expected
+    assert (recipe["model"], recipe["workflow"], recipe["mode"]) == (
+        route.model,
+        route.workflow,
+        route.mode,
     )
-    assert contract_values[:2] == ("/opt/puzzletron/src/modelopt", "/venv")
-    assert all(value and value.startswith("REPLACE_WITH_") for value in contract_values[2:])
-    assert not runner.contract.prerun_commands
-    assert runner.slurm is not None
-    assert runner.slurm.account.startswith("REPLACE_WITH_")
-    assert runner.slurm.partition.startswith("REPLACE_WITH_")
-
-
-@pytest.mark.parametrize("relative_path", SLURM_RUNNER_CONFIGS)
-def test_checked_in_slurm_runners_only_emit_generic_partitions(
-    relative_path: str,
-) -> None:
-    payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
-    partition_keys = {key for key in payload["runner"]["slurm"] if key.startswith("partition")}
-
-    assert "partition" in payload["runner"]["slurm"]
-    assert partition_keys <= {"partition", "partition_cpu"}
-
-
-@pytest.mark.parametrize("relative_path", NAMED_SLURM_RUNNER_CONFIGS)
-def test_named_slurm_runners_keep_logs_below_the_campaign_root(
-    relative_path: str,
-) -> None:
-    payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
-
-    assert "log_dir" not in payload["runner"]["slurm"]
-
-
-def test_execution_example_is_loadable() -> None:
-    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.example.yaml"
-
-    execution = load_execution_config(path)
-
-    assert set(execution) >= {"defaults", "stages"}
-
-
-def test_setup_defaults_example_is_portable() -> None:
-    path = REPOSITORY_ROOT / "examples/puzzletron/configs/setup/defaults.example.yaml"
-
-    defaults = load_defaults(path)
-
-    contract = defaults["infrastructure"]["execution_contract"]
-    assert contract["repository"] == WORKER_REPOSITORY_PLACEHOLDER
-    assert contract["venv"] == WORKER_VENV_PLACEHOLDER
-    assert contract["container"] is None
-    assert contract["container_mounts"] is None
-    assert not contract["prerun_commands"]
-
-    slurm = defaults["infrastructure"]["runner"]["slurm"]
-    assert "account" not in slurm
-    assert slurm["partition"] is None
 
 
 def test_model_examples_use_public_hugging_face_identities() -> None:

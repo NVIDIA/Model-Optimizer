@@ -17,39 +17,54 @@
 
 from pathlib import Path
 
+import yaml
+
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.public_config import (
+    materialize_resolved_bundle,
+    resolve_public_run,
+    site_template,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
-RUN_PATH = FAMILY_ROOT / "runs/full_smoke.yaml"
-RUNNER_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml"
-)
-SINGLE_GPU_EXECUTION_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
-)
+RECIPE_PATH = REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_0p8b_text_smoke.yaml"
 
 
-def _compile(monkeypatch, tmp_path: Path, experiment: Path, execution: Path):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / experiment.stem))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+def _compile(tmp_path: Path):
+    recipe = yaml.safe_load(RECIPE_PATH.read_text())
+    recipe["run_root"] = str(tmp_path / "run")
+    recipe["data"] = {
+        "path": str(tmp_path / "prepared-data"),
+        "revision": "fixture-revision",
+    }
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
+    site = site_template()
+    site["site"]["environment"].update({"repository": str(REPOSITORY_ROOT), "venv": ".venv"})
+    site["site"]["paths"]["hf_home"] = str(tmp_path / "hf")
+    site["site"]["slurm"].update({"account": "test", "partition": "test"})
+    site_path = tmp_path / "site.yaml"
+    site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+    bundle = materialize_resolved_bundle(resolve_public_run(recipe_path, site_path), activate=False)
     return compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(execution),
+        experiment_config_path=bundle / "experiment.runtime.yaml",
+        runner=load_runner_config(bundle / "runner.yaml"),
+        execution=load_execution_config(bundle / "execution.yaml"),
         stage_filter="full",
     )
 
 
-def test_full_smoke_compiles_one_complete_bounded_lifecycle(monkeypatch, tmp_path: Path) -> None:
-    plan = _compile(monkeypatch, tmp_path, RUN_PATH, SINGLE_GPU_EXECUTION_PATH)
+def test_full_smoke_compiles_one_complete_bounded_lifecycle(tmp_path: Path) -> None:
+    plan = _compile(tmp_path)
     stages = {stage.stage_id: stage for stage in plan.stages}
     nodes = plan.experiment_config["post_mip"]["flows"]["params-90"]["nodes"]
 
+    assert plan.experiment_config["dataset_path"] == str(tmp_path / "prepared-data")
+    assert plan.experiment_config["data"]["revision"] == "fixture-revision"
     assert tuple(node for node in stages if node.startswith("post.")) == (
         "post.params-90.online_eval",
         "post.params-90.best_lm",

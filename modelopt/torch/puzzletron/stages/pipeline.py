@@ -220,6 +220,10 @@ def _calculate_static_workload_stats(config: dict[str, Any], hydra_cfg: Any) -> 
     """Append one analytical memory profile for every configured MIP workload."""
     from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 
+    # Hidden-width scenarios own the width list. Keep the static cost
+    # inventory aligned without requiring users to repeat it under
+    # ``vllm_stats`` when runtime measurements are disabled.
+    configure_vllm_stats_widths(config, hydra_cfg)
     workloads = dict((config.get("mip") or {}).get("workloads") or {})
     if not workloads:
         workloads = {

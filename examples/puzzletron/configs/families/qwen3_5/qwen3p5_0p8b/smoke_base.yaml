@@ -25,6 +25,7 @@ capability_validation:
 data:
   modality: text
   layout: fixed
+  revision: ${oc.env:PUZZLETRON_DATASET_REVISION,unpublished}
   max_sample_length: 512
   packing:
 

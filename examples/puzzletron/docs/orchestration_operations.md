@@ -1,38 +1,16 @@
 # Run and recover campaigns
 
-Run one stage with the same experiment, runner, and execution files used for a
-full campaign:
+The public `launch` and `resume` commands execute the complete sealed dependency
+plan. This keeps the recorded plan identical to the launched plan.
 
-```bash
-PUZZLETRON_BUNDLE=/path/to/generated/campaign/production
-
-python examples/puzzletron/orchestrate.py \
-  --experiment "$PUZZLETRON_BUNDLE/experiment.yaml" \
-  --runner "$PUZZLETRON_BUNDLE/runner.yaml" \
-  --execution "$PUZZLETRON_BUNDLE/execution.yaml" \
-  --stage width_importance
-```
-
-`--stage <stage_id>` runs only that stage and requires its parent artifacts to
-be complete; it does not run missing prerequisites. Use `--stage full` for the
-normal dependency-ordered campaign and whole-campaign resume.
-
-For repeated manual stage-by-stage work, `per_attempt` is usually the better
-fit because Slurm reserves only the resources requested by that attempt. A
-selected stage also works in `reusable_allocation` mode, but the complete outer
-node remains reserved until that stage finishes or fails, even while some of
-its GPUs are unused. Puzzletron then exits the outer job; it does not keep an
-idle allocation between separate commands. Site policies that reclaim jobs
-with low GPU utilization may still favor `per_attempt`.
-
-Run the same command with `--dry-run` after changing any input file or updating
-the checkout. For Slurm runners, each dry-run submission includes a
+Use the public `dry-run` subcommand after changing the recipe or site file or
+updating the checkout. For Slurm sites, each dry-run submission includes a
 submission-equivalent `sbatch` script with its nested `srun` command. CPU/GPU
 requests, task launchers, partitions, containers, mounts, and worker commands
 match a launch. The preview uses a deterministic attempt ID, job name, and log
 path; a real launch replaces those three identifiers.
 
-When the execution file sets `mode: reusable_allocation`, dry-run instead shows
+When the selected resource profile uses `reusable_allocation`, dry-run instead shows
 one outer Slurm script plus the logical attempts that share it. The public
 launch command is unchanged. Puzzletron persists the outer handle, reattaches
 when the same command finds it active, and runs the ordinary controller inside
@@ -45,7 +23,7 @@ and exits when the selected plan completes or fails. In reusable mode, the
 foreground process watches the outer allocation; the inner controller writes
 its logical-stage progress to the allocation log whose path the watcher prints.
 
-`--once` recovers and polls existing attempts, submits currently ready work,
+`launch --once` recovers and polls existing attempts, submits currently ready work,
 and exits after one scheduling iteration. Submitted jobs keep running. Invoke
 the same `--once` command again for the next recovery and scheduling iteration.
 In reusable mode, `--once` submits or reattaches to the one outer allocation and
@@ -83,15 +61,12 @@ detach while leaving jobs running, or continue. Non-interactive Ctrl-C and
 SIGTERM cancel active work and quit. Detaching preserves saved job information,
 so running the same command recovers the active jobs.
 
-The reusable-allocation watcher has a narrower interruption contract: Ctrl-C detaches and leaves the outer Slurm job running. Rerun the identical command to reattach. Cancel the outer job with the site's normal Slurm command only when you intend to stop all work in that allocation. After Slurm reports the outer job cancelled or failed, rerunning starts a replacement unless a compatible worker result records clean completion or an uncancelled terminal stage failure. Completed logical stages remain skipped, and in-flight local attempts from that allocation are recorded as cancelled before unfinished work is resubmitted. A recorded cancellation and a final-report failure remain retryable. Change the configuration or use a fresh run root before rerunning a campaign with a terminal stage failure.
+The reusable-allocation watcher has a narrower interruption contract: Ctrl-C detaches and leaves the outer Slurm job running. Rerun the identical command to reattach. Cancel the outer job with the site's normal Slurm command only when you intend to stop all work in that allocation. After Slurm reports the outer job cancelled or failed, rerunning starts a replacement unless a compatible worker result records clean completion or an uncancelled terminal stage failure. Completed logical stages remain skipped, and in-flight local attempts from that allocation are recorded as cancelled before unfinished work is resubmitted. A recorded cancellation and a final-report failure remain retryable. Use a new run root before rerunning a public recipe with a terminal stage failure. A legacy three-file run can instead change its configuration before rerunning.
 
-Do not edit the experiment, runner, or execution files while a compatible
-reusable allocation is active. Let it finish or cancel it, make the change,
-and run a fresh dry-run before launching again. A changed configuration has a
-new plan identity. In the same run root, Puzzletron can still reuse completed
-stages whose recorded outputs remain compatible and valid; affected or
-unfinished stages run again. Choose a new run root for a clean independent
-campaign.
+For a public recipe run, do not edit the generated experiment, runner, or
+execution files. Change the recipe or site file and use a new run root; the
+existing run root remains bound to its sealed bundle and is resumed with
+`puzzletron.py resume`.
 
 Redirect stderr before piping through `tee` (for example, append
 `2>&1 | tee run.log`) so progress output is captured. Use `--color always` for
@@ -100,17 +75,18 @@ to change the default five-second poll interval.
 
 ## State and execution records
 
-The experiment file calls the campaign output directory `puzzle_dir`. Resume
-information is written under `<puzzle-dir>/orchestration/`. The command supports
-`single`, `sharded`, and `persistent_pool` strategies, Slurm and SSH executors,
-attempt recovery, and semantic stage validation. See the
-[`configs/orchestration/`](../configs/orchestration/) directory for starter
-runner and execution files.
+The recipe calls the campaign output directory `run_root`. Resume information
+and the sealed resolved bundle are written under `<run-root>/orchestration/`.
+`resume <run-root>` verifies and reuses the sealed experiment, runner,
+execution, plan, manifest, and provenance records. The runtime
+supports `single`, `sharded`, and `persistent_pool` strategies, Slurm and SSH
+executors, attempt recovery, and semantic stage validation.
 
 Accepted rank-zero stage results also write checksum-validated execution
-records under `<puzzle-dir>/manifests/executions/`. Puzzletron validates these
+records under `<run-root>/manifests/executions/`. Puzzletron validates these
 records when resuming a stage. They identify existing outputs but do not copy
-or make those outputs immutable.
+or make those outputs immutable. The configuration bundle is separately
+immutable and hash-checked.
 
 Dataset preparation additionally records the expected files. Routine resume
 checks their paths, types, sizes, and timestamps without rereading every image

@@ -6,6 +6,7 @@ Changelog
 
 **New Features**
 
+- Simplify maintained Puzzletron campaign setup to one concise recipe plus a reusable site configuration, with strict validation, immutable resolved-run evidence, and a unified CLI for setup, inspection, launch, and resume. The advanced custom-model wizard and existing orchestration inputs remain supported.
 - Add Puzzletron dynamic post-MIP downstream evaluation through ``lmms-eval`` with vLLM-backed checkpoint evaluation, setup-wizard topology/resource prompts, non-interactive setup automation, and an opt-in Nemotron-3 Nano 30B A3B BF16 example flow.
 - Add Qwen 3.5 VLM pruning examples with pinned dataset preparation, a multi-axis campaign, physical materialization, teacher/student evaluation, short knowledge distillation, and compatible-stage resume.
 - Add the ``day0-release`` agent skill (``.agents/skills/day0-release/``), a deterministic end-to-end driver that chains the PTQ → evaluation → comparison skills (the evaluation stage deploys the checkpoint itself) with an enforced gate after each stage and returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE). Ships three GPU-free, unit-tested gate scripts (``gate_ptq.py``, ``gate_run.py``, ``gate_compare.py``) that validate checkpoint coverage, evaluation-run completeness, and baseline-vs-candidate accuracy threshold. v1 reports and stops on regression; the recipe-search loop is deferred.

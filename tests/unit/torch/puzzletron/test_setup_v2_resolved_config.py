@@ -530,7 +530,9 @@ def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) 
     resume_command = next(command for command in commands if "--resume" in command)
     assert resume_command == [
         "python",
-        f"{repository}/examples/puzzletron/puzzletron_setup_v2.py",
+        f"{repository}/examples/puzzletron/puzzletron.py",
+        "setup",
+        "custom",
         "--resume",
         str(campaign_dir),
     ]

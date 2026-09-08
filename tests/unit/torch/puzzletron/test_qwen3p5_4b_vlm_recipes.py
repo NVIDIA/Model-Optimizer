@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU contracts for the maintained Qwen 3.5 4B VLM example."""
+"""CPU contracts for the maintained Qwen 3.5 4B VLM recipes."""
 
 from itertools import pairwise
 from pathlib import Path
@@ -25,52 +25,51 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.public_config import (
+    materialize_resolved_bundle,
+    resolve_public_run,
+    site_template,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b"
 MODEL_PATH = FAMILY_ROOT / "model.yaml"
-MIP_RUN_PATH = FAMILY_ROOT / "runs/mip_vlm_smoke.yaml"
-LIFECYCLE_RUN_PATH = FAMILY_ROOT / "runs/vlm_lifecycle_smoke.yaml"
-LEGACY_FULL_RUN_PATH = FAMILY_ROOT / "runs/full_vlm_smoke.yaml"
-CAMPAIGN_RUN_PATH = FAMILY_ROOT / "runs/ffn_width_10to20pct_kd_search.yaml"
-LEGACY_CAMPAIGN_RUN_PATH = FAMILY_ROOT / "runs/vlm_campaign.yaml"
-RUNNER_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml"
+SMOKE_RECIPE_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_4b_vlm_smoke.yaml"
 )
-EXECUTION_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
-)
-LIFECYCLE_EXECUTION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.vlm_lifecycle_smoke.yaml"
-)
-LEGACY_FULL_EXECUTION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.full_vlm_smoke.yaml"
-)
-CAMPAIGN_EXECUTION_PATH = REPOSITORY_ROOT / (
-    "examples/puzzletron/configs/orchestration/qwen3p5_4b/"
-    "execution.ffn_width_10to20pct_kd_search.yaml"
-)
-LEGACY_CAMPAIGN_EXECUTION_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.campaign.yaml"
+CAMPAIGN_RECIPE_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_4b_vlm_campaign.yaml"
 )
 
 
 def _compile_plan(
-    monkeypatch,
     tmp_path: Path,
-    run_path: Path,
-    execution_path=EXECUTION_PATH,
-    run_root_name: str | None = None,
+    recipe_source: Path,
 ):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / (run_root_name or run_path.stem)))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
+    run_root = tmp_path / recipe_source.stem
+    dataset = tmp_path / "dataset"
+    recipe = yaml.safe_load(recipe_source.read_text())
+    recipe["run_root"] = str(run_root)
+    recipe["resource_profile"] = "selected"
+    recipe["data"] = {"path": str(dataset), "revision": "fixture-revision"}
+    recipe_path = tmp_path / f"{run_root.name}.recipe.yaml"
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
+    site = site_template()
+    site["site"]["environment"].update({"repository": str(REPOSITORY_ROOT), "venv": ".venv"})
+    site["site"]["paths"]["hf_home"] = str(tmp_path / "hf")
+    site["site"]["slurm"].update({"account": "test", "partition": "test"})
+    site["resources"]["selected"] = {
+        "mode": "per_attempt",
+        "gpus_per_node": 8,
+        "max_nodes": 1,
+    }
+    site_path = tmp_path / "site.yaml"
+    site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+    bundle = materialize_resolved_bundle(resolve_public_run(recipe_path, site_path), activate=False)
     return compile_campaign_plan(
-        experiment_config_path=run_path,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(execution_path),
+        experiment_config_path=bundle / "experiment.runtime.yaml",
+        runner=load_runner_config(bundle / "runner.yaml"),
+        execution=load_execution_config(bundle / "execution.yaml"),
         stage_filter="full",
     )
 
@@ -89,42 +88,12 @@ def test_qwen3p5_4b_model_pins_the_bounded_ffn_grid() -> None:
     assert model["pruning"] == {"intermediate_size_list": widths}
 
 
-def test_qwen3p5_4b_default_compiles_the_complete_ffn_grid_and_stops_at_mip(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    plan = _compile_plan(monkeypatch, tmp_path, MIP_RUN_PATH)
-    config = plan.experiment_config
-    stage_ids = tuple(stage.stage_id for stage in plan.stages)
-
-    assert stage_ids == (
-        "convert",
-        "width_importance",
-        "sort",
-        "sort_sanity",
-        "width_sanity",
-        "slicing_sanity",
-        "build_library",
-        "replacement_scoring",
-        "mip",
-    )
-    assert config["vllm_stats"]["enabled"] is False
-    runs = config["mip"]["runs"]
-    assert set(runs) == {"params-80", "memory-85"}
-    assert all(run["solver"]["num_solutions"] == 3 for run in runs.values())
-    assert all(run["homogeneous"]["keep"] == 2 for run in runs.values())
-    assert config["post_mip"]["flows"] == {}
-
-
-def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_evaluation(
-    monkeypatch,
+def test_qwen3p5_4b_smoke_materializes_reloads_and_bounds_kd_and_evaluation(
     tmp_path: Path,
 ) -> None:
     plan = _compile_plan(
-        monkeypatch,
         tmp_path,
-        LIFECYCLE_RUN_PATH,
-        execution_path=LIFECYCLE_EXECUTION_PATH,
+        SMOKE_RECIPE_PATH,
     )
     config = plan.experiment_config
     post_stages = tuple(stage for stage in plan.stages if stage.stage_id.startswith("post."))
@@ -155,41 +124,10 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
     )
 
 
-def test_qwen3p5_4b_legacy_full_smoke_alias_resolves_to_lifecycle(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    lifecycle_plan = _compile_plan(
-        monkeypatch,
-        tmp_path,
-        LIFECYCLE_RUN_PATH,
-        execution_path=LIFECYCLE_EXECUTION_PATH,
-        run_root_name="lifecycle-alias-contract",
-    )
-    legacy_plan = _compile_plan(
-        monkeypatch,
-        tmp_path,
-        LEGACY_FULL_RUN_PATH,
-        execution_path=LIFECYCLE_EXECUTION_PATH,
-        run_root_name="lifecycle-alias-contract",
-    )
-
-    assert legacy_plan.experiment_config["post_mip"] == lifecycle_plan.experiment_config["post_mip"]
-    assert (
-        legacy_plan.experiment_config["global_distillation"]
-        == (lifecycle_plan.experiment_config["global_distillation"])
-    )
-    assert load_execution_config(LEGACY_FULL_EXECUTION_PATH) == load_execution_config(
-        LIFECYCLE_EXECUTION_PATH
-    )
-
-
-def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp_path) -> None:
+def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(tmp_path) -> None:
     plan = _compile_plan(
-        monkeypatch,
         tmp_path,
-        CAMPAIGN_RUN_PATH,
-        execution_path=CAMPAIGN_EXECUTION_PATH,
+        CAMPAIGN_RECIPE_PATH,
     )
     config = plan.experiment_config
     candidates = config["mip"]["runs"]["ffn-candidates"]
@@ -227,29 +165,3 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 8
     assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
     assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2
-
-
-def test_qwen3p5_4b_legacy_campaign_alias_resolves_to_named_search(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    campaign_plan = _compile_plan(
-        monkeypatch,
-        tmp_path,
-        CAMPAIGN_RUN_PATH,
-        execution_path=CAMPAIGN_EXECUTION_PATH,
-        run_root_name="campaign-alias-contract",
-    )
-    legacy_plan = _compile_plan(
-        monkeypatch,
-        tmp_path,
-        LEGACY_CAMPAIGN_RUN_PATH,
-        execution_path=CAMPAIGN_EXECUTION_PATH,
-        run_root_name="campaign-alias-contract",
-    )
-
-    assert legacy_plan.experiment_config["mip"] == campaign_plan.experiment_config["mip"]
-    assert legacy_plan.experiment_config["post_mip"] == campaign_plan.experiment_config["post_mip"]
-    assert load_execution_config(LEGACY_CAMPAIGN_EXECUTION_PATH) == load_execution_config(
-        CAMPAIGN_EXECUTION_PATH
-    )

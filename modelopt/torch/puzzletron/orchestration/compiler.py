@@ -87,6 +87,7 @@ _EXECUTION_CONTRACT_FIELDS = {
     "container_mounts",
     "mounts",
     "setup_env",
+    "source_guard",
     "prerun_commands",
     "prerun",
     "postrun_commands",
@@ -392,12 +393,20 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
     )
     _reject_inline_secret_assignments(prerun, path="runner.execution_contract.prerun_commands")
     _reject_inline_secret_assignments(postrun, path="runner.execution_contract.postrun_commands")
+    source_guard = contract_payload.get("source_guard")
+    if source_guard is not None and not isinstance(source_guard, str):
+        raise TypeError("runner.execution_contract.source_guard must be a string")
+    _reject_inline_secret_assignments(
+        (source_guard,) if source_guard is not None else (),
+        path="runner.execution_contract.source_guard",
+    )
     contract = ExecutionContract(
         repository=str(contract_payload.get("repository", ".")),
         venv=str(contract_payload.get("venv", ".venv")),
         container=contract_payload.get("container"),
         container_mounts=contract_payload.get("container_mounts") or contract_payload.get("mounts"),
         setup_env=contract_payload.get("setup_env"),
+        source_guard=source_guard,
         prerun_commands=prerun,
         postrun_commands=postrun,
     )

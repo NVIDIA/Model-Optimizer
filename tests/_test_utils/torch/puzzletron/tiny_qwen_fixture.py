@@ -21,7 +21,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,60 +29,24 @@ import yaml
 from _test_utils.torch.transformers_models import create_tiny_qwen3_5_dir
 from datasets import Dataset, DatasetDict
 
+import puzzletron_orchestrator.public_config as public_config
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_setup.v2.wizard import _DEFAULT_DATA_SOURCE, _DEFAULT_MODEL_SOURCE, run_wizard_v2
+from puzzletron_orchestrator.config import _compose, _config_root, _merge
 
 __all__ = ["TinyQwenCampaign", "build_tiny_qwen_campaign"]
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from puzzletron_orchestrator.schema import CampaignPlan
-    from puzzletron_setup.v2.prompts import PromptChoice
 
-
-_SETUP_DEFAULTS = Path(__file__).with_name("tiny_qwen_setup_defaults.yaml")
-_EXPERIMENT_OVERLAY = Path(__file__).with_name("tiny_qwen_experiment_overlay.yaml")
-
-
-class _DefaultsBackend:
-    """Select resolved guided defaults while supplying the campaign directory."""
-
-    def __init__(self, campaign_dir: Path) -> None:
-        self.campaign_dir = campaign_dir
-
-    def text(self, message: str, default: str) -> Any:
-        if message == "Campaign directory:":
-            return str(self.campaign_dir)
-        return default
-
-    def select(
-        self,
-        message: str,
-        choices: Sequence[PromptChoice],
-        default: Any,
-    ) -> Any:
-        if message == "Model:":
-            return _DEFAULT_MODEL_SOURCE
-        if message == "Dataset:":
-            return _DEFAULT_DATA_SOURCE
-        if default is not None:
-            return default
-        return next(choice.value for choice in choices if choice.disabled is None)
-
-    def checkbox(
-        self,
-        message: str,
-        choices: Sequence[PromptChoice],
-        defaults: Sequence[Any],
-    ) -> Any:
-        del message, choices
-        return list(defaults)
+_CONFIG_DIR = Path(__file__).with_name("configs")
+_RECIPE = _CONFIG_DIR / "tiny_qwen.recipe.yaml"
+_SITE = _CONFIG_DIR / "tiny_qwen.site.yaml"
+_EXPERIMENT_OVERLAY = _CONFIG_DIR / "tiny_qwen_lifecycle.overlay.yaml"
 
 
 @dataclass(frozen=True)
@@ -98,14 +62,14 @@ class TinyQwenCampaign:
     config: dict[str, Any]
     compiled_plan: CampaignPlan
 
-    def run(self, *, timeout: int = 2100) -> subprocess.CompletedProcess[str]:
+    def run(self, *, timeout: int = 720) -> subprocess.CompletedProcess[str]:
         """Run or resume the full campaign through the public local orchestrator."""
 
         command = [
             sys.executable,
             str(self.project_root / "examples/puzzletron/orchestrate.py"),
             "--experiment",
-            str(self.smoke_bundle / "experiment.yaml"),
+            str(self.smoke_bundle / "experiment.runtime.yaml"),
             "--runner",
             str(self.smoke_bundle / "runner.yaml"),
             "--execution",
@@ -120,15 +84,32 @@ class TinyQwenCampaign:
         ]
         for override in self.overrides:
             command.extend(("--override", override))
-        return subprocess.run(
-            command,
-            cwd=self.project_root,
-            env=self.environment,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        try:
+            return subprocess.run(
+                command,
+                cwd=self.project_root,
+                env=self.environment,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            stderr = error.stderr or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            logs = sorted(
+                self.smoke_root.glob("logs/**/*.log"),
+                key=lambda path: path.stat().st_mtime_ns,
+            )
+            log_tail = (
+                logs[-1].read_text(errors="replace")[-12000:] if logs else "no task log found"
+            )
+            raise AssertionError(
+                f"Tiny Qwen Puzzletron campaign timed out after {timeout}s.\n"
+                f"stderr tail:\n{stderr[-12000:]}\n"
+                f"latest task-log tail:\n{log_tail}"
+            ) from error
 
     def require_success(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
         """Return the controller result or raise with the most useful task log."""
@@ -168,7 +149,7 @@ def _save_messages_dataset(path: Path) -> None:
         {"role": "user", "content": "What is model compression?"},
         {"role": "assistant", "content": response},
     ]
-    rows = [{"messages": messages}] * 8
+    rows = [{"messages": messages}] * 2
     DatasetDict(
         {
             "train": Dataset.from_list(rows),
@@ -177,42 +158,31 @@ def _save_messages_dataset(path: Path) -> None:
     ).save_to_disk(str(path))
 
 
-def _merge_config(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Recursively apply a declarative test overlay to a generated config."""
+def _write_tiny_route_template(project_root: Path, tmp_path: Path, model_dir: Path) -> Path:
+    """Compose the checked-in tiny overlay onto the maintained lifecycle."""
 
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _merge_config(base[key], value)
-        else:
-            base[key] = value
-    return base
-
-
-def _write_setup_defaults(
-    path: Path,
-    *,
-    model_dir: Path,
-    dataset_dir: Path,
-    result_root: Path,
-    project_root: Path,
-) -> None:
-    """Materialize the checked-in setup config with per-test runtime paths."""
-
-    defaults = yaml.safe_load(_SETUP_DEFAULTS.read_text())
-    defaults["model"]["source"] = str(model_dir)
-    defaults["data"]["source"] = str(dataset_dir)
-    defaults["output"]["result_root"] = str(result_root)
-    contract = defaults["infrastructure"]["execution_contract"]
-    contract["repository"] = str(project_root)
-    contract["venv"] = sys.prefix
-    path.write_text(yaml.safe_dump(defaults, sort_keys=False))
+    source = (
+        project_root
+        / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml"
+    )
+    experiment = _compose(source, root=_config_root(source), stack=())
+    overlay = yaml.safe_load(_EXPERIMENT_OVERLAY.read_text())
+    experiment = _merge(experiment, overlay)
+    # The hermetic test replaces external downstream benchmarks with the
+    # checked-in local-only flow rather than merging the two node mappings.
+    experiment["post_mip"]["flows"]["params-90"]["nodes"] = overlay["post_mip"]["flows"][
+        "params-90"
+    ]["nodes"]
+    experiment["input_hf_model_path"] = str(model_dir)
+    experiment["model_info"]["hf_repo"] = str(model_dir)
+    catalog = tmp_path / "test-route-catalog"
+    catalog.mkdir()
+    (catalog / "tiny_qwen.yaml").write_text(yaml.safe_dump(experiment, sort_keys=False))
+    return catalog
 
 
-def build_tiny_qwen_campaign(
-    project_root: Path,
-    tmp_path: Path,
-) -> TinyQwenCampaign:
-    """Generate the sole tiny-Qwen setup-to-resume Puzzletron E2E fixture."""
+def build_tiny_qwen_campaign(project_root: Path, tmp_path: Path) -> TinyQwenCampaign:
+    """Generate the sole tiny-Qwen public-route E2E fixture."""
 
     model_dir = create_tiny_qwen3_5_dir(
         tmp_path / "model",
@@ -225,39 +195,40 @@ def build_tiny_qwen_campaign(
         layer_types=["full_attention"] * 2,
     )
     dataset_dir = tmp_path / "dataset"
-    campaign_dir = tmp_path / "campaign"
-    result_root = tmp_path / "results"
+    result_root = tmp_path / "fast-e2e"
     cache_dir = tmp_path / "cache"
-    defaults_path = tmp_path / "defaults.yaml"
+    recipe_path = tmp_path / "puzzletron.recipe.yaml"
+    site_path = tmp_path / "puzzletron.site.yaml"
     _save_messages_dataset(dataset_dir)
-    _write_setup_defaults(
-        defaults_path,
-        model_dir=model_dir,
-        dataset_dir=dataset_dir,
-        result_root=result_root,
-        project_root=project_root,
-    )
 
-    generated = run_wizard_v2(
-        resume=None,
-        defaults_path=defaults_path,
-        backend=_DefaultsBackend(campaign_dir),
+    recipe = yaml.safe_load(_RECIPE.read_text())
+    recipe["run_root"] = str(result_root)
+    recipe["data"]["path"] = str(dataset_dir)
+    site = yaml.safe_load(_SITE.read_text())
+    site["site"]["environment"].update({"repository": str(project_root), "venv": sys.prefix})
+    site["site"]["paths"]["hf_home"] = str(cache_dir / "huggingface")
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
+    site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+
+    catalog_root = _write_tiny_route_template(project_root, tmp_path, model_dir)
+    route_key = (recipe["model"], recipe["workflow"], recipe["mode"])
+    original_root = public_config._CONFIG_ROOT
+    original_routes = public_config.ROUTES_BY_KEY
+    test_routes = dict(original_routes)
+    test_routes[route_key] = replace(
+        original_routes[route_key],
+        experiment_template="tiny_qwen.yaml",
     )
-    smoke_bundle = generated / "smoke"
-    experiment_path = smoke_bundle / "experiment.yaml"
-    experiment = yaml.safe_load(experiment_path.read_text())
-    flows = dict((experiment.get("post_mip") or {}).get("flows") or {})
-    if len(flows) != 1:
-        raise AssertionError(f"expected one recommended post-MIP flow, found {sorted(flows)}")
-    flow_id = next(iter(flows))
-    overlay = yaml.safe_load(_EXPERIMENT_OVERLAY.read_text())
-    overlay_flows = dict(overlay["post_mip"]["flows"])
-    if tuple(overlay_flows) != (flow_id,):
-        raise AssertionError(
-            f"tiny-Qwen overlay targets {sorted(overlay_flows)}, generated flow is {flow_id!r}"
-        )
-    _merge_config(experiment, overlay)
-    experiment_path.write_text(yaml.safe_dump(experiment, sort_keys=False))
+    try:
+        public_config._CONFIG_ROOT = catalog_root
+        public_config.ROUTES_BY_KEY = test_routes
+        resolved = public_config.resolve_public_run(recipe_path, site_path)
+    finally:
+        public_config._CONFIG_ROOT = original_root
+        public_config.ROUTES_BY_KEY = original_routes
+
+    smoke_bundle = public_config.materialize_resolved_bundle(resolved, activate=True)
+    experiment_path = smoke_bundle / "experiment.runtime.yaml"
     overrides: tuple[str, ...] = ()
     config = pipeline_config_from_path(experiment_path, overrides=overrides)
     compiled_plan = compile_campaign_plan(
@@ -287,8 +258,8 @@ def build_tiny_qwen_campaign(
     return TinyQwenCampaign(
         project_root=project_root,
         smoke_bundle=smoke_bundle,
-        smoke_root=result_root / "smoke",
-        flow_id=flow_id,
+        smoke_root=result_root,
+        flow_id="params-90",
         overrides=overrides,
         environment=environment,
         config=config,

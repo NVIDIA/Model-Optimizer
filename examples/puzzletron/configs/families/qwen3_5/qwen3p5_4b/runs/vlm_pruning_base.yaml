@@ -6,8 +6,7 @@ defaults:
   - /families/qwen3_5/qwen3p5_4b/model@_global_
   - _self_
 
-# Bounded one-GPU compilation and MIP route for the pinned public checkpoint.
-# The default stops before materialization, evaluation, and distillation.
+# Shared pruning and MIP settings for maintained lifecycle routes.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_4b_vlm_smoke}
 dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH}
 display_name: Qwen3p5_4B_VLM

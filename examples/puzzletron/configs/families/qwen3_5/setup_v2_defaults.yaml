@@ -1,3 +1,4 @@
+# Defaults for the custom-model setup wizard. Maintained recipes do not read this file.
 schema_version: 2
 
 profiles:

@@ -212,6 +212,7 @@ def render_sbatch_script(
         prerun_block,
         f"source {shlex.quote(venv)}/bin/activate",
         'export PYTHONPATH="$ROOT:${PYTHONPATH:-}"',
+        contract.source_guard or "",
         "export PYTHONUNBUFFERED=1",
         *env_lines,
     ]

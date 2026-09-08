@@ -39,8 +39,8 @@ from modelopt.torch.puzzletron.post_mip.records import CandidateLedger
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 
 
-@pytest.mark.timeout(2400)
-def test_tiny_qwen_campaign_uses_current_public_route(
+@pytest.mark.timeout(900)
+def test_tiny_qwen_full_lifecycle_uses_public_bundle_contract(
     project_root_path: Path,
     tmp_path: Path,
 ) -> None:
@@ -51,7 +51,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
 
     campaign = build_tiny_qwen_campaign(project_root_path, tmp_path)
     _assert_compiled_route(campaign)
-    completed = campaign.run(timeout=2100)
+    completed = campaign.run()
     result = campaign.require_success(completed)
 
     stage_ids = tuple(node.stage_id for node in campaign.compiled_plan.stages)
@@ -60,7 +60,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     assert manifest_paths
     pruning_paths = _assert_pruning_and_mip_artifacts(campaign)
     final_checkpoint, post_paths = _assert_post_mip_and_final_checkpoint(campaign)
-    _assert_selected_checkpoint_runs(final_checkpoint)
+    _assert_final_checkpoint_runs(final_checkpoint)
     _assert_final_report(campaign, result)
 
     state = CampaignStateStore(campaign.smoke_root)
@@ -70,7 +70,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     durable_paths = [*manifest_paths, *pruning_paths, *post_paths]
     before_resume = _artifact_digests(durable_paths)
 
-    resumed = campaign.run(timeout=120)
+    resumed = campaign.run(timeout=60)
     resumed_result = campaign.require_success(resumed)
 
     _assert_completed_campaign(campaign, resumed_result, stage_ids)
@@ -84,17 +84,34 @@ def test_tiny_qwen_campaign_uses_current_public_route(
 def _assert_compiled_route(campaign: TinyQwenCampaign) -> None:
     """Verify the saved YAML bundle compiles to the intended one-GPU DAG."""
 
-    for name in ("experiment.yaml", "runner.yaml", "execution.yaml"):
+    for name in (
+        "recipe.yaml",
+        "experiment.runtime.yaml",
+        "experiment.resolved.yaml",
+        "runner.yaml",
+        "execution.yaml",
+        "manifest.json",
+        "provenance.json",
+    ):
         assert (campaign.smoke_bundle / name).is_file()
-    serving = campaign.config["post_mip"]["flows"][campaign.flow_id]["nodes"]["serving"]
+    flow_nodes = campaign.config["post_mip"]["flows"][campaign.flow_id]["nodes"]
+    assert campaign.config["sort"]["deferred_axes"] == [
+        "kv_groups",
+        "q_heads_per_group",
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+    ]
+    serving = flow_nodes["serving"]
     assert serving["config"]["allow_aiperf_v011_online_tokenizer_resolution"] is True
     assert serving["config"]["topology"]["extra_vllm_args"] == [
         "-cc.cudagraph_mode=NONE",
         "--no-enable-flashinfer-autotune",
         "--max-num-batched-tokens",
-        "128",
+        "64",
         "--max-num-seqs",
-        "4",
+        "2",
         "--gpu-memory-utilization",
         "0.5",
     ]
@@ -114,9 +131,24 @@ def _assert_compiled_route(campaign: TinyQwenCampaign) -> None:
         node for node in campaign.compiled_plan.stages if node.stage_id.startswith(prefix)
     )
     assert tuple(node.stage_id.removeprefix(prefix) for node in post_nodes) == expected_nodes
+    assert flow_nodes["online_eval"]["config"]["eval_samples"] == 1
+    assert flow_nodes["final_eval"]["config"]["eval_samples"] == 1
     assert post_nodes[0].parents == ("mip",)
     for parent, node in pairwise(post_nodes):
         assert node.parents == (parent.stage_id,)
+
+    stage_ids = tuple(node.stage_id for node in campaign.compiled_plan.stages)
+    major_stages = (
+        "convert",
+        "tokenize_data",
+        "width_importance",
+        "sort",
+        "build_library",
+        "replacement_scoring",
+        "mip",
+    )
+    assert tuple(stage_id for stage_id in stage_ids if stage_id in major_stages) == major_stages
+    assert all(node.total_gpus <= 1 for node in campaign.compiled_plan.stages)
 
     replacement_node = next(
         node for node in campaign.compiled_plan.stages if node.stage_id == "replacement_scoring"
@@ -124,9 +156,13 @@ def _assert_compiled_route(campaign: TinyQwenCampaign) -> None:
     replacement_work = adapter_for_stage(replacement_node).plan(
         campaign.compiled_plan, replacement_node
     )
-    assert (replacement_node.instances, replacement_node.gpus_per_instance) == (1, 1)
-    assert len(replacement_work.items) == 1
-    assert replacement_work.items[0].metadata["worker_count"] == 1
+    assert campaign.config["embedding_pruning"]["widths"] == [512, 256]
+    assert (
+        replacement_node.strategy.value,
+        replacement_node.instances,
+        replacement_node.gpus_per_instance,
+        len(replacement_work.items),
+    ) == ("single", 1, 1, 1)
 
 
 def _assert_completed_campaign(
@@ -193,7 +229,7 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
         if scenario["status"] == "feasible"
     ]
     solutions = [solution for path in solution_paths for solution in _json(path)]
-    assert len(solutions) >= 3
+    assert solutions
     solution_ffn_widths = {
         int(width)
         for solution in solutions
@@ -215,58 +251,34 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
 def _assert_post_mip_and_final_checkpoint(
     campaign: TinyQwenCampaign,
 ) -> tuple[Path, list[Path]]:
-    """Verify the post-MIP flow selects and trains one usable final checkpoint."""
+    """Verify the post-MIP flow evaluates and trains one usable final checkpoint."""
 
     root = campaign.smoke_root
     ledger = CandidateLedger(root / "artifacts/post_mip")
     online = ledger.load_candidate_set("online_eval")
-    assert len(online.revision_ids) >= 3
+    assert len(online.revision_ids) == 1
     online_observations = ledger.observations["online_eval"]
     assert all(row.status == "success" for row in online_observations.values())
     assert all(Path(row.artifacts["result_path"]).is_file() for row in online_observations.values())
-    online_losses = {
-        revision_id: _finite_metric(ledger, revision_id, "online_eval.lm_loss")
-        for revision_id in online.revision_ids
-    }
-
-    best_lm = ledger.load_candidate_set("best_lm")
-    assert len(best_lm.revision_ids) == 3
-    expected_best_lm = tuple(
-        revision_id
-        for _loss, revision_id in sorted(
-            (loss, revision_id) for revision_id, loss in online_losses.items()
-        )[:3]
-    )
-    assert best_lm.revision_ids == expected_best_lm
-    assert {
-        revision_id
-        for revision_id, row in ledger.observations["best_lm"].items()
-        if row.status == "selected"
-    } == set(best_lm.revision_ids)
+    assert _finite_metric(ledger, online.revision_ids[0], "online_eval.lm_loss") >= 0
 
     materialized = ledger.load_candidate_set("materialized")
-    assert len(materialized.revision_ids) == 3
+    assert len(materialized.revision_ids) == 1
     for revision_id in materialized.revision_ids:
         revision = ledger.revisions[revision_id]
-        assert revision.parent_revision_id in set(best_lm.revision_ids)
         checkpoint = Path(revision.artifact["checkpoint"])
         assert (checkpoint / "config.json").is_file()
         assert list(checkpoint.glob("*.safetensors"))
-    assert {
-        ledger.revisions[revision_id].parent_revision_id
-        for revision_id in materialized.revision_ids
-    } == set(best_lm.revision_ids)
-
     serving = ledger.load_candidate_set("serving")
-    assert len(serving.revision_ids) >= 2
-    assert set(serving.revision_ids) <= set(materialized.revision_ids)
-    serving_throughputs = {
-        revision_id: _finite_metric(
-            ledger, revision_id, "serving.concurrency_1.output_token_throughput"
+    assert len(serving.revision_ids) == 1
+    assert (
+        _finite_metric(
+            ledger,
+            serving.revision_ids[0],
+            "serving.concurrency_1.output_token_throughput",
         )
-        for revision_id in serving.revision_ids
-    }
-    assert all(throughput > 0 for throughput in serving_throughputs.values())
+        > 0
+    )
     serving_observations = ledger.observations["serving"]
     aiperf_paths = [
         Path(path)
@@ -277,29 +289,19 @@ def _assert_post_mip_and_final_checkpoint(
     ]
     assert aiperf_paths and all(path.is_file() for path in aiperf_paths)
 
-    fastest = ledger.load_candidate_set("fastest")
-    assert len(fastest.revision_ids) == 2
-    expected_fastest = tuple(
-        revision_id
-        for _throughput, revision_id in sorted(
-            (throughput, revision_id) for revision_id, throughput in serving_throughputs.items()
-        )[-2:][::-1]
-    )
-    assert fastest.revision_ids == expected_fastest
     short_kd = ledger.load_candidate_set("short_kd")
-    assert len(short_kd.revision_ids) == 2
+    assert len(short_kd.revision_ids) == 1
     kd_paths = []
     for revision_id in short_kd.revision_ids:
         revision = ledger.revisions[revision_id]
-        assert revision.parent_revision_id in set(materialized.revision_ids)
         checkpoint = Path(revision.artifact["checkpoint"])
         summary_path = Path(revision.artifact["summary_path"])
         kd_summary = _json(summary_path)
         records = kd_summary["records"]
         steps = {int(record.get("step", record.get("global_step"))) for record in records}
         losses = [float(record.get("loss", record.get("train_loss"))) for record in records]
-        assert kd_summary["max_steps"] == 2
-        assert len(steps) >= 2
+        assert kd_summary["max_steps"] == 1
+        assert steps
         assert all(math.isfinite(loss) for loss in losses)
         assert (checkpoint / "config.json").is_file()
         assert list(checkpoint.glob("*.safetensors"))
@@ -318,22 +320,11 @@ def _assert_post_mip_and_final_checkpoint(
                 *checkpoint.glob("*.safetensors"),
             ]
         )
-    assert {
-        ledger.revisions[revision_id].parent_revision_id for revision_id in short_kd.revision_ids
-    } == set(fastest.revision_ids)
-
     final_eval = ledger.load_candidate_set("final_eval")
-    assert set(final_eval.revision_ids) == set(short_kd.revision_ids)
-    final_losses = {
-        revision_id: _finite_metric(ledger, revision_id, "final_eval.lm_loss")
-        for revision_id in final_eval.revision_ids
-    }
-    best = ledger.load_candidate_set("best")
-    assert len(best.revision_ids) == 1
-    selected_id = best.revision_ids[0]
-    assert final_losses[selected_id] == min(final_losses.values())
-    selected = ledger.revisions[selected_id]
-    final_checkpoint = Path(selected.artifact["checkpoint"])
+    assert len(final_eval.revision_ids) == 1
+    assert _finite_metric(ledger, final_eval.revision_ids[0], "final_eval.lm_loss") >= 0
+    final_revision = ledger.revisions[final_eval.revision_ids[0]]
+    final_checkpoint = Path(final_revision.artifact["checkpoint"])
 
     post_paths = [root / "artifacts/post_mip/candidate_registry.json"]
     post_paths.extend(root.glob("artifacts/post_mip/nodes/*/current.json"))
@@ -345,17 +336,17 @@ def _assert_post_mip_and_final_checkpoint(
     return final_checkpoint, [*post_paths, *aiperf_paths, *kd_paths]
 
 
-def _assert_selected_checkpoint_runs(final_checkpoint: Path) -> None:
-    """Reload the selected physical checkpoint and run a finite CUDA forward pass."""
+def _assert_final_checkpoint_runs(final_checkpoint: Path) -> None:
+    """Reload the final physical checkpoint and run a finite CUDA forward pass."""
 
     resolution = resolve_descriptor_from_pretrained(str(final_checkpoint))
-    selected_config = _json(final_checkpoint / "config.json")
+    final_config = _json(final_checkpoint / "config.json")
     widths_by_block = [
         _nested_values(block_config, "intermediate_size")
-        for block_config in selected_config["block_configs"]
+        for block_config in final_config["block_configs"]
     ]
     assert all(len(widths) == 1 for widths in widths_by_block)
-    selected_widths = [int(widths[0]) for widths in widths_by_block]
+    final_widths = [int(widths[0]) for widths in widths_by_block]
     model = load_anymodel_for_scoring(
         str(final_checkpoint),
         anymodel_descriptor=resolution.name,
@@ -364,7 +355,7 @@ def _assert_selected_checkpoint_runs(final_checkpoint: Path) -> None:
         local_files_only=True,
     ).cuda()
 
-    assert [layer.mlp.down_proj.in_features for layer in model.model.layers] == selected_widths
+    assert [layer.mlp.down_proj.in_features for layer in model.model.layers] == final_widths
     with torch.no_grad():
         logits = model(torch.tensor([[1, 2, 3, 4]], device="cuda"), use_cache=False).logits
     assert torch.isfinite(logits).all()

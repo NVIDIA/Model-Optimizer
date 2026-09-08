@@ -32,6 +32,11 @@ import pytest
 import yaml
 from datasets import Dataset, DatasetDict
 
+from puzzletron_orchestrator.public_config import (
+    materialize_resolved_bundle,
+    resolve_public_run,
+    site_template,
+)
 from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
     assert_pruned_checkpoints_completed_benchmark,
 )
@@ -69,38 +74,44 @@ def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
     project_root_path: Path,
     tmp_path: Path,
 ) -> None:
-    """Run the bounded lifecycle on one H100 with network or populated benchmark caches."""
+    """Run a bundle generated through the public configuration contract locally."""
 
     dataset = tmp_path / "dataset"
     results = tmp_path / "results"
     cache = tmp_path / "cache"
-    runner = tmp_path / "runner.yaml"
+    recipe = tmp_path / "recipe.yaml"
+    site = tmp_path / "site.yaml"
     _save_messages_dataset(dataset)
-    runner.write_text(
-        yaml.safe_dump(
-            {
-                "runner": {
-                    "kind": "slurm",
-                    "slurm": {"account": "local-smoke", "max_nodes": 1},
-                    "execution_contract": {
-                        "repository": str(project_root_path),
-                        "venv": sys.prefix,
-                        "container": None,
-                        "container_mounts": None,
-                        "prerun_commands": [],
-                        "postrun_commands": [],
-                    },
-                }
-            },
-            sort_keys=False,
-        )
+    recipe_payload = yaml.safe_load(
+        (
+            project_root_path / "examples/puzzletron/configs/recipes/qwen3p5_0p8b_text_smoke.yaml"
+        ).read_text()
     )
+    recipe_payload.update(
+        {
+            "run_root": str(results),
+            "resource_profile": "selected",
+            "data": {"path": str(dataset), "revision": "fixture-revision"},
+        }
+    )
+    recipe.write_text(yaml.safe_dump(recipe_payload, sort_keys=False))
+    site_payload = site_template()
+    site_payload["site"]["environment"].update(
+        {"repository": str(project_root_path), "venv": sys.prefix}
+    )
+    site_payload["site"]["paths"]["hf_home"] = str(cache / "huggingface")
+    site_payload["site"]["slurm"].update({"account": "local-smoke", "partition": "local"})
+    site_payload["resources"]["selected"] = {
+        "mode": "per_attempt",
+        "gpus_per_node": 1,
+        "max_nodes": 1,
+    }
+    site.write_text(yaml.safe_dump(site_payload, sort_keys=False))
+    bundle = materialize_resolved_bundle(resolve_public_run(recipe, site), activate=True)
 
     environment = os.environ.copy()
     environment.update(
         {
-            "PUZZLETRON_RUN_ROOT": str(results),
-            "PUZZLETRON_DATASET_PATH": str(dataset),
             "HF_HOME": str(cache / "huggingface"),
             "HF_DATASETS_CACHE": str(cache / "datasets"),
             "TORCH_HOME": str(cache / "torch"),
@@ -112,17 +123,11 @@ def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
             sys.executable,
             str(project_root_path / "examples/puzzletron/orchestrate.py"),
             "--experiment",
-            str(
-                project_root_path / "examples/puzzletron/configs/families/qwen3_5/"
-                "qwen3p5_0p8b/runs/full_smoke.yaml"
-            ),
+            str(bundle / "experiment.runtime.yaml"),
             "--runner",
-            str(runner),
+            str(bundle / "runner.yaml"),
             "--execution",
-            str(
-                project_root_path
-                / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
-            ),
+            str(bundle / "execution.yaml"),
             "--stage",
             "full",
             "--local",

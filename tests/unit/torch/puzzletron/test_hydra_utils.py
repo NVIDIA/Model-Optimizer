@@ -68,7 +68,10 @@ def test_static_workload_stats_preserves_resolved_python_objects(monkeypatch):
     monkeypatch.setattr(calc_subblock_stats, "launch_calc_subblock_stats", launched.append)
 
     pipeline_stages._calculate_static_workload_stats(
-        {"mip": {"workloads": {"interactive": {"isl": 256, "osl": 64, "batch_size": 2}}}},
+        {
+            "embedding_pruning": {"widths": [512, 256]},
+            "mip": {"workloads": {"interactive": {"isl": 256, "osl": 64, "batch_size": 2}}},
+        },
         hydra_cfg,
     )
 
@@ -80,6 +83,7 @@ def test_static_workload_stats_preserves_resolved_python_objects(monkeypatch):
     assert selected.calc_subblock_stats.generation_seq_len == 64
     assert selected.calc_subblock_stats.runtime_stats.enabled is False
     assert selected.calc_subblock_stats.merge_with_existing_stats is True
+    assert list(selected.calc_subblock_stats.model_hidden_sizes) == [512, 256]
 
 
 def test_warmup_steps_casts_inputs_before_computing():

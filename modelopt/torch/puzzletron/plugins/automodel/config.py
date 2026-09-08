@@ -64,6 +64,7 @@ __all__ = [
 _FROM_PRETRAINED_TARGET = "nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained"
 _FROM_PRETRAINED_VLM_TARGET = "nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained"
 _DEFAULT_TEACHER_SUBDIR = "ckpts/teacher"
+_RUNTIME_CHECKPOINT_SUBDIR = ".runtime/nemo_automodel/checkpoints"
 
 
 def _int_or_default(value, default: int = 1) -> int:
@@ -86,6 +87,16 @@ def _teacher_path(hydra_cfg) -> str:
     if explicit:
         return str(explicit)
     return f"{hydra_cfg.puzzle_dir}/{_DEFAULT_TEACHER_SUBDIR}"
+
+
+def _route_runtime_files_to_run_root(recipe: dict, hydra_cfg) -> dict:
+    """Keep NeMo's disabled-checkpoint bookkeeping out of the source checkout."""
+    checkpoint = dict(recipe.get("checkpoint") or {})
+    checkpoint.setdefault(
+        "checkpoint_dir", str(Path(str(hydra_cfg.puzzle_dir)) / _RUNTIME_CHECKPOINT_SUBDIR)
+    )
+    recipe["checkpoint"] = checkpoint
+    return recipe
 
 
 def _trust_remote_code(hydra_cfg) -> bool:
@@ -547,6 +558,7 @@ def build_recipe_config(hydra_cfg) -> dict:
     """
     automodel_cfg = hydra_cfg.pruning.get("automodel", None)
     recipe = _inject_authored_model_backend(build_stage_recipe_config(automodel_cfg), hydra_cfg)
+    recipe = _route_runtime_files_to_run_root(recipe, hydra_cfg)
 
     model = dict(recipe.get("model", {}))
     model.setdefault("_target_", _FROM_PRETRAINED_TARGET)
@@ -645,6 +657,7 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     """
     automodel_cfg = hydra_cfg.scoring.get("automodel", None)
     recipe = _inject_authored_model_backend(build_stage_recipe_config(automodel_cfg), hydra_cfg)
+    recipe = _route_runtime_files_to_run_root(recipe, hydra_cfg)
     force_hf = bool(_as_dict(automodel_cfg).get("force_hf", False))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)

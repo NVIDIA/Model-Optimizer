@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The fixture replaces only paths created for the current test process.
+schema_version: 1
+site:
+  kind: slurm
+  environment:
+    repository: REPLACE_WITH_TEST_CHECKOUT
+    venv: REPLACE_WITH_TEST_VENV
+    container:
+    container_mounts:
+    prerun_commands: []
+    postrun_commands: []
+  paths:
+    hf_home: REPLACE_WITH_TEST_HF_HOME
+  slurm:
+    account: test
+    job_name_prefix: test-puzzletron
+resources:
+  fast-e2e:
+    mode: per_attempt
+    gpus_per_node: 1
+    max_nodes: 1

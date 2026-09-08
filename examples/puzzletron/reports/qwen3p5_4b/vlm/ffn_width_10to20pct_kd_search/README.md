@@ -16,36 +16,29 @@ repeated here.
 ## Reproduce
 
 Use the model and dataset versions recorded in the run's structured record.
-Prepare the dataset where workers can read it, and replace every placeholder in
-the runner template before launching.
+Prepare the dataset where workers can read it, copy the maintained recipe, and
+configure the reusable site file before launching.
 
 ```bash
-export PUZZLETRON_DATASET_PATH=/path/to/qwen3p5-vlm-campaign-data
-export PUZZLETRON_DATASET_REVISION=51f4f4d219315c3283950994d4eb3d7fc30aa87b
-export PUZZLETRON_RUN_ROOT=/path/to/puzzle_runs/qwen3p5_4b_vlm_campaign
-
 python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
-  --output "$PUZZLETRON_DATASET_PATH" \
-  --revision "$PUZZLETRON_DATASET_REVISION" \
+  --output /path/to/qwen3p5-vlm-campaign-data \
+  --revision 51f4f4d219315c3283950994d4eb3d7fc30aa87b \
   --subsets sparsetables plotqa_cot wiki_en \
   --num-samples 64 \
   --max-shards-per-subset 1
 
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml
-RUNNER=examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml
+cp examples/puzzletron/configs/recipes/qwen3p5_4b_vlm_campaign.yaml campaign.recipe.yaml
+cp examples/puzzletron/configs/site.example.yaml puzzletron.site.yaml
+# Set recipe data.path and run_root, then fill in the site placeholders.
 
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full --dry-run
+python examples/puzzletron/puzzletron.py dry-run campaign.recipe.yaml \
+  --site puzzletron.site.yaml
 ```
 
 Run the dry run first and check the commands, paths, and requested GPUs. The
-runner file is only a template until its placeholders are replaced. The full
+site file is only a template until its placeholders are replaced. The full
 recipe also contains a fresh 256-step KD run and a final teacher comparison;
 run `2026-09-01-r2` stopped before those steps.
 
-See the [Qwen 3.5 4B VLM example](../../../../docs/qwen3p5_4b_vlm_example.md)
+See [maintained recipes](../../../../docs/maintained_recipes.md)
 for environment preparation and lifecycle details.

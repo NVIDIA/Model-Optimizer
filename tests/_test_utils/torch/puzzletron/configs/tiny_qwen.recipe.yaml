@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The fixture replaces only the temporary run and data paths.
+schema_version: 1
+name: tiny-qwen-fast-e2e
+model: qwen3.5-0.8b
+workflow: text-pruning
+mode: smoke
+run_root: REPLACE_WITH_TEST_RUN_ROOT
+resource_profile: fast-e2e
+data:
+  path: REPLACE_WITH_TEST_DATASET
+  revision: hermetic-tiny-qwen-v1
