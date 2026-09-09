@@ -204,16 +204,16 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
     expected_widths = campaign.config["embedding_pruning"]["widths"]
     assert replacement_summary["widths"] == expected_widths
     assert replacement_summary["scenario_count"] == len(expected_widths)
-    replacement_result_paths = list(
-        root.glob(
-            "scenarios/width-*/depth-*/distributed_eval/replacement_scoring/results/**/*.json"
-        )
+    replacement_result_paths = sorted(
+        path
+        for child in replacement_summary["children"]
+        for input_dir in child["inputs"]
+        for path in Path(input_dir).rglob("*.json")
     )
     replacement_results = [_json(path) for path in replacement_result_paths]
     assert replacement_results
-    provenances = [result["provenance"] for result in replacement_results]
-    assert {provenance["score_device_type"] for provenance in provenances} == {"cuda"}
-    assert {provenance["visible_cuda_device_count"] for provenance in provenances} == {1}
+    assert set(_nested_values(replacement_results, "score_device_type")) == {"cuda"}
+    assert set(_nested_values(replacement_results, "visible_cuda_device_count")) == {1}
 
     candidate_library_path = root / "candidate_library.json"
     candidate_library = _json(candidate_library_path)
