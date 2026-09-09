@@ -17,6 +17,7 @@
 
 import inspect
 import logging
+import re
 import warnings
 from contextlib import contextmanager
 from functools import partial
@@ -1908,7 +1909,14 @@ class _QuantMoELinear(QuantModule):
                 "a device_map that keeps the MoE layers resident — and re-run."
             )
 
-        dtype, device = self.weight.dtype, self.weight.device
+        # MoELinear.forward always promotes to fp32 for the matmul regardless of storage
+        # dtype (`F.linear(x.float(), self.weight[expert_id].float())`), so each expert's
+        # weight is expanded in fp32 too. Storing at the original dtype (e.g. bf16) would
+        # force the forward below to downcast the fp32 activation to match before the
+        # matmul, computing in bf16 and changing the model's output even with every
+        # quantizer disabled -- the bf16 rounding this class exists to quantize *past*, not
+        # to reintroduce as a side effect of conversion.
+        device = self.weight.device
 
         with init_empty_weights():
             experts = nn.ModuleList(
@@ -1921,19 +1929,20 @@ class _QuantMoELinear(QuantModule):
         for i in range(self.num_experts):
             experts[i].to_empty(device=device)
             with torch.no_grad():
-                experts[i].weight.data = self.weight[i].detach().to(dtype=dtype, device=device)
+                experts[i].weight.data = (
+                    self.weight[i].detach().to(dtype=torch.float32, device=device)
+                )
 
         delattr(self, "weight")
         self.experts = experts
 
     def forward(self, x, expert_id):
-        # experts[expert_id] is a _QuantLinear after quantization wrapping,
-        # providing per-expert input_quantizer and weight_quantizer.
-        # Cast input to match expert weight dtype before linear operation,
-        # then cast output to float32 to match original MoELinear forward behavior.
+        # experts[expert_id] is a _QuantLinear after quantization wrapping, providing
+        # per-expert input_quantizer and weight_quantizer. The expert's weight is fp32
+        # (see _setup), so upcasting x here reproduces MoELinear's own fp32 promotion
+        # instead of losing precision to the weight's original storage dtype.
         expert = self.experts[expert_id]
-        x = x.to(expert.weight.dtype)
-        return expert(x).float()
+        return expert(x.float()).float()
 
 
 def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
@@ -1980,12 +1989,37 @@ def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
     )
 
 
+_STEP_FAMILY_RE = re.compile(r"(?i)^step\d")
+
+
+def _is_step_family_model(model: nn.Module) -> bool:
+    """Whether ``model`` is a Step-family root model (Step-3.5, Step-3.7, or a future revision).
+
+    Matched against the ``step<digit>`` convention shared by ``model_type`` (``"step3p5"``,
+    ``"step3p7"``) and the remote-code class name (``Step3p5ForCausalLM``,
+    ``Step3p7ForConditionalGeneration``), not an exact revision, so a new Step release is
+    still picked up without another hardcoded name. This is deliberately narrower than the
+    shape/signature check in :func:`_is_expert_indexed_moe_linear` alone: that check accepts
+    any module with a matching 3-D weight and an ``(x, expert_id)`` forward, which is a
+    coincidence risk on its own -- an unrelated architecture happening to reuse the parameter
+    name ``expert_id`` with different semantics (a per-expert bias or post-scale, say) would
+    be claimed and have that behavior silently dropped by the replacement wrapper. Gating on
+    the model family keeps the shape check doing what it is actually good at: telling
+    Step revisions apart without a class-name allowlist, rather than distinguishing Step
+    from arbitrary third-party MoE code.
+    """
+    model_type = str(getattr(getattr(model, "config", None), "model_type", "") or "")
+    return bool(_STEP_FAMILY_RE.match(model_type) or _STEP_FAMILY_RE.match(type(model).__name__))
+
+
 def register_moe_linear_on_the_fly(model):
     """Register expert-indexed ``MoELinear`` modules (Step-3.5 / Step-3.7) for quantization.
 
     Without this the routed experts carry no quantizer at all: an experts-only recipe matches
     nothing and the export writes a checkpoint with ``quant_algo: null``.
     """
+    if not _is_step_family_model(model):
+        return
     visited_types = set()
     for name, module in model.named_modules():
         mod_type = type(module)

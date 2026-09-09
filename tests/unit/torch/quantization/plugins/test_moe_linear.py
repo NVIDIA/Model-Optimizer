@@ -15,6 +15,8 @@
 
 """Tests for _QuantMoELinear: expert-indexed MoE weights (Step-3.5 / Step-3.7 remote code)."""
 
+import types
+
 import pytest
 import torch
 import torch.nn as nn
@@ -86,6 +88,9 @@ class _SyntheticStepMoEMLP(nn.Module):
 class _TinyStepModel(nn.Module):
     def __init__(self):
         super().__init__()
+        # register_moe_linear_on_the_fly gates on the Step-family model_type; real Step
+        # checkpoints carry this in config.json.
+        self.config = types.SimpleNamespace(model_type="step3p7")
         self.moe = _SyntheticStepMoEMLP()
 
     def forward(self, x):
@@ -140,6 +145,29 @@ def test_module_with_3d_weight_but_other_forward_is_not_claimed():
     assert not _is_expert_indexed_moe_linear(
         _NotExpertIndexed(NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE)
     )
+
+
+def test_disabled_quantizers_reproduce_bf16_weight_fp32_compute_parity():
+    """Conversion must not change the model's output when every quantizer is disabled.
+
+    ``MoELinear.forward`` always promotes to fp32 for the matmul regardless of storage
+    dtype (``F.linear(x.float(), self.weight[expert_id].float())``). A wrapper that
+    instead downcasts the fp32 activation to the weight's original storage dtype (e.g.
+    bf16) before the matmul silently changes the model even with quantization off.
+    """
+    torch.manual_seed(0)
+    num_experts, in_features, out_features = 2, 4096, 1280
+    module = _SyntheticMoELinear(num_experts, in_features, out_features)
+    module.weight.data = module.weight.data.to(torch.bfloat16)
+    module.config = types.SimpleNamespace(model_type="step3p7")  # satisfy the family gate
+    x = torch.randn(8, in_features, dtype=torch.bfloat16)
+    reference = module(x, 0)
+
+    mtq.quantize(module, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]})
+    assert isinstance(module, _QuantMoELinear), "conversion did not happen; test is vacuous"
+    converted = module(x, 0)
+
+    assert torch.equal(converted, reference)
 
 
 def test_grouped_routing_module_is_not_claimed():
@@ -209,7 +237,7 @@ def test_offloaded_weights_are_refused_not_silently_corrupted():
     restores into, exporting a checkpoint of zeros. Conversion must refuse instead.
     """
     pytest.importorskip("accelerate")
-    from accelerate import cpu_offload
+    from accelerate import cpu_offload  # local: accelerate is an optional dependency
 
     model = _TinyStepModel()
     cpu_offload(model.moe.up_proj, execution_device=torch.device("cpu"))
@@ -219,14 +247,41 @@ def test_offloaded_weights_are_refused_not_silently_corrupted():
         mtq.quantize(model, _moe_quant_cfg(), forward_loop=None)
 
 
-def test_registration_is_not_gated_on_model_class_name():
-    """Detection is structural, so a Step-3.7-style model registers as readily as Step-3.5."""
+def test_registration_is_not_gated_on_exact_revision_class_name():
+    """Any Step-family root (matched by `model_type`/class-name convention, not an exact
+    revision) registers its `MoELinear` modules -- Step-3.7 as readily as Step-3.5."""
     model = _TinyStepModel()
     assert QuantModuleRegistry.get(_SyntheticMoELinear) is None
 
     register_moe_linear_on_the_fly(model)
 
     assert issubclass(QuantModuleRegistry.get(_SyntheticMoELinear), _QuantMoELinear)
+
+
+def test_non_step_model_with_identical_signature_is_not_registered():
+    """A same-shape, same-signature module is not enough on its own to be claimed.
+
+    The structural check in `_is_expert_indexed_moe_linear` cannot tell a real Step
+    `MoELinear` apart from unrelated code that happens to reuse the `(x, expert_id)`
+    parameter names with different semantics (a per-expert bias or post-scale, say) --
+    `_QuantMoELinear` would silently drop that behavior. Registration is therefore also
+    gated on the model being Step-family; a structurally identical module on a model that
+    is not must not be registered.
+    """
+
+    class _ThirdPartyMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = types.SimpleNamespace(model_type="not_step")
+            self.moe = _SyntheticStepMoEMLP()
+
+        def forward(self, x):
+            return self.moe(x)
+
+    model = _ThirdPartyMoEModel()
+    register_moe_linear_on_the_fly(model)
+
+    assert QuantModuleRegistry.get(_SyntheticMoELinear) is None
 
 
 def test_expert_indexed_moe_is_quantized_and_reconstructed():

@@ -15,6 +15,8 @@
 
 """Step-3.7 PTQ recipes: what the `moe` / `share_expert` naming does and does not match."""
 
+import types
+
 import pytest
 import torch
 import torch.nn as nn
@@ -85,6 +87,9 @@ class _StepModel(nn.Module):
 
     def __init__(self):
         super().__init__()
+        # register_moe_linear_on_the_fly gates on the Step-family model_type; real Step
+        # checkpoints carry this in config.json.
+        self.config = types.SimpleNamespace(model_type="step3p7")
         self.model = nn.Module()
         self.model.language_model = nn.Module()
         self.model.language_model.layers = nn.ModuleList([_StepMoELayer(), _StepDenseLayer()])
