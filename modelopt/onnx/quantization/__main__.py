@@ -163,8 +163,21 @@ def get_parser() -> argparse.ArgumentParser:
         nargs="+",
         help=(
             "Priority order for the execution providers (EP) to calibrate the model. "
-            "Any subset of ['trt', 'cuda:x', dml:x, 'cpu'], where 'x' is the device id."
+            "Any subset of ['NvTensorRtRtx', 'trt', 'cuda:x', dml:x, 'cpu'], where 'x' is "
+            "the device id. For TensorRT-RTX, pass 'NvTensorRtRtx' for either backend; "
+            "select the backend with --trt_rtx_backend. "
             "If a custom op is detected in the model, 'trt' will automatically be added to the EP list."
+        ),
+    )
+    argparser.add_argument(
+        "--trt_rtx_backend",
+        choices=["legacy", "abi"],
+        default="legacy",
+        help=(
+            "TensorRT-RTX implementation used with --calibration_eps NvTensorRtRtx. "
+            "The legacy backend uses TensorRT-RTX libraries on PATH; "
+            "the ABI backend uses the installed standalone EP plugin. "
+            "The ABI backend requires Python 3.11 or later."
         ),
     )
     argparser.add_argument(
@@ -369,6 +382,8 @@ def get_parser() -> argparse.ArgumentParser:
         choices=["quick", "default", "extensive"],
         help=(
             "If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes. "
+            "Candidates are benchmarked in the requested runtime precision, and calibrated Q/DQ is retained only "
+            "when it meets the 1.02x performance threshold; otherwise the output has no Q/DQ. "
             "Available modes (presets 'schemes_per_region', 'warmup_runs', and 'timing_runs' values): "
             "  - 'quick': fewer schemes and benchmark runs for quick exploration; "
             "  - 'default': balanced, recommended for most cases; "
@@ -532,6 +547,7 @@ def main():
         calibration_cache_path=args.calibration_cache_path,
         calibration_shapes=args.calibration_shapes,
         calibration_eps=args.calibration_eps,
+        trt_rtx_backend=args.trt_rtx_backend,
         override_shapes=args.override_shapes,
         op_types_to_quantize=args.op_types_to_quantize,
         op_types_to_exclude=args.op_types_to_exclude,

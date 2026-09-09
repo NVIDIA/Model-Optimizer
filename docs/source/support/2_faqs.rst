@@ -64,6 +64,16 @@ Currently, DirectML backend (ORT-DML) doesn't support 8-bit precision. So, it ex
 
 The FP8 type support in QuantizeLinear / DeQuantizeLinear node came with Opset-19. So, ensure that opset of ONNX model is 19+.
 
+9. How do I install a workflow that requires PyArrow on Windows ARM64?
+------------------------------------------------------------------------
+
+Dependency ``datasets`` is used for calibration. Pyarrow is an essential requirement of ``datasets``. Pr for arm64 Pyarrow support has been raised in this pr https://github.com/apache/arrow/pull/48539. Before Arrow officially provides wheels, please follow the guide to build pyarrow locally.
+
+Follow the :ref:`Windows on Arm installation guide <Install-Page-Windows-ARM64>` for the tested
+LLVM, Arrow C++, and PyArrow build procedure. The locally built wheel must match the Python ABI and
+native ARM64 toolchain used by the target environment.
+
+
 .. _nas_faqs:
 
 NAS/Pruning
