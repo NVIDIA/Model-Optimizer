@@ -205,7 +205,7 @@ def load_multimodal_components(
     """Load multimodal components from safetensors file.
 
     Args:
-        pretrained_model_path: Path to the pretrained model.
+        pretrained_model_path: Directory or HuggingFace repo id of the pretrained model.
         prefixes: Tensor key prefixes to select.  Defaults to the LLaVA-style
             ``multi_modal_projector`` / ``vision_model`` prefixes.  Pass
             ``("model.visual.",)`` for Qwen3-VL checkpoints.
@@ -215,8 +215,44 @@ def load_multimodal_components(
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     if not hf_checkpoint_path.is_dir():
-        raise ValueError(
-            f"Invalid pretrained model path: {pretrained_model_path}. It should be a directory."
+        # Also accept a repo id, which is what the example scripts pass to quantize.py.
+        # Fetched in two stages: the vision tower is a small fraction of a VLM checkpoint, so
+        # pulling every shard to keep a few would waste tens of GB.
+        local_files_only = _is_hf_hub_offline()
+        repo_id = str(pretrained_model_path)
+        try:
+            index_dir = Path(
+                snapshot_download(
+                    repo_id=repo_id,
+                    allow_patterns=["model.safetensors.index.json"],
+                    local_files_only=local_files_only,
+                )
+            )
+        except (LocalEntryNotFoundError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid pretrained model path: {pretrained_model_path}. It should be a "
+                "directory or an available HuggingFace repo id."
+            ) from exc
+
+        index_file = index_dir / "model.safetensors.index.json"
+        if index_file.is_file():
+            try:
+                weight_map = json.loads(index_file.read_text())["weight_map"]
+            except (json.JSONDecodeError, KeyError) as exc:
+                raise ValueError(f"Malformed safetensors index in {repo_id}.") from exc
+            wanted = sorted(
+                {shard for key, shard in weight_map.items() if key.startswith(prefixes)}
+            )
+        else:
+            wanted = ["model.safetensors"]  # unsharded checkpoint
+        # Kept separate from the resolution failure above: a hub outage or a full disk here is
+        # retryable, not a bad path.
+        hf_checkpoint_path = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["model.safetensors.index.json", *wanted],
+                local_files_only=local_files_only,
+            )
         )
 
     safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
@@ -240,7 +276,13 @@ def load_multimodal_components(
         with open(safetensors_index_file) as f:
             safetensors_index = json.load(f)
 
-        all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
+        all_shard_files = sorted(
+            {
+                shard
+                for key, shard in safetensors_index["weight_map"].items()
+                if key.startswith(prefixes)
+            }
+        )
         for shard_file in all_shard_files:
             safetensors_filepath = Path(hf_checkpoint_path) / shard_file
             with safe_open(safetensors_filepath, framework="pt") as f:
@@ -250,6 +292,12 @@ def load_multimodal_components(
 
     else:
         print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
+
+    if not multimodal_state_dict:
+        raise ValueError(
+            f"No tensors under {prefixes} in {pretrained_model_path}; the vision tower would be "
+            "missing from the export. The checkpoint's prefixes have likely changed."
+        )
 
     print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
     return multimodal_state_dict

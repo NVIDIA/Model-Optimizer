@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 import warnings
 from pathlib import Path
 
@@ -136,6 +137,17 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
     return returncode, "".join(chunks)
 
 
+# Set by a suite's conftest to run a command without spawning a subprocess (see
+# ``_test_utils.examples.megatron_example_runner``). Unset means always use a subprocess.
+_in_process_runner = None
+
+
+def set_in_process_runner(runner) -> None:
+    """Register ``runner(cmd_parts, example_path) -> str``; it must not fall back to a subprocess."""
+    global _in_process_runner
+    _in_process_runner = runner
+
+
 def run_example_command(
     cmd_parts: list[str],
     example_path: str,
@@ -146,18 +158,48 @@ def run_example_command(
 ) -> str | None:
     """Run an example command, retrying transient HuggingFace access errors."""
     print(f"[{example_path}] Running command: {cmd_parts}")
-    env = env or os.environ.copy()
+    in_process = _in_process_runner if env is None else None
+    if _in_process_runner is not None and env is not None:
+        # The in-process runner uses the ambient environment, so a caller-supplied env would be
+        # silently dropped. Fall back to a subprocess rather than run with the wrong environment.
+        warnings.warn(f"[{example_path}] env= given; running this step as a subprocess")
+    env = os.environ.copy() if env is None else env
     cwd = MODELOPT_ROOT / "examples" / example_path
 
     for attempt in range(hf_max_retries + 1):
         if setup_free_port:
+            # Subprocess steps only: an in-process runner picks its own free port, since env is a
+            # copy it never sees.
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
-        returncode, output = _run_capturing(cmd_parts, cwd, env)
+        if in_process is not None:
+            # Inside the loop so in-process steps get the same transient-HuggingFace retries;
+            # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
+            try:
+                result = in_process(cmd_parts, example_path)
+            except Exception as e:
+                # Re-raise unless it looks transient, so a real failure keeps its traceback
+                # instead of being flattened into CalledProcessError.
+                # format_exc() walks __cause__/__context__: most markers are exception type
+                # names that only ever appear in a formatted traceback, never in str(e) -- a Hub
+                # ConnectionError typically surfaces wrapped in a DatasetGenerationError. The
+                # runner also attaches what the step printed, for launcher-level failures.
+                captured = getattr(e, "captured_output", "")
+                text = f"{traceback.format_exc()}\n{captured}"
+                if attempt == hf_max_retries or not any(
+                    marker in text for marker in _HF_TRANSIENT_MARKERS
+                ):
+                    raise
+                returncode, output = 1, text
+            else:
+                assert result is not None, "an in-process runner must return output, not fall back"
+                return result
+        else:
+            returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:
             return output
         transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
         if not transient or attempt == hf_max_retries:
-            raise subprocess.CalledProcessError(returncode, cmd_parts)
+            raise subprocess.CalledProcessError(returncode, cmd_parts, output=output)
         warnings.warn(
             f"[{example_path}] transient HuggingFace access error; retrying in "
             f"{hf_retry_delay_s}s (attempt {attempt + 1}/{hf_max_retries})"

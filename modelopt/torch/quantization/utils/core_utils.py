@@ -713,8 +713,9 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
     1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
        and writes it back, so every expert shares the same input amax.
     2. If ``sync_weight_amax`` is True, also syncs ``weight_quantizer`` amax across
-       experts (max across experts). This matches TEGroupedMLP behavior where all
-       experts share a single weight quantizer.
+       experts (max across experts), so the layer ends up with one effective weight
+       scale. Off by default: experts otherwise keep an independent amax each, which
+       is also what ``TEGroupedLinear``'s per-expert ``GroupedQuantizer`` does.
     3. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
