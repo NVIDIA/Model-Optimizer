@@ -303,7 +303,7 @@ def _find_nodes_to_quantize_autotune(
     timing_runs: int = 100,
     trtexec_args: str | None = None,
     network_timeout_minutes: int = 10,
-    remote_engine_path: str = "trtexec_benchmark_model.trt",
+    remote_engine_path: str | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
@@ -400,7 +400,7 @@ def quantize(
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
     autotune_network_timeout_minutes: int = 10,
-    autotune_remote_engine_path: str = "trtexec_benchmark_model.trt",
+    autotune_remote_engine_path: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.

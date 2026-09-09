@@ -32,7 +32,7 @@ import os
 import re
 import shlex
 import shutil
-import subprocess  # nosec B404
+import subprocess  # nosec B404 — subprocess is used only with list-form commands (no shell=True)
 import tempfile
 import time
 import uuid
@@ -484,7 +484,7 @@ class TrtExecBenchmark(Benchmark):
             )
             if result.returncode != 0:
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
-                self.logger.error(f"stderr: {result.stderr}")
+                self.logger.error(f"stderr: {_redact_url_password(result.stderr)}")
                 return float("inf")
             if self.has_remote_config:
                 # need to push the model to the device and use trtexec_safe to run
@@ -498,13 +498,14 @@ class TrtExecBenchmark(Benchmark):
                 ]
                 result = subprocess.run(
                     scp_cmd, capture_output=True, text=True, timeout=self.network_timeout_seconds
-                )  # nosec B603
-
-                if result.returncode != 0:
-                    self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
-                    return float("inf")
+                )  # nosec B603 — list-form, no shell=True; user/host validated against leading -
 
                 try:
+                    if result.returncode != 0:
+                        self.logger.error(
+                            f"Failed to push engine to remote device: {_redact_url_password(result.stderr)}"
+                        )
+                        return float("inf")
                     ld_path = (
                         f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
                     )
@@ -526,7 +527,7 @@ class TrtExecBenchmark(Benchmark):
                         capture_output=True,
                         text=True,
                         timeout=self.network_timeout_seconds,
-                    )  # nosec B603
+                    )  # nosec B603 — list-form, no shell=True; user/host validated against leading -
                     if result.returncode != 0:
                         # fallback and try trtexec with "--safe" in case this is a safety proxy target
                         trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
@@ -547,7 +548,7 @@ class TrtExecBenchmark(Benchmark):
                             capture_output=True,
                             text=True,
                             timeout=self.network_timeout_seconds,
-                        )  # nosec B603
+                        )  # nosec B603 — list-form, no shell=True; user/host validated against leading -
                 finally:
                     # Cleanup remote engine file after benchmarking to avoid disk filling up
                     cleanup_cmd = [
@@ -564,20 +565,21 @@ class TrtExecBenchmark(Benchmark):
                             capture_output=True,
                             text=True,
                             timeout=self.network_timeout_seconds,
-                        )  # nosec B603
+                        )  # nosec B603 — list-form, no shell=True; user/host validated against leading -
                     except Exception as e:
                         self.logger.warning(f"Error during remote engine cleanup: {e}")
 
             if result.returncode != 0:
                 self.logger.error(
-                    f"Failed to run trtexec_safe or trtexec with '--safe'\n{result.stdout}\n{result.stderr}"
+                    f"Failed to run trtexec_safe or trtexec with '--safe'\n"
+                    f"{_redact_url_password(result.stdout)}\n{_redact_url_password(result.stderr)}"
                 )
                 return float("inf")
             _latency_pattern = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
             if not (match := re.search(_latency_pattern, result.stdout, re.IGNORECASE)):
                 # this could be due to creating a degenerate onnx file that can't be engine built.
                 # thus not a hard failure
-                self.logger.warning(f"trtexec stdout:\n{result.stdout}")
+                self.logger.warning(f"trtexec stdout:\n{_redact_url_password(result.stdout)}")
                 self.logger.error("Could not parse median latency from trtexec output")
                 return float("inf")
             latency = float(match.group(1))

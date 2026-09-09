@@ -472,8 +472,10 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_remote_engine_path",
         type=str,
-        default="trtexec_benchmark_model.trt",
-        help="Path used for storing temporary TensorRT engine files for remote profiling",
+        default=None,
+        help="Path used for storing temporary TensorRT engine files for remote profiling. "
+        "If unset, a unique per-run filename is generated automatically to avoid collisions "
+        "when multiple users share the same remote device.",
     )
     return argparser
 

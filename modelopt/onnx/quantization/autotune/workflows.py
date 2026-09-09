@@ -105,7 +105,11 @@ def init_benchmark_instance(
                     Higher values give more stable median (default: 20)
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
-        network_timeout_minutes:  Timeout for network commands in minutes, IE scp.
+        network_timeout_minutes: Timeout for network commands in minutes, e.g. scp uploads.
+        remote_engine_path: Path on the remote device for the temporary TRT engine used during
+                           remote autotuning. If None (default), a unique per-run filename is
+                           generated automatically to avoid collisions when multiple users share
+                           the same remote device.
     """
     global _benchmark_instance
     try:

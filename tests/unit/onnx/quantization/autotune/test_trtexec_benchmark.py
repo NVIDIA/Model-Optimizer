@@ -26,8 +26,8 @@ invoked. They cover:
   ``trtexec_safe`` invocation; fallback to ``trtexec --safe`` when
   ``trtexec_safe`` is absent.
 - SSH key-based auth only: no sshpass prefixes in any subprocess command.
-- Latency parsing from both ``_STD_PATTERN`` (GPU Compute Time) and
-  ``_SAFE_PATTERN`` (timestamped GPU Compute Time … median).
+- Latency parsing via ``_STD_PATTERN`` (``[I] GPU Compute Time: … median``),
+  which is used for both local and remote paths.
 - Error paths: non-zero trtexec returncode, scp failure, missing trtexec
   binary, unparseable stdout.
 """
@@ -640,15 +640,16 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
 
 
 def test_remote_run_scp_failure_returns_inf(remote_bench, tmp_path):
-    """If scp fails, the pipeline short-circuits before ssh and returns ``inf``."""
+    """If scp fails, the pipeline short-circuits before ssh but still runs cleanup."""
     trtexec_proc = _make_proc(stdout="")
     scp_proc = _make_proc(returncode=1, stderr="permission denied")
+    cleanup_proc = _make_proc()
 
-    with patch("subprocess.run", side_effect=[trtexec_proc, scp_proc]) as run_mock:
+    with patch("subprocess.run", side_effect=[trtexec_proc, scp_proc, cleanup_proc]) as run_mock:
         latency = remote_bench.run(str(tmp_path / "m.onnx"))
 
     assert latency == float("inf")
-    assert run_mock.call_count == 2  # no ssh call
+    assert run_mock.call_count == 3  # trtexec, scp, cleanup (no main ssh call)
 
 
 def test_remote_run_falls_back_to_trtexec_safe_flag(remote_bench, tmp_path):
