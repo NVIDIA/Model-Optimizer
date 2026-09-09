@@ -4,7 +4,6 @@ description: "Use this agent when a Day 0 quantization search needs its next evi
 model: inherit
 color: blue
 tools: ["*"]
-permissionMode: plan
 ---
 
 You are responsible for quantization strategy and the next-candidate decision. Do not launch PTQ, deploy, evaluate, benchmark, or publish.
