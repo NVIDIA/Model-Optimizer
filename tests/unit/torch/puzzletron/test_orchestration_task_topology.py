@@ -179,6 +179,31 @@ def test_task_launcher_slices_visibility_and_propagates_payload_exit_status(
     assert int(captured["env"]["MASTER_PORT"]) > 0
 
 
+def test_runtime_cache_defaults_preserve_site_settings(tmp_path: Path) -> None:
+    cache_keys = (
+        "XDG_CACHE_HOME",
+        "TRITON_CACHE_DIR",
+        "FLASHINFER_WORKSPACE_BASE",
+        "TORCH_EXTENSIONS_DIR",
+        "VLLM_CACHE_ROOT",
+    )
+    explicit_flashinfer_root = tmp_path / "site-flashinfer"
+    env = {
+        "TMPDIR": str(tmp_path),
+        "FLASHINFER_WORKSPACE_BASE": str(explicit_flashinfer_root),
+    }
+
+    task_launcher._set_runtime_cache_defaults(env, attempt_id="attempt-a", task_index=2)
+
+    assert env["FLASHINFER_WORKSPACE_BASE"] == str(explicit_flashinfer_root)
+    for key in cache_keys:
+        if key == "FLASHINFER_WORKSPACE_BASE":
+            continue
+        cache_path = Path(env[key])
+        assert cache_path.is_dir()
+        assert cache_path.is_relative_to(tmp_path / "puzzletron")
+
+
 def test_task_launcher_exports_shared_multi_node_rendezvous(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")

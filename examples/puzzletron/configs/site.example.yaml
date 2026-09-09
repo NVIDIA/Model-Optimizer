@@ -6,6 +6,7 @@ site:
     venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     container:
     container_mounts:
+    # Puzzletron defaults runtime caches below TMPDIR; most sites need no cache hooks.
     prerun_commands: []
     postrun_commands: []
   paths:
