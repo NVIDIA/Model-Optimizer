@@ -110,7 +110,8 @@ internal composition templates and should not be edited or launched directly.
 ## Custom models
 
 If no maintained recipe matches the model, use the existing setup wizard
-through the same main command:
+through the same main command. Review its custom-model inputs first with
+`python examples/puzzletron/puzzletron.py setup --help`, then run:
 
 ```bash
 python examples/puzzletron/puzzletron.py setup

@@ -26,8 +26,9 @@ from pathlib import Path
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
+if str(REPOSITORY_ROOT) in sys.path:
+    sys.path.remove(str(REPOSITORY_ROOT))
+sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.puzzletron import orchestrate  # noqa: E402
 from puzzletron_orchestrator.recipe_config import (  # noqa: E402
