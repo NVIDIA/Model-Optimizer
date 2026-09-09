@@ -237,7 +237,8 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
         for solution in solutions
         for width in _nested_values(solution["chosen_block_configs"], "intermediate_size")
     }
-    assert solution_ffn_widths.intersection({256, 512})
+    configured_ffn_widths = set(campaign.config["pruning"]["intermediate_size_list"])
+    assert solution_ffn_widths and solution_ffn_widths <= configured_ffn_widths
     return [
         *pass_manifests,
         *score_files,
