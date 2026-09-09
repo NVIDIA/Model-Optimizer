@@ -311,6 +311,13 @@ def test_finalized_result_path_requires_current_workflow_and_final_status(tmp_pa
             lambda result: result["artifacts"][0].update(path="../outside"),
             "normalized relative POSIX path",
         ),
+        (
+            lambda result: result["subjects"][0]["architecture"].update(
+                block_count=2,
+                block_config_groups=[{"blocks": [0, 0], "config": {"ffn_width": 3072}}],
+            ),
+            "architecture groups must cover every block exactly once",
+        ),
     ],
 )
 def test_result_rejects_ambiguous_or_unsafe_evidence(mutate, message: str) -> None:
@@ -340,6 +347,7 @@ def test_html_is_traceable_complete_and_contains_no_unique_evidence(tmp_path: Pa
     assert rendered.manifest["source_validation"] == "passed"
     assert b"bounded&lt;script&gt;" in rendered.content
     assert b"bounded<script>" not in rendered.content
+    assert b"puzzletron-run-result" not in rendered.content
     for expected in (
         b"Subjects and heterogeneous configurations",
         b"DAG stages and phases",
@@ -352,6 +360,32 @@ def test_html_is_traceable_complete_and_contains_no_unique_evidence(tmp_path: Pa
     ):
         assert expected in rendered.content
     assert "controller: detached" in render_run_text(inspect_run(tmp_path))
+
+
+def test_html_bounds_large_structured_tables_without_changing_the_result() -> None:
+    result = _result()
+    template = result["metrics"][1]
+    result["metrics"] = [
+        {
+            **template,
+            "metric_id": f"metric:diagnostic:{index}",
+            "name": f"producer.diagnostic_{index}",
+            "unit": "producer_defined",
+            "direction": "neutral",
+            "aggregation": "producer_defined",
+        }
+        for index in range(250)
+    ]
+
+    rendered = render_run_html(
+        result,
+        generated_at=NOW,
+        renderer_revision="modelopt.puzzletron.html-summary/v1",
+    )
+
+    assert b"50 additional metrics remain available in result.json" in rendered.content
+    assert b"producer.diagnostic_199" in rendered.content
+    assert b"producer.diagnostic_200" not in rendered.content
 
 
 def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_path: Path) -> None:
@@ -381,7 +415,9 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
                 "architectures": {
                     "architecture-1": {
                         "architecture_id": "architecture-1",
-                        "block_configs": [{"layer": 0, "ffn_width": 3072}],
+                        "block_configs": [
+                            {"ffn_width": 2048 if index % 2 else 3072} for index in range(4)
+                        ],
                         "origins": [{"kind": "heterogeneous", "profile_id": "profile-1"}],
                     }
                 },
@@ -430,6 +466,8 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
                     "metrics": {
                         "candidate.lm_loss": 0.7,
                         "candidate.token_accuracy": 0.75,
+                        "candidate.benchmark.mmmu_acc_none": 0.5,
+                        "candidate.unused_diagnostic": 99,
                         "reference.lm_loss": 0.5,
                         "delta.lm_loss": 0.2,
                     },
@@ -445,7 +483,26 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
     plan = SimpleNamespace(
         puzzle_dir=tmp_path,
         contract_hash="workflow-1",
-        experiment_config={"display_name": "Qwen", "modality": "vlm"},
+        experiment_config={
+            "display_name": "Qwen",
+            "modality": "vlm",
+            "post_mip": {
+                "flows": {
+                    "campaign": {
+                        "nodes": {
+                            "selected": {
+                                "type": "filter",
+                                "metrics": [
+                                    {"metric": "evaluate.lm_loss"},
+                                    {"metric": "evaluate.token_accuracy"},
+                                    {"metric": "evaluate.benchmark.mmmu_acc_none"},
+                                ],
+                            }
+                        }
+                    }
+                }
+            },
+        },
         stages=(SimpleNamespace(stage_id="evaluate", parents=()),),
     )
     stage = StageView(
@@ -479,12 +536,19 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
     assert {subject["role"] for subject in stored["subjects"]} == {"candidate", "teacher"}
     assert {metric["name"] for metric in stored["metrics"]} == {
         "producer.token_accuracy",
+        "quality.benchmark.mmmu_acc_none",
         "quality.lm_loss",
         "serving.observed_input_sequence_length",
         "serving.output_token_throughput",
     }
     loss_metrics = [metric for metric in stored["metrics"] if metric["name"] == "quality.lm_loss"]
     assert {metric["aggregation"] for metric in loss_metrics} == {"mean_of_sample_token_means"}
+    mmmu = next(
+        metric
+        for metric in stored["metrics"]
+        if metric["name"] == "quality.benchmark.mmmu_acc_none"
+    )
+    assert mmmu["direction"] == "higher_is_better"
     throughput = next(
         metric
         for metric in stored["metrics"]
@@ -492,9 +556,17 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
     )
     assert throughput["dimensions"]["repetition_index"] == 1
     assert throughput["workload"]["requested"] == {"input_tokens": 128, "output_tokens": 32}
-    assert stored["subjects"][0]["architecture"]["block_configs"] == [
-        {"ffn_width": 3072, "layer": 0}
-    ]
+    assert stored["subjects"][0]["architecture"]["details_path"] == (
+        "artifacts/post_mip/candidate_registry.json"
+    )
+    groups = stored["subjects"][0]["architecture"]["block_config_groups"]
+    recovered = [None] * 4
+    for group in groups:
+        for index in group["blocks"]:
+            recovered[index] = group["config"]
+    assert len(groups) == 2
+    assert recovered == [{"ffn_width": 2048 if index % 2 else 3072} for index in range(4)]
+    assert all("unused_diagnostic" not in metric["name"] for metric in stored["metrics"])
     assert any(artifact["path"].endswith("comparison.json") for artifact in stored["artifacts"])
     assert any(
         artifact["path"].endswith("puzzletron_aiperf_result.json")

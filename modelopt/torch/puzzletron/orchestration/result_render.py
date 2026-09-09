@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 __all__ = ["RenderedView", "render_run_html", "render_run_text"]
 
+_MAX_TABLE_ROWS = 200
+
 
 @dataclass(frozen=True)
 class RenderedView:
@@ -48,6 +50,23 @@ def _compact(value: object) -> str:
 
 def _row(*values: object) -> str:
     return "<tr>" + "".join(f"<td>{html.escape(_value(value))}</td>" for value in values) + "</tr>"
+
+
+def _bounded_rows(rows: list[str], *, columns: int, label: str) -> str:
+    visible = rows[:_MAX_TABLE_ROWS]
+    omitted = len(rows) - len(visible)
+    if omitted:
+        visible.append(
+            f'<tr><td colspan="{columns}">{omitted} additional {html.escape(label)} '
+            "remain available in result.json.</td></tr>"
+        )
+    return "".join(visible)
+
+
+def _architecture_summary(architecture: Mapping[str, Any]) -> str:
+    summary = {key: value for key, value in architecture.items() if key != "block_config_groups"}
+    summary["block_config_group_count"] = len(architecture.get("block_config_groups") or ())
+    return _compact(summary)
 
 
 def _measure_text(progress: Mapping[str, Any]) -> str:
@@ -104,86 +123,112 @@ def render_run_html(
     status = run["status"]
     freshness = run["freshness"]
     subject_rows = (
-        "".join(
-            _row(
-                subject["role"],
-                subject["subject_id"],
-                _compact(subject["checkpoint"]),
-                _compact(subject["architecture"]),
-            )
-            for subject in result["subjects"]
+        _bounded_rows(
+            [
+                _row(
+                    subject["role"],
+                    subject["subject_id"],
+                    _compact(subject["checkpoint"]),
+                    _architecture_summary(subject["architecture"]),
+                )
+                for subject in result["subjects"]
+            ],
+            columns=4,
+            label="subjects",
         )
         or '<tr><td colspan="4">No subjects recorded.</td></tr>'
     )
     stage_rows = (
-        "".join(
-            _row(
-                stage["stage_id"],
-                stage["stage_type"],
-                stage.get("phase_id"),
-                ", ".join(stage["parent_stage_ids"]) or "none",
-                ", ".join(stage.get("external_prerequisite_stage_ids", ())) or "none",
-                stage["state"],
-                len(stage["attempts"]),
-                stage.get("elapsed_seconds"),
-            )
-            for stage in result["stages"]
+        _bounded_rows(
+            [
+                _row(
+                    stage["stage_id"],
+                    stage["stage_type"],
+                    stage.get("phase_id"),
+                    ", ".join(stage["parent_stage_ids"]) or "none",
+                    ", ".join(stage.get("external_prerequisite_stage_ids", ())) or "none",
+                    stage["state"],
+                    len(stage["attempts"]),
+                    stage.get("elapsed_seconds"),
+                )
+                for stage in result["stages"]
+            ],
+            columns=8,
+            label="stages",
         )
         or '<tr><td colspan="8">No stages recorded.</td></tr>'
     )
     progress_rows = (
-        "".join(
-            _row(
-                stage["stage_id"],
-                stage["progress"]["status"],
-                _compact(stage["progress"].get("scope") or {}),
-                _measure_text(stage["progress"]),
-                _eta_text(stage["progress"]),
-            )
-            for stage in result["stages"]
+        _bounded_rows(
+            [
+                _row(
+                    stage["stage_id"],
+                    stage["progress"]["status"],
+                    _compact(stage["progress"].get("scope") or {}),
+                    _measure_text(stage["progress"]),
+                    _eta_text(stage["progress"]),
+                )
+                for stage in result["stages"]
+            ],
+            columns=5,
+            label="progress records",
         )
         or '<tr><td colspan="5">No progress recorded.</td></tr>'
     )
     metric_rows = (
-        "".join(
-            _row(
-                metric["name"],
-                metric["subject_id"],
-                metric["checkpoint_id"],
-                metric["value"] if metric["value_state"] == "present" else metric["value_state"],
-                metric["unit"],
-                metric["aggregation"],
-                metric["direction"],
-                _compact(metric["workload"]),
-                _compact(metric.get("dimensions") or {}),
-            )
-            for metric in result["metrics"]
+        _bounded_rows(
+            [
+                _row(
+                    metric["name"],
+                    metric["subject_id"],
+                    metric["checkpoint_id"],
+                    metric["value"]
+                    if metric["value_state"] == "present"
+                    else metric["value_state"],
+                    metric["unit"],
+                    metric["aggregation"],
+                    metric["direction"],
+                    _compact(metric["workload"]),
+                    _compact(metric.get("dimensions") or {}),
+                )
+                for metric in result["metrics"]
+            ],
+            columns=9,
+            label="metrics",
         )
         or '<tr><td colspan="9">No metrics recorded.</td></tr>'
     )
     comparison_rows = (
-        "".join(
-            _row(
-                item["left_metric_id"],
-                item["right_metric_id"],
-                item["delta"] if item["comparable"] else "not comparable",
-                item["relative_delta"] if item["comparable"] else "not comparable",
-                ", ".join(item["exclusion_reasons"]) or "none",
-            )
-            for item in result.get("comparisons", ())
+        _bounded_rows(
+            [
+                _row(
+                    item["left_metric_id"],
+                    item["right_metric_id"],
+                    item["delta"] if item["comparable"] else "not comparable",
+                    item["relative_delta"] if item["comparable"] else "not comparable",
+                    ", ".join(item["exclusion_reasons"]) or "none",
+                )
+                for item in result.get("comparisons", ())
+            ],
+            columns=5,
+            label="comparisons",
         )
         or '<tr><td colspan="5">No teacher/candidate comparisons recorded.</td></tr>'
     )
     artifact_rows = (
-        "".join(
-            _row(
-                artifact["role"],
-                artifact["path"],
-                artifact.get("availability"),
-                artifact.get("validation"),
-                (artifact.get("digest") or {}).get("value"),
-            )
-            for artifact in result["artifacts"]
+        _bounded_rows(
+            [
+                _row(
+                    artifact["role"],
+                    artifact["path"],
+                    artifact.get("availability"),
+                    artifact.get("validation"),
+                    (artifact.get("digest") or {}).get("value"),
+                )
+                for artifact in result["artifacts"]
+            ],
+            columns=5,
+            label="artifacts",
         )
         or '<tr><td colspan="5">No artifacts recorded.</td></tr>'
     )
@@ -196,7 +241,6 @@ def render_run_html(
         for name, value in run["timing"].items()
     )
     provenance = result["provenance"]
-    embedded = json.dumps(result, sort_keys=True).replace("<", "\\u003c")
     run_id = html.escape(str(run["identity"]["run_id"]))
     document = (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
@@ -233,8 +277,8 @@ def render_run_html(
         f"<th>Validation</th><th>SHA-256</th></tr></thead><tbody>{artifact_rows}</tbody></table>"
         f"<h2>Provenance</h2><pre>{html.escape(json.dumps(provenance, indent=2, sort_keys=True))}</pre>"
         f"<h2>Limitations</h2><ul>{limitations}</ul>"
-        "<p>This optional view is generated from result.json and contains no unique evidence.</p>"
-        f'<script type="application/json" id="puzzletron-run-result">{embedded}</script>'
+        "<p>This optional view is generated from result.json and contains no unique evidence. "
+        "Use the source result and linked artifacts for machine-readable detail.</p>"
         "</body></html>\n"
     ).encode()
     source = canonical_json_bytes(

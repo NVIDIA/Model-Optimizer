@@ -342,7 +342,40 @@ def validate_result(result: Mapping[str, Any]) -> None:
         subject_ids.add(subject_id)
         _string(subject.get("role"), f"subject {index} role")
         _mapping(subject.get("checkpoint"), f"subject {index} checkpoint")
-        _mapping(subject.get("architecture"), f"subject {index} architecture")
+        architecture = _mapping(subject.get("architecture"), f"subject {index} architecture")
+        _string(architecture.get("architecture_id"), f"subject {index} architecture id")
+        if details_path := architecture.get("details_path"):
+            _relative_path(details_path, f"subject {index} architecture details")
+        if "block_config_groups" in architecture:
+            block_count = architecture.get("block_count")
+            if isinstance(block_count, bool) or not isinstance(block_count, int) or block_count < 0:
+                raise ResultValidationError(
+                    f"subject {index} grouped architecture requires a nonnegative block_count"
+                )
+            covered_blocks: list[int] = []
+            for group_index, raw_group in enumerate(
+                _sequence(
+                    architecture.get("block_config_groups"),
+                    f"subject {index} architecture block groups",
+                )
+            ):
+                group = _mapping(raw_group, f"subject {index} architecture group {group_index}")
+                _mapping(group.get("config"), f"subject {index} architecture group config")
+                blocks = _sequence(
+                    group.get("blocks"), f"subject {index} architecture group blocks"
+                )
+                if not blocks or any(
+                    isinstance(block, bool) or not isinstance(block, int) or block < 0
+                    for block in blocks
+                ):
+                    raise ResultValidationError(
+                        f"subject {index} architecture groups require nonnegative block indices"
+                    )
+                covered_blocks.extend(blocks)
+            if sorted(covered_blocks) != list(range(block_count)):
+                raise ResultValidationError(
+                    f"subject {index} architecture groups must cover every block exactly once"
+                )
     metric_ids: set[str] = set()
     for index, raw in enumerate(_sequence(result.get("metrics"), "metrics")):
         metric = _mapping(raw, f"metric {index}")
@@ -539,7 +572,13 @@ def _metric_semantics(raw_name: str) -> tuple[str, str, str, str, dict[str, Any]
             "producer_defined",
             dimensions,
         )
-    if name.startswith("token_accuracy") or "accuracy" in name or "exact_match" in name:
+    if (
+        name.startswith("token_accuracy")
+        or "accuracy" in name
+        or "exact_match" in name
+        or "_acc_" in name
+        or name.endswith(".acc")
+    ):
         return f"quality.{name}", "ratio", "higher_is_better", "producer_defined", dimensions
     if name in {"input_sequence_length", "output_sequence_length"}:
         return (
@@ -565,8 +604,56 @@ def _metric_semantics(raw_name: str) -> tuple[str, str, str, str, dict[str, Any]
     return f"producer.{name}", "producer_defined", "neutral", "producer_defined", dimensions
 
 
+def _reported_post_mip_metrics(config: Mapping[str, Any]) -> tuple[set[str], bool]:
+    """Return decision metrics named by configured post-MIP filters.
+
+    Detailed producer observations remain available through the artifact catalog.
+    The portable result carries the measurements that drive campaign decisions,
+    rather than duplicating every intermediate evaluator statistic.
+    """
+
+    names: set[str] = set()
+    configured = False
+    post_mip = config.get("post_mip")
+    flows = post_mip.get("flows") if isinstance(post_mip, Mapping) else None
+    for flow in flows.values() if isinstance(flows, Mapping) else ():
+        nodes = flow.get("nodes") if isinstance(flow, Mapping) else None
+        for node in nodes.values() if isinstance(nodes, Mapping) else ():
+            if not isinstance(node, Mapping):
+                continue
+            if node.get("type") != "filter":
+                continue
+            configured = True
+            rows = node.get("metrics") or ()
+            if metric := node.get("metric"):
+                rows = (*rows, {"metric": metric})
+            for row in rows:
+                value = row.get("metric") if isinstance(row, Mapping) else None
+                if isinstance(value, str) and "." in value:
+                    names.add(value.split(".", 1)[1])
+    return names, configured
+
+
+def _architecture_block_config_groups(architecture: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Losslessly group identical block configs for a compact heterogeneous view."""
+
+    grouped: dict[str, tuple[Any, list[int]]] = {}
+    for block_index, raw_block in enumerate(architecture.get("block_configs") or ()):
+        block = dict(raw_block or {})
+        encoded = json.dumps(block, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        grouped.setdefault(encoded, (deepcopy(block), []))[1].append(block_index)
+    return [
+        {
+            "blocks": blocks,
+            "config": config,
+        }
+        for _encoded, (config, blocks) in sorted(grouped.items())
+    ]
+
+
 def _project_post_mip_evidence(
     root: Path,
+    config: Mapping[str, Any],
 ) -> (
     tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]
     | None
@@ -590,6 +677,7 @@ def _project_post_mip_evidence(
     limitations: set[str] = set()
     evidence_sources = [registry_path.relative_to(root).as_posix()]
     aiperf_paths: set[Path] = set()
+    reported_metrics, has_reporting_policy = _reported_post_mip_metrics(config)
 
     def add_artifact(role: str, value: Any) -> None:
         if isinstance(value, Mapping):
@@ -630,6 +718,8 @@ def _project_post_mip_evidence(
             raise ResultValidationError(
                 f"post-MIP observations must be a list: {observations_path}"
             )
+        if not observations:
+            limitations.add(f"Post-MIP node {node_id!r} recorded no observations.")
         source_path = observations_path.relative_to(root).as_posix()
         evidence_sources.append(source_path)
         add_artifact("node_observations", str(observations_path))
@@ -655,23 +745,43 @@ def _project_post_mip_evidence(
             candidate_checkpoint = {"checkpoint_id": checkpoint_id}
             if relative := _run_relative(root, checkpoint.get("checkpoint")):
                 candidate_checkpoint["path"] = relative
-            subjects[candidate_id] = {
-                "subject_id": candidate_id,
-                "role": "candidate",
-                "checkpoint": candidate_checkpoint,
-                "architecture": {
-                    "architecture_id": architecture_id,
-                    "block_configs": deepcopy(list(architecture.get("block_configs") or ())),
-                    "origins": deepcopy(list(architecture.get("origins") or ())),
-                },
-            }
             row_metrics = dict(raw.get("metrics") or {})
             has_prefixed_candidate = any(name.startswith("candidate.") for name in row_metrics)
+            retained_metrics = []
             for raw_name, raw_value in sorted(row_metrics.items()):
                 if raw_name.startswith("delta.") or (
                     has_prefixed_candidate and not raw_name.startswith(("candidate.", "reference."))
                 ):
                     continue
+                producer_name = raw_name.removeprefix("candidate.").removeprefix("reference.")
+                if (
+                    has_reporting_policy
+                    and reported_metrics
+                    and producer_name not in reported_metrics
+                ):
+                    continue
+                present = (
+                    isinstance(raw_value, (int, float))
+                    and not isinstance(raw_value, bool)
+                    and math.isfinite(float(raw_value))
+                )
+                if not present and producer_name not in reported_metrics:
+                    continue
+                retained_metrics.append((raw_name, raw_value, present))
+            if retained_metrics or candidate_checkpoint.get("path"):
+                subjects[candidate_id] = {
+                    "subject_id": candidate_id,
+                    "role": "candidate",
+                    "checkpoint": candidate_checkpoint,
+                    "architecture": {
+                        "architecture_id": architecture_id,
+                        "block_count": len(architecture.get("block_configs") or ()),
+                        "block_config_groups": _architecture_block_config_groups(architecture),
+                        "details_path": registry_path.relative_to(root).as_posix(),
+                        "origins": deepcopy(list(architecture.get("origins") or ())),
+                    },
+                }
+            for raw_name, raw_value, present in retained_metrics:
                 role = "teacher" if raw_name.startswith("reference.") else "candidate"
                 subject_id = candidate_id
                 metric_checkpoint_id = checkpoint_id
@@ -696,11 +806,6 @@ def _project_post_mip_evidence(
                     + hashlib.sha256(
                         f"{execution_id}\0{revision_id}\0{role}\0{name}".encode()
                     ).hexdigest()[:20]
-                )
-                present = (
-                    isinstance(raw_value, (int, float))
-                    and not isinstance(raw_value, bool)
-                    and math.isfinite(float(raw_value))
                 )
                 metrics[metric_id] = {
                     "metric_id": metric_id,
@@ -782,6 +887,10 @@ def _project_post_mip_evidence(
         limitations.add(
             "Producer-defined and sample-mean metrics retain their recorded aggregation and are not relabeled as token-weighted means."
         )
+    if has_reporting_policy:
+        limitations.add(
+            "The portable catalog records configured decision metrics and losslessly grouped block configurations; complete intermediate metrics and the ungrouped architecture registry remain discoverable through linked producer artifacts."
+        )
     return (
         sorted(subjects.values(), key=lambda item: item["subject_id"]),
         sorted(metrics.values(), key=lambda item: item["metric_id"]),
@@ -829,7 +938,7 @@ def publish_controller_result(
     prior_timing = existing.get("run", {}).get("timing", {})
     ended_at = observed_at if execution_status in _TERMINAL_STATES else None
     observed_epoch = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).timestamp()
-    projected = _project_post_mip_evidence(plan.puzzle_dir)
+    projected = _project_post_mip_evidence(plan.puzzle_dir, plan.experiment_config)
     if projected is None:
         subjects = deepcopy(list(existing.get("subjects", ())))
         metrics = deepcopy(list(existing.get("metrics", ())))
