@@ -34,6 +34,103 @@ if TYPE_CHECKING:
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 _SOURCE_PATHSPECS = (".", ":(exclude,attr:filter=lfs)")
 
+_STANDALONE_SOURCE_GUARD = r"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+repository = Path(sys.argv[1]).expanduser().resolve()
+expected = json.loads(sys.argv[2])
+pathspecs = (".", ":(exclude,attr:filter=lfs)")
+
+
+def git_output(*args):
+    executable = shutil.which("git")
+    if executable is None:
+        raise OSError("git executable not found")
+    result = subprocess.run(
+        [executable, *args],
+        cwd=repository,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
+
+
+def packaged_revision():
+    if repository.parent.name != "src":
+        return None
+    marker = repository.parent.parent / "modelopt_revision"
+    try:
+        revision = marker.read_text().strip().lower()
+    except OSError:
+        return None
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision):
+        return None
+    return {"revision": revision, "dirty": False}
+
+
+def working_tree_fingerprint():
+    digest = hashlib.sha256()
+    digest.update(git_output("diff", "--binary", "HEAD", "--", *pathspecs))
+    untracked = git_output("ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+    for encoded in sorted(item for item in untracked if item):
+        digest.update(b"\0path\0" + encoded + b"\0")
+        candidate = repository / os.fsdecode(encoded)
+        if candidate.is_symlink():
+            digest.update(b"symlink\0" + os.fsencode(os.readlink(candidate)))
+            continue
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def repository_revision():
+    try:
+        revision = git_output("rev-parse", "HEAD").decode().strip()
+        dirty = bool(git_output("status", "--porcelain", "--", *pathspecs).strip())
+    except (OSError, subprocess.CalledProcessError):
+        return packaged_revision() or {"revision": None, "dirty": None}
+    code = {"revision": revision, "dirty": dirty}
+    if dirty:
+        try:
+            code["working_tree_sha256"] = working_tree_fingerprint()
+        except (OSError, subprocess.CalledProcessError):
+            code["working_tree_sha256"] = None
+    return code
+
+
+def _assert_worker_source():
+    actual = repository_revision()
+    if actual.get("revision") != expected.get("revision"):
+        raise RuntimeError(
+            "Worker source revision changed after the run bundle was resolved: "
+            f"expected {expected.get('revision')}, got {actual.get('revision')}"
+        )
+    expected_dirty = expected.get("dirty")
+    if expected_dirty is None:
+        expected_dirty = False
+    if actual.get("dirty") != expected_dirty:
+        raise RuntimeError(
+            "Worker source state changed after the run bundle was resolved: "
+            f"expected dirty={expected_dirty}, got dirty={actual.get('dirty')}"
+        )
+    if expected_dirty and actual.get("working_tree_sha256") != expected.get(
+        "working_tree_sha256"
+    ):
+        raise RuntimeError("Worker source contents changed after the run bundle was resolved")
+
+
+_assert_worker_source()
+""".strip()
+
 
 async def _git_output(repository: Path, *args: str) -> bytes:
     """Run one fixed-argument Git query without involving a shell."""
@@ -58,6 +155,12 @@ def _run_git(repository: Path, *args: str) -> bytes:
     """Run a Git query from the synchronous configuration API."""
 
     return asyncio.run(_git_output(repository, *args))
+
+
+def standalone_source_guard() -> str:
+    """Return the dependency-free worker identity guard sealed into run bundles."""
+
+    return _STANDALONE_SOURCE_GUARD
 
 
 def _packaged_revision(repository: Path) -> dict[str, Any] | None:

@@ -169,11 +169,15 @@ def _source_guard_command(environment: Mapping[str, Any], worker_code: Mapping[s
     expected = {key: worker_code.get(key) for key in ("revision", "dirty", "working_tree_sha256")}
     repository = str(environment["repository"])
     python = str(Path(str(environment["venv"])) / "bin" / "python")
-    statement = (
-        "from puzzletron_orchestrator.recipe_config import _assert_worker_source; "
-        f"_assert_worker_source({repository!r}, {expected!r})"
+    argv = (
+        python,
+        "-I",
+        "-c",
+        _source_identity.standalone_source_guard(),
+        repository,
+        json.dumps(expected, sort_keys=True, separators=(",", ":")),
     )
-    return f"PYTHONPATH={shlex.quote(repository)} {shlex.quote(python)} -c {shlex.quote(statement)}"
+    return " ".join(shlex.quote(part) for part in argv)
 
 
 def _runner_payload(
