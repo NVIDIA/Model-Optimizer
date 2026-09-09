@@ -45,6 +45,7 @@ class TestSlurmConfig:
         assert cfg.local is False
         assert cfg.container_mounts is None
         assert cfg.srun_args is None
+        assert cfg.dependency is None
         assert cfg.array is None
 
     def test_custom_values(self):
@@ -57,6 +58,7 @@ class TestSlurmConfig:
             container="nvcr.io/nvidia/pytorch:24.01-py3",
             container_mounts=["/data:/data"],
             srun_args=["--no-container-mount-home"],
+            dependency="singleton",
         )
         assert cfg.host == "login.example.com"
         assert cfg.account == "my_account"
@@ -64,6 +66,7 @@ class TestSlurmConfig:
         assert cfg.gpus_per_node == 8
         assert cfg.mem == "128G"
         assert cfg.container_mounts == ["/data:/data"]
+        assert cfg.dependency == "singleton"
 
     def test_nullable_gpus_per_node(self):
         cfg = SlurmConfig(gpus_per_node=None)

@@ -24,6 +24,9 @@ modelopt_launcher = [
     "examples/**/*.jinja",
 ]
 
+[tool.uv]
+package = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

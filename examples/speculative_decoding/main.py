@@ -204,7 +204,16 @@ def train():
     if last_checkpoint:
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
-    checkpoint = training_args.resume_from_checkpoint or last_checkpoint
+    if training_args.resume_model_only:
+        # With resume_model_only, initialize the first run from the configured checkpoint;
+        # fully resume the latest local checkpoint thereafter.
+        checkpoint = last_checkpoint or training_args.resume_from_checkpoint
+        model_only_init = last_checkpoint is None
+    else:
+        # Without resume_model_only, use the requested checkpoint when set; otherwise resume
+        # the latest local checkpoint.
+        checkpoint = training_args.resume_from_checkpoint or last_checkpoint
+        model_only_init = False
 
     use_offline_training = recipe.data.mode != "online"
 
@@ -212,6 +221,8 @@ def train():
     # weights load via from_pretrained; FSDP sharded checkpoints load the base model and
     # resume through the Trainer.
     checkpoint_is_hf = _is_hf_format_checkpoint(checkpoint)
+    if model_only_init and not checkpoint_is_hf:
+        raise ValueError("resume_model_only requires a consolidated Hugging Face checkpoint.")
 
     if checkpoint_is_hf:
         assert checkpoint is not None  # guaranteed by checkpoint_is_hf
@@ -355,7 +366,9 @@ def train():
     fsdp2_buffer_patch.log_param_dtypes(trainer.model)
 
     print_rank_0("Start training...")
-    trainer.train(resume_from_checkpoint=checkpoint)
+    # With resume_model_only, initialize the first run from the configured checkpoint with fresh
+    # Trainer state (skipping optimizer state loading); otherwise resume full training state.
+    trainer.train(resume_from_checkpoint=None if model_only_init else checkpoint)
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
 

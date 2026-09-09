@@ -22,11 +22,12 @@ collect responses, and optionally save them to disk for downstream pipelines
 
 # ruff: noqa: D101, D102, D103, D107, PLR1722
 import argparse
+import json
 import os
 import re
 
 from datasets import load_dataset
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 early_termination = False
 
@@ -46,7 +47,15 @@ class LLM:
         self.args = args
         self._pid = os.getpid()
         self.client = OpenAI(base_url=args.base_url)
-        self.generate(messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True)
+        # Exercise the selected no-thinking control path during server warmup.
+        if args.thinking_control == "chat-template-kwargs":
+            self.generate(
+                messages=[{"role": "user", "content": "Hello!"}],
+                verbose=True,
+                enable_thinking=False,
+            )
+        else:
+            self.generate(messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True)
 
     def _ensure_client(self):
         """Reinitialize the HTTP client if we've been forked into a new process.
@@ -59,15 +68,39 @@ class LLM:
             self._pid = os.getpid()
             self.client = OpenAI(base_url=self.args.base_url)
 
-    def generate(self, messages, verbose=False, **chat_template_kwargs):
+    def generate(
+        self,
+        messages,
+        verbose=False,
+        sample_id="<unknown>",
+        sampling_params=None,
+        **chat_template_kwargs,
+    ):
         global early_termination
         self._ensure_client()
         try:
+            sampling_params = sampling_params or {}
+            arg_temperature = self.args.temperature if self.args.temperature is not None else 0.0
+            chat_template_kwargs = {
+                key: value for key, value in chat_template_kwargs.items() if value is not None
+            }
+            # vLLM exposes top_k and chat-template controls as OpenAI API extensions.
+            request_kwargs = {}
+            extra_body = {}
+            if chat_template_kwargs:
+                extra_body["chat_template_kwargs"] = chat_template_kwargs
+            if "top_k" in sampling_params:
+                extra_body["top_k"] = sampling_params["top_k"]
+            if extra_body:
+                request_kwargs["extra_body"] = extra_body
             completion = self.client.chat.completions.create(
                 model=self.args.model,
                 messages=messages,
-                temperature=self.args.temperature,
+                temperature=sampling_params.get("temperature", arg_temperature),
+                top_p=sampling_params.get("top_p", 1.0),
+                presence_penalty=sampling_params.get("presence_penalty", 0.0),
                 max_tokens=self.args.max_tokens,
+                **request_kwargs,
             )
             new_message = completion.choices[0].message.content
             if verbose:
@@ -76,11 +109,18 @@ class LLM:
                 print("[NEW] {:10}: {:64}\n\n".format("assistant", new_message))
 
             new_message = {"role": "assistant", "content": new_message}
+        except BadRequestError as e:
+            # Skip overlength rows; all other request errors must fail the shard.
+            if e.param == "input_tokens":
+                print(f"[SKIP] {sample_id}: {e}")
+                return None
+            print(e)
+            raise RuntimeError(str(e)) from None
         except Exception as e:
             print(e)
             if "Connection error" in str(e):
                 early_termination = True
-            raise  # always propagate so datasets.map() halts the shard
+            raise RuntimeError(str(e)) from None
 
         return new_message
 
@@ -103,7 +143,9 @@ parser.add_argument(
     "--num-samples", "--num_samples", type=int, default=None, help="maximum samples to process."
 )
 parser.add_argument("--num-proc", type=int, default=32, help="number of processes (concurrency).")
-parser.add_argument("--temperature", type=float, default=0.0, help="temperature.")
+parser.add_argument("--temperature", type=float, default=None, help="temperature (default: 0).")
+parser.add_argument("--sampling-params", type=json.loads, default=None)
+parser.add_argument("--non-thinking-sampling-params", type=json.loads, default=None)
 parser.add_argument(
     "--max-tokens", type=int, default=None, help="maximum tokens to generate per response."
 )
@@ -114,7 +156,25 @@ parser.add_argument(
     help="maximum total length (prompt + output). Stops synthesizing remaining turns "
     "when context exceeds this limit.",
 )
+parser.add_argument(
+    "--thinking-control",
+    choices=["soft-switch", "chat-template-kwargs"],
+    default="soft-switch",
+    help="Disable thinking with /no_think or the server's chat_template_kwargs API.",
+)
+parser.add_argument(
+    "--response-mode",
+    choices=["mixed", "thinking", "non-thinking"],
+    default="mixed",
+    help="Response mode for synthesized shards; mixed disables thinking on even shards.",
+)
 args = parser.parse_args()
+
+if args.temperature is not None and any(
+    params is not None and "temperature" in params
+    for params in (args.sampling_params, args.non_thinking_sampling_params)
+):
+    parser.error("--temperature cannot be combined with temperature in a sampling profile")
 
 llm = LLM(args)
 
@@ -133,6 +193,7 @@ def synthesize(data):
         raise ValueError(
             "No conversations or messages in the data. Only OAI chat data is supported."
         )
+    sample_id = data.get("uuid") or data.get("conversation_id") or "<unknown>"
 
     # Handle generation specific kwargs.
     enable_thinking = data.get("enable_thinking", True)
@@ -146,7 +207,7 @@ def synthesize(data):
         if role == "system":
             current_messages.append(msg)
         elif role == "user":
-            if not enable_thinking:
+            if not enable_thinking and args.thinking_control == "soft-switch":
                 # Copy to avoid mutating the original dataset row.
                 msg = dict(msg)
                 msg["content"] = msg["content"] + " /no_think"
@@ -159,13 +220,30 @@ def synthesize(data):
                 est_tokens = ctx_chars // 3  # rough char-to-token estimate
                 if est_tokens + args.max_tokens > max_total:
                     # Drop this user turn — context too long for another generation
+                    print(f"[SKIP] {sample_id}: estimated context exceeds {max_total} tokens")
                     current_messages.pop()
                     break
 
-            new_message = llm.generate(current_messages, verbose=False)
+            # Thinking and non-thinking rows use their own sampling profiles.
+            new_message = llm.generate(
+                current_messages,
+                verbose=False,
+                sample_id=sample_id,
+                sampling_params=(
+                    args.non_thinking_sampling_params
+                    if not enable_thinking and args.non_thinking_sampling_params is not None
+                    else args.sampling_params
+                ),
+                enable_thinking=(
+                    enable_thinking if args.thinking_control == "chat-template-kwargs" else None
+                ),
+            )
             if new_message is None:
+                current_messages.pop()
                 break
 
+            # Preserve the mode so the training template can handle unfinished thinking.
+            new_message["enable_thinking"] = enable_thinking
             last_full_message = new_message
 
             if enable_thinking:
@@ -200,7 +278,12 @@ def synthesize(data):
                 current_messages[i] = last_full_message
                 break
 
-    return {"messages": current_messages}
+    # Preserve the dataset schema for failed rows, then filter them after mapping.
+    synthesis_ok = last_full_message is not None
+    output_messages = [dict(msg) for msg in (current_messages if synthesis_ok else messages)]
+    for msg in output_messages:
+        msg.setdefault("enable_thinking", enable_thinking)
+    return {"messages": output_messages, "_synthesis_ok": synthesis_ok}
 
 
 # Support both HF Hub repo IDs and local file paths (.jsonl, .json, .parquet, etc.)
@@ -250,9 +333,20 @@ for shard_id in shard_ids:
     print(len(shard), file_path)
 
     num_proc = min(args.num_proc, len(shard))
-    if shard_id % 2 == 0:
+    if args.response_mode == "non-thinking" or (
+        args.response_mode == "mixed" and shard_id % 2 == 0
+    ):
         shard = shard.map(disable_thinking_column, num_proc=num_proc)
-    updated_shard = shard.map(synthesize, num_proc=num_proc)
+    # Reuse completed map-worker caches and omit rows without a generated response.
+    cache_dir = os.path.join(args.save, ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    updated_shard = shard.map(
+        synthesize,
+        num_proc=num_proc,
+        cache_file_name=os.path.join(cache_dir, f"shard_{shard_id}.arrow"),
+    )
+    updated_shard = updated_shard.filter(lambda row: row["_synthesis_ok"])
+    updated_shard = updated_shard.remove_columns("_synthesis_ok")
     updated_shard.to_json(file_path)
     with open(done_path, "w") as done_file:
         done_file.write("done\n")

@@ -1,0 +1,91 @@
+# Qwen3.5-9B DSpark training: 8 target nodes + 8 trainer nodes.
+
+job_name: qwen3.5-9b-dspark-training
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-9B
+    hf_data: /hf-local/modelopt/qwen3.5-9b-dspark-synthesis
+    output_dir: /cicd/qwen3.5-9b-dspark
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    reqs: wandb==0.22.3
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - data.data_path=<<global_vars.hf_data>>
+      - data.chat_template=examples/Qwen/Qwen3.5-9B/chat_template_train.jinja
+      - training.output_dir=<<global_vars.output_dir>>/training
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=5
+      - training.per_device_train_batch_size=1
+      - training.gradient_accumulation_steps=8
+      - training.learning_rate=6.0e-4
+      - training.warmup_ratio=0.04
+      - training.lr_scheduler_type=cosine_with_min_lr
+      - training.lr_scheduler_kwargs.min_lr=3.0e-5
+      - training.save_steps=200
+      - training.logging_steps=10
+      - training.estimate_ar=true
+      - training.answer_only_loss=true
+      - training.report_to=wandb
+      - dflash.dflash_block_size=8
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=4.0
+      - dflash.dflash_mask_token_id=248077
+      - dflash.dflash_swa_window_size=4096
+      - dflash.dflash_architecture_config.num_hidden_layers=6
+      - dflash.dflash_architecture_config.num_attention_heads=32
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.head_dim=128
+      - dflash.dflash_architecture_config.intermediate_size=12288
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - EAGLE_CAPTURE_IDS: "[2,8,13,19,24,30,32]"
+      - SERVE_NODES: "8"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      - HS_POOL_SLOTS: "32"
+      - WANDB_PROJECT: modelopt-dspark-training
+      - WANDB_NAME: qwen3.5-9b-dspark
+      - WANDB_RUN_ID: qwen35-9b-dspark
+      - WANDB_RESUME: allow
+      - WANDB_DIR: <<global_vars.output_dir>>/wandb
+      - EXPORT_PATH: <<global_vars.output_dir>>/export
+      - EXPORT_EXTRA_ARGS: --trust_remote_code
+      - SERVE_MAX_MODEL_LEN: "4160"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_READY_TIMEOUT: "1800"
+    slurm_config:
+      _factory_: slurm_factory
+      nodes: 16
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      dependency: singleton
+      time: 04:00:00
+      container: vllm/vllm-openai:v0.27.1
+
+  task_2:
+    script: common/specdec/export_latest_and_vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_TRAINING_DIR: <<global_vars.output_dir>>/training
+      - DRAFT_MODEL: <<global_vars.output_dir>>/export
+      - EXPORT_TRUST_REMOTE_CODE: "1"
+      - SPEC_METHOD: dspark
+      - NUM_SPEC_TOKENS: "7"
+      - TP_SIZE: "1"
+      - MAX_MODEL_LEN: "4160"
+      - MAX_OUTPUT_TOKENS: "128"
+      - MIN_ACCEPTANCE_LENGTH: "1.2"
+    slurm_config:
+      _factory_: slurm_factory
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: 02:00:00
+      container: vllm/vllm-openai:v0.27.1

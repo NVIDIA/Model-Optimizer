@@ -137,9 +137,10 @@ done
 pip3 install -q datasets openai 2>/dev/null || true
 echo "Running: python3 common/query.py http://localhost:8000/v1 ${MODEL} ${QUERY_ARGS[*]}"
 python3 common/query.py http://localhost:8000/v1 "${MODEL}" "${QUERY_ARGS[@]}"
+QUERY_EXIT=$?
 echo "Main process exit"
 
 kill $SERVER_PID
 wait $SERVER_PID 2>/dev/null || true
 
-exit 0
+exit $QUERY_EXIT

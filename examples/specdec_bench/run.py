@@ -15,6 +15,7 @@
 
 import argparse
 import asyncio
+import json
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
@@ -56,6 +57,13 @@ datasets_available = {
     "specbench": datasets.SpecBench,
     "speed": datasets.SPEEDBench,
 }
+
+
+def parse_runtime_params(value):
+    if value.lstrip().startswith("{"):
+        return json.loads(value)
+    with open(value) as f:
+        return yaml.safe_load(f)
 
 
 async def tqdm_gather(*fs, return_exceptions=False, **kwargs):
@@ -242,6 +250,7 @@ def run_simple(args):
     )
 
     runner.clear_metrics()
+    model.stop()
 
 
 if __name__ == "__main__":
@@ -318,10 +327,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--runtime_params",
-        type=str,
+        type=parse_runtime_params,
         required=False,
         default=None,
-        help="Path to the runtime params yaml file",
+        help="Path to a runtime params YAML file or an inline JSON object",
     )
     parser.add_argument(
         "--temperature",
@@ -359,8 +368,9 @@ if __name__ == "__main__":
         required=False,
         default=None,
         help=(
-            "DFlash block size (num_speculative_tokens). Use instead of --draft_length "
-            "for DFLASH: block_size = draft_length + 1."
+            "Draft block size for DFlash and DSpark. To draft N tokens "
+            "(num_speculative_tokens=N), use --block_size N+1 for DFlash and "
+            "--block_size N for DSpark."
         ),
     )
     parser.add_argument(
@@ -404,10 +414,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.runtime_params is not None:
-        with open(args.runtime_params) as f:
-            args.runtime_params = yaml.safe_load(f)
-    else:
+    if args.runtime_params is None:
         args.runtime_params = {}
     if args.dataset is None:
         assert (

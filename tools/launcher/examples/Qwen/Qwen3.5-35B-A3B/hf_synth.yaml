@@ -1,0 +1,57 @@
+# Synthesize Qwen3.5-35B-A3B conversations dataset for DSpark training.
+
+job_name: qwen3.5-35b-a3b-dspark-synthesis
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-35B-A3B
+    hf_data: /hf-local/nvidia/Nemotron-Post-Training-Dataset-v2/default.jsonl
+    output_dir: /hf-local/modelopt/qwen3.5-35b-a3b-dspark-synthesis
+
+  task_0:
+    script: common/vllm/query.sh
+    args:
+      - --model
+      - <<global_vars.hf_model>>
+      - --tensor-parallel-size
+      - "8"
+      - --trust-remote-code
+      - --language-model-only
+      - --enable-prefix-caching
+      - --mamba-cache-mode
+      - align
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-model-len
+      - "8192"
+      - --
+      - --data
+      - <<global_vars.hf_data>>
+      - --save
+      - <<global_vars.output_dir>>
+      - --num-shards
+      - "384"
+      - --shard-id
+      - $SLURM_ARRAY_TASK_ID
+      - --thinking-control
+      - chat-template-kwargs
+      - --response-mode
+      - thinking
+      - "--sampling-params '{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}'"
+      - --num-proc
+      - "64"
+      - --max-tokens
+      - "4096"
+      - --max-total-length
+      - "8192"
+    environment:
+      - VLLM_STARTUP_TIMEOUT: "1800"
+    slurm_config:
+      _factory_: slurm_factory
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      time: 04:00:00
+      container: vllm/vllm-openai:v0.27.1
+      array: "0-383%192"
+      requeue: true

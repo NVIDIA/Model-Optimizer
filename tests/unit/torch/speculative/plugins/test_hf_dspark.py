@@ -32,12 +32,13 @@ import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _accuracy_counts
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashModule,
     build_target_layer_ids,
@@ -73,10 +74,24 @@ def _get_dspark_config(
         "markov_rank": MARKOV_RANK,
         "markov_head_type": head_type,
         "use_confidence_head": use_confidence_head,
-        "pure_draft_prefix_len": 1,
         "shift_label": True,
     }
     return config
+
+
+def test_accuracy_counts_per_position():
+    """Accuracy is represented as raw correct/valid counts for each block position."""
+    pred_ids = torch.tensor([[[0, 1, 2, 0], [1, 1, 0, 2]]])
+    target_ids = torch.tensor([[[0, 2, 2, 1], [1, 0, 0, 2]]])
+    eval_mask = torch.tensor([[[1, 1, 1, 0], [1, 0, 1, 1]]])
+    logits = torch.nn.functional.one_hot(pred_ids, num_classes=3).float()
+
+    correct, valid = _accuracy_counts(logits, target_ids, eval_mask)
+
+    torch.testing.assert_close(correct, torch.tensor([2.0, 0.0, 2.0, 1.0]))
+    torch.testing.assert_close(valid, torch.tensor([2.0, 1.0, 2.0, 1.0]))
+    assert correct.sum() == 5
+    assert valid.sum() == 6
 
 
 class TestDSparkConvert:
@@ -170,6 +185,9 @@ class TestDSparkForward:
 
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
+        assert out.train_acc_correct.shape == (BLOCK_SIZE,)
+        assert out.train_acc_valid.shape == (BLOCK_SIZE,)
+        assert torch.all(out.train_acc_correct <= out.train_acc_valid)
         # three-term loss bookkeeping
         for key in ("ce_loss", "l1_loss", "confidence_loss", "base_accuracy"):
             assert key in out.dspark_metrics
@@ -267,7 +285,7 @@ class TestDSparkSwa:
 
 
 class TestDSparkExporter:
-    """Test the DSpark checkpoint export format (z-lab-compatible layout)."""
+    """Test the DeepSpec/vLLM Qwen3 DSpark checkpoint layout."""
 
     def _export(self, tmp_path, head_type="vanilla", use_confidence_head=False):
         model = get_tiny_llama(num_hidden_layers=4)
@@ -288,36 +306,70 @@ class TestDSparkExporter:
 
     @pytest.mark.parametrize("head_type", HEAD_TYPES)
     def test_export_weight_keys_match_reference(self, tmp_path, head_type):
-        """Exported weights carry the head tensors under reference names, no prefix."""
+        """Exported head tensors use the Qwen3DSparkModel module names."""
         sd = load_file(str(self._export(tmp_path, head_type=head_type) / "model.safetensors"))
         for key in sd:
             assert "dflash_module." not in key
             assert "rotary_emb" not in key
-        assert "markov_w1.weight" in sd
-        assert "markov_w2.weight" in sd
-        assert ("gate_proj.weight" in sd) == (head_type == "gated")
-        assert ("joint_proj.weight" in sd) == (head_type == "rnn")
+        assert "markov_head.markov_w1.weight" in sd
+        assert "markov_head.markov_w2.weight" in sd
+        assert ("markov_head.gate_proj.weight" in sd) == (head_type == "gated")
+        assert ("markov_head.joint_proj.weight" in sd) == (head_type == "rnn")
 
     def test_export_includes_confidence_weights(self, tmp_path):
         """The confidence head weights are exported when enabled."""
         sd = load_file(str(self._export(tmp_path, use_confidence_head=True) / "model.safetensors"))
-        assert "confidence_proj.weight" in sd
+        assert "confidence_head.proj.weight" in sd
+        assert "confidence_head.proj.bias" in sd
 
     def test_export_config_has_dspark_fields(self, tmp_path):
-        """config.json carries the dflash_config DSpark head fields."""
+        """config.json matches the Qwen3DSparkModel runtime contract."""
         export_dir = self._export(tmp_path, head_type="gated")
         with open(export_dir / "config.json") as f:
             cfg = json.load(f)
 
-        assert cfg["architectures"] == ["DFlashDraftModel"]
+        assert cfg["architectures"] == ["Qwen3DSparkModel"]
         dc = cfg["dflash_config"]
         assert dc["projector_type"] == "dspark"
+        assert dc["shift_label"] is True
         assert dc["markov_rank"] == MARKOV_RANK
         assert dc["markov_head_type"] == "gated"
         assert dc["use_confidence_head"] is False
-        assert dc["shift_label"] is True
-        assert "mask_token_id" in dc
-        assert "target_layer_ids" in dc
+        assert cfg["markov_rank"] == MARKOV_RANK
+        assert cfg["markov_head_type"] == "gated"
+        assert cfg["enable_confidence_head"] is False
+        assert cfg["confidence_head_with_markov"] is False
+        assert cfg["num_anchors"] == 512
+        assert cfg["mask_token_id"] == cfg["dflash_config"]["mask_token_id"]
+        assert cfg["target_layer_ids"] == cfg["dflash_config"]["target_layer_ids"]
+
+    def test_export_config_matches_training_config(self):
+        """Export preserves every training draft config field after canonicalization."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.rope_theta = None
+        model.config.rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": 10_000_000,
+        }
+        mtsp.convert(model, [("dflash", _get_dspark_config())])
+
+        training_config = model.dflash_config.to_dict()
+        exported_config = model.get_exporter()._export_config()
+        runtime_config = Qwen3Config(
+            **{**exported_config, **exported_config["dflash_config"]}
+        ).to_dict()
+        runtime_config.setdefault("attention_sink_bias", False)
+        metadata = {"architectures", "dtype", "transformers_version"}
+
+        mismatches = {
+            field: (
+                training_config[field],
+                runtime_config.get(field, "<missing>"),
+            )
+            for field in training_config.keys() - metadata
+            if field not in runtime_config or training_config[field] != runtime_config[field]
+        }
+        assert not mismatches, json.dumps(mismatches, indent=2)
 
 
 class TestDraftAttentionPattern:
@@ -705,7 +757,6 @@ class TestInitCheckpoint:
         path = export_dir / "model.safetensors"
         sd = load_file(str(path))
         sd["markov_head.markov_w1.weight"] = torch.zeros(3, MARKOV_RANK)
-        del sd["markov_w1.weight"]
         save_file(sd, str(path))
         with pytest.raises(ValueError, match="shape mismatch"):
             self._make_model(init_checkpoint=export_dir)

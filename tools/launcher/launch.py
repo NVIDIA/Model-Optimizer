@@ -107,6 +107,8 @@ if _has_modelopt_src:
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt_recipes"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/examples"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/pyproject.toml"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/LICENSE_HEADER"))
 
 packager = run.PatternPackager(
     include_pattern=_include_pattern,

@@ -119,20 +119,23 @@ class VLLMModel(Model):
                 # (handled in speculative.py:562-573).
                 specdec["model"] = draft_model_dir
         elif kwargs.get("speculative_algorithm") == "DFLASH":
+            # DFlash block size includes one anchor, so block 8 maps to 7 speculative tokens in vLLM.
             specdec = {
                 "method": "dflash",
                 "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+                "num_speculative_tokens": (kwargs.get("speculative_num_draft_tokens") or 8) - 1,
             }
         elif kwargs.get("speculative_algorithm") == "DSPARK":
             specdec = {
                 "method": "dspark",
                 "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
-                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens") or 7,
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+
+        if specdec is not None and kwargs.get("draft_sample_method") is not None:
+            specdec["draft_sample_method"] = kwargs["draft_sample_method"]
 
         if specdec is None:
             num_speculative_tokens = 1
@@ -163,6 +166,7 @@ class VLLMModel(Model):
             temperature=sampling_kwargs.get("temperature", 1.0),
             top_p=sampling_kwargs.get("top_p", 1.0),
             top_k=sampling_kwargs.get("top_k", 0),
+            presence_penalty=sampling_kwargs.get("presence_penalty", 0.0),
         )
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)

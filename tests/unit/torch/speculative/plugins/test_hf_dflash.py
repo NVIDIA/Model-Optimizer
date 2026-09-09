@@ -804,8 +804,7 @@ class TestDFlashExporter:
         with open(export_dir / "config.json") as f:
             cfg = json.load(f)
 
-        # vLLM _resolve_layer_attention reads these; all-full layer_types + use_swa=True
-        # → non-causal sliding window on every draft layer.
+        assert cfg["layer_types"] == ["sliding_attention"] * NUM_DRAFT_LAYERS
         assert cfg["sliding_window"] == 256
         assert cfg["dflash_config"]["use_swa"] is True
         assert cfg["dflash_config"]["swa_window_size"] == 256

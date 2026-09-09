@@ -137,7 +137,7 @@ gpus_on_node() { nvidia-smi --query-gpu=count --format=csv,noheader,nounits | he
 #   $1 = optional override (SERVE_ADVERTISE_IP / TRAINER_ADVERTISE_IP)
 resolve_routable_ip() {
     local ip="$1"
-    [ -z "$ip" ] && ip=$(getent hosts "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
+    [ -z "$ip" ] && ip=$(getent ahostsv4 "${SLURMD_NODENAME:-$(hostname)}" 2>/dev/null | awk '{print $1}' | head -1)
     [ -z "$ip" ] && ip=$(hostname -I | tr ' ' '\n' | grep -vE '^(127\.|169\.254\.|fe80:|::1)' | head -1)
     [ -z "$ip" ] && ip=$(hostname -I | awk '{print $1}')
     echo "$ip"

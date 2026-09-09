@@ -44,6 +44,7 @@ class SlurmConfig:
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt"
     container_mounts: Optional[list[str]] = None
     srun_args: Optional[list[str]] = None
+    dependency: Optional[str] = None
     array: Optional[str] = None
     requeue: bool = False
     nodes: int = 1
@@ -81,6 +82,7 @@ def slurm_factory(
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
     ],
     srun_args: list[str] = ["--no-container-mount-home"],
+    dependency: Optional[str] = None,
     array: Optional[str] = None,
     requeue: bool = False,
     time: str = "04:00:00",
@@ -101,6 +103,7 @@ def slurm_factory(
         modelopt_install_path=modelopt_install_path,
         container_mounts=container_mounts,
         srun_args=srun_args,
+        dependency=dependency,
         array=array,
         requeue=requeue,
         time=time,

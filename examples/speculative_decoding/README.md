@@ -396,3 +396,7 @@ python scripts/export_hf_checkpoint.py \
 ### Results
 
 See [doc/dflash.md](doc/dflash.md) for design details, benchmark results, and open items.
+
+### DSpark
+
+For end-to-end Qwen3.5 DSpark synthesis, streaming training, export, and benchmark commands, see the [Qwen3.5 DSpark guide](doc/dspark.md).
