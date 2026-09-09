@@ -51,10 +51,11 @@ The Post-Training Quantization (PTQ) process for ONNX models usually involves ru
 
 - *onnxruntime-directml* provides the DirectML EP.
 - *onnxruntime-trt-rtx* provides TensorRT-RTX EP.
+- *onnxruntime-ep-nv-tensorrt-rtx-cu13* provides TensorRT-RTX EP ABI plugin.
 - *onnxruntime-gpu* provides the CUDA EP.
 - *onnxruntime* provides the CPU EP.
 
-By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
+By default, ModelOpt-Windows x64 installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
 
 - Install CUDA and cuDNN:
     - For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the `CUDA Execution Provider requirements <https://onnxruntime.ai/docs/install/#cuda-and-cudnn/>`_ for compatible versions of CUDA and cuDNN.
@@ -65,6 +66,8 @@ If you need to use any other EP for calibration, you can uninstall the existing 
 
       pip uninstall onnxruntime-gpu
       pip install onnxruntime-directml
+
+If you are running on arm64 Windows. CUDA EP is not available yet, instead use TensorRT-RTX EP ABI plugin. Package is already included in ``nvidia-modelopt[onnx]``.
 
 **5. Setup GPU Acceleration Tool for Quantization**
 
@@ -104,6 +107,9 @@ Ensure the following steps are verified:
             - *onnxruntime-trt-rtx* (TensorRT-RTX EP)
             - *onnxruntime-gpu* (CUDA EP)
             - *onnxruntime* (CPU EP)
+
+        The *onnxruntime-ep-nv-tensorrt-rtx-cu13* plugin is installed alongside the selected
+        ONNX Runtime package; it does not replace *onnxruntime-gpu*.
       - **CUDA Toolkit**: For CUDA workflows, verify that the selected Toolkit is found first and that ``nvcc`` reports the expected major version:
 
             .. code-block:: bat
