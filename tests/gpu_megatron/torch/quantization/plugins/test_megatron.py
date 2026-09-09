@@ -1936,7 +1936,11 @@ _PRISTINE_GPT_SHARDED_STATE_DICT = GPTModel.sharded_state_dict
 
 
 def _stock_gpt_sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer."""
+    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer.
+
+    Copied verbatim from ``GPTModel.sharded_state_dict`` in NVIDIA/Megatron-LM at ``be08ce5b1~1``
+    (Apache-2.0) so the patched path is exercised whichever megatron-core is installed.
+    """
     sharded_state_dict = super(GPTModel, self).sharded_state_dict(prefix, sharded_offsets, metadata)
     output_layer_extra_state_key = f"{prefix}output_layer._extra_state"
     output_extra_state = sharded_state_dict.pop(output_layer_extra_state_key, None)
