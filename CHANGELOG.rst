@@ -12,11 +12,9 @@ Changelog
 
 **Backward Breaking Changes**
 
-- TensorRT-LLM checkpoint export moved to the ``modelopt.torch.export.trtllm`` subpackage and is no longer re-exported from ``modelopt.torch.export``. Import ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` from ``modelopt.torch.export.trtllm``, and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``. The shared quantization format constants (``QUANTIZATION_*``, ``KV_CACHE_*``) now live in ``modelopt.torch.export.quant_format`` and remain available from ``modelopt.torch.export``.
-
 **Deprecations**
 
-- ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning``. The TensorRT-LLM checkpoint format will be removed in a future release; use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang.
+- The TensorRT-LLM checkpoint export format is deprecated: ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning`` and the format will be removed in a future release. Use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang. Its implementation moved to ``modelopt.torch.export.trtllm``, so import those two functions from there and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``.
 
 **Bug Fixes**
 
