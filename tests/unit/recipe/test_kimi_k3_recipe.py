@@ -17,7 +17,7 @@
 
 from modelopt.recipe import load_recipe
 
-RECIPE = "huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
+RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
 
 
 def test_kimi_k3_recipe_matches_published_quantization_map():

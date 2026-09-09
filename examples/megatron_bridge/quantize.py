@@ -62,6 +62,7 @@ import copy
 import gc
 
 import torch
+from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
@@ -70,7 +71,11 @@ from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -97,6 +102,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
+        ),
+    )
+    parser.add_argument(
         "--export_megatron_path",
         type=str,
         required=True,
@@ -117,8 +131,8 @@ def get_args() -> argparse.Namespace:
         default=None,
         help=(
             "PTQ recipe YAML file or builtin name (e.g. 'general/ptq/fp8_default-kv_fp8'). "
-            "When set, --quant_cfg, --kv_cache_quant, --weight_only, and --moe_calib_experts_ratio "
-            "are ignored; the recipe is authoritative for quant_cfg, algorithm, and KV-cache config."
+            "When set, --quant_cfg, --kv_cache_quant and --weight_only are ignored; the recipe "
+            "is authoritative for quant_cfg, algorithm, and KV-cache config."
         ),
     )
     parser.add_argument(
@@ -148,16 +162,6 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
     )
-    parser.add_argument(
-        "--moe_calib_experts_ratio",
-        type=float,
-        default=None,
-        help=(
-            "Fraction of experts (in (0.0, 1.0]) to calibrate per forward pass for MoE models. "
-            "Lower values speed up calibration of models with many experts; ignored for dense models."
-        ),
-    )
-
     # Calibration dataset arguments (matched to hf_ptq.py)
     parser.add_argument(
         "--calib_dataset_name",
@@ -203,9 +207,6 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
-        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
-
     print_args(args)
 
     return args
@@ -215,17 +216,13 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     """Build the ModelOpt quantization config dict from the parsed arguments."""
     if args.recipe is not None:
         # A YAML recipe is authoritative: it encodes quant_cfg + algorithm + KV-cache config
-        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only / --moe_calib_experts_ratio
-        # customizations below are skipped.
+        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only customizations below
+        # are skipped.
         print_rank_0(f"Using recipe {args.recipe} for quantization")
-        if (
-            args.kv_cache_quant != KV_CACHE_NONE
-            or args.weight_only
-            or args.moe_calib_experts_ratio is not None
-        ):
+        if args.kv_cache_quant != KV_CACHE_NONE or args.weight_only:
             warn_rank_0(
-                "--kv_cache_quant / --weight_only / --moe_calib_experts_ratio are ignored when "
-                "--recipe is set; the recipe is authoritative."
+                "--kv_cache_quant / --weight_only are ignored when --recipe is set; the recipe "
+                "is authoritative."
             )
         recipe = load_recipe(args.recipe)
         if not isinstance(recipe, ModelOptPTQRecipe):
@@ -257,28 +254,24 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         kv_cache_quant_cfg = KV_QUANT_CFG_CHOICES[args.kv_cache_quant]["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
 
-    # For MoE models, optionally calibrate only a fraction of experts per forward pass for speed.
-    if args.moe_calib_experts_ratio is not None:
-        algorithm = mtq_config.get("algorithm")
-        if isinstance(algorithm, str):
-            mtq_config["algorithm"] = {
-                "method": algorithm,
-                "moe_calib_experts_ratio": args.moe_calib_experts_ratio,
-            }
-        elif isinstance(algorithm, dict):
-            algorithm["moe_calib_experts_ratio"] = args.moe_calib_experts_ratio
-        else:
-            warn_rank_0(
-                f"Quantization algorithm {algorithm!r} does not support moe_calib_experts_ratio; ignoring."
-            )
-
     return mtq_config
 
 
 def main(args: argparse.Namespace):
+    trust_remote_code = is_safe_repo(
+        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+    )
+
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+    )
+
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=trust_remote_code,
+        moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
@@ -293,8 +286,7 @@ def main(args: argparse.Namespace):
     )
 
     # Only the language model is quantized (vision tower + projector stay full precision)
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: quantizing `model.language_model` only (vision tower left in full precision)."
@@ -377,7 +369,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -412,12 +404,12 @@ def main(args: argparse.Namespace):
         model,
         args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
-        hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+        hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
     if is_vlm:
         print_rank_0(
-            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format "
-            "(HuggingFace unified export of a quantized VLM is not yet supported)."
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
+            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py."
         )
     else:
         print_rank_0(
