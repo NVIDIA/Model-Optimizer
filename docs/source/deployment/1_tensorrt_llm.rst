@@ -43,7 +43,7 @@ The export API (:meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.trt
             inference_pipeline_parallel,  # The number of GPUs used in the inference time for pipeline parallelism.
         )
 
-If the :meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>` call is successful, the TensorRT-LLM checkpoint will be saved. Otherwise, e.g. the ``decoder_type`` is not supported, a torch state_dict checkpoint will be saved instead.
+If the :meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>` call is successful, the TensorRT-LLM checkpoint will be saved. Otherwise, e.g. the ``decoder_type`` is not supported, the call warns and re-raises the exception, and no checkpoint is written. To inspect the model in that case, save the ModelOpt-optimized ``state_dict`` yourself with ``torch.save``.
 
 .. list-table:: Model support matrix for the TensorRT-LLM checkpoint export
    :header-rows: 1
