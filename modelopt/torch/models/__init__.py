@@ -28,8 +28,41 @@ The per-model file is named for what it holds, not for who reads it: a model's s
 general model data, and export is only its first consumer.
 """
 
-from .moe import *
-from .specs import *
+from .moe import is_moe
+from .specs import (
+    ExportSpec,
+    ModelSpec,
+    MoESpec,
+    SpecSection,
+    get_spec,
+    get_specs,
+    hf_model_type,
+    list_all_possible,
+    match_class_names,
+    match_moe_block,
+    match_moe_model,
+    register,
+)
+
+# Named rather than star-imported so a star-import of this package does not also re-export
+# the per-model subpackages imported below for their registration side effect. The list
+# cannot drift silently: an entry that no longer exists fails at import, and one that is
+# no longer used fails lint.
+__all__ = [
+    "ExportSpec",
+    "MoESpec",
+    "ModelSpec",
+    "SpecSection",
+    "get_spec",
+    "get_specs",
+    "hf_model_type",
+    "is_moe",
+    "list_all_possible",
+    "match_class_names",
+    "match_moe_block",
+    "match_moe_model",
+    "register",
+]
 
 # Importing the model packages registers every spec as a side effect.
 from . import (  # isort: skip

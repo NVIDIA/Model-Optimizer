@@ -23,7 +23,7 @@ from ..specs import ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
-# has_iterable_experts stays False until the grouped export path is validated on
+# No ExportSpec.grouped_expert_export here: the grouped export path is not validated on
 # this model.
 register(
     ModelSpec(

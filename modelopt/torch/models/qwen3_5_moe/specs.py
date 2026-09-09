@@ -19,12 +19,12 @@ from ..specs import ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
-# has_iterable_experts stays False to preserve pre-refactor behavior: the legacy
-# get_experts_list keyed off ``type(root_model).__name__.lower()``, and
+# No ExportSpec.grouped_expert_export here, which preserves pre-refactor behavior: the
+# legacy get_experts_list keyed off ``type(root_model).__name__.lower()``, and
 # "qwen3_5moeforcausallm" matched none of its qwen substrings (the "_5" breaks
-# "qwen3moeforcausallm"), so Qwen3.5-MoE raised NotImplementedError there. The
-# layout looks identical to qwen3_moe, so flipping this to True is likely correct
-# -- but that is a behavior change and belongs in its own PR with validation.
+# "qwen3moeforcausallm"), so Qwen3.5-MoE raised NotImplementedError there. The layout
+# looks identical to qwen3_moe, so enabling it is likely correct -- but that is a
+# behavior change and belongs in its own PR with validation.
 register(
     ModelSpec(
         model_type="qwen3_5_moe",
