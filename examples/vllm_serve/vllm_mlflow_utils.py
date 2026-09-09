@@ -33,20 +33,29 @@ import argparse
 import contextlib
 import os
 import shutil
+import socket
 import tempfile
+import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
+import modelopt
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.utils.mlflow import (
+    _MASK,
+    _SECRET_NAME,
     MlflowRunLogger,
+    _git_sha,
+    _redact,
+    _stat_key,
     command_text,
+    current_user,
     default_experiment_name,
     validate_tracking_uri,
 )
@@ -61,6 +70,11 @@ RUN_NAME_ENV = "MODELOPT_MLFLOW_RUN_NAME"
 REQUIRED_ENV = "MODELOPT_MLFLOW_REQUIRED"
 COMMAND_ENV = "MODELOPT_MLFLOW_COMMAND"
 
+# Set directly in the container environment (e.g. by NeMo Evaluator Launcher's deployment
+# config) rather than resolved by this launcher: unlike the MLflow settings above, there is
+# nothing to validate or default before publishing it to the worker.
+REPORT_DIR_ENV = "MODELOPT_REPORT_DIR"
+
 # Everything the rank-0 worker needs in its environment to reach the tracking server. The
 # credentials are never set here, only forwarded when the launching shell exported them --
 # without that, a Ray worker authenticates as nobody and the run fails to open.
@@ -71,6 +85,7 @@ MLFLOW_ENV_VARS = frozenset(
         RUN_NAME_ENV,
         REQUIRED_ENV,
         COMMAND_ENV,
+        REPORT_DIR_ENV,
         "MLFLOW_TRACKING_TOKEN",
         "MLFLOW_TRACKING_USERNAME",
         "MLFLOW_TRACKING_PASSWORD",
@@ -189,29 +204,156 @@ def quant_variant() -> str:
     return "unquantized"
 
 
+class LocalReportLogger:
+    """Record one script invocation as a directory tree instead of an MLflow run.
+
+    For a caller that already sits downstream of another MLflow writer -- a launcher that
+    exports its own job as one MLflow run and would clobber that run's status or collide on
+    param keys if a second process also called ``start_run``/``end_run`` against it. Writing
+    to a local directory instead lets that launcher's own exporter pick the bundle up as
+    artifacts of its single run (e.g. NeMo Evaluator Launcher's ``auto_export`` MLflow
+    destination with ``copy_artifacts: true``), with ModelOpt never touching MLflow itself.
+
+    Mirrors :class:`~modelopt.torch.utils.mlflow.MlflowRunLogger`'s
+    ``start``/``log_text``/``finish`` surface so :class:`FakeQuantMlflowTracker` can pick
+    either backend without changing how it calls into it. Unlike ``MlflowRunLogger``, a write
+    failure here is always fatal: this directory is the only copy of these artifacts, and
+    there is no server-reachability case to fall back on.
+
+    *report_dir* is created (with parents) on :meth:`start`; ``enabled=False`` makes every
+    method a no-op, which is how a non-rank-0 worker skips writing.
+    """
+
+    def __init__(self, report_dir: str | Path, enabled: bool = True):
+        """Configure the report location without touching the filesystem yet."""
+        self.report_dir = Path(report_dir)
+        self.enabled = enabled
+        self._file_stats: dict[str, tuple[int, int] | None] = {}
+        self._start_time = 0.0
+
+    def start(
+        self,
+        params: dict[str, Any] | None = None,
+        tags: dict[str, Any] | None = None,
+        texts: dict[str, str] | None = None,
+        files: Mapping[str, Path | str] | None = None,
+    ) -> None:
+        """Create the report directory and write the inputs known so far.
+
+        *params* and *tags* land in ``manifest.yaml`` alongside the command and version;
+        *texts* is written as one file per entry; *files* names the outputs the run is
+        expected to produce, so :meth:`finish` can tell them from files already there.
+        """
+        if not self.enabled:
+            return
+        self._start_time = time.time()
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        self._file_stats = {str(p): _stat_key(p) for p in map(Path, (files or {}).values())}
+        manifest = {
+            "tags": {
+                "user": current_user(),
+                "hostname": socket.gethostname(),
+                "modelopt_version": modelopt.__version__,
+                "git_sha": _git_sha(),
+                **(tags or {}),
+            },
+            "params": {
+                k: _MASK if _SECRET_NAME.search(k) else _redact(v)
+                for k, v in (params or {}).items()
+            },
+            "command": command_text(),
+            "modelopt_version": modelopt.__version__,
+        }
+        self._write_yaml("manifest.yaml", manifest)
+        self._write_texts(texts)
+        self._write_yaml("status.yaml", {"status": "RUNNING"})
+
+    def log_text(self, artifact_path: str, text: str) -> None:
+        """Write *text* to *artifact_path* under the report directory, while the run is open."""
+        if not self.enabled:
+            return
+        self._write_texts({artifact_path: text})
+
+    def finish(
+        self,
+        status: str,
+        texts: dict[str, str] | None = None,
+        files: Mapping[str, Path | str] | None = None,
+        metrics: dict[str, float] | None = None,
+    ) -> None:
+        """Write the run's outputs and record *status* in ``status.yaml``.
+
+        *files* entries are skipped the same way ``MlflowRunLogger`` skips them: absent, or
+        unchanged since :meth:`start` -- so a rerun that reuses this directory does not
+        recopy a previous attempt's summary as its own.
+        """
+        if not self.enabled:
+            return
+        self._write_texts(texts)
+        for artifact_path, local in (files or {}).items():
+            path = Path(local)
+            if not path.is_file():
+                continue
+            if str(path) in self._file_stats and self._file_stats[str(path)] == _stat_key(path):
+                continue
+            target = self.report_dir / artifact_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        elapsed = time.time() - self._start_time
+        self._write_yaml(
+            "status.yaml", {"status": status, "total_time_s": elapsed, **(metrics or {})}
+        )
+        print(f"[modelopt] {status}: report at {self.report_dir}")
+
+    def _write_texts(self, texts: dict[str, str] | None) -> None:
+        for artifact_path, text in (texts or {}).items():
+            target = self.report_dir / artifact_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+
+    def _write_yaml(self, artifact_path: str, value: dict[str, Any]) -> None:
+        target = self.report_dir / artifact_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(yaml.safe_dump(value, sort_keys=False))
+
+
 class FakeQuantMlflowTracker:
     """Records one vLLM fake-quant worker's calibrate-and-serve as an MLflow run.
 
-    Inert unless the launcher published a tracking URI *and* this is the global rank-0
-    worker, so the worker needs no branching: every method is a no-op otherwise, and the
-    server behaves exactly as it did before tracking existed.
+    Inert unless the launcher published a tracking URI, or the environment names a local
+    report directory, *and* this is the global rank-0 worker, so the worker needs no
+    branching: every method is a no-op otherwise, and the server behaves exactly as it did
+    before tracking existed.
+
+    A report directory (``$MODELOPT_REPORT_DIR``) takes priority over a tracking URI when
+    both are set: it exists precisely so a caller downstream of another MLflow writer (e.g.
+    NeMo Evaluator Launcher, which exports its own job as one MLflow run) can fold this run's
+    artifacts into that run instead of ModelOpt opening a second, colliding one -- see
+    :class:`LocalReportLogger`.
     """
 
     def __init__(self, worker: Any, quant_config: dict[str, Any]):
         """Configure the run from the environment; nothing contacts the server yet."""
+        report_dir = os.environ.get(REPORT_DIR_ENV) or None
         uri = os.environ.get(TRACKING_URI_ENV) or None
         self._quant_config = quant_config
         self._staging: Path | None = None
         self._files: dict[str, Path] = {}
         self._closed = False
         self._worker = worker
-        self._logger = MlflowRunLogger(
-            uri or "",
-            os.environ.get(EXPERIMENT_ENV) or _fallback_experiment(worker),
-            run_name=os.environ.get(RUN_NAME_ENV) or None,
-            enabled=bool(uri) and getattr(worker, "rank", 0) == 0,
-            required=os.environ.get(REQUIRED_ENV) == "1",
-        )
+        is_rank0 = getattr(worker, "rank", 0) == 0
+        if report_dir:
+            self._logger: LocalReportLogger | MlflowRunLogger = LocalReportLogger(
+                report_dir, enabled=is_rank0
+            )
+        else:
+            self._logger = MlflowRunLogger(
+                uri or "",
+                os.environ.get(EXPERIMENT_ENV) or _fallback_experiment(worker),
+                run_name=os.environ.get(RUN_NAME_ENV) or None,
+                enabled=bool(uri) and is_rank0,
+                required=os.environ.get(REQUIRED_ENV) == "1",
+            )
 
     @property
     def enabled(self) -> bool:
