@@ -1909,14 +1909,7 @@ class _QuantMoELinear(QuantModule):
                 "a device_map that keeps the MoE layers resident — and re-run."
             )
 
-        # MoELinear.forward always promotes to fp32 for the matmul regardless of storage
-        # dtype (`F.linear(x.float(), self.weight[expert_id].float())`), so each expert's
-        # weight is expanded in fp32 too. Storing at the original dtype (e.g. bf16) would
-        # force the forward below to downcast the fp32 activation to match before the
-        # matmul, computing in bf16 and changing the model's output even with every
-        # quantizer disabled -- the bf16 rounding this class exists to quantize *past*, not
-        # to reintroduce as a side effect of conversion.
-        device = self.weight.device
+        dtype, device = self.weight.dtype, self.weight.device
 
         with init_empty_weights():
             experts = nn.ModuleList(
@@ -1929,20 +1922,53 @@ class _QuantMoELinear(QuantModule):
         for i in range(self.num_experts):
             experts[i].to_empty(device=device)
             with torch.no_grad():
-                experts[i].weight.data = (
-                    self.weight[i].detach().to(dtype=torch.float32, device=device)
-                )
+                experts[i].weight.data = self.weight[i].detach().to(dtype=dtype, device=device)
 
         delattr(self, "weight")
         self.experts = experts
 
     def forward(self, x, expert_id):
         # experts[expert_id] is a _QuantLinear after quantization wrapping, providing
-        # per-expert input_quantizer and weight_quantizer. The expert's weight is fp32
-        # (see _setup), so upcasting x here reproduces MoELinear's own fp32 promotion
-        # instead of losing precision to the weight's original storage dtype.
+        # per-expert input_quantizer and weight_quantizer.
+        #
+        # MoELinear.forward always promotes to fp32 for the matmul regardless of storage
+        # dtype (`F.linear(x.float(), self.weight[expert_id].float())`), so leaving the
+        # expert's weight at its native storage dtype (e.g. bf16) and downcasting x to
+        # match before the matmul would compute in bf16 and change the model's output even
+        # with every quantizer disabled -- the bf16 rounding this class exists to quantize
+        # *past*, not to reintroduce as a side effect of conversion.
+        #
+        # A prior version of this fix instead expanded every expert's weight in fp32
+        # permanently in `_setup`. That reproduces Step's fp32 compute but turns a per-call
+        # transient promotion into persistent model state: on Step-3.7's full routed-expert
+        # set (42 layers x 3 projections x 288 experts x 4096 x 1280), doubling from bf16 to
+        # fp32 adds roughly 354 GiB held throughout calibration, on top of device placement
+        # already sized for bf16 -- a model that loaded successfully can then OOM. It also
+        # left disabled/unquantized experts reconstructed at fp32 in the exported checkpoint.
+        #
+        # Instead, only the one expert actually being called is promoted, transiently, for
+        # the duration of this one call -- matching Step's own per-call `.float()` memory
+        # profile instead of Step-3.7's full expert set. `expert.weight` is read here
+        # outside any `quantize_weight()` context, so `_get_quantized_weight` passes it
+        # through unchanged and this is the real underlying nn.Parameter (the same pattern
+        # `_setup` above uses), not a value computed by the quantizer -- so reassigning its
+        # `.data` genuinely mutates the persisted storage, not a transient wrapper.
+        #
+        # This must keep calling `expert(x)` (`__call__`, not `.forward()`) rather than
+        # reimplementing the input/weight-quantize/output-quantize sequence inline: some
+        # calibration algorithms (e.g. `local_hessian_calibrate`) register a
+        # `forward_pre_hook` directly on the quantized Linear module, which only fires
+        # through standard `nn.Module.__call__` dispatch.
         expert = self.experts[expert_id]
-        return expert(x.float()).float()
+        original_weight = expert.weight.data
+        with torch.no_grad():
+            expert.weight.data = original_weight.float()
+        try:
+            out = expert(x.float())
+        finally:
+            with torch.no_grad():
+                expert.weight.data = original_weight
+        return out.float()
 
 
 def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:

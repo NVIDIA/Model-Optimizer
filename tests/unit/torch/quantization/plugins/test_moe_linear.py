@@ -148,12 +148,17 @@ def test_module_with_3d_weight_but_other_forward_is_not_claimed():
 
 
 def test_disabled_quantizers_reproduce_bf16_weight_fp32_compute_parity():
-    """Conversion must not change the model's output when every quantizer is disabled.
+    """Conversion must not change the model's output when every quantizer is disabled, and
+    must not permanently promote expert storage to fp32 to get there.
 
     ``MoELinear.forward`` always promotes to fp32 for the matmul regardless of storage
     dtype (``F.linear(x.float(), self.weight[expert_id].float())``). A wrapper that
     instead downcasts the fp32 activation to the weight's original storage dtype (e.g.
-    bf16) before the matmul silently changes the model even with quantization off.
+    bf16) before the matmul silently changes the model even with quantization off. The
+    opposite mistake -- promoting every expert's *storage* to fp32 in `_setup` to match --
+    reproduces Step's numerics but doubles the model's expert-weight memory footprint for
+    its entire lifetime (on Step-3.7's full routed-expert set, ~354 GiB); the promotion
+    must be transient, scoped to the one expert actually being called.
     """
     torch.manual_seed(0)
     num_experts, in_features, out_features = 2, 4096, 1280
@@ -165,9 +170,18 @@ def test_disabled_quantizers_reproduce_bf16_weight_fp32_compute_parity():
 
     mtq.quantize(module, {"quant_cfg": [{"quantizer_name": "*", "enable": False}]})
     assert isinstance(module, _QuantMoELinear), "conversion did not happen; test is vacuous"
-    converted = module(x, 0)
 
+    # Storage stays at the checkpoint's own dtype -- only the matmul promotes, transiently.
+    for expert in module.experts:
+        assert expert.weight.dtype == torch.bfloat16
+
+    converted = module(x, 0)
     assert torch.equal(converted, reference)
+
+    # Reconstruction (export) must also see -- and keep -- the original storage dtype, not
+    # a permanently-promoted one.
+    _reconstruct_fused_moe_linear(module)
+    assert module.weight.dtype == torch.bfloat16
 
 
 def test_grouped_routing_module_is_not_claimed():
@@ -282,6 +296,37 @@ def test_non_step_model_with_identical_signature_is_not_registered():
     register_moe_linear_on_the_fly(model)
 
     assert QuantModuleRegistry.get(_SyntheticMoELinear) is None
+
+
+def test_local_hessian_calibration_fires_through_the_transient_weight_swap():
+    """`forward` must keep calling `expert(x)` (`__call__`), not `.forward()` directly.
+
+    `local_hessian_calibrate` registers a `forward_pre_hook` on each quantized Linear
+    module and relies on standard `nn.Module.__call__` dispatch to fire it. A `forward`
+    that bypassed `__call__` -- e.g. to reimplement the input/weight-quantize/output-quantize
+    sequence inline instead of transiently swapping the expert's weight storage -- would
+    silently skip this hook and leave the weight quantizer uncalibrated (amax stays None).
+    """
+    torch.manual_seed(0)
+    model = _TinyStepModel()
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*moe*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*moe*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            {"quantizer_name": "*moe.gate.*", "enable": False},
+        ],
+        "algorithm": "local_hessian",
+    }
+
+    def forward_loop(m):
+        for _ in range(3):
+            m(torch.randn(2, 8, HIDDEN_SIZE))
+
+    mtq.quantize(model, cfg, forward_loop=forward_loop)
+
+    for expert in model.moe.up_proj.experts:
+        assert expert.weight_quantizer.amax is not None
 
 
 def test_expert_indexed_moe_is_quantized_and_reconstructed():
