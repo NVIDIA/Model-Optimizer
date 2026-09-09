@@ -13,15 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Export package for Hugging Face and Megatron-based models."""
+"""Export to the TensorRT-LLM checkpoint format.
 
-from .convert_hf_config import *
-from .model_utils import *
-from .moe_utils import *
-from .plugins import *
-from .quant_format import *
-from .registry import *
-from .shard_cast_utils import *
-from .transformer_engine import *
-from .unified_export_hf import *
-from .unified_export_megatron import *
+Everything reachable only from :func:`export_tensorrt_llm_checkpoint
+<modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>` lives
+here, so the framework-agnostic export code in :mod:`modelopt.torch.export` stays free of
+TensorRT-LLM checkpoint concerns. This subpackage is deliberately *not* re-exported from
+:mod:`modelopt.torch.export`; import from ``modelopt.torch.export.trtllm`` directly.
+"""
+
+from .model_config import *
+from .model_config_export import *

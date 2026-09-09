@@ -32,6 +32,9 @@ from safetensors.torch import save_file
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import import_plugin
 
+from ..layer_utils import is_layernorm
+from ..quant_format import QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ
+from ..quant_utils import get_quantization_format, process_layer_quant_config
 from .layer_utils import (
     build_conv_config,
     build_decoder_config,
@@ -48,11 +51,10 @@ from .layer_utils import (
     is_conv,
     is_decoder_list,
     is_embedding,
-    is_layernorm,
     is_linear,
     model_type_is_enc_dec,
 )
-from .model_config import QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ, ModelConfig
+from .model_config import ModelConfig
 from .model_config_utils import (
     merge_gate_fc,
     merge_qkv,
@@ -67,7 +69,6 @@ from .postprocess import (
     postprocess_tensors,
     update_lm_head_quantization,
 )
-from .quant_utils import get_quantization_format, process_layer_quant_config
 from .tensorrt_llm_utils import (
     convert_to_tensorrt_llm_config,
     is_tensorrt_llm_0_8_or_9,

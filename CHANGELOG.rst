@@ -12,6 +12,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- TensorRT-LLM checkpoint export moved to the ``modelopt.torch.export.trtllm`` subpackage and is no longer re-exported from ``modelopt.torch.export``. Import ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` from ``modelopt.torch.export.trtllm``, and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``. The shared quantization format constants (``QUANTIZATION_*``, ``KV_CACHE_*``) now live in ``modelopt.torch.export.quant_format`` and remain available from ``modelopt.torch.export``.
+
 **Deprecations**
 
 **Bug Fixes**

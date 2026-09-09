@@ -34,9 +34,9 @@ from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCol
 from modelopt.torch.utils import distributed as dist
 
 from .layer_utils import is_moe, sync_moe_gate_up_amax
-from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
+from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import _postprocess_single_tensor, get_quant_config, get_quantization_format
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (

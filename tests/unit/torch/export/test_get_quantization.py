@@ -26,13 +26,16 @@ from _test_utils.torch.export.utils import (
 
 import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layer_utils import get_quantization_format
-from modelopt.torch.export.model_config import (
+from modelopt.torch.export.quant_format import (
     QUANTIZATION_FP8,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
-from modelopt.torch.export.quant_utils import get_kv_cache_scaling_factor, get_quant_config
+from modelopt.torch.export.quant_utils import (
+    get_kv_cache_scaling_factor,
+    get_quant_config,
+    get_quantization_format,
+)
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 
 

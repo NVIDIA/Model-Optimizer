@@ -27,11 +27,11 @@ After the model is quantized, the quantized model can be exported to the TensorR
 #. A single JSON file recording the model structure and metadata (config.json)
 #. A group of safetensors files, each recording the local calibrated model on a single GPU rank (model weights, scaling factors per GPU).
 
-The export API (:meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.model_config_export.export_tensorrt_llm_checkpoint>`) can be used as follows:
+The export API (:meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>`) can be used as follows:
 
 .. code-block:: python
 
-    from modelopt.torch.export import export_tensorrt_llm_checkpoint
+    from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 
     with torch.inference_mode():
         export_tensorrt_llm_checkpoint(
@@ -43,7 +43,7 @@ The export API (:meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.mod
             inference_pipeline_parallel,  # The number of GPUs used in the inference time for pipeline parallelism.
         )
 
-If the :meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.model_config_export.export_tensorrt_llm_checkpoint>` call is successful, the TensorRT-LLM checkpoint will be saved. Otherwise, e.g. the ``decoder_type`` is not supported, a torch state_dict checkpoint will be saved instead.
+If the :meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>` call is successful, the TensorRT-LLM checkpoint will be saved. Otherwise, e.g. the ``decoder_type`` is not supported, a torch state_dict checkpoint will be saved instead.
 
 .. list-table:: Model support matrix for the TensorRT-LLM checkpoint export
    :header-rows: 1

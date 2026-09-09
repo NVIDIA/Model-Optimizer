@@ -35,7 +35,7 @@ from _test_utils.torch.export.utils import (
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import (
+from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
     QUANTIZATION_FP8,
@@ -52,12 +52,12 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     get_scaling_factor,
-    get_scaling_factor_from_weight,
     get_weight_block_size,
     postprocess_state_dict,
     process_layer_quant_config,
     to_quantized_weight,
 )
+from modelopt.torch.export.trtllm.quant_utils import get_scaling_factor_from_weight
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.config import (
     FP8_DEFAULT_CFG,
