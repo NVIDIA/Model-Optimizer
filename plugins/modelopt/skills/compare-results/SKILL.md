@@ -71,9 +71,9 @@ the validated runs are comparable:
    precision the baseline is**, and apply the gate relative to that baseline
    rather than to an assumed BF16.
 
-For SciCode, keep `num_repeats: 1` to limit sandbox workload. If variance is a
-concern, run multiple independent matched baseline/candidate pairs instead of
-increasing repeats within one run.
+For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
+the two means — see the evaluation skill's `recipes/tasks/aa/scicode.md`. Fewer
+than 8 valid runs on a side is `INDETERMINATE`, not a delta.
 
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
