@@ -90,10 +90,11 @@ Result 1: Scale selection matters on Qwen3.5-9B
 ************************************************
 
 Table 1 isolates weight-scale selection on Qwen3.5-9B under NVFP4 W4A4: FP4
-weights and FP4 activations. MMLU, HellaSwag, and WinoGrande are zero-shot;
-GSM8K is five-shot with strict-match accuracy; WikiText reports word
-perplexity. Accuracy values are percentage points. "Average drop" is the mean
-of :math:`\max(\text{BF16 score}-\text{quantized score}, 0)` over the four
+weights and FP4 activations. The retained team workbook defines MMLU as
+zero-shot accuracy, HellaSwag as zero-shot normalized accuracy, WinoGrande as
+zero-shot accuracy, GSM8K as five-shot strict-match accuracy, and WikiText as
+word perplexity. Accuracy values are percentage points. "Average drop" is the
+mean of :math:`\max(\text{BF16 score}-\text{quantized score}, 0)` over the four
 accuracy tasks, so lower is better. GPTQ here uses max-based scales [2]_.
 
 All three tables in this article report Model Optimizer team measurements.
@@ -166,14 +167,12 @@ The result is not a claim that one method wins every cell: for example, weight
 MSE is higher on HellaSwag and WinoGrande.
 
 The retained team workbook identifies this model only as Qwen3.5-9B; it does
-not record a model repository or checkpoint revision. It defines the reported
-metrics as zero-shot MMLU accuracy, zero-shot HellaSwag normalized accuracy,
-zero-shot WinoGrande accuracy, five-shot GSM8K strict-match accuracy, and
-WikiText word perplexity. The same workbook contains one value per
-configuration, but does not retain the calibration dataset or size, benchmark
-dataset revisions, evaluator and version, hardware, repeat count, or
-uncertainty. Tables 1 and 2 therefore support comparisons among these recorded
-configurations, not claims of statistical significance or exact reproduction.
+not record a model repository or checkpoint revision. The same workbook
+contains one value per configuration, but does not retain the calibration
+dataset or size, benchmark dataset revisions, evaluator and version, hardware,
+repeat count, or uncertainty. Tables 1 and 2 therefore support comparisons
+among these recorded configurations, not claims of statistical significance or
+exact reproduction.
 
 Result 2: Local Hessian composes with GPTQ
 ******************************************
