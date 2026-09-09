@@ -497,11 +497,12 @@ def test_weight_quantizers_disabled_by_a_later_entry_are_allowed():
 
 
 def test_sequential_weight_quantizers_do_not_trip_the_guard():
-    """List-valued `cfg` builds `SequentialQuantizer`s — the guard reads `is_enabled` through
-    the container, not just through `TensorQuantizer` leaves.
+    """List-valued `cfg` builds `SequentialQuantizer`s, but the guard only ever looks at
+    `TensorQuantizer` instances -- this pins that it still doesn't wrongly raise for them.
 
-    `SequentialQuantizer.is_enabled` delegates to its first member; a check that only
-    looked at `TensorQuantizer` instances directly would miss these and wrongly raise.
+    `SequentialQuantizer` (itself an `nn.Sequential`) is not special-cased: its `TensorQuantizer`
+    children are reachable directly via `named_modules()`, individually named
+    `...weight_quantizer.0` / `.1`, so the substring match already finds them.
     """
     model = SimpleLinear()
     calib_data = [model.get_input() for _ in range(2)]

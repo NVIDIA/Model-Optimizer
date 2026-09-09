@@ -184,10 +184,14 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     if not weight_patterns:
         return
 
+    # `SequentialQuantizer.is_enabled` delegates to its first member, so a list-valued `cfg`'s
+    # quantizers are already covered here without naming `SequentialQuantizer` explicitly:
+    # `named_modules()` recurses into the container and yields those children too, individually,
+    # named `...weight_quantizer.0` / `.1` (the substring match below still applies to them).
     if any(
         module.is_enabled
         for name, module in model.named_modules()
-        if isinstance(module, (TensorQuantizer, SequentialQuantizer)) and "weight_quantizer" in name
+        if isinstance(module, TensorQuantizer) and "weight_quantizer" in name
     ):
         return
 
@@ -200,10 +204,11 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         "modules holding the weights were never converted to quantized modules (an "
         "unsupported custom module, e.g. a trust_remote_code MoE layout).\n"
         "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
-        f"targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
-        f"this too, while other ranks proceed into calibration -- a collective hang, not "
+        "targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
+        "this too, while other ranks proceed into calibration -- a collective hang, not "
         f"just a wrong per-rank verdict. Set {_SKIP_WEIGHT_QUANT_CHECK_ENV}=1 to bypass this "
-        "check in that situation."
+        "check in that situation -- note this is process-global, so it silences the check "
+        "on every rank, not only the one with the legitimately empty stage."
     )
 
 
