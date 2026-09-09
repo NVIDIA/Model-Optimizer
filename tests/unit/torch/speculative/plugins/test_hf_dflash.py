@@ -21,6 +21,7 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import json
 import logging
 import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,6 +33,7 @@ from _test_utils.torch.transformers_models import (
     tf_modelopt_state_and_output_tester,
 )
 from transformers import AutoModelForCausalLM
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
@@ -484,29 +486,45 @@ class TestDFlashSaveRestore:
 
 
 class TestDFlashLazyRotaryEmb:
-    """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
+    """Rotary embedding creation: eager on a real device, still lazy on meta.
 
-    rotary_emb is not created in __init__ — it's lazily initialized on first
-    forward call to avoid meta-tensor issues during from_pretrained restore.
+    The laziness exists for one reason — ``__init__`` runs on the meta device during
+    ``from_pretrained`` restore, and building ``inv_freq`` there produces a meta buffer.
+    That reason only applies on meta, and deferring everywhere else costs a correctness
+    property under DDP: ``inv_freq`` is non-persistent, so a rank whose batch has no
+    valid anchor returns before running the draft and ends the step one buffer short.
+    ``broadcast_buffers`` then coalesces mismatched buffer lists across ranks and hangs
+    rather than raising, which single-node runs never reproduce.
+
+    So the buffer is built during ``modify()`` when the base model is on a real device,
+    and still deferred when it is on meta.
     """
 
-    def test_rotary_emb_not_created_in_init(self):
-        """rotary_emb should not exist after convert (before forward)."""
+    def test_rotary_emb_created_during_convert_on_a_real_device(self):
+        """On a real device the buffer exists after convert, before any forward."""
         model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+        assert hasattr(model.dflash_module, "rotary_emb")
+        assert not any(b.is_meta for b in model.dflash_module.rotary_emb.buffers())
+
+    def test_rotary_emb_deferred_on_meta(self):
+        """On meta the buffer is still deferred, which is what the laziness is for."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
         config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
 
-    def test_rotary_emb_created_on_forward(self):
-        """rotary_emb should be created on first forward call."""
+    def test_rotary_emb_init_is_idempotent(self):
+        """A later _maybe_init_rotary_emb must not replace an existing buffer."""
         model = get_tiny_llama(num_hidden_layers=4)
         config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
-        # Call _maybe_init_rotary_emb directly
+        first = dflash_mod.rotary_emb
         dflash_mod._maybe_init_rotary_emb(device="cpu")
-        assert hasattr(dflash_mod, "rotary_emb")
+        assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
 
@@ -912,6 +930,220 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def _dflash_batch(vocab_size, bsz=2, seq_len=SEQ_LEN):
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, vocab_size, (bsz, seq_len))
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def _converted(fp32_master_weights=None, num_hidden_layers=4):
+    model = get_tiny_llama(num_hidden_layers=num_hidden_layers)
+    config = get_dflash_config()
+    if fp32_master_weights is not None:
+        config["dflash_fp32_master_weights"] = fp32_master_weights
+    mtsp.convert(model, [("dflash", config)])
+    return model
+
+
+class TestDFlashFp32MasterWeights:
+    """``dflash_fp32_master_weights``: what is promoted, and what the optimizer inherits.
+
+    The parameter dtype is the visible half; the OPTIMIZER's dtype is the point of the
+    change, and it is not decided until AdamW allocates its moments with ``zeros_like(p)``
+    inside the first step. A test that looked only at parameters would pass while the
+    feature was broken.
+    """
+
+    def test_flag_off_leaves_the_draft_in_the_base_dtype(self):
+        model = _converted(fp32_master_weights=False)
+        assert model._base_model.dtype == torch.bfloat16
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
+
+    def test_flag_on_promotes_only_the_draft(self):
+        model = _converted(fp32_master_weights=True)
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.float32}
+        # The frozen base is deliberately left alone: no trainable parameters, no
+        # optimizer state, and promoting it would change the hidden states the draft
+        # is trained against.
+        assert model._base_model.dtype == torch.bfloat16
+
+    def test_adam_moments_follow_the_parameters(self):
+        """The half that actually matters, and the one a parameter check would miss.
+
+        The forward runs under ``torch.autocast`` because the flag needs one: a promoted
+        fp32 draft is fed bf16 hidden states by the frozen target. HF Trainer supplies it
+        under ``TrainingArguments.bf16``, so this mirrors the training path.
+        """
+        moments = {}
+        for flag, expected in ((False, torch.bfloat16), (True, torch.float32)):
+            model = _converted(fp32_master_weights=flag)
+            model.train()
+            trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            optimizer.step()
+
+            seen = {
+                state[key].dtype
+                for state in optimizer.state.values()
+                for key in ("exp_avg", "exp_avg_sq")
+            }
+            assert seen == {expected}, f"flag={flag}: moment dtypes {seen}"
+            moments[flag] = seen
+        assert moments[False] != moments[True]
+
+    def test_promotion_keeps_the_full_precision_draw(self):
+        """Promoted and unpromoted runs share a draw; only the stored precision differs.
+
+        The draft is drawn in fp32 by ``_init_weights``. An unpromoted run rounds that draw
+        to the base model's dtype; a promoted one keeps it. So the two arms of a
+        bf16-vs-fp32 comparison start from the same initialization, each at the precision it
+        trains in, rather than from two different draws.
+        """
+        torch.manual_seed(1234)
+        bf16_model = _converted(fp32_master_weights=False)
+        torch.manual_seed(1234)
+        fp32_model = _converted(fp32_master_weights=True)
+
+        bf16_params = dict(bf16_model.dflash_module.named_parameters())
+        fp32_params = dict(fp32_model.dflash_module.named_parameters())
+        assert bf16_params.keys() == fp32_params.keys()
+        keeps_finer_bits = False
+        for name, bf16_param in bf16_params.items():
+            promoted = fp32_params[name]
+            assert promoted.dtype == torch.float32
+            # Same draw: rounding the promoted copy down recovers the unpromoted arm exactly.
+            assert torch.equal(promoted.to(torch.bfloat16), bf16_param), name
+            keeps_finer_bits |= not torch.equal(promoted, bf16_param.float())
+        assert keeps_finer_bits, "the promoted draft should hold bits bf16 cannot represent"
+
+    def test_promotion_survives_a_checkpoint_restore(self):
+        """A resumed run must not quietly drop back to the base dtype.
+
+        ``modify()`` runs with the base on meta during ``from_pretrained``, so it cannot
+        place the draft at all. If nothing re-applies it, the draft resumes at the loaded
+        dtype and AdamW allocates its moments to match, which switches the feature off for
+        the whole remainder of a long run.
+        """
+        mto.enable_huggingface_checkpointing()
+        model = _converted(fp32_master_weights=True)
+        reference = {n: p.detach().clone() for n, p in model.dflash_module.named_parameters()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model.save_pretrained(tmp)
+            # `dtype="auto"` is what the resume path in examples/speculative_decoding/main.py
+            # uses, and it is also what collapses every tensor onto the base model's dtype.
+            restored = AutoModelForCausalLM.from_pretrained(tmp, dtype="auto")
+
+            # What the restore leaves behind on its own, which is the bug this guards: the
+            # draft comes back at the base model's dtype with the flag still set.
+            assert {p.dtype for p in restored.dflash_module.parameters()} == {
+                restored._base_model.dtype
+            }
+
+            restored.restore_draft_precision(tmp)
+
+        assert {p.dtype for p in restored.dflash_module.parameters()} == {torch.float32}
+        assert hasattr(restored.dflash_module, "rotary_emb")
+        # The checkpoint stores the draft in fp32; reloading at the stored dtype is what
+        # keeps a resume from costing the run a rounding of its master weights.
+        for name, param in restored.dflash_module.named_parameters():
+            assert torch.equal(param.detach(), reference[name]), name
+
+        restored.train()
+        optimizer = torch.optim.AdamW(
+            [p for p in restored.dflash_module.parameters() if p.requires_grad], lr=1e-4
+        )
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = restored(**_dflash_batch(restored.dflash_config.vocab_size))
+        out.loss.backward()
+        optimizer.step()
+        assert {
+            state[key].dtype
+            for state in optimizer.state.values()
+            for key in ("exp_avg", "exp_avg_sq")
+        } == {torch.float32}
+
+    def test_generation_names_the_flag_instead_of_failing_on_a_matmul(self):
+        """AR validation runs outside the Trainer's autocast, so it has to say so.
+
+        ``pseudo_speculative_generate`` is called directly by ``AcceptanceRateValidation``
+        under ``estimate_ar``, which is outside the wrapper HF Trainer puts around
+        ``forward``. Without the guard a promoted draft dies there on a bare
+        ``F.linear`` dtype mismatch, potentially hours into a run.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            model.pseudo_speculative_generate(input_ids, steps=2)
+
+        # Under the autocast the flag needs, the same call goes through.
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+    def test_the_guard_is_silent_when_the_flag_is_off(self):
+        """An unpromoted draft matches the base dtype, so nothing needs reconciling."""
+        model = _converted(fp32_master_weights=False)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+
+class TestDFlashDraftActivationCheckpointing:
+    """``training.gradient_checkpointing`` has to reach the draft, and be inert when it does.
+
+    The draft is the only trainable part of a DFlash setup, so it is the only part where
+    checkpointing saves anything: the frozen target runs under ``no_grad`` and stores no
+    activations, and a flag that landed only there would report the feature as enabled
+    while saving nothing.
+    """
+
+    def test_the_flag_reaches_the_draft_layers(self):
+        model = _converted()
+        layers = list(model.dflash_module.layers)
+        assert layers
+        # Inheriting the supported base class is what makes HF's own recursion find them.
+        assert all(isinstance(layer, GradientCheckpointingLayer) for layer in layers)
+        assert all(layer.gradient_checkpointing is False for layer in layers)
+
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        assert all(layer.gradient_checkpointing for layer in layers)
+
+    def test_gradients_are_bit_identical_with_and_without(self):
+        """Recompute is mathematically neutral; it trades step time for memory only."""
+        grads = {}
+        for enabled in (False, True):
+            torch.manual_seed(99)
+            model = _converted()
+            model.train()
+            if enabled:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            torch.manual_seed(99)
+            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            grads[enabled] = {
+                name: param.grad.detach().clone()
+                for name, param in model.dflash_module.named_parameters()
+                if param.grad is not None
+            }
+
+        assert grads[False] and grads[False].keys() == grads[True].keys()
+        for name, grad in grads[False].items():
+            assert torch.equal(grad, grads[True][name]), name
 
 
 def test_validate_online_histogram_matches_ar(monkeypatch):

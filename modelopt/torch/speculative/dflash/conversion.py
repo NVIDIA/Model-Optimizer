@@ -35,6 +35,12 @@ DominoDMRegistry = _DMRegistryCls(prefix="Domino")
 # ``dflash_architecture_config.projector_type == "dspark"`` and kept in its own
 # registry so its wrapper (HFDSparkModel) does not overwrite HFDFlashModel.
 DSparkDMRegistry = _DMRegistryCls(prefix="DSpark")
+# LiLiCorr also reuses the dflash mode/config/recipe, converting the base model to a
+# DFlash backbone augmented with a reranker over the candidate lattice the backbone
+# already produces. Selected via
+# ``dflash_architecture_config.projector_type == "lilicorr"`` and kept in its own
+# registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
+LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
 
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
@@ -53,12 +59,14 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
         registry = DominoDMRegistry
     elif projector_type == "dspark":
         registry = DSparkDMRegistry
+    elif projector_type == "lilicorr":
+        registry = LiLiCorrDMRegistry
     elif projector_type in (None, "dflash"):
         registry = DFlashDMRegistry
     else:
         raise ValueError(
             f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
-            "Expected 'dflash' (default), 'domino' or 'dspark'."
+            "Expected 'dflash' (default), 'domino', 'dspark' or 'lilicorr'."
         )
 
     original_cls = type(model)
