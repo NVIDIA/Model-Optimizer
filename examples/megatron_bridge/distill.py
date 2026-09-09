@@ -176,6 +176,12 @@ def get_args():
     )
     parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
     parser.add_argument(
+        "--no_async_save",
+        action="store_true",
+        help="Save checkpoints synchronously. Async saving spawns a worker that needs its own "
+        "CUDA context, which fails when the training process already fills the GPU.",
+    )
+    parser.add_argument(
         "--logit_kl_topk",
         type=int,
         default=None,
@@ -593,7 +599,7 @@ def main(args: argparse.Namespace):
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=args.checkpoint_keep_last,  # Keeps most recent checkpoints (-1 keeps all)
             ckpt_format="torch_dist",
-            async_save=True,
+            async_save=not args.no_async_save,
             fully_parallel_save=True,
         ),
         rng=RNGConfig(seed=args.seed),
