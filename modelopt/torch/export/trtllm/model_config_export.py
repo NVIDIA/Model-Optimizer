@@ -19,6 +19,7 @@ import copy
 import json
 import math
 import tempfile
+import warnings
 from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
@@ -85,6 +86,12 @@ with import_plugin("megatron", verbose=False):
 
 __all__ = ["export_tensorrt_llm_checkpoint", "torch_to_tensorrt_llm_checkpoint"]
 
+_DEPRECATION_MSG = (
+    "{name} and the TensorRT-LLM checkpoint format are deprecated and will be removed in a "
+    "future release. Use modelopt.torch.export.export_hf_checkpoint instead, which exports a "
+    "unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang."
+)
+
 
 def torch_to_tensorrt_llm_checkpoint(
     model: nn.Module,
@@ -95,6 +102,11 @@ def torch_to_tensorrt_llm_checkpoint(
     workspace_path: Path | str | None = None,
 ) -> Iterator[tuple[dict[str, Any], dict[str, torch.Tensor], dict[str, Any]]]:
     """Converts the torch model to the TensorRT-LLM checkpoint per GPU rank.
+
+    .. deprecated::
+        The TensorRT-LLM checkpoint format is deprecated. Use
+        :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`
+        instead.
 
     TensorRT-LLM checkpoint is the LLM model format that can be used by the TensorRT-LLM build API.
     for the engine building process.
@@ -121,6 +133,32 @@ def torch_to_tensorrt_llm_checkpoint(
             per_layer_quantization: A dict that contains layer-wise quantization information for all quantized layers
             for mixed_precision, empty dictionary otherwise.
     """
+    # Warn here rather than in the generator body: the body does not run until the first
+    # ``next()``, so a warning inside it would fire late (or never, if the caller never iterates).
+    warnings.warn(
+        _DEPRECATION_MSG.format(name="torch_to_tensorrt_llm_checkpoint"),
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _torch_to_tensorrt_llm_checkpoint(
+        model=model,
+        decoder_type=decoder_type,
+        dtype=dtype,
+        inference_tensor_parallel=inference_tensor_parallel,
+        inference_pipeline_parallel=inference_pipeline_parallel,
+        workspace_path=workspace_path,
+    )
+
+
+def _torch_to_tensorrt_llm_checkpoint(
+    model: nn.Module,
+    decoder_type: str,
+    dtype: torch.dtype | None = None,
+    inference_tensor_parallel: int = 0,
+    inference_pipeline_parallel: int = 1,
+    workspace_path: Path | str | None = None,
+) -> Iterator[tuple[dict[str, Any], dict[str, torch.Tensor], dict[str, Any]]]:
+    """Generator behind :func:`torch_to_tensorrt_llm_checkpoint`; see it for the contract."""
     if dtype is None:
         dtype = get_dtype(model)
 
@@ -448,6 +486,12 @@ def export_tensorrt_llm_checkpoint(
 ):
     """Exports the torch model to the TensorRT-LLM checkpoint and save to the export_dir.
 
+    .. deprecated::
+        The TensorRT-LLM checkpoint format is deprecated. Use
+        :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`
+        instead, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM,
+        vLLM and SGLang.
+
     Args:
         model: the torch model.
         decoder_type: the type of the decoder, e.g. gpt, gptj, llama.
@@ -471,6 +515,11 @@ def export_tensorrt_llm_checkpoint(
             https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/models/modeling_utils.py.
         * ``.safetensors``: The file for the list of weights as safetensors. Unique for each rank.
     """
+    warnings.warn(
+        _DEPRECATION_MSG.format(name="export_tensorrt_llm_checkpoint"),
+        DeprecationWarning,
+        stacklevel=2,
+    )
     export_dir = Path(export_dir)
     export_root = export_dir
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -485,7 +534,7 @@ def export_tensorrt_llm_checkpoint(
             tensorrt_llm_config,
             weights,
             quant_config,
-        ) in torch_to_tensorrt_llm_checkpoint(
+        ) in _torch_to_tensorrt_llm_checkpoint(
             model=model,
             decoder_type=decoder_type,
             dtype=dtype,
