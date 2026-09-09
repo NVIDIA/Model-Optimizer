@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from typing import TypedDict
 
@@ -62,6 +63,19 @@ __all__ = [
 ]
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+
+
+def nixl_backends_from_env() -> list[str]:
+    """NIXL backend list from ``NIXL_BACKENDS`` (comma-separated), defaulting to ``["UCX"]``.
+
+    Shared by the trainer-side agent (here) and the producer-side connector
+    (rdma_hidden_states_connector.py) so the two ALWAYS agree — they must use the same
+    backend to hand off over RDMA. Default UCX (InfiniBand clusters like HSG/nrt); on AWS EFA
+    set ``NIXL_BACKENDS=LIBFABRIC`` — UCX needs the EFA verbs driver (libefa-rdmav34.so) which
+    the container lacks, so UCX RDMA dies there.
+    """
+    return os.environ.get("NIXL_BACKENDS", "UCX").split(",")
+
 
 # Errors from ``_fetch`` that are genuinely transient (server overloaded / connection
 # reset / timeout) and so count against the circuit breaker and trigger a resample.
@@ -92,6 +106,33 @@ def _tokenize_with_loss_mask(
     recovery = None
     if answer_only_loss and not getattr(tokenizer, "is_fast", False):
         recovery = get_loss_mask_recovery(tokenizer)
+    if answer_only_loss and recovery is None:
+        # Fail loudly on a template without {% generation %} tags: transformers only
+        # warns and returns an ALL-ZERO assistant mask, which trains every sample at
+        # zero loss with no other symptom. (The regex matches the tag itself, not the
+        # unrelated `add_generation_prompt` identifier most templates contain.)
+        template = getattr(tokenizer, "chat_template", None) or ""
+        if not re.search(r"\{%-?\s*generation\b", template):
+            raise RuntimeError(
+                "answer_only_loss=True needs assistant masks, but the tokenizer's chat "
+                "template has no {% generation %} tags, so apply_chat_template would "
+                "return an all-zero mask and training would silently run at zero loss. "
+                "Pass a tagged template copy via data.chat_template (see "
+                "tools/launcher/examples/MiniMaxAI/MiniMax-M3/m3_chat_template_generation.jinja "
+                "for a worked example), register a loss-mask recovery "
+                "(modelopt.torch.utils.loss_mask), or set answer_only_loss=false."
+            )
+        if not getattr(tokenizer, "is_fast", False):
+            # A tagged template is not enough on a slow tokenizer: assistant-mask
+            # alignment needs the fast tokenizer's char_to_token, so apply_chat_template
+            # would fail downstream with an unrelated-looking error.
+            raise RuntimeError(
+                "answer_only_loss=True needs assistant masks, but the tokenizer is not a "
+                "fast tokenizer, so apply_chat_template cannot align {% generation %} tags "
+                "to tokens (char_to_token is unavailable). Use a fast tokenizer, register "
+                "a loss-mask recovery (modelopt.torch.utils.loss_mask), or set "
+                "answer_only_loss=false."
+            )
     out = tokenizer.apply_chat_template(
         conversations,
         tokenize=True,
@@ -242,12 +283,17 @@ class StreamingDataset(Dataset):
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry.
 
-        Returns ``None`` for entries missing ``cid`` / ``messages``, or when
+        Returns ``None`` for entries missing ``cid`` / ``conversations``-or-``messages``, or when
         right-truncation to ``max_seq_len`` drops the entire supervised span
         (``answer_only_loss`` mode with the assistant turn at the tail).
         """
         cid = entry.get("conversation_id") or entry.get("uuid")
-        convs = entry.get("messages") or entry.get("conversations")
+        # Prefer ``conversations``, fall back to ``messages`` (the documented default format;
+        # see examples README). The order matters: some corpora (e.g. Spec-Decoding-Dataset-v2)
+        # carry a degenerate user-only ``messages`` stub (no assistant turn) alongside the real
+        # dialogue in ``conversations`` — preferring ``conversations`` picks the real dialogue
+        # there, while a ``messages``-only corpus still works via the fallback.
+        convs = entry.get("conversations") or entry.get("messages")
         if cid is None or not convs or not isinstance(convs, list):
             return None
         input_ids, loss_mask = _tokenize_with_loss_mask(
@@ -321,6 +367,18 @@ class EagleVllmStreamingConfig(StreamingConfig):
     # Required here (the base field is optional): the RDMA recv buffer is pre-sized and
     # registered once from max_seq_len, so it must be known before the first fetch.
     max_seq_len: int = Field(gt=0)
+    # vLLM captures the residual stream BEFORE the final norm, so the trainer must re-apply it
+    # before lm_head (see HFDFlashModel.forward). Set False for a post-norm producer.
+    base_hidden_prenorm: bool = True
+    # Whether the LAST captured plane doubles as both the final aux feature and the base
+    # (KD/distillation-target) hidden. Normally they are distinct: the draft's aux layers
+    # sit below the base's last layer, so the producer captures ``aux + [final]`` and the
+    # trainer peels the extra plane off. A draft whose top aux id already IS the base's
+    # final layer (e.g.
+    # nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark, aux ids [2,6,20,30,42,52]
+    # on a 52-layer base) cannot supply a distinct extra id — vLLM captures each layer at
+    # most once — so the final plane is reused for both roles.
+    final_aux_is_base_hidden: bool = False
 
     @field_validator("server_urls", mode="before")
     @classmethod
@@ -370,7 +428,8 @@ class EagleVllmStreamingDataset(StreamingDataset):
         if getattr(self, "_nixl_pid", None) != pid:
             from nixl._api import nixl_agent, nixl_agent_config
 
-            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=["UCX"]))
+            _backends = nixl_backends_from_env()
+            self._nixl = nixl_agent(f"hs-trainer-{pid}", nixl_agent_config(backends=_backends))
             self._nixl_pid = pid
             self._remote_by_host: dict = {}
             self._recv = None
@@ -413,6 +472,17 @@ class EagleVllmStreamingDataset(StreamingDataset):
         )
         r.raise_for_status()
         kv = r.json().get("kv_transfer_params") or {}
+        # Fail loud on undersized pool slots: if the serve connector's max_tokens is below our
+        # max_seq_len, long prompts overflow the slot and the producer silently skips capture,
+        # so /desc never readies and the fetch would hang. Surface it as a clear error instead.
+        conn_max_tokens = kv.get("hs_max_tokens")
+        if conn_max_tokens is not None and conn_max_tokens < self.config.max_seq_len:
+            raise RuntimeError(
+                f"serve connector max_tokens={conn_max_tokens} < trainer max_seq_len="
+                f"{self.config.max_seq_len}: prompts longer than {conn_max_tokens} tokens would "
+                "be silently dropped (capture skipped) and the fetch would hang. Raise "
+                "HS_MAX_TOKENS to >= max_seq_len, or unset it to auto-size from max_model_len."
+            )
         rid = kv.get("hs_req_id")
         if rid is None:
             warn_rank_0(f"[streaming] no hs_req_id for {sample['cid']}")
@@ -518,8 +588,15 @@ class EagleVllmStreamingDataset(StreamingDataset):
         hidden_states = fetched["hidden_states"]
         loss_mask = fetched["loss_mask"]
 
+        # The last plane is always the base (KD-target) hidden. It is normally an extra
+        # plane on top of the aux features; when the draft's top aux layer already is the
+        # base's final layer the producer cannot emit a distinct extra plane, so the same
+        # plane serves both roles (see ``final_aux_is_base_hidden``).
         base_model_hidden_states = hidden_states[:, -1, :]
-        aux_hidden_states = hidden_states[:, :-1, :].reshape(hidden_states.shape[0], -1)
+        aux_planes = (
+            hidden_states if self.config.final_aux_is_base_hidden else hidden_states[:, :-1, :]
+        )
+        aux_hidden_states = aux_planes.reshape(hidden_states.shape[0], -1)
 
         input_ids = token_ids.to(torch.int64)
         labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
@@ -532,4 +609,5 @@ class EagleVllmStreamingDataset(StreamingDataset):
             "attention_mask": torch.ones_like(input_ids),
             "loss_mask": loss_mask,
             "labels": labels,
+            "base_hidden_prenorm": self.config.base_hidden_prenorm,
         }

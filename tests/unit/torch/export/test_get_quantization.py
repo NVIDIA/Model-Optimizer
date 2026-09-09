@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import fnmatch
+
 import pytest
 import torch
 from _test_utils.torch.export.utils import (
@@ -22,6 +24,7 @@ from _test_utils.torch.export.utils import (
     partial_w4a8_config,
 )
 
+import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
@@ -29,8 +32,59 @@ from modelopt.torch.export.model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
-from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.export.quant_utils import get_kv_cache_scaling_factor, get_quant_config
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+
+
+class _FakeKVCacheQuantizer(torch.nn.Module):
+    """Minimal FP8 KV cache quantizer for scaling-factor tests."""
+
+    is_enabled = True
+    num_bits = (4, 3)
+    maxbound = 448.0
+
+    def export_amax(self):
+        return torch.tensor([224.0])
+
+
+def test_get_kv_cache_scaling_factor_can_disable_fp8_clamping():
+    """FP8 KV cache scales below 1.0 are retained when explicitly requested."""
+    attention = torch.nn.Module()
+    attention.k_bmm_quantizer = _FakeKVCacheQuantizer()
+    attention.v_bmm_quantizer = _FakeKVCacheQuantizer()
+
+    clamped_scales = get_kv_cache_scaling_factor(attention)
+    unclamped_scales = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=False)
+
+    assert all(torch.equal(scale, torch.tensor([1.0])) for scale in clamped_scales)
+    assert all(torch.equal(scale, torch.tensor([0.5])) for scale in unclamped_scales)
+
+
+@pytest.mark.parametrize("clamp_kv_cache_scales", [True, False])
+def test_export_mcore_gpt_to_hf_passes_kv_cache_clamping_option(
+    monkeypatch, tmp_path, clamp_kv_cache_scales
+):
+    """The public Megatron export API forwards the KV cache clamping option."""
+    exporter_args = {}
+
+    class FakeExporter:
+        def __init__(self, *args, **kwargs):
+            exporter_args.update(kwargs)
+            self.export_extra_modules = False
+
+        def save_pretrained(self, *args):
+            pass
+
+    monkeypatch.setattr(unified_export_megatron, "GPTModelExporter", FakeExporter)
+
+    unified_export_megatron.export_mcore_gpt_to_hf(
+        object(),
+        tmp_path,
+        export_dir=tmp_path,
+        clamp_kv_cache_scales=clamp_kv_cache_scales,
+    )
+
+    assert exporter_args["clamp_kv_cache_scales"] is clamp_kv_cache_scales
 
 
 @pytest.mark.parametrize(
@@ -60,3 +114,108 @@ def test_nvfp4_static_quantizer_export():
     quant_config = get_quant_config(model)
     assert quant_config["quantization"]["quant_algo"] == "NVFP4"
     assert quant_config["quantization"]["group_size"] == 16
+
+
+class _FakeTopKRouter(torch.nn.Module):
+    """Mimics a transformers>=5.0 MoE router: owns a ``weight`` but is NOT an ``nn.Linear``.
+
+    ``mtq.quantize`` only attaches quantizers to registered modules (e.g. ``nn.Linear``), so a
+    router like this never receives one -- reproducing the condition behind NVBug 5718750.
+    """
+
+    def __init__(self, hidden: int, num_experts: int):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(num_experts, hidden))
+        self.top_k = 2
+        self.num_experts = num_experts
+
+    def forward(self, x):
+        return torch.nn.functional.linear(x, self.weight)
+
+
+class _FakeMoEBlock(torch.nn.Module):
+    def __init__(self, hidden: int = 16, num_experts: int = 4):
+        super().__init__()
+        self.gate = _FakeTopKRouter(hidden, num_experts)
+        self.experts = torch.nn.ModuleList(
+            torch.nn.Linear(hidden, hidden, bias=False) for _ in range(num_experts)
+        )
+
+    def forward(self, x):
+        self.gate(x)  # exercise the router so it is reachable
+        out = x
+        for expert in self.experts:
+            out = expert(out)
+        return out
+
+
+class _FakeMoEModel(torch.nn.Module):
+    def __init__(self, hidden: int = 16, num_experts: int = 4):
+        super().__init__()
+        self.block = _FakeMoEBlock(hidden, num_experts)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+_nvfp4_all_linears_config = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
+            "enable": True,
+        },
+        {
+            "quantizer_name": "*input_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+            },
+            "enable": True,
+        },
+    ],
+    "algorithm": "max",
+}
+
+
+def test_moe_router_excluded_when_not_quantized():
+    """NVBug 5718750: a non-Linear MoE router (transformers>=5.0 TopKRouter) gets no quantizer.
+
+    Its BF16 weight is still exported, so it must be listed in ``exclude_modules``; otherwise
+    deployment frameworks treat it as a quantized weight and fail to load the checkpoint.
+    """
+    hidden = 16
+    model = _FakeMoEModel(hidden=hidden)
+    mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
+
+    # The router is not an nn.Linear, so quantize attached no quantizer to it.
+    assert not hasattr(model.block.gate, "weight_quantizer")
+    # The experts are quantized to NVFP4.
+    assert get_quantization_format(model.block.experts[0]) == QUANTIZATION_NVFP4
+
+    quant_config = get_quant_config(model)
+    assert quant_config["quantization"]["quant_algo"] == "NVFP4"
+
+    exclude_modules = quant_config["quantization"]["exclude_modules"]
+    assert any(fnmatch.fnmatch("block.gate", pattern) for pattern in exclude_modules), (
+        f"MoE router 'block.gate' missing from exclude_modules: {exclude_modules}"
+    )
+    # The quantized experts must NOT be excluded.
+    assert not any(fnmatch.fnmatch("block.experts.0", pattern) for pattern in exclude_modules), (
+        f"Quantized expert wrongly excluded: {exclude_modules}"
+    )
+
+
+def test_moe_router_names_handle_root_module():
+    """When the MoE block itself is the root module, router names have no leading dot."""
+    from modelopt.torch.export.quant_utils import _get_unquantized_moe_router_names
+
+    block = _FakeMoEBlock(hidden=16)
+    # name == "" for the root module; the router must be "gate", not ".gate".
+    assert _get_unquantized_moe_router_names(block) == ["gate"]

@@ -19,7 +19,7 @@ These helpers turn an MXFP4 source layer's E8M0 block scales into the per-tensor
 ``global_amax`` and per-NVFP4-block ``amax`` that pin NVFP4's two-level scale so
 the cast reproduces the source MXFP4 weights bit-for-bit (see PR #1372 for the
 derivation). They are pure tensor math with no model or checkpoint dependencies,
-shared by the GPT-OSS (``examples/llm_ptq``) and DeepSeek-V4
+shared by the GPT-OSS (``examples/hf_ptq``) and DeepSeek-V4
 (``examples/deepseek``) PTQ cast paths.
 """
 

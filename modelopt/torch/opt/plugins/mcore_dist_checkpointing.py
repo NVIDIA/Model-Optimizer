@@ -172,6 +172,16 @@ def _load_extra_state_from_sharded_checkpoint(
             extra_state_dict_no_prefix[k[len(prefix) :]] = v
     model.load_state_dict(extra_state_dict_no_prefix, strict=False)
 
+    # PyTorch load_state_dict calls set_extra_state only when the CLASS overrides it; modelopt registers it at
+    # instance level, so bare output_layer/ColumnParallelLinear is skipped -> saved static amax not applied.
+    # Invoke it explicitly here (idempotent via allow_post_restore).
+    for name, module in model.named_modules():
+        key = f"{name}._extra_state" if name else "_extra_state"
+        if key in extra_state_dict_no_prefix and hasattr(
+            module, "modelopt_set_extra_state_callbacks"
+        ):
+            module.set_extra_state(extra_state_dict_no_prefix[key])
+
 
 def restore_sharded_modelopt_state(
     model: list[torch.nn.Module],

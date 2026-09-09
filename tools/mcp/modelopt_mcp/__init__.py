@@ -28,9 +28,10 @@ Tool surface (Phase 1):
 * ``submit_job`` — submit a launcher YAML; mode determined by args
   (``hf_local`` → Docker; ``cluster_host`` → Slurm). Returns
   immediately: Slurm returns ``experiment_id`` (parsed from launch.py's
-  detach-mode stdout), Docker returns the background subprocess
-  ``pid`` (Phase 2 will tail launcher output to capture the nemo_run
-  experiment_id for the Docker path too).
+  detach-mode stdout), Docker always returns the background subprocess
+  ``pid`` plus ``experiment_id`` when it appears during the short
+  launcher-output tail; on timeout Docker returns ``experiment_id=None``
+  and a persistent ``stdout_log`` diagnostic path.
 * ``job_status`` — filesystem-based status from nemo_run's experiment
   dir (``_DONE``, ``status_*.out``). No in-memory registry; survives
   MCP server restarts.

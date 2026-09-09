@@ -96,8 +96,10 @@ class Hparam:
         """Context manager to temporarily set hparam to be configurable."""
         original_value = self._is_configurable
         self._is_configurable = True
-        yield
-        self._is_configurable = original_value
+        try:
+            yield
+        finally:
+            self._is_configurable = original_value
 
     @property
     def is_sortable(self):

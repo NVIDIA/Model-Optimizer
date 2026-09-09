@@ -313,7 +313,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
 
     seen_batch_sizes: list[int] = []
 
-    def fake_forward(x):
+    def fake_call(x):
         seen_batch_sizes.append(x.shape[0])
         # First call is the single-batch probe — succeeds.
         # Second call is the target-batch attempt — OOMs.
@@ -322,7 +322,9 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
-    model.forward = fake_forward
+    # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
+    # so route the mock's __call__ via side_effect.
+    model.side_effect = fake_call
     model.__class__.__name__ = "DummyModel"  # not enc/dec
 
     free_before = 1000
@@ -344,7 +346,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             sample_input_single_batch=sample_input,
         )
 
-    # Forward calls: probe(1), retry-at-target(10), retry-after-halve(5)
+    # Model calls: probe(1), retry-at-target(10), retry-after-halve(5)
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
@@ -699,7 +701,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokeniz
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
-    Without shuffle, source A's 8x-oversampled docs would all come first in
+    Without shuffle, source A's 16x-oversampled docs would all come first in
     ``all_samples`` and (with sufficient row consumption per doc) fill every row.
     With the deterministic shuffle, both sources appear within the first
     ``total_rows`` worth of consumed samples.
@@ -868,6 +870,19 @@ class TestLocalDatasetDirRoundTrips:
         default_samples = get_dataset_samples(dataset, num_samples=4)
         train_samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert default_samples == train_samples
+
+    def test_zero_quota_split_is_not_loaded(self, monkeypatch, make_toy_hf_dataset):
+        """1 sample over 2 splits → quotas [0, 1]: the zero-quota split is never opened."""
+        datasets = pytest.importorskip("datasets")
+        loaded, real_load_dataset = [], datasets.load_dataset
+
+        def _spy(*args, **kwargs):
+            loaded.append(kwargs.get("split"))
+            return real_load_dataset(*args, **kwargs)
+
+        monkeypatch.setattr(datasets, "load_dataset", _spy)
+        get_dataset_samples(make_toy_hf_dataset(), num_samples=1, split=["train", "test"])
+        assert loaded == ["test"]
 
     def test_download_to_jsonl_then_load(self, tmp_path, make_toy_hf_dataset):
         """Dump the dataset to JSONL, then reload it via the local-jsonl path."""

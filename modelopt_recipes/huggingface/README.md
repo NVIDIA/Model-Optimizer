@@ -1,21 +1,23 @@
-# Model-specific recipes for Hugging Face models
+# Architecture-specific recipes for Hugging Face models
 
 This folder holds model-optimization recipes (e.g. PTQ recipes) whose
-behavior is tied to a **specific Hugging Face model architecture or model instance**.
+behavior is tied to a **specific Hugging Face `model_type` (architecture)** — one
+recipe covers every checkpoint of that architecture. Recipes tuned to a single
+*published checkpoint* live in the sibling [`../models/`](../models/) tier
+instead.
 
 ## Choosing a recipe
 
-Built-in recipes live in two places: `modelopt_recipes/huggingface/<model_type>/`
-for model-specific recipes and `modelopt_recipes/general/` for model-agnostic
-ones. When deciding which to use:
+Built-in recipes live in three tiers — pick the most specific that applies:
 
-1. **Look in `huggingface/<model_type>/` first** for the target model's
-   Hugging Face `model_type`, and inside it for a nested
-   `<specific_model>/` folder if the recipe is tuned for one released
-   checkpoint rather than every checkpoint of that `model_type`. The
-   presence of a folder here signals that there is a recommended recipe
-   for that `model_type` or model instance.
-2. **Fall back to `general/`** if no `<model_type>/` folder applies. The
+1. **[`../models/<org>/<model_id>/`](../models/)** first, if there is an entry
+   for your **exact** published checkpoint (keyed by its model-hub path). It
+   mirrors a validated, per-checkpoint scheme.
+2. **`huggingface/<model_type>/`** for the target model's Hugging Face
+   `model_type` — an architecture-level recipe that applies to every checkpoint
+   of that `model_type`. The presence of a folder here signals a recommended
+   recipe for that architecture.
+3. **Fall back to `general/`** if no `<model_type>/` folder applies. The
    general recipes are a good starting point for any model — and the
    recommended starting point for a model architecture that does not yet
    have a model-specific entry.
@@ -67,17 +69,13 @@ include the field name the snippet represents as a secondary suffix
 is its natural canonical home; other importers reference it by the
 same relative path under `modelopt_recipes/`.
 
-### Per-family nested layout for specific model variants
+### Checkpoint-specific recipes
 
-If a recipe is tuned for one specific released model rather than every
-checkpoint under a `model_type`, nest the model name as an extra level:
-
-```text
-<model_type>/
-  <specific_model>/
-    <task>/
-      <recipe>.yaml
-```
+If a recipe is tuned for one specific released checkpoint rather than every
+checkpoint of a `model_type`, it does not belong here — it lives in the
+top-level [`../models/`](../models/) tier, keyed by the checkpoint's model-hub
+path `<org>/<model_id>`. See [`../models/README.md`](../models/README.md) for
+that convention.
 
 ### Per-folder READMEs
 

@@ -76,7 +76,7 @@ pipeline:
       - --concurrency 8
       - --num_requests 80
       - --output_length 4096
-      - --max_seq_len 40960
+      - --max_seq_len 65536
       - --aa_timing
       - --show_progress
       - --save_dir /scratchspace/qwen35_4b_none_vllm/throughput_32k

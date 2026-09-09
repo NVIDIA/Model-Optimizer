@@ -185,7 +185,7 @@ class GptOssModelDescriptor(ModelDescriptor):
         return {
             "experts_removal": expert_mixin,
             # Backward-compat alias: this key was "expert_removal" before the
-            # bypass branch standardised on "experts_removal" (matching the
+            # pruning configuration standardised on "experts_removal" (matching the
             # NemotronH descriptor). Kept so external scripts that still call
             # `resolve_pruning_mixin("expert_removal", GptOssModelDescriptor)`
             # continue to work. Remove after a deprecation cycle.

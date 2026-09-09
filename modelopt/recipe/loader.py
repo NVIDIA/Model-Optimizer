@@ -42,6 +42,7 @@ __all__ = ["load_config", "load_recipe"]
 # must contain 'quantize'" instead of pydantic's generic missing-field error.
 _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
     RecipeType.PTQ: "quantize",
+    RecipeType.AUTO_QUANTIZE: "auto_quantize",
     RecipeType.SPECULATIVE_EAGLE: "eagle",
     RecipeType.SPECULATIVE_DFLASH: "dflash",
     RecipeType.SPECULATIVE_MEDUSA: "medusa",
@@ -57,6 +58,15 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         isinstance(recipe_path, Path) and recipe_path.is_absolute()
     ):
         rp_str = str(recipe_path)
+        # Backward-compat alias: checkpoint-mirror recipes moved from the old
+        # ``huggingface/models/<org>/<model_id>/`` layout to the top-level ``models/``
+        # tier. A source checkout also keeps a ``huggingface/models`` -> ``../models``
+        # symlink, but symlinks don't survive into built wheels, so rewrite the old
+        # prefix here too — that keeps saved ``--recipe huggingface/models/...`` paths
+        # working for pip-installed users, not just source checkouts.
+        _bc_prefix = "huggingface/models/"
+        if rp_str.replace("\\", "/").startswith(_bc_prefix):
+            rp_str = "models/" + rp_str.replace("\\", "/")[len(_bc_prefix) :]
         suffixes = [""] if rp_str.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
         for suffix in suffixes:
             candidate = BUILTIN_RECIPES_LIB.joinpath(rp_str + suffix)
@@ -171,9 +181,9 @@ def _load_recipe_from_file(
 
         raw = yaml.safe_load(recipe_file.read_text()) or {}
         if not isinstance(raw, dict) or required_section not in raw:
-            kind = (
-                rtype.value.split("_", 1)[-1].upper() if "_" in rtype.value else rtype.value.upper()
-            )
+            # Strip only the ``speculative_`` prefix so multi-word non-speculative types
+            # (e.g. ``auto_quantize``) keep their full name: AUTO_QUANTIZE, not QUANTIZE.
+            kind = rtype.value.removeprefix("speculative_").upper()
             raise ValueError(f"{kind} recipe file {recipe_file} must contain {required_section!r}.")
 
     # Passing ``schema_type=schema_class`` to ``load_config`` enables typed-list

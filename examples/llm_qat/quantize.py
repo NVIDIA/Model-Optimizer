@@ -64,7 +64,7 @@ def quantize():
         print_rank_0(f"Loading quantization recipe: {quant_args.recipe}")
     ptq_cfg = resolve_quant_cfg_from_args(quant_args)
     if ptq_cfg is None:
-        raise ValueError("--recipe or --quant_cfg is required for quantization.")
+        raise ValueError("--recipe is required for quantization.")
 
     # Load model and tokenizer
     print_rank_0(f"Loading model: {model_args.model_name_or_path}")

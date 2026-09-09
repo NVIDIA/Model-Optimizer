@@ -21,17 +21,22 @@ from pathlib import Path
 import pytest
 import torch
 import transformers
-from _test_utils.torch.megatron.models import get_mcore_gpt_model
+from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     create_tiny_nemotron_dir,
+    create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
+    create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
+import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
@@ -86,7 +91,34 @@ def _test_unified_export_megatron(
     size,
     model_dir=None,
 ):
-    if model_type == "qwen3vl":
+    if model_type == "nemotron_h":
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        model = get_mcore_hybrid_model(
+            tensor_model_parallel_size=size,
+            pipeline_model_parallel_size=1,
+            initialize_megatron=True,
+            num_layers=config.num_hidden_layers,
+            hybrid_layer_pattern=config.hybrid_override_pattern,
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_query_groups=config.num_key_value_heads,
+            ffn_hidden_size=config.intermediate_size,
+            max_sequence_length=config.max_position_embeddings,
+            vocab_size=config.vocab_size,
+            mamba_state_dim=config.ssm_state_size,
+            mamba_num_heads=config.mamba_num_heads,
+            mamba_head_dim=config.mamba_head_dim,
+            mamba_num_groups=config.n_groups,
+            num_moe_experts=config.n_routed_experts,
+            moe_ffn_hidden_size=config.moe_intermediate_size,
+            moe_shared_expert_intermediate_size=config.moe_shared_expert_intermediate_size,
+            # NemotronH is the only arch that exports fused grouped-GEMM experts.
+            moe_grouped_gemm=True,
+            # NemotronH norms are RMSNorm; the builder defaults to LayerNorm, whose biases have no
+            # counterpart in the HF checkpoint.
+            normalization="RMSNorm",
+        ).cuda()
+    elif model_type == "qwen3vl":
         config = transformers.AutoConfig.from_pretrained(model_dir)
         text_cfg = config.text_config
         num_layers = text_cfg.num_hidden_layers
@@ -97,6 +129,47 @@ def _test_unified_export_megatron(
         max_sequence_length = text_cfg.max_position_embeddings
         vocab_size = text_cfg.vocab_size
         extra_kwargs = {"kv_channels": text_cfg.head_dim, "qk_layernorm": True}
+    elif model_type in {"qwen3_5_moe_vl_grouped", "qwen3_5_moe_vl_sequential"}:
+        text_cfg = transformers.AutoConfig.from_pretrained(model_dir).text_config
+        num_layers = text_cfg.num_hidden_layers
+        hidden_size = text_cfg.hidden_size
+        num_attention_heads = text_cfg.num_attention_heads
+        num_query_groups = text_cfg.num_key_value_heads
+        ffn_hidden_size = text_cfg.intermediate_size
+        max_sequence_length = text_cfg.max_position_embeddings
+        vocab_size = text_cfg.vocab_size
+        # Hybrid GatedDeltaNet + gated attention, with routed experts stored packed.
+        extra_kwargs = {
+            "kv_channels": text_cfg.head_dim,
+            "qk_layernorm": True,
+            "experimental_attention_variant": "gated_delta_net",
+            "num_moe_experts": text_cfg.num_experts,
+            "moe_ffn_hidden_size": text_cfg.moe_intermediate_size,
+            "moe_shared_expert_intermediate_size": text_cfg.shared_expert_intermediate_size,
+            "moe_shared_expert_gate": True,
+            # Match the HF layer_types pattern (every Nth layer is full attention, rest GDN).
+            "linear_attention_freq": len(text_cfg.layer_types),
+            # Both layouts must reach the same packed HF tensors, via GroupedMLPPacking
+            # (TEGroupedMLP) and PackNameRemapping (SequentialMLP) respectively.
+            "moe_grouped_gemm": model_type.endswith("grouped"),
+        }
+    elif model_type == "qwen3_moe":
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        num_layers = config.num_hidden_layers
+        hidden_size = config.hidden_size
+        num_attention_heads = config.num_attention_heads
+        num_query_groups = config.num_key_value_heads
+        ffn_hidden_size = config.intermediate_size
+        max_sequence_length = config.max_position_embeddings
+        vocab_size = config.vocab_size
+        # SequentialMLP: the Qwen3 rules only cover per-expert (``local_experts``) MoE.
+        extra_kwargs = {
+            "kv_channels": config.hidden_size // config.num_attention_heads,
+            "qk_layernorm": True,
+            "num_moe_experts": config.num_experts,
+            "moe_ffn_hidden_size": config.moe_intermediate_size,
+            "moe_grouped_gemm": False,
+        }
     elif model_type in {"llama", "nemotron"}:
         config = transformers.AutoConfig.from_pretrained(model_dir)
         num_layers = config.num_hidden_layers
@@ -113,22 +186,26 @@ def _test_unified_export_megatron(
     activation_func = "squared_relu" if model_type == "nemotron" else "swiglu"
     normalization = "LayerNorm" if model_type == "nemotron" else "RMSNorm"
 
-    model = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        pipeline_model_parallel_size=1,
-        initialize_megatron=True,
-        num_layers=num_layers,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_query_groups=num_query_groups,
-        ffn_hidden_size=ffn_hidden_size,
-        max_sequence_length=max_sequence_length,
-        vocab_size=vocab_size,
-        activation_func=activation_func,
-        normalization=normalization,
-        transformer_impl="modelopt",
-        **extra_kwargs,
-    ).cuda()
+    model = (
+        model
+        if model_type == "nemotron_h"
+        else get_mcore_gpt_model(
+            tensor_model_parallel_size=size,
+            pipeline_model_parallel_size=1,
+            initialize_megatron=True,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_query_groups=num_query_groups,
+            ffn_hidden_size=ffn_hidden_size,
+            max_sequence_length=max_sequence_length,
+            vocab_size=vocab_size,
+            activation_func=activation_func,
+            normalization=normalization,
+            transformer_impl="modelopt",
+            **extra_kwargs,
+        ).cuda()
+    )
 
     if quant_config:
         quant_config_dict = getattr(mtq, quant_config)
@@ -165,20 +242,17 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
-    if model_type == "qwen3vl" and rank == 0:
-        # sanity check that vision weights were merged by export_mcore_gpt_to_hf
-        keys = []
-        for sf in sorted(tmp_export_dir.glob("*.safetensors")):
-            with safe_open(str(sf), framework="pt", device="cpu") as f:
-                keys.extend(f.keys())
-        # every decoder layer should be present, not just some
-        for i in range(num_layers):
-            assert any(k.startswith(f"model.language_model.layers.{i}.") for k in keys), (
-                f"language model layer {i} keys missing from export"
-            )
-        assert any(k.startswith("model.visual.") for k in keys), (
-            "vision encoder keys missing from export"
+    if rank == 0 and extra_module is None:
+        # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
+        assert_exported_checkpoint_matches(
+            tmp_export_dir,
+            model_dir,
+            check_values=False,
+            # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
+            allow_unexpected=("mlp.gate.expert_bias",),
         )
+
+    if model_type == "qwen3vl" and rank == 0:
         # try to load the model and run a forward pass
         vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
             tmp_export_dir, torch_dtype=torch.bfloat16
@@ -193,8 +267,11 @@ def _test_unified_export_megatron(
     ("model_type", "extra_module", "quant_config", "kv_cache_quant_cfg"),
     [
         ("nemotron", None, None, None),
+        # NemotronH (Mamba + attention + grouped-GEMM MoE) is the stronger quantized case, but it
+        # routes no NVFP4 weight through the dense-MLP rules, so keep one dense NVFP4 param too.
         ("nemotron", None, "NVFP4_DEFAULT_CFG", None),
-        ("nemotron", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("nemotron_h", None, "NVFP4_DEFAULT_CFG", None),
+        ("nemotron_h", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
         ("nemotron", "eagle", None, None),
         ("nemotron", "medusa", None, None),
         ("llama", None, None, None),
@@ -204,6 +281,14 @@ def _test_unified_export_megatron(
         ("llama", "medusa", None, None),
         ("qwen3vl", None, None, None),
         ("qwen3vl", None, "FP8_DEFAULT_CFG", None),
+        # Regression guard: routed experts used to be dropped silently from the export.
+        ("qwen3_moe", None, None, None),
+        ("qwen3_moe", None, "FP8_DEFAULT_CFG", None),
+        # Packed routed experts (Qwen3.5). NVFP4 keeps per-expert block scales while FP8 merges a
+        # single scale, so the packing rules only get full coverage across both formats.
+        ("qwen3_5_moe_vl_grouped", None, "NVFP4_DEFAULT_CFG", None),
+        ("qwen3_5_moe_vl_grouped", None, "FP8_DEFAULT_CFG", None),
+        ("qwen3_5_moe_vl_sequential", None, "NVFP4_DEFAULT_CFG", None),
     ],
 )
 def test_unified_export_megatron(
@@ -215,6 +300,12 @@ def test_unified_export_megatron(
         model_dir = create_tiny_qwen3vl_dir(tmp_path)
     elif model_type == "nemotron":
         model_dir = create_tiny_nemotron_dir(tmp_path)
+    elif model_type == "nemotron_h":
+        model_dir = create_tiny_nemotron_h_dir(tmp_path)
+    elif model_type == "qwen3_moe":
+        model_dir = create_tiny_qwen3_moe_dir(tmp_path)
+    elif model_type.startswith("qwen3_5_moe_vl"):
+        model_dir = create_tiny_qwen3_5_moe_vl_dir(tmp_path)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
     # TODO: Fix TP>1 failures
@@ -540,3 +631,103 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
+
+
+class _FakeTEGroupedMLP:
+    """Minimal TEGroupedMLP stand-in exposing num_gemms, weight{i}, and state_dict()."""
+
+    def __init__(self, num_gemms: int, hidden: int = 8, ffn: int = 16, local_expert_indices=None):
+        self.num_gemms = num_gemms
+        self._weights = {
+            f"weight{i}": torch.randn(ffn, hidden, dtype=torch.bfloat16) for i in range(num_gemms)
+        }
+        for k, v in self._weights.items():
+            setattr(self, k, v)
+        if local_expert_indices is not None:
+            self.local_expert_indices = local_expert_indices
+
+    def state_dict(self):
+        return dict(self._weights)
+
+
+def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter._state_dict = {}
+    exporter._get_quantized_state = lambda *a, **k: ({}, None, 0)
+    exporter._get_weight_scales = lambda *a, **k: (None, None)
+    exporter._record_layer_quant_config = lambda *a, **k: None
+    return exporter
+
+
+def test_grouped_mlp_slicing_maps_local_to_global_expert_ids():
+    """EP>1 fix: without global remapping, every EP rank would write experts.0..N-1 and
+    collide on the writer's state_dict.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    # Simulate EP rank 2 of an EP=4 job: this rank owns global experts 4 and 5.
+    module = _FakeTEGroupedMLP(num_gemms=2, local_expert_indices=[4, 5])
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.4.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.5.gate_up_proj.weight" in exporter._state_dict
+    # Local indices 0/1 must NOT leak into the exported state_dict.
+    assert "experts.0.gate_up_proj.weight" not in exporter._state_dict
+    assert "experts.1.gate_up_proj.weight" not in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_normalizes_tensor_local_expert_indices():
+    """local_expert_indices may arrive as a torch.Tensor (Megatron path). It must be
+    normalized to list[int] -- a naive `bool(tensor)` on a multi-element tensor raises.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(
+        num_gemms=2, local_expert_indices=torch.tensor([6, 7], dtype=torch.long)
+    )
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.6.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.7.gate_up_proj.weight" in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_collects_all_missing_expert_weights():
+    """New collect-then-raise behavior: the error message must name every missing
+    weight{i}, not just the first one hit.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=3)
+    # Drop weight0 AND weight2; only weight1 remains.
+    module.state_dict = lambda: {"weight1": module.weight1}
+
+    with pytest.raises(ValueError) as exc_info:
+        exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    msg = str(exc_info.value)
+    assert "weight0" in msg and "weight2" in msg, (
+        f"error should list all missing weights, got: {msg}"
+    )
+
+
+def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
+    """DP>1 fix predicate: only the DP0/EP0 rank among is_last_stage_main_rank writes
+    sidecar files. Guards the predicate used at three sites in save_pretrained.
+    """
+    # is_last_stage_main_rank=False is never a writer, regardless of DP/EP.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(False) is False
+
+    # DP0/EP0 is the writer.
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is True
+
+    # DP rank != 0 loses the writer role even if is_last_stage_main_rank.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 1)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False
+
+    # EP rank != 0 loses the writer role.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 1)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False

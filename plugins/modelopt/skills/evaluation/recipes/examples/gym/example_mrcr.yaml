@@ -1,0 +1,319 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# MRCR (Multi-Round Co-reference Resolution) — STANDALONE gym eval.
+# NeMo Gym `simple_agent`: no SIF, no code-exec sandbox, no judge, no Tavily.
+# Grading is deterministic (prefix-gated SequenceMatcher.ratio) — HF_TOKEN is the
+# only secret. Targets the 1M-context N3 variant like the reviewed golden; prompts
+# up to 1,048,576 tokens drive every unusual setting below.
+#
+# Read recipes/tasks/gym/mrcr.md first (variant choice, Gym pin/container
+# coupling, score extraction, failure modes).
+#
+# `.env` needs HF_TOKEN, NEMO_EVALUATOR_TRUST_PRE_CMD=1 (this config has a pre_cmd)
+# and NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1 (nemo_gym is not in the FDF map).
+#   nel run --config example_mrcr.yaml --env-file .env
+#
+# =============================================================================
+defaults:
+  # slurm/default works anywhere; if your install ships a predefined
+  # internal/slurm/<cluster> config, prefer it (pre-fills hostname/partition/
+  # gres — see SKILL.md Step 4).
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+cluster:
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
+
+execution:
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  output_dir: ???        # absolute host path; keeps the response cache across resumes
+  walltime: "04:00:00"
+  # num_nodes / num_instances: cluster-dependent, so size them from the node's GPU
+  # count rather than copying — see references/multi-node.md (HAProxy pattern A).
+  # Defaults are 1/1, which will not finish a 1M run inside the walltime; the
+  # golden used 4 nodes / 4 instances of TP2 x DP2 on 4-GPU nodes (8 replicas).
+  # `parallelism` below is the TOTAL across instances.
+  # gres: a predefined internal/slurm/<cluster> config sets this. On slurm/default
+  # it's gpu:8 — set to the node's GPU count (match --tensor/--data-parallel-size)
+  # or sbatch fails "Requested node configuration is not available".
+  mounts:
+    # mount_home ALWAYS false — see example_eval.yaml / SKILL Step 4 for why.
+    mount_home: false
+    deployment:
+      # Real HF cache -> /hf-cache (paired with HF_HOME below).
+      <HOST_HF_CACHE>: /hf-cache
+    evaluation:
+      <HOST_HF_CACHE>: /hf-cache
+      <HOST_UV_CACHE>: /cache/uv
+  auto_export:            # REQUIRED trigger for MLflow upload (see example_eval.yaml).
+    destinations:
+      - mlflow
+  # Auto-export is a separate CPU-only sbatch; GPU-only partitions reject it.
+  cpu_partition: ???
+
+deployment:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: lit:/hf-cache
+    # REQUIRED for the 1M variant: --max-model-len above the checkpoint's
+    # declared max_position_embeddings is refused by vLLM without this.
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN: lit:1
+    # vLLM backend toggles go HERE (not in command). Uncomment per model card —
+    # e.g. NVFP4 MoE on Blackwell needs FlashInfer FP4 kernels:
+    #   VLLM_USE_FLASHINFER_MOE_FP4: lit:1
+    #   VLLM_FLASHINFER_MOE_BACKEND: lit:throughput
+  checkpoint_path: ???           # prefer a path already on the cluster over hf_model_handle
+  hf_model_handle:
+  served_model_name: ???
+  image: vllm/vllm-openai:v0.26.0   # bump to the EXACT model's recipes.vllm.ai minimum (SKILL Step 3)
+  gpu_memory_utilization: 0.95      # golden raises this from 0.85 to fit the 1M KV cache
+  # Golden serves in REASONING mode (thinking forced on via chat_template_kwargs
+  # below), so set the model's --reasoning-parser.
+  # After sizing num_nodes / num_instances / TP / DP above, append
+  # `--max-num-seqs N` where N = ceil(parallelism / num_instances / DP) — the GYM
+  # rule, not the generic SKILL one. Golden: ceil(256/4/2) = 32.
+  # Treat that as a CEILING, not a target. Like AA-LCR (recipes/tasks/aa/lcr.md)
+  # this task is KV-bound, and far more so: ~1M input tokens per request vs LCR's
+  # ~120K. Too high and vLLM preempts, and recomputing a 1M-token prefill makes the
+  # run SLOWER, not faster. Start small and raise only while preemption stays ~0
+  # (grep the server log for "preempted"). See references/parallelism.md.
+  # --kv-cache-dtype: match the checkpoint's kv_cache_quant_algo in
+  # hf_quant_config.json (vLLM does NOT read it from config.json). fp8 here only
+  # because this class of checkpoint declares FP8 KV; drop it for a checkpoint
+  # that does not, rather than applying uncalibrated KV quantization.
+  command: >-
+    vllm serve /checkpoint
+    --served-model-name ${deployment.served_model_name}
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --tensor-parallel-size 1
+    --data-parallel-size 1
+    --max-model-len 1100000
+    --kv-cache-dtype fp8
+    --reasoning-parser <PARSER>
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
+    --enable-prefix-caching
+    --enable-chunked-prefill
+    --max-num-batched-tokens 131072
+
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN         # openai/mrcr + the gated NVIDIA tokenizer both need it
+    HF_HOME: lit:/hf-cache
+    DUMMY_API_KEY: lit:dummy        # the deployed vLLM endpoint's (policy) key
+    UV_CACHE_DIR: lit:/cache/uv
+    NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
+  # The pinned Gym commit's MRCR prepare needs tiktoken + transformers, neither
+  # declared in its venv. Needs NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the shell.
+  pre_cmd: |-
+    set -ex
+    command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="/root/.local/bin:$PATH"; }
+    uv pip install --python /opt/Gym/.venv/bin/python --quiet tiktoken transformers
+  nemo_evaluator_config:
+    config:
+      params:
+        temperature: 1.0
+        top_p: 0.95
+        # Gym client concurrency, TOTAL across instances — not a per-server cap.
+        parallelism: 256
+        request_timeout: 36000      # 1M-token prefills are slow
+        max_retries: 10
+        # Uncapped: answers reproduce a full earlier turn, and any cap truncates
+        # it and craters SequenceMatcher.ratio (see max_output_tokens=null below).
+        max_new_tokens:
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
+        adapter_config:
+          use_system_prompt: false
+          process_reasoning_traces: true
+          params_to_remove:
+            - max_tokens
+            - max_completion_tokens
+          # Keep the toggle key your model family uses (enable_thinking ->
+          # Qwen3.x/GLM/Nemotron; thinking -> Kimi/DeepSeek); see SKILL
+          # "Reasoning adapter config".
+          params_to_add:
+            chat_template_kwargs:
+              enable_thinking: true
+            skip_special_tokens: false
+          # Caching OFF (same as the other gym template) — a cache hit across
+          # runs or variants would report stale completions.
+          use_caching: false
+          use_progress_tracking: true
+          tracking_requests_stats: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 10
+          use_response_logging: true
+          max_logged_responses: 10
+  # STANDALONE: exactly one gym task. Do NOT add other tasks to this list.
+  tasks:
+    - name: nemo_gym
+      # ??? on purpose: MRCR REQUIRES a git-backed Gym image so the pin below can
+      # apply, and the bootstrap exits 1 without one. The public
+      # nvcr.io/nvidia/eval-factory/nemo-gym:* images have a NON-git /opt/Gym and
+      # will not run this benchmark (GDPVal differs — its baked fallback is valid).
+      # NVIDIA-internal: modelopttools:eval-config Step 3d names a working image.
+      container: ???
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              nemo_gym:
+                install_on_the_fly:
+                  url: https://github.com/NVIDIA-NeMo/Gym
+                  # Golden's pin. Carries the N3 1M prepare path config_n3_1m.yaml
+                  # needs, and is NEWER than the Gym baked into any image — so it
+                  # MUST apply. Applied by `git checkout` in /opt/Gym, so it is
+                  # only usable where that is a git repo — the bootstrap exits
+                  # nonzero if the pin cannot apply or HEAD != this SHA, so a wrong
+                  # image fails fast instead of scoring. See recipes/tasks/gym/mrcr.md.
+                  commit: a431501aa294f3237d472aaf58dd1e5026156ea8  # pragma: allowlist secret
+                command: |
+                  set -ex
+                  cd /opt/Gym
+                  # Honour a mounted uv cache if injected, else image-local. Plain $VAR, no braces.
+                  [ -n "$UV_CACHE_DIR" ] || export UV_CACHE_DIR=/opt/cache/uv
+                  source .venv/bin/activate
+                  # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
+                  # images bake Gym at a fixed version (not a git repo) — use it as-is.
+                  # MRCR REQUIRES the pin (N3 1M prepare path). Unlike GDPVal rubric
+                  # mode there is no valid fallback, so refuse to run unpinned rather
+                  # than score a different benchmark green.
+                  if [ -d .git ]; then
+                    git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
+                    git fetch oss_pin
+                    git checkout "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
+                    echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+                    [ "$(git rev-parse HEAD)" = "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}" ] || \
+                      { echo "ERROR: Gym HEAD != pinned commit" >&2; exit 1; }
+                  else
+                    echo "ERROR: /opt/Gym is not a git repo; MRCR requires the pinned Gym" >&2
+                    exit 1
+                  fi
+                  # Pin sub-venv ray to whatever the IMAGE already has. Hardcoding a
+                  # version breaks when the image moves: a 2.49.2 pin against an image
+                  # carrying ray[default]==2.55.1 makes uv unsatisfiable and the gym
+                  # server dies at startup. Empty => leave ray unpinned.
+                  _ray_ver="$(/opt/Gym/.venv/bin/python -c 'import ray,sys; sys.stdout.write(ray.__version__)' 2>/dev/null || true)"
+                  echo "=== image ray version: $_ray_ver ==="
+                  for r in /opt/Gym/responses_api_models/*/requirements.txt \
+                           /opt/Gym/responses_api_agents/*/requirements.txt \
+                           /opt/Gym/resources_servers/*/requirements.txt; do
+                    [ -f "$r" ] || continue
+                    grep -vE '^[[:space:]]*-e ' "$r" > "$r.fixed" || true
+                    [ -n "$_ray_ver" ] && { grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo "ray[default]==$_ray_ver" >> "$r.fixed"; }
+                    grep -qiE '^tqdm' "$r.fixed" 2>/dev/null || echo 'tqdm' >> "$r.fixed"
+                    mv "$r.fixed" "$r" 2>/dev/null || true
+                  done
+                  for v in /opt/Gym/responses_api_models/*/.venv \
+                           /opt/Gym/responses_api_agents/*/.venv \
+                           /opt/Gym/resources_servers/*/.venv; do
+                    [ -d "$v" ] || continue
+                    d="$(dirname "$v")"
+                    [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
+                  done
+                  # Preserve inherited PYTHONPATH. Plain $VAR only -- OmegaConf parses brace syntax.
+                  _gym_sp="$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+                  if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
+                  else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi
+
+                  # SECRETS: `set -x` traces AFTER expansion, so without this the params'
+                  # $HF_TOKEN lands in the log (and in MLflow via log_logs). The rollout
+                  # call below is already safe via the heredoc.
+                  set +x
+                  ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
+                  set -x
+                  # The rollout command is written to a script and run from it, rather than passed
+                  # to `bash -c '...'`. Gym params can legitimately CONTAIN single quotes, which
+                  # would close a single-quoted `bash -c` wrapper early; Hydra then receives the
+                  # value split on spaces and dies with "no viable alternative at input".
+                  # The heredoc delimiter is QUOTED ('GYM_RUN_EOF') so nothing expands while
+                  # writing: $$ and $DUMMY_API_KEY land in the script literally and are expanded
+                  # at run time by the shell that executes it, which is what we want.
+                  cat > /tmp/gym_run.sh <<'GYM_RUN_EOF'
+                  echo $$ > /tmp/gym_eval_pgid
+                  exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}
+                  GYM_RUN_EOF
+                  setsid --wait bash /tmp/gym_run.sh &
+                  __ev=$!
+                  __rc=0; wait "$__ev" || __rc=$?
+                  echo "Evaluator Gym finished!"
+                  __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
+                  [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
+                  timeout 60 ray stop --force >/dev/null 2>&1 || true
+                  # uid-scoped: an unscoped pkill would kill other jobs' Ray daemons.
+                  pkill -9 -u "$(id -u)" -f raylet >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f gcs_server >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f plasma_store >/dev/null 2>&1 || true
+                  exit $__rc
+                # VARIANT SELECTOR — picks the context cap, the dataset AND the
+                # metric prefix. Change BOTH config_paths lines together, and update
+                # the metric name you harvest:
+                #   config_n3_1m.yaml   -> mrcr_n3_1m_benchmark_simple_agent   (this template)
+                #   config_n3_128k.yaml -> mrcr_n3_128k_benchmark_simple_agent
+                #   config.yaml         -> mrcr_benchmark_simple_agent
+                data_prep_params: >-
+                  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/mrcr/config_n3_1m.yaml]"
+                  +hf_token=$HF_TOKEN
+                  ++use_cached_prepared_benchmarks=true
+                # NEVER put '#' inside this folded (>-) scalar — it folds to one line and
+                # comments out every override after it.
+                collect_rollout_params: >-
+                  "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/mrcr/config_n3_1m.yaml]"
+                  ++port_range_low=63000
+                  ++port_range_high=64000
+                  ++global_aiohttp_connector_limit_per_host={{config.params.parallelism}}
+                  ++num_samples_in_parallel={{config.params.parallelism}}
+                  ++uv_cache_dir=$UV_CACHE_DIR
+                  ++output_jsonl_fpath={{config.output_dir}}/evaluator_rollouts.jsonl
+                  ++nemo_gym_log_dir={{config.output_dir}}/nemo_gym_logs
+                  ++overwrite_metrics_conflicts=true
+                  ++split=benchmark
+                  ++resume_from_cache=true
+                  ++reuse_existing_data_preparation=true
+                  ++skip_venv_if_present=true
+                  ++upload_rollouts_to_wandb=false
+                  ++responses_create_params.temperature={{config.params.temperature}}
+                  ++responses_create_params.top_p={{config.params.top_p}}
+                  ++responses_create_params.max_output_tokens=null
+                common_params: >-
+                  ++num_repeats=1
+                  ++policy_base_url={{target.api_endpoint.url}}
+                  ++policy_api_key=$DUMMY_API_KEY
+                  ++policy_model_name={{target.api_endpoint.model_id}}
+
+export:
+  # LITERAL values only (auto_export resolves this block at submit time in a scope
+  # without deployment/evaluation nodes; ${oc.env:...} is fine). Keep the sampling
+  # tags EQUAL to evaluation params above — they're the only MLflow record of them.
+  mlflow:
+    tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config
+    experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
+    description: 'CHANGEME-served-model-name | MRCR 1M | T=1.0, top_p=0.95, num_repeats=1'
+    log_logs: true
+    only_required: false
+    tags:
+      framework: vllm
+      model: CHANGEME-served-model-name
+      benchmark: nemo_gym.mrcr_n3_1m   # CHANGEME with the variant (see VARIANT SELECTOR)
+      temperature: '1.0'
+      top_p: '0.95'

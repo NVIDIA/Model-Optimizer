@@ -406,7 +406,7 @@ def format_stitched_losses(
 
         # Calculate change from initial: current loss minus the block's loss in the
         # first log chunk we saw. Per-block training-progress signal — answers "is
-        # bypass distillation actually reducing this block's loss?" and stays
+        # whether training is actually reducing this block's loss?" and stays
         # apples-to-apples even when blocks have very different intrinsic loss scales.
         if not initial_values_dict or block_name not in initial_values_dict:
             # No baseline supplied (callers may omit initial_values_dict).

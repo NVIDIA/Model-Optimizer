@@ -19,7 +19,7 @@ import pytest
 from _test_utils.examples.run_command import (
     extend_cmd_parts,
     run_example_command,
-    run_llm_ptq_command,
+    run_hf_ptq_command,
 )
 from _test_utils.torch.misc import minimum_sm
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
@@ -36,6 +36,9 @@ def test_lm_eval_hf(tmp_path):
         num_fewshot=5,
         limit=0.1,
         batch_size=8,
+        # Exercise the accuracy gate: reads the results file and enforces the bound
+        output_path=str(tmp_path / "results"),
+        accuracy_lower_bound=0.1,
     )
     run_example_command(cmd_parts, "llm_eval")
 
@@ -45,11 +48,12 @@ def test_lm_eval_hf(tmp_path):
 def test_qwen3_eval_fp8(tmp_path):
     # Bump max_position_embeddings: TRT-LLM serve rejects prompts longer than max_seq_len.
     # The default (32) is shorter than even simple MMLU prompts, and 2048 is shorter than
-    # 5-shot gsm8k prompts (~3.9k tokens). The eval LLM caps max_seq_len at max_gen_toks + 4096,
-    # so 8192 leaves headroom for the longest prompts we evaluate.
+    # 5-shot gsm8k prompts (~3.9k tokens). huggingface_example.sh sizes the lm_eval engine
+    # at max_input_len 4096 + max_output_len, so 8192 leaves headroom for the longest
+    # prompts we evaluate.
     model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, max_position_embeddings=8192)
     try:
-        run_llm_ptq_command(
+        run_hf_ptq_command(
             model=str(model_dir),
             quant="fp8",
             tasks="mmlu,lm_eval,simple_eval",

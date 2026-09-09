@@ -142,6 +142,33 @@ slurm_config:
         assert pipeline.tasks[0].environment == [{"HF_MODEL": "/hf-local/Qwen/Qwen3-8B"}]
         assert pipeline.tasks[1].environment == [{"HF_MODEL": "/hf-local/Qwen/Qwen3-8B"}]
 
+    def test_inline_task_and_global_vars(self):
+        """A task can use `inline` instead of `script`, with global_vars resolved."""
+        task = SandboxTask0(
+            inline="torchrun prune_minitron.py --output_hf_path <<global_vars.output_dir>>/pruned",
+        )
+        pipeline = SandboxPipeline(
+            task_0=task,
+            global_vars=GlobalVariables(output_dir="/cicd/megatron-bridge"),
+        )
+        assert pipeline.tasks[0].script is None
+        assert (
+            pipeline.tasks[0].inline
+            == "torchrun prune_minitron.py --output_hf_path /cicd/megatron-bridge/pruned"
+        )
+
+    def test_task_reqs_fields(self):
+        """A task can carry `reqs` / `reqs_file`, both resolved for global_vars."""
+        task = SandboxTask0(
+            reqs="transformers<5",
+            reqs_file="<<global_vars.output_dir>>/requirements.txt",
+            inline="python eval.py --out <<global_vars.output_dir>>",
+        )
+        pipeline = SandboxPipeline(task_0=task, global_vars=GlobalVariables(output_dir="/cicd/out"))
+        assert pipeline.tasks[0].reqs == "transformers<5"
+        assert pipeline.tasks[0].reqs_file == "/cicd/out/requirements.txt"
+        assert pipeline.tasks[0].inline == "python eval.py --out /cicd/out"
+
 
 class TestTestYamlFormat:
     """Tests for the test YAML format used by run_test_yaml.sh."""

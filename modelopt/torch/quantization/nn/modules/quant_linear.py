@@ -164,14 +164,18 @@ class SVDQuantLinear(QuantLinearConvBase):
 
     def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
-        super().fold_weight(keep_attrs)
-        if (
+        should_fold = (
             hasattr(self, "weight_quantizer")
             and hasattr(self, "weight")
+            and isinstance(self.weight, torch.Tensor)
+            and isinstance(self.weight_quantizer, TensorQuantizer)
             and self.weight_quantizer.fake_quant
-        ):
+        )
+        super().fold_weight(keep_attrs)
+        if should_fold:
             if (
-                self._not_sequential_quantizers()
+                not keep_attrs
+                and self._not_sequential_quantizers()
                 and self.weight_quantizer.svdquant_lora_a is not None
                 and self.weight_quantizer.svdquant_lora_b is not None
             ):
@@ -192,7 +196,7 @@ class SVDQuantLinear(QuantLinearConvBase):
 class RealQuantLinear(QuantModule):
     """Quantized version of nn.Linear with real quantization."""
 
-    list_of_scale_tensors = ["_scale", "double_scale", "_scale_zeros"]
+    list_of_scale_tensors = ["_scale", "_double_scale", "_scale_zeros"]
     allow_real_quant_gemm = True
 
     @property

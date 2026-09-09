@@ -20,19 +20,10 @@ import onnx_graphsurgeon as gs
 import pytest
 import torch
 from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
+from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 import modelopt.onnx.quantization as moq
-
-
-def assert_nodes_are_quantized(nodes):
-    for node in nodes:
-        for inp_idx, inp in enumerate(node.inputs):
-            if isinstance(inp, gs.Variable):
-                assert node.i(inp_idx).op == "DequantizeLinear", (
-                    f"Input '{inp.name}' of node '{node.name}' is not quantized but should be!"
-                )
-    return True
 
 
 def int8_test_helper(tmp_path, high_precision_dtype, **kwargs):
