@@ -17,6 +17,7 @@ import argparse
 import csv
 
 import timm
+from _trt_compat import check_dynamic_nvfp4_trt_support, onnx_uses_dynamic_nvfp4
 from evaluation import evaluate
 
 from modelopt.torch._deploy._runtime import RuntimeRegistry
@@ -80,6 +81,12 @@ def main():
     )
 
     args = parser.parse_args()
+    if onnx_uses_dynamic_nvfp4(args.onnx_path):
+        try:
+            check_dynamic_nvfp4_trt_support()
+        except ImportError as error:
+            parser.error(str(error))
+
     deployment = {
         "runtime": "TRT",
         "precision": args.engine_precision,

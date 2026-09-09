@@ -287,3 +287,26 @@ def test_prepare_ep_list_rejects_unrecognized_trt_rtx_backend():
 def test_configure_ort_rejects_unrecognized_trt_rtx_backend():
     with pytest.raises(ValueError, match="trt_rtx_backend must be 'legacy' or 'abi'"):
         ort_utils.configure_ort([], [], calibration_eps=["cpu"], trt_rtx_backend="invalid")
+
+
+@pytest.mark.parametrize(
+    ("banner", "accepted"),
+    [
+        ("&&&& FAILED TensorRT.trtexec [TensorRT v101601]", False),
+        ("&&&& PASSED TensorRT.trtexec [TensorRT v110000] [b114]", True),
+    ],
+)
+def test_check_for_trtexec_compact_version_banner(monkeypatch, banner, accepted):
+    path = "/usr/bin/trtexec"
+    monkeypatch.setattr(ort_utils.shutil, "which", lambda _: path)
+    monkeypatch.setattr(
+        ort_utils,
+        "_run_trtexec",
+        lambda **_: types.SimpleNamespace(stdout=banner, stderr=""),
+    )
+
+    if accepted:
+        assert ort_utils._check_for_trtexec(min_version="11.0") == path
+    else:
+        with pytest.raises(ImportError, match=r">= 11\.0, found 10\.16"):
+            ort_utils._check_for_trtexec(min_version="11.0")

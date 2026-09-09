@@ -29,6 +29,11 @@ import timm
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from _trt_compat import (
+    check_dynamic_nvfp4_trt_support,
+    onnx_uses_dynamic_nvfp4,
+    request_needs_dynamic_nvfp4_check,
+)
 from datasets import load_dataset
 from download_example_onnx import export_to_onnx
 from evaluation import evaluate
@@ -592,7 +597,10 @@ def main():
     parser.add_argument(
         "--trt_build",
         action="store_true",
-        help="Build a TensorRT engine from the exported ONNX model using trtexec.",
+        help=(
+            "Build a TensorRT engine from the exported ONNX model using trtexec. "
+            "Dynamic NVFP4 engine builds require TensorRT 11.0 or newer."
+        ),
     )
     parser.add_argument(
         "--no_pretrained",
@@ -615,6 +623,17 @@ def main():
         parser.error(
             f"Expected a PTQ or AutoQuantize recipe, got {type(recipe).__name__} from {args.recipe}."
         )
+
+    if request_needs_dynamic_nvfp4_check(
+        args.qformat,
+        args.auto_quantization_formats,
+        recipe_provided=recipe is not None,
+        trt_build=args.trt_build,
+    ):
+        try:
+            check_dynamic_nvfp4_trt_support()
+        except ImportError as error:
+            parser.error(str(error))
 
     # Create model and move to appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -731,6 +750,11 @@ def main():
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")
 
     if args.trt_build:
+        if recipe is not None and onnx_uses_dynamic_nvfp4(args.onnx_save_path):
+            try:
+                check_dynamic_nvfp4_trt_support()
+            except ImportError as error:
+                parser.error(str(error))
         build_trt_engine(args.onnx_save_path)
 
 

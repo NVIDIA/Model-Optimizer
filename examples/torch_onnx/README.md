@@ -97,7 +97,10 @@ not make MXFP8, NVFP4, INT4_AWQ, or AutoQuantize supported for convolutional arc
 
 If the input model is of type image classification, use the following script to evaluate it. The script automatically downloads and uses the [ILSVRC/imagenet-1k](https://huggingface.co/datasets/ILSVRC/imagenet-1k) dataset from Hugging Face. This gated repository requires authentication via Hugging Face access token. See <https://huggingface.co/docs/hub/en/security-tokens> for details.
 
-> *Note: TensorRT 10.11 or later is required to evaluate the MXFP8 or NVFP4 ONNX models.*
+> *Note: TensorRT 10.11 or later is required to evaluate MXFP8 ONNX models. Dynamic NVFP4
+> (W4A4) models containing `TRT_FP4DynamicQuantize` require TensorRT 11.0 or later for
+> `--trt_build` or evaluation. Export without `--trt_build` remains supported; use
+> `--qformat=fp8` without `--recipe` when targeting TensorRT 10.*
 
 ```bash
 python ../onnx_ptq/evaluate.py \

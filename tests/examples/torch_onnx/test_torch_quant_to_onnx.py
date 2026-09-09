@@ -21,10 +21,19 @@ import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
 from modelopt.recipe import load_recipe
+from modelopt.torch.quantization.backends.utils import fp4_compatible
 
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
-_QFORMATS = ["fp8", "int8", "mxfp8", "nvfp4", "auto"]
+_REQUIRES_FP4 = pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")
+
+_QFORMATS = [
+    "fp8",
+    "int8",
+    "mxfp8",
+    pytest.param("nvfp4", marks=_REQUIRES_FP4),
+    pytest.param("auto", marks=[_REQUIRES_FP4, pytest.mark.timeout(600)]),
+]
 _RESNET_RECIPE_QFORMATS = {"fp8", "int8"}
 
 _MODELS = {
@@ -88,8 +97,14 @@ def test_torch_onnx(tmp_path, model_key, qformat):
         calibration_data_size="1",
         num_score_steps="1",
     )
-    cmd_parts.extend(["--no_pretrained", "--trt_build"])
+    cmd_parts.append("--no_pretrained")
+    if qformat not in {"nvfp4", "auto"}:
+        cmd_parts.append("--trt_build")
     run_example_command(cmd_parts, "torch_onnx")
+
+    if qformat == "nvfp4":
+        op_types = {node.op_type for node in onnx.load(onnx_save_path).graph.node}
+        assert "TRT_FP4DynamicQuantize" in op_types
 
     if model_key == "resnet50" and qformat in _RESNET_RECIPE_QFORMATS:
         _assert_residual_inputs_are_quantized(onnx_save_path)
