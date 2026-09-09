@@ -58,11 +58,9 @@ from .unified_export_hf import (
     save_non_weight_artifacts,
 )
 
-__all__ = [
-    "_export_fsdp2_checkpoint_streaming",
-    "_export_transformers_checkpoint_streaming",
-    "collect_export_tensors",
-]
+# Both exporters are internal dispatch targets of ``export_hf_checkpoint``, which is the public
+# entry point; only the shared walk is named without an underscore.
+__all__ = ["collect_export_tensors"]
 
 
 class _StreamingShardWriter:
@@ -72,7 +70,10 @@ class _StreamingShardWriter:
     at :meth:`finalize` renames temp files to canonical shard names once the total shard
     count is known.
 
-    Peak memory = 1 layer (being materialized) + 1 shard buffer, not the full checkpoint.
+    The writer itself holds one shard buffer, never the full checkpoint. What the caller holds on
+    top of that differs: the offload path feeds it one materialized layer at a time, while the
+    FSDP2 path hands over this rank's whole share (~model / world_size), because every gather must
+    finish before any rank starts writing.
     """
 
     def __init__(self, export_dir: Path | str, max_shard_size: int, part_tag: str = "") -> None:

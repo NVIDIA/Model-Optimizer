@@ -23,7 +23,6 @@ GPU. The multi-rank unshard collective needs real FSDP2 and is covered in ``test
 
 import copy
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -71,12 +70,12 @@ def _load_all(export_dir: Path) -> dict:
 # --------------------------------------------------------------------------- #
 # End-to-end streaming export (world=1)
 # --------------------------------------------------------------------------- #
-def test_streaming_export_matches_resident_path():
+def test_streaming_export_matches_resident_path(tmp_path):
     """Streaming export produces the same tensors as the whole-state-dict path."""
     model = _tiny_quantized_llama()
     ref_model = copy.deepcopy(model)  # export packs weights in place -> need two copies
 
-    d = Path(tempfile.mkdtemp())
+    d = tmp_path
     _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
     streamed = _load_all(d)
 
@@ -87,9 +86,9 @@ def test_streaming_export_matches_resident_path():
         assert torch.equal(streamed[key].float(), ref[key].cpu().float()), key
 
 
-def test_streaming_export_drops_tied_alias_and_writes_config():
+def test_streaming_export_drops_tied_alias_and_writes_config(tmp_path):
     model = _tiny_quantized_llama()
-    d = Path(tempfile.mkdtemp())
+    d = tmp_path
     _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d)
 
     loaded = _load_all(d)
@@ -100,10 +99,10 @@ def test_streaming_export_drops_tied_alias_and_writes_config():
     assert not list(d.glob("__shard_part*"))
 
 
-def test_streaming_export_subsplits_by_max_shard_size():
+def test_streaming_export_subsplits_by_max_shard_size(tmp_path):
     """A tiny max_shard_size forces several shard files; the index still maps every key."""
     model = _tiny_quantized_llama()
-    d = Path(tempfile.mkdtemp())
+    d = tmp_path
     _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d, max_shard_size=2048)
 
     index = json.loads((d / "model.safetensors.index.json").read_text())
@@ -113,11 +112,11 @@ def test_streaming_export_subsplits_by_max_shard_size():
     assert index["metadata"]["total_size"] > 0
 
 
-def test_streaming_export_extra_state_dict_mtp():
+def test_streaming_export_extra_state_dict_mtp(tmp_path):
     """extra_state_dict (MTP-style tensors the model never holds) is written by rank 0."""
     model = _tiny_quantized_llama()
     extra = {"model.layers.99.mtp.weight": torch.randn(8, 8, dtype=torch.bfloat16)}
-    d = Path(tempfile.mkdtemp())
+    d = tmp_path
     _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=d, extra_state_dict=extra)
 
     loaded = _load_all(d)
