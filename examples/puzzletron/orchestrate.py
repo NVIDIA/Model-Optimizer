@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     verify_expectation_here = allocation_identity is None and not result.get("detached")
     if args.expect is not None and verify_expectation_here:
-        if result.get("report_status") == "completed":
+        if result.get("report_status") == "completed" or result.get("result_finalized"):
             expectation = verify_expected_results(args.expect, puzzle_dir=plan.puzzle_dir)
         else:
             expectation = ExpectationResult(
@@ -317,7 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     expectation_exit_code = result.get("expectation_exit_code")
     if expectation_exit_code is not None:
         return int(expectation_exit_code)
-    return 0 if not result.get("halted") and result.get("report_status") != "failed" else 1
+    optional_view_failed_without_result = result.get(
+        "report_status"
+    ) == "failed" and not result.get("result_finalized")
+    return 0 if not result.get("halted") and not optional_view_failed_without_result else 1
 
 
 if __name__ == "__main__":

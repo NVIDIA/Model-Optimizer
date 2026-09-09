@@ -34,7 +34,7 @@ students.
 - The teacher scores came from an earlier evaluation. We did not run the planned
   final teacher and student comparison, and we do not have the exact teacher
   checkpoint fingerprint or runtime settings.
-- The separate [4B teacher baseline](../../../qwen35_teacher_backend_baseline/README.md)
+- The separate [4B teacher baseline](../../../qwen35_teacher_backend_baseline/runs/teacher-paths-20260902/summary.md)
   uses 64 RealWorldQA rows, 120 MMMU rows, and 160 MVBench rows. It does not use
   the same evaluation rows as this run.
 
@@ -88,4 +88,7 @@ examples or tokens processed or the optimizer history.
 - The trained checkpoints and raw run files are stored outside this repository.
   The structured record includes their identifiers and hashes.
 
-Reproduction instructions are in the [campaign guide](../../README.md).
+Shared evidence instructions are in the
+[campaign reports guide](../../../../../../docs/campaign_reports.md). Use the
+[Qwen 3.5 4B VLM example](../../../../../../docs/qwen3p5_4b_vlm_example.md) for
+current setup and reproduction guidance.

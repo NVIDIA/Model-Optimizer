@@ -1,0 +1,81 @@
+schema: modelopt.puzzletron.results-catalog/v1
+role: generated_discovery_index
+evidence_source: structured result.json leaves and qualified historical wrappers
+generated_at: '2026-09-08T00:00:00+00:00'
+generator_revision: modelopt.puzzletron.catalog/v1
+entries:
+  - run_id: 2026-09-01-r2
+    record_id: qwen3p5_4b-vlm-ffn_width_10to20pct_kd_search-2026-09-01-r2
+    model_family: Qwen/Qwen3.5-4B
+    modality: vlm
+    evidence_class: qualified_historical
+    execution_status: unknown
+    evidence_status: preliminary
+    updated_at: '2026-09-02'
+    result_path: examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/result_record.json
+    limitation_count: 14
+    summary_path: examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/summary.md
+  - run_id: 20260901_legacy_selection_v1
+    record_id: qwen35-vlm-kd-learning-curve-20260901-legacy-selection-v1
+    model_family: qwen3p5_0p8b
+    modality: vlm
+    evidence_class: qualified_historical
+    execution_status: completed
+    evidence_status: superseded
+    updated_at: '2026-09-02'
+    result_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_vlm_kd_learning_curve/runs/20260901_legacy_selection_v1/result_record.json
+    limitation_count: 8
+    summary_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_vlm_kd_learning_curve/runs/20260901_legacy_selection_v1/summary.md
+  - run_id: exclusive_w32_v2
+    record_id: qwen35-vlm-post-mip-ffn2048-exclusive-w32-v2
+    model_family: qwen3p5_0p8b
+    modality: vlm
+    evidence_class: qualified_historical
+    execution_status: completed
+    evidence_status: preliminary
+    updated_at: '2026-09-01'
+    result_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_vlm_smoke/runs/exclusive_w32_v2/result_record.json
+    limitation_count: 11
+    summary_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_vlm_smoke/runs/exclusive_w32_v2/summary.md
+  - run_id: nemotron3_nano_30b_a3b-development-snapshot
+    record_id: legacy:nemotron3_nano_30b_a3b:campaign-report
+    model_family: nemotron3_nano_30b_a3b
+    modality: text
+    evidence_class: qualified_historical
+    execution_status: unknown
+    evidence_status: not_reproducible
+    result_path: examples/puzzletron/reports/legacy/nemotron3_nano_30b_a3b/campaign_report/runs/development_snapshot/result_record.json
+    limitation_count: 4
+    summary_path: examples/puzzletron/reports/nemotron3_nano_30b_a3b.html
+  - run_id: qwen3p5_9b-development-snapshot
+    record_id: legacy:qwen3p5_9b:campaign-report
+    model_family: qwen3p5_9b
+    modality: text
+    evidence_class: qualified_historical
+    execution_status: unknown
+    evidence_status: not_reproducible
+    result_path: examples/puzzletron/reports/legacy/qwen3p5_9b/campaign_report/runs/development_snapshot/result_record.json
+    limitation_count: 4
+    summary_path: examples/puzzletron/reports/qwen3p5_9b.html
+  - run_id: teacher-paths-20260902
+    record_id: qwen3p5-0p8b-vlm-teacher-paths-20260902
+    model_family: Qwen/Qwen3.5-0.8B
+    modality: vlm
+    evidence_class: qualified_historical
+    execution_status: unknown
+    evidence_status: teacher_only
+    updated_at: '2026-09-02'
+    result_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_teacher_backend_baseline/runs/teacher-paths-20260902/result_record.json
+    limitation_count: 8
+    summary_path: examples/puzzletron/reports/qwen3p5_0p8b/vlm/qwen35_teacher_backend_baseline/runs/teacher-paths-20260902/summary.md
+  - run_id: teacher-paths-20260902
+    record_id: qwen3p5-4b-vlm-teacher-paths-20260902
+    model_family: Qwen/Qwen3.5-4B
+    modality: vlm
+    evidence_class: qualified_historical
+    execution_status: unknown
+    evidence_status: teacher_only
+    updated_at: '2026-09-02'
+    result_path: examples/puzzletron/reports/qwen3p5_4b/vlm/qwen35_teacher_backend_baseline/runs/teacher-paths-20260902/result_record.json
+    limitation_count: 8
+    summary_path: examples/puzzletron/reports/qwen3p5_4b/vlm/qwen35_teacher_backend_baseline/runs/teacher-paths-20260902/summary.md

@@ -127,8 +127,14 @@ def _handle_from_payload(payload: Mapping[str, Any] | None) -> JobHandle | None:
 def _result_is_complete(plan: CampaignPlan, result: Mapping[str, Any] | None) -> bool:
     if result is None:
         return False
+    result_record = plan.puzzle_dir / "results" / "result.json"
+    has_result = (
+        result.get("result_finalized") is True
+        and result.get("result_path") == str(result_record)
+        and result_record.is_file()
+    )
     return (
-        result.get("report_status") == "completed"
+        (result.get("report_status") == "completed" or has_result)
         and not result.get("halted")
         and all(stage_is_complete(plan.experiment_config, node.stage_id) for node in plan.stages)
     )

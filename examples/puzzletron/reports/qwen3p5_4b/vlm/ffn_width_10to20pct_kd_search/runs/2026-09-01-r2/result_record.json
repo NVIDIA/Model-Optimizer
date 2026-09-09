@@ -77,7 +77,7 @@
     }
   },
   "reproduction": {
-    "guide": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/README.md",
+    "guide": "examples/puzzletron/docs/campaign_reports.md",
     "dry_run_command": [
       "python",
       "examples/puzzletron/orchestrate.py",

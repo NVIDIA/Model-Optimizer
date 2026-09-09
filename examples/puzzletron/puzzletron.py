@@ -37,6 +37,12 @@ from puzzletron_orchestrator.recipe_config import (  # noqa: E402
     materialize_resolved_bundle,
     resolve_recipe_run,
 )
+from puzzletron_orchestrator.result_render import render_run_text  # noqa: E402
+from puzzletron_orchestrator.run_reporting import (  # noqa: E402
+    export_run_result,
+    inspect_run,
+    refresh_run_report,
+)
 
 
 def _add_recipe_inputs(parser: argparse.ArgumentParser) -> None:
@@ -123,6 +129,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inspect.add_argument("--json", action="store_true", help="Print one JSON document.")
 
+    results = commands.add_parser(
+        "results", help="Inspect, export, or refresh structured run results."
+    )
+    result_commands = results.add_subparsers(dest="results_command", required=True)
+    results_inspect = result_commands.add_parser("inspect", help="Inspect current run evidence.")
+    results_inspect.add_argument("run_root", type=Path)
+    results_inspect.add_argument("--json", action="store_true", help="Print one JSON document.")
+    results_export = result_commands.add_parser(
+        "export", help="Export a portable structured result."
+    )
+    results_export.add_argument("run_root", type=Path)
+    results_refresh = result_commands.add_parser(
+        "refresh", help="Regenerate the optional HTML summary from structured evidence."
+    )
+    results_refresh.add_argument("run_root", type=Path)
     return parser
 
 
@@ -213,6 +234,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inspect":
             _inspect(bundle_for_run_root(args.run_root), as_json=args.json)
             return 0
+        if args.command == "results":
+            if args.results_command == "inspect":
+                view = inspect_run(args.run_root)
+                print(json.dumps(view, indent=2) if args.json else render_run_text(view), end="")
+                return 0
+            if args.results_command == "export":
+                print(export_run_result(args.run_root))
+                return 0
+            if args.results_command == "refresh":
+                refresh_run_report(args.run_root)
+                print(args.run_root / "artifacts" / "campaign_report" / "campaign_report.html")
+                return 0
+            raise AssertionError(f"Unhandled results command: {args.results_command}")
 
         resolved = resolve_recipe_run(args.recipe, args.site, run_root=args.run_root)
         if args.command == "validate":

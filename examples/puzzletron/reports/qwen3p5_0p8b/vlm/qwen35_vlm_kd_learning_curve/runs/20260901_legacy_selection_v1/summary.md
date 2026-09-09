@@ -118,4 +118,4 @@ recorded in `result_record.json`.
 See the [structured record](result_record.json), [tidy metrics](metrics.csv),
 [frozen row manifest](row_manifest.json), and [MVBench denominator
 audit](mvbench_audit.csv). Campaign-level reproduction guidance is in the
-[campaign README](../../README.md).
+[campaign reports guide](../../../../../../docs/campaign_reports.md).

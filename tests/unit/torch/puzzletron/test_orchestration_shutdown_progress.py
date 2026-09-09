@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import signal
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -59,6 +58,7 @@ from puzzletron_orchestrator.state import PersistedAttempt, StageRunRecord
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
 
 def _seed_evaluation_progress(
@@ -144,23 +144,10 @@ class _FakeExecutor(Executor):
         return handle
 
     def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-        statuses = []
-        for handle in handles:
-            attempt = self._attempts[handle.handle_id]
-            state = JobState.RUNNING
-            if attempt.stage_id == "final_report":
-                puzzle_dir = Path(
-                    attempt.command.argv[attempt.command.argv.index("--puzzle-dir") + 1]
-                )
-                report_dir = puzzle_dir / "artifacts" / "campaign_report"
-                report_dir.mkdir(parents=True, exist_ok=True)
-                (report_dir / "campaign_report.html").write_text("<html></html>\n")
-                (report_dir / "report_manifest.json").write_text("{}\n")
-                state = JobState.COMPLETED
-            statuses.append(
-                JobStatus(handle=handle, state=state, log_paths=self.fetch_logs(handle))
-            )
-        return statuses
+        return [
+            JobStatus(handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle))
+            for handle in handles
+        ]
 
     def cancel(self, handles: Sequence[JobHandle]) -> None:
         self.cancelled.extend(handles)
@@ -792,9 +779,10 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
 
     assert recovered_result["halted"] is (not aggregation_failure)
     assert recovered_result["failed_stages"] == ([] if aggregation_failure else ["convert"])
-    assert recovered_executor.submitted_stage_ids == (
-        ["final_report"] if aggregation_failure else []
-    )
+    assert recovered_executor.submitted_stage_ids == []
+    if aggregation_failure:
+        assert recovered_result["result_path"]
+        assert recovered_result["report_status"] == "completed"
     assert len(list(controller.store.events_root.glob(f"*_{event_name}.json"))) == 1
     assert recovered.store.stage_is_complete("convert") is aggregation_failure
 
