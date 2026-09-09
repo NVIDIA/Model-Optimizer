@@ -17,24 +17,6 @@ prompt embeddings and masks plus a static negative-prompt embedding for teacher 
 tensors through a user-prepared FastGen cache. With `prompt_only: true`, cached image latents are
 omitted from the training batch and never enter the PDD objective.
 
-## Ownership
-
-ModelOpt owns only the PDD model transformation, Qwen execution adapter, loss, and fused sampler.
-NeMo AutoModel owns the ordinary training lifecycle: dataloader iteration, backward, gradient
-clipping, optimizer and learning-rate state, step scheduling, SIGTERM handling, checkpoint save,
-`LATEST`, and resume. The example does not define a custom training loop or checkpoint manager and
-does not modify files in AutoModel, Diffusers, or Qwen.
-
-The example pins AutoModel 0.5.0. That release does not expose setup hooks for preserving Qwen's
-FP32 timestep input or freezing parameters before optimizer construction, so `pdd/compat.py`
-temporarily adapts those two setup calls inside a serialized context and restores them immediately
-after `TrainDiffusionRecipe.setup()`.
-
-ModelOpt also binds an instance-local Qwen forward for PDD execution. Diffusers owns the joint
-attention-mask behavior, but casts normalized timesteps to BF16; the PDD path preserves the FP32
-grid value used by the original FastGen implementation. The override otherwise follows the pinned
-Diffusers forward and rejects unsupported execution modes explicitly.
-
 ## Prepare the student
 
 Widen the Qwen output projection before AutoModel constructs FSDP and the optimizer:
