@@ -1100,6 +1100,24 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
             for idx, q in enumerate(quantizers):
                 yield weight[idx], q
 
+    def iter_weight_quantizers_for_calibration(self):
+        """Yield the per-expert weight quantizers without slicing the fused 3-D weight.
+
+        Overrides the base, which would go through :meth:`iter_weights_for_calibration` and
+        evaluate ``weight[idx]``. Under FSDP2 that weight is a DTensor, so every expert slice
+        dispatches a redistribute collective to produce a value a quantizer-only caller discards.
+        """
+        for weight_name, quantizers_name in (
+            (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
+            ("down_proj", "down_proj_weight_quantizers"),
+        ):
+            # Same skip condition as iter_weights_for_calibration, so the two stay in lockstep.
+            # Fetching the attribute is free; only indexing into it would collective.
+            quantizers = getattr(self, quantizers_name, None)
+            if getattr(self, weight_name, None) is None or quantizers is None:
+                continue
+            yield from quantizers
+
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each per-expert weight quantizer into its slice of the fused 3-D weight.
 
