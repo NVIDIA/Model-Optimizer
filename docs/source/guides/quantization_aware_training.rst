@@ -80,18 +80,11 @@ Use the framework README as the executable source of truth. Each guide owns its
 prerequisites, commands, data preparation, distributed topology, and export options.
 
 * `Hugging Face QAT/QAD Quick Start
-  <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat#quick-start>`_:
-  run ``examples/llm_qat/quantize.py``, then ``train.py`` with a QAT or QAD
-  configuration, and finally ``export.py``. QAD training also supplies the BF16
-  teacher through ``--teacher_model``.
+  <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat#quick-start>`_
 * `Megatron-Bridge README
-  <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_:
-  run ``examples/megatron_bridge/quantize.py``, ``distill.py``, and
-  ``export_quantized_megatron_to_hf.py``. ``distill.py`` is the QAD entry point;
-  use the Megatron-Bridge SFT application for CE-only QAT.
+  <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
 * `Megatron-LM ModelOpt post-training documentation
-  <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_:
-  run ``quantize.sh``, then ``finetune.sh`` for QAT or QAD, and ``export.sh``.
+  <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_
 
 QAD launcher examples
 ===================================
