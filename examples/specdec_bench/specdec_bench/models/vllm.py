@@ -28,6 +28,16 @@ except ImportError:
     vllm = None
 
 
+# Forwarded from ``--runtime_params`` ``engine_args.<key>``; extend as needed.
+PASSTHROUGH_ENGINE_ARGS = (
+    "mamba_backend",
+    "mamba_ssm_cache_dtype",
+    "mamba_cache_mode",
+    "mamba_cache_philox_rounds",
+    "enable_mamba_cache_stochastic_rounding",
+)
+
+
 class VLLMModel(Model):
     # Cross-engine ``--max_seq_len`` (run.py) lands in kwargs under the
     # vLLM-native name ``max_model_len`` (see run.py's ``_MAX_SEQ_LEN_KEY``)
@@ -114,6 +124,13 @@ class VLLMModel(Model):
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
             }
+        elif kwargs.get("speculative_algorithm") == "DSPARK":
+            specdec = {
+                "method": "dspark",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
+                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
@@ -133,8 +150,9 @@ class VLLMModel(Model):
             max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            enforce_eager=kwargs.get("enforce_eager", False),
             max_model_len=kwargs.get("max_model_len"),
+            **{key: kwargs[key] for key in PASSTHROUGH_ENGINE_ARGS if kwargs.get(key) is not None},
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)

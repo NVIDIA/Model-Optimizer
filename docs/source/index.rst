@@ -12,6 +12,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <div class="announcement-tags" aria-label="Announcement tags">
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
+         <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -23,6 +24,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
+       <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
+       <p>AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget.</p>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-08-13" data-title="Model Optimizer announcements are moving to GitHub Pages" data-summary="The public Model Optimizer site is gaining a PR-updated announcements landing page within the existing Sphinx documentation." data-tags="release docs github-pages">
        <div class="announcement-card-meta">August 13, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/github-pages-announcements.html">Model Optimizer announcements are moving to GitHub Pages</a></h2>

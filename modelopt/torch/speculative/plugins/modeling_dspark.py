@@ -66,12 +66,17 @@ the bias computation is fully self-contained on this module. Submodule names
 checkpoints stay portable.
 """
 
+import logging
+
 import torch
 from torch import nn
 
 from .modeling_dflash import DFlashModule
+from .modeling_draft_checkpoint_compat import remap_dspark_nested_head_keys
 
 __all__ = ["DSparkModule"]
+
+logger = logging.getLogger(__name__)
 
 
 class DSparkModule(DFlashModule):
@@ -119,6 +124,9 @@ class DSparkModule(DFlashModule):
         # DFlashModule.__init__ already ran _init_weights before these modules
         # existed, so initialize the new layers explicitly.
         self._init_head_weights(config)
+
+        # Released-checkpoint key layouts live in modeling_draft_checkpoint_compat.
+        self._register_load_state_dict_pre_hook(remap_dspark_nested_head_keys, with_module=False)
 
     def _init_head_weights(self, config):
         """Initialize the head Linear/Embedding layers (matching HF _init_weights std)."""

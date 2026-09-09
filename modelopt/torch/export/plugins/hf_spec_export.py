@@ -412,10 +412,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
-        # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
+        # Sliding-window attention: all draft layers use SWA. vLLM's
         # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
-        # layer_types left all "full_attention" it applies a non-causal sliding window to
-        # every draft layer (window from swa_window_size / top-level sliding_window).
+        # layer_types left all "full_attention" it applies a sliding window to every draft
+        # layer (window from swa_window_size / top-level sliding_window).
         swa_window = getattr(self.model, "dflash_swa_window_size", None)
         if swa_window is not None:
             config["sliding_window"] = swa_window
@@ -423,9 +423,22 @@ class DFlashExporter(SpeculativeDecodingExporter):
                 {
                     "use_swa": True,
                     "swa_window_size": swa_window,
-                    "causal": False,
                 }
             )
+
+        # Block-internal attention pattern. Emitted unconditionally (not just under SWA):
+        # vLLM's _dflash_layer_causal treats dflash_config.causal as an all-layer override,
+        # and its default differs per layer type, so writing it explicitly is what keeps
+        # inference consistent with how the draft was actually trained.
+        config["dflash_config"]["causal"] = (
+            getattr(self.model, "dflash_draft_attention", "bidirectional") == "causal"
+        )
+
+        # Learnable per-head attention sink. vLLM reads dflash_config.attention_sink_bias to
+        # decide whether to build the sink parameter and pass it to its attention kernel.
+        if getattr(self.model, "dflash_attention_sink", False):
+            config["dflash_config"]["attention_sink_bias"] = True
+            config["attention_sink_bias"] = True
 
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.

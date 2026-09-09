@@ -1,4 +1,4 @@
-/* Scoped announcement styles for the Sphinx RTD theme. */
+/* Scoped announcement styles using Shibuya's light and dark color tokens. */
 
 #announcements > h1,
 #announcements > p,
@@ -13,11 +13,11 @@
 }
 
 .announcement-toolbar {
-  border: 1px solid #d6d8dc;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
   margin: 1.5rem 0;
   padding: 1rem;
-  background: #f8f9fb;
+  background: var(--sy-c-background);
 }
 
 .announcement-search-label {
@@ -30,8 +30,10 @@
   box-sizing: border-box;
   width: 100%;
   padding: 0.55rem 0.65rem;
-  border: 1px solid #b8bdc6;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   font-size: 1rem;
 }
 
@@ -43,11 +45,11 @@
 }
 
 .announcement-tag {
-  border: 1px solid #9aa1ad;
+  border: 1px solid var(--sy-c-border);
   border-radius: 999px;
   padding: 0.28rem 0.65rem;
-  background: #fff;
-  color: #2f343d;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   cursor: pointer;
   font-size: 0.86rem;
 }
@@ -67,7 +69,7 @@
 }
 
 .announcement-card {
-  border-bottom: 1px solid #d6d8dc;
+  border-bottom: 1px solid var(--sy-c-border);
   padding: 0 0 1rem;
 }
 
@@ -86,7 +88,7 @@
 }
 
 .announcement-card-meta {
-  color: #6b7280;
+  color: var(--sy-c-light);
   font-size: 0.85rem;
 }
 
@@ -97,9 +99,9 @@
 }
 
 .announcement-card-tags span {
-  border: 1px solid #d6d8dc;
+  border: 1px solid var(--sy-c-border);
   border-radius: 999px;
-  color: #4b5563;
+  color: var(--sy-c-light);
   font-size: 0.78rem;
   padding: 0.15rem 0.45rem;
 }
@@ -119,10 +121,10 @@
 }
 
 .announcement-page-button {
-  border: 1px solid #9aa1ad;
+  border: 1px solid var(--sy-c-border);
   border-radius: 4px;
-  background: #fff;
-  color: #2f343d;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
   cursor: pointer;
   padding: 0.35rem 0.7rem;
 }
@@ -133,7 +135,7 @@
 }
 
 .announcement-page-status {
-  color: #4b5563;
+  color: var(--sy-c-light);
   font-size: 0.9rem;
 }
 

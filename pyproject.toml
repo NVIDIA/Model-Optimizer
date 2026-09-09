@@ -108,7 +108,7 @@ dev-docs = [
     "sphinx-autobuild==2025.8.25; python_version >= '3.12'",
     "sphinx-copybutton~=0.5.2; python_version >= '3.12'",
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
-    "sphinx-rtd-theme~=3.1.0; python_version >= '3.12'",
+    "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
 ]
 dev-test = [

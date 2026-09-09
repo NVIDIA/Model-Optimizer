@@ -42,9 +42,15 @@ TORCH_VERSIONS = {
     "torch_213": "torchvision~=0.28.0",
 }
 
+# Extra install pins applied per transformers matrix entry (installed after the base
+# ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.14.0",
-    "tf_min": "transformers~=4.57.0",
+    "tf_latest": ("transformers~=5.14.0",),
+    # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
+    # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
+    # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
+    # models silently misroute to the LLM path on export.
+    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
 }
 
 
@@ -63,9 +69,9 @@ _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
     session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
-    tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
-    if tf_pin:
-        session.install(tf_pin)
+    tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
+    if tf_pins:
+        session.install(*tf_pins)
     session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
 
 
