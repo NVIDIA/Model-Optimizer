@@ -49,7 +49,6 @@ from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
     _dispatch_export_handler,
-    _patch_revert_weight_conversion,
     _prepare_model_for_export,
     _prepare_moe_inputs,
     _resolve_export_dtype,
@@ -271,17 +270,6 @@ def _make_tensor_sink(
         writer.add(new_key, new_value.detach().contiguous().cpu())
 
     return sink
-
-
-def _copy_remote_code_files(model: nn.Module, export_dir: Path) -> None:
-    """Copy the checkpoint's custom modeling *.py files, which trust_remote_code models need."""
-    source = Path(getattr(model.config, "_name_or_path", "") or "")
-    if not source.is_dir():
-        return
-    for py_file in source.glob("*.py"):
-        destination = export_dir / py_file.name
-        if not destination.exists():
-            shutil.copy2(py_file, destination)
 
 
 def _export_transformers_checkpoint_streaming(
@@ -678,15 +666,6 @@ def _export_fsdp2_checkpoint_streaming(
         gathered = [closed]
     if my_rank == 0:
         name_shards_and_write_index(export_dir, gathered)
-        _sanitize_generation_config_for_save(model)
-        _patches = _patch_revert_weight_conversion()
-        try:
-            model.config.save_pretrained(str(export_dir))
-        finally:
-            _unpatch_revert_weight_conversion(_patches)
-        if getattr(model, "generation_config", None) is not None:
-            with contextlib.suppress(Exception):
-                model.generation_config.save_pretrained(str(export_dir))
-        _copy_remote_code_files(model, export_dir)
+        save_non_weight_artifacts(model, export_dir)
 
     return None, quant_config
