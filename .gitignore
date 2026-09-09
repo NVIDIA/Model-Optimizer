@@ -62,9 +62,10 @@ venv/
 **.pickle
 **.tar.gz
 
-# Ignore claude local settings
+# Ignore claude local settings and runtime agent state
 .claude/settings.local.json
-.claude/agents/
+.claude/agents/*
+!.claude/agents/*.md
 CLAUDE.local.md
 AGENTS.override.md
 
