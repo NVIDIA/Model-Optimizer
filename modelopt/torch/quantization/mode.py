@@ -226,6 +226,8 @@ def wrapped_calib_func(
     So lets wrap them to be compatible with the ModelOpt convert entrypoint.
     """
     kwargs = config.model_dump()
+    if "skip_forward_without_activation_calib" not in config.model_fields_set:
+        kwargs.pop("skip_forward_without_activation_calib", None)
     method = kwargs.pop("method")
     layerwise_cfg = kwargs.pop("layerwise", None) or {}
     layerwise = layerwise_cfg.get("enable", False)
