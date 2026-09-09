@@ -137,7 +137,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
   | **GDPVal** (Stirrup agent, agentic) | `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `recipes/examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
   | **MRCR** (simple agent, long-context) | `recipes/tasks/gym/mrcr.md`, `recipes/examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
 
-**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run. **SciCode needs at least 8 submissions, not one**, reported as their mean (`recipes/tasks/aa/scicode.md`).
 
 **Shortcut path** (when task list is known up front, e.g. "run AA"):
 
@@ -381,7 +381,7 @@ Re-submit again if it's preempted again — each resume re-deploys, then skips a
 
 Implications for the agent:
 
-- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain.
+- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain. (SciCode's mandatory 8+ submissions are independent scored runs, not a walltime workaround.)
 - Do **not** treat a walltime timeout as a failed run. Check `nel status` / `nel info` and the dependent job's logs before declaring failure. `references/run-validation.md` covers what a real failure looks like vs an expected resume event.
 - Bumping `data_parallel_size` / `parallelism` to finish faster is fine when the goal is wall-clock latency, not a walltime workaround — but it's optional, not required, for runs longer than 4h.
 
