@@ -22,10 +22,10 @@ The process is as follows:
   3. (Optional) Compress weights to a real low-bit representation.
   4. Save the quantized model as a Megatron checkpoint (with ModelOpt state). The checkpoint can be
      reloaded for further training (QAT / distillation) or converted to a HuggingFace (unified)
-     checkpoint for deployment with `export.py` (see that script for TensorRT-LLM / vLLM / SGLang).
+     checkpoint for deployment with `export_quantized_megatron_to_hf.py` (for TensorRT-LLM / vLLM / SGLang).
 
 Tensor / pipeline / expert parallelism are all supported here — the Megatron checkpoint is saved
-sharded and can be re-sharded on load (e.g. `export.py` reloads it at TP=1 for the HF export).
+sharded and can be re-sharded on load (e.g. `export_quantized_megatron_to_hf.py` reloads it at TP=1 for the HF export).
 
 Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
     1024 samples from default dataset are used for calibration (sequence length = 4096).
@@ -48,7 +48,8 @@ Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV
         --seq_length 4096 \
         --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
-To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
+To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, use
+`export_quantized_megatron_to_hf.py`.
 
 To see the full usage for advanced configurations, run:
     torchrun --nproc_per_node 1 quantize.py --help
@@ -61,6 +62,8 @@ import copy
 import gc
 
 import torch
+from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
@@ -68,12 +71,24 @@ from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
-from modelopt.torch.utils.plugins.megatron_calibration import get_megatron_calibration_forward_loop
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
+from modelopt.torch.utils.plugins.megatron_calibration import (
+    get_megatron_calibration_forward_loop,
+    get_megatron_vlm_calibration_forward_loop,
+)
 from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
+from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
+
+# Default calibration datasets when --calib_dataset_name is not set
+DEFAULT_TEXT_CALIB_DATASET = "cnn_nemotron_v2_mix"  # cnn_dailymail + nemotron-post-training-v2
+DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
 # The --quant_cfg / --kv_cache_quant CLI vocabularies are discovered from the preset
-# YAMLs (shared with the llm_ptq examples via modelopt.recipe.presets). --quant_cfg
+# YAMLs (shared with the hf_ptq examples via modelopt.recipe.presets). --quant_cfg
 # additionally accepts any full config name from ``mtq.config.choices`` (e.g.
 # ``FP8_DEFAULT_CFG``); see get_quant_config below.
 
@@ -86,6 +101,15 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
+        ),
+    )
     parser.add_argument(
         "--export_megatron_path",
         type=str,
@@ -107,16 +131,16 @@ def get_args() -> argparse.Namespace:
         default=None,
         help=(
             "PTQ recipe YAML file or builtin name (e.g. 'general/ptq/fp8_default-kv_fp8'). "
-            "When set, --quant_cfg, --kv_cache_quant, --weight_only, and --moe_calib_experts_ratio "
-            "are ignored; the recipe is authoritative for quant_cfg, algorithm, and KV-cache config."
+            "When set, --quant_cfg, --kv_cache_quant and --weight_only are ignored; the recipe "
+            "is authoritative for quant_cfg, algorithm, and KV-cache config."
         ),
     )
     parser.add_argument(
         "--quant_cfg",
         type=str,
-        default="fp8",
+        default=None,
         help=(
-            f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
+            f"Quantization config. Preset names: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
         ),
@@ -138,31 +162,29 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
     )
-    parser.add_argument(
-        "--moe_calib_experts_ratio",
-        type=float,
-        default=None,
-        help=(
-            "Fraction of experts (in (0.0, 1.0]) to calibrate per forward pass for MoE models. "
-            "Lower values speed up calibration of models with many experts; ignored for dense models."
-        ),
-    )
-
     # Calibration dataset arguments (matched to hf_ptq.py)
     parser.add_argument(
         "--calib_dataset_name",
         type=str,
-        default="cnn_nemotron_v2_mix",  # cnn_dailymail + nemotron-post-training-dataset-v2
+        default=None,
         help=(
-            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
-            "You can also pass any other dataset and see if auto-detection for your dataset works."
+            "Calibration dataset. If unset, it is auto-selected by model type: a text dataset "
+            f"({DEFAULT_TEXT_CALIB_DATASET}) for language models, and an image-text dataset "
+            f"({DEFAULT_VLM_CALIB_DATASET}) for VLMs. Passing a text dataset for a VLM estimates importance from text "
+            f"only. Text dataset options: {get_supported_datasets()}; VLM (image) dataset options: "
+            f"{get_supported_vlm_datasets()}."
         ),
     )
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
-    parser.add_argument("--seq_length", type=int, default=4096, help="Calibration sequence length")
+    parser.add_argument(
+        "--seq_length",
+        type=int,
+        default=4096,
+        help="Calibration sequence length (text only; ignored for image-text VLM calibration).",
+    )
 
     # Post-quantization generation (sanity check) arguments
     parser.add_argument(
@@ -185,9 +207,6 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
-        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
-
     print_args(args)
 
     return args
@@ -197,17 +216,13 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     """Build the ModelOpt quantization config dict from the parsed arguments."""
     if args.recipe is not None:
         # A YAML recipe is authoritative: it encodes quant_cfg + algorithm + KV-cache config
-        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only / --moe_calib_experts_ratio
-        # customizations below are skipped.
+        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only customizations below
+        # are skipped.
         print_rank_0(f"Using recipe {args.recipe} for quantization")
-        if (
-            args.kv_cache_quant != KV_CACHE_NONE
-            or args.weight_only
-            or args.moe_calib_experts_ratio is not None
-        ):
+        if args.kv_cache_quant != KV_CACHE_NONE or args.weight_only:
             warn_rank_0(
-                "--kv_cache_quant / --weight_only / --moe_calib_experts_ratio are ignored when "
-                "--recipe is set; the recipe is authoritative."
+                "--kv_cache_quant / --weight_only are ignored when --recipe is set; the recipe "
+                "is authoritative."
             )
         recipe = load_recipe(args.recipe)
         if not isinstance(recipe, ModelOptPTQRecipe):
@@ -222,7 +237,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         mtq_config = getattr(mtq, args.quant_cfg)
     else:
         raise ValueError(
-            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name / short alias "
+            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name "
             f"({', '.join(QUANT_CFG_CHOICES)}) or a full config name from {mtq.config.choices}."
         )
 
@@ -239,28 +254,24 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         kv_cache_quant_cfg = KV_QUANT_CFG_CHOICES[args.kv_cache_quant]["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
 
-    # For MoE models, optionally calibrate only a fraction of experts per forward pass for speed.
-    if args.moe_calib_experts_ratio is not None:
-        algorithm = mtq_config.get("algorithm")
-        if isinstance(algorithm, str):
-            mtq_config["algorithm"] = {
-                "method": algorithm,
-                "moe_calib_experts_ratio": args.moe_calib_experts_ratio,
-            }
-        elif isinstance(algorithm, dict):
-            algorithm["moe_calib_experts_ratio"] = args.moe_calib_experts_ratio
-        else:
-            warn_rank_0(
-                f"Quantization algorithm {algorithm!r} does not support moe_calib_experts_ratio; ignoring."
-            )
-
     return mtq_config
 
 
 def main(args: argparse.Namespace):
+    trust_remote_code = is_safe_repo(
+        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+    )
+
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+    )
+
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=trust_remote_code,
+        moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
@@ -274,7 +285,51 @@ def main(args: argparse.Namespace):
         init_model_parallel=True,
     )
 
+    # Only the language model is quantized (vision tower + projector stay full precision)
+    language_model, is_vlm = get_language_model(unwrapped_model)
+    if is_vlm:
+        warn_rank_0(
+            "VLM detected: quantizing `model.language_model` only (vision tower left in full precision)."
+        )
+
+    # Auto-select the calibration dataset by model type when not explicitly provided.
+    if args.calib_dataset_name is None:
+        args.calib_dataset_name = (
+            DEFAULT_VLM_CALIB_DATASET if is_vlm else DEFAULT_TEXT_CALIB_DATASET
+        )
+
+    # Infer the calibration modality from the dataset: the known image-text datasets require a VLM, everything
+    # else is text. Passing a text dataset for a VLM estimates importance from text only (vision tower idle).
+    use_image_calib = args.calib_dataset_name in get_supported_vlm_datasets()
+    if use_image_calib and not is_vlm:
+        raise ValueError(
+            f"Calibration dataset '{args.calib_dataset_name}' is image-text and requires a VLM; "
+            "pass a text dataset for a language model."
+        )
+    if is_vlm and not use_image_calib:
+        warn_rank_0(
+            f"Text-only calibration on a VLM (dataset '{args.calib_dataset_name}'): the language "
+            "model's calibration statistics will not see vision tokens."
+        )
+    print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
+
     mtq_config = get_quant_config(args)
+
+    # Quantize only the language model: disable quantizers on every top-level submodule that is not
+    # the language model (vision tower + projector). Skip aliases of language-model submodules (e.g.
+    # Qwen's ``self.decoder = language_model.decoder``) so the LM's own layers stay enabled.
+    if is_vlm:
+        lm_module_ids = {id(m) for m in language_model.modules()}
+        non_lm_children = sorted(
+            name
+            for name, child in unwrapped_model.named_children()
+            if name != "language_model" and id(child) not in lm_module_ids
+        )
+        for name in non_lm_children:
+            # Anchor to the child subtree (top-level child of the quantized root) so a short non-LM
+            # name cannot accidentally match a language-model quantizer path by substring.
+            mtq_config["quant_cfg"].append({"quantizer_name": f"{name}.*", "enable": False})
+        print_rank_0(f"Disabling quantizers on non-language-model submodules: {non_lm_children}")
 
     # KV-cache quantization is incompatible with weight compression. Validate on the *resolved*
     # config (KV-cache quantizers are named ``*[kv]_bmm_quantizer``) so this also covers
@@ -288,25 +343,41 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Quantizing the model with: {args.recipe or args.quant_cfg}")
     if "awq" in str(mtq_config.get("algorithm")):
         print_rank_0(
-            "AWQ calibration can take longer than other methods; "
-            "reduce --calib_num_samples to speed it up."
+            "AWQ calibration can take longer than other methods; reduce --calib_num_samples to speed it up."
         )
 
     # Dynamic and weight-only configs need no activation statistics, so skip both the
     # (potentially expensive) calibration dataset download and the calibration forward pass.
-    if mtq.need_calibration(mtq_config):
-        forward_loop = get_megatron_calibration_forward_loop(
+    if not mtq.need_calibration(mtq_config):
+        warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
+        forward_loop = None
+    elif not use_image_calib:
+        text_forward_loop = get_megatron_calibration_forward_loop(
             tokenizer,
             dataset_name=args.calib_dataset_name,
             num_samples=args.calib_num_samples,
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
-            # pack=True uses Megatron pretraining-style global-stream document packing
-            pack=True,
+            pack=True,  # Megatron pretraining-style global-stream document packing
         )
+
+        # Run text prefill on the language model: we quantize the root (a VLM root forward expects
+        # vision inputs), but text calibration must drive the inner LM. For plain LMs these are the same.
+        def forward_loop(_model=None):
+            text_forward_loop(language_model)
     else:
-        warn_rank_0("Dynamic or weight-only quantization detected; skipping calibration.")
-        forward_loop = None
+        # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
+        # see vision-conditioned activations (we still quantize the LM only).
+        processor = AutoProcessor.from_pretrained(
+            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
+        )
+        forward_loop = get_megatron_vlm_calibration_forward_loop(
+            unwrapped_model,  # full VLM (vision encoder + projector + language model)
+            processor,
+            dataset_name=args.calib_dataset_name,
+            num_samples=args.calib_num_samples,
+            batch_size=args.calib_batch_size,
+        )
 
     if hasattr(unwrapped_model, "calibration_mode"):
         # Some model wrappers (e.g. distillation/speculative) gate calibration behind a flag.
@@ -333,12 +404,18 @@ def main(args: argparse.Namespace):
         model,
         args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
-        hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+        hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
-    print_rank_0(
-        f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. "
-        "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export.py"
-    )
+    if is_vlm:
+        print_rank_0(
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
+            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py."
+        )
+    else:
+        print_rank_0(
+            f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. To deploy this model "
+            "(TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py"
+        )
 
     # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
     # weights are now real low-bit and megatron_generate may not support compressed forward for
@@ -349,13 +426,14 @@ def main(args: argparse.Namespace):
         )
     if not args.skip_generate and not args.compress:
         print_rank_0("\nTesting quantized model with custom prompts...")
-        unwrapped_model.eval()
+        # Sanity-check text generation on the quantized language model.
+        language_model.eval()
         for idx, prompt in enumerate(args.prompts.split("|")):
             tokens = tokenizer(prompt, return_tensors="pt")
             # enable_kv_cache=False avoids pre-allocating the static KV cache: this is a short sanity-check
             # generation and the KV-cache allocation can OOM tight quantization runs on large MoE models.
             generated_ids = megatron_generate(
-                unwrapped_model, tokens.input_ids.cuda(), osl=args.osl, enable_kv_cache=False
+                language_model, tokens.input_ids.cuda(), osl=args.osl, enable_kv_cache=False
             )
             generated_texts = tokenizer.batch_decode(generated_ids)
             print_rank_0(f"\nPrompt {idx + 1}: {prompt}\nGenerated: {generated_texts}")
@@ -368,5 +446,7 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

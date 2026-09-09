@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server exposing ModelOpt launcher operations (submit, status, logs) as typed tools for codex / Claude Code agents"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0",
+    "mcp>=1.0,<2",  # server.py imports mcp.server.fastmcp, removed in mcp 2.0
     "modelopt-launcher",
     "pyyaml",
     "pydantic>=2.0",

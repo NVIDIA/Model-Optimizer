@@ -29,6 +29,31 @@ from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_
 
 ALL_SPEC_MODES = ["eagle", "dflash"]
 
+
+def _get_rope_theta(config, default=None):
+    """Get RoPE theta from either legacy or Transformers 5 config fields.
+
+    ``rope_parameters`` is checked FIRST. A config can carry both fields with
+    different values: Transformers 5 stores the real base under
+    ``rope_parameters`` while the class default (10000.0 for Qwen3) may still be
+    visible as a top-level ``rope_theta``. Reading ``rope_theta`` first silently
+    exports a draft whose RoPE base is 100x off the target's, which breaks
+    serving because DFlash injects the target's KV into every draft layer.
+    """
+    # Transformers 5 stores this under rope_parameters (and exposes the same
+    # data through rope_scaling for backwards compatibility).
+    for attr in ("rope_parameters", "rope_scaling"):
+        rope_config = getattr(config, attr, None)
+        if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
+            return rope_config["rope_theta"]
+
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
+
+    return default
+
+
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
         "layers.0.self_attn.q_proj",
@@ -376,14 +401,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            # Inherit the target's rope_theta: DFlash injects the target's KV into every
-            # draft layer, so the draft's RoPE base must match the target's. (The draft
-            # arch config carries no rope_theta of its own.)
-            "rope_theta": (
-                getattr(base_config, "rope_theta", None)
-                if getattr(base_config, "rope_theta", None) is not None
-                else getattr(draft_config, "rope_theta", 1000000.0)
-            ),
+            # Inherit the target's RoPE base: DFlash injects target KV into every draft
+            # layer, so their RoPE bases must match. Transformers 5 stores rope_theta
+            # in rope_parameters rather than a top-level config attribute.
+            "rope_theta": _get_rope_theta(base_config, _get_rope_theta(draft_config, 1000000.0)),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
@@ -398,6 +419,34 @@ class DFlashExporter(SpeculativeDecodingExporter):
             config["layer_types"] = draft_config.layer_types
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        # Sliding-window attention: all draft layers use SWA. vLLM's
+        # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
+        # layer_types left all "full_attention" it applies a sliding window to every draft
+        # layer (window from swa_window_size / top-level sliding_window).
+        swa_window = getattr(self.model, "dflash_swa_window_size", None)
+        if swa_window is not None:
+            config["sliding_window"] = swa_window
+            config["dflash_config"].update(
+                {
+                    "use_swa": True,
+                    "swa_window_size": swa_window,
+                }
+            )
+
+        # Block-internal attention pattern. Emitted unconditionally (not just under SWA):
+        # vLLM's _dflash_layer_causal treats dflash_config.causal as an all-layer override,
+        # and its default differs per layer type, so writing it explicitly is what keeps
+        # inference consistent with how the draft was actually trained.
+        config["dflash_config"]["causal"] = (
+            getattr(self.model, "dflash_draft_attention", "bidirectional") == "causal"
+        )
+
+        # Learnable per-head attention sink. vLLM reads dflash_config.attention_sink_bias to
+        # decide whether to build the sink parameter and pass it to its attention kernel.
+        if getattr(self.model, "dflash_attention_sink", False):
+            config["dflash_config"]["attention_sink_bias"] = True
+            config["attention_sink_bias"] = True
 
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.
@@ -445,3 +494,114 @@ class DFlashExporter(SpeculativeDecodingExporter):
             f"Exported DFlash draft model: {len(drafter_sd)} tensors, "
             f"config keys: {list(drafter_config.keys())[:5]}..."
         )
+
+
+class DominoExporter(DFlashExporter):
+    """Draft model exporter for Domino (DFlash backbone + causal correction head).
+
+    Same z-lab-compatible format as DFlash, plus the Domino head weights
+    (``prefix_gru.*`` / ``embed_proj.*``, already captured by the inherited
+    ``dflash_module.`` stripping) and the extra config fields the loader needs to
+    rebuild the head (``projector_type``, ``emb_dim``, ``gru_hidden_dim``,
+    ``pure_draft_prefix_len``, ``shift_label``).
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the Domino head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        # Present because HFDominoModel.modify validates them at convert time.
+        emb_dim = draft_config.emb_dim
+        gru_hidden_dim = draft_config.gru_hidden_dim
+        # Mirror the reference checkpoint: emb_dim also appears at the top level.
+        config["emb_dim"] = emb_dim
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "domino"),
+                "shift_label": getattr(draft_config, "shift_label", True),
+                "pure_draft_prefix_len": getattr(draft_config, "pure_draft_prefix_len", 1),
+                "gru_hidden_dim": gru_hidden_dim,
+                "emb_dim": emb_dim,
+            }
+        )
+        return config
+
+
+class LiLiCorrExporter(DFlashExporter):
+    """Draft model exporter for LiLiCorr (DFlash backbone + candidate-lattice reranker).
+
+    Same z-lab-compatible format as DFlash, plus the reranker weights (``lilicorr.*``,
+    already captured by the inherited ``dflash_module.`` stripping) and the config fields
+    the serving loader rebuilds the head from. Every geometry field must be emitted:
+    ``lilicorr_logit_scale`` and ``lilicorr_vector_eps`` change the score without changing
+    any tensor shape, so a default guessed in their absence loads cleanly and scores a
+    different function.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the LiLiCorr head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+        head = self.model.dflash_module.lilicorr
+
+        config["architectures"] = ["LiLiCorrDraftModel"]
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "lilicorr"),
+                "lilicorr_enabled": True,
+                # Read off the built head rather than the config dict, so the exported
+                # geometry is the geometry of the weights in the same directory.
+                "lilicorr_candidate_topk": head.candidate_topk,
+                "lilicorr_hidden_size": head.hidden_size,
+                "lilicorr_num_layers": len(head.layers),
+                "lilicorr_num_heads": head.num_heads,
+                "lilicorr_mlp_ratio": head.mlp_ratio,
+                "lilicorr_factor_dim": head.factor_dim,
+                "lilicorr_vector_eps": head.vector_eps,
+                "lilicorr_logit_scale": head.logit_scale,
+            }
+        )
+
+        # The serving loader builds the conv wrappers from geometry, not from the tensors:
+        # without these two keys it defaults both to 0 and drops the conv tensors silently.
+        conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
+        # `taps` is absent on the no-op sublayer wrapper, which is what a conv-free draft
+        # carries, so its presence is the test for whether convolutions were installed.
+        taps = getattr(conv, "taps", None)
+        if conv is not None and taps:
+            config["dflash_config"].update(
+                {
+                    "conv_kernel_size": taps,
+                    "conv_group_size": conv.group_size,
+                }
+            )
+        return config
+
+
+class DSparkExporter(DFlashExporter):
+    """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
+
+    Same z-lab-compatible format as DFlash, plus the DSpark head weights
+    (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
+    ``confidence_proj.*``, already captured by the inherited ``dflash_module.``
+    stripping) and the extra config fields the loader needs to rebuild the head
+    (``projector_type``, ``markov_rank``, ``markov_head_type``,
+    ``use_confidence_head``, ``shift_label``).
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the DSpark head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "dspark"),
+                "shift_label": getattr(draft_config, "shift_label", True),
+                "markov_rank": draft_config.markov_rank,
+                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
+                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
+            }
+        )
+        return config

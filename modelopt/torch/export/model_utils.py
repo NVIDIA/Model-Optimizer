@@ -14,7 +14,7 @@
 # limitations under the License.
 """Utility functions for model type detection and classification."""
 
-import re
+import warnings
 
 import torch.nn as nn
 
@@ -44,7 +44,6 @@ MODEL_NAME_TO_TYPE = {
     "phi3small": "phi3small",
     "phi3": "phi3",
     "PhiMoEForCausalLM": "phi3",
-    "Phi4MMForCausalLM": "phi4mm",
     "phi": "phi",
     "TLGv4ForCausalLM": "phi",
     "MixtralForCausalLM": "llama",
@@ -71,7 +70,12 @@ __doc__ = f"""Utility functions for model type detection and classification.
         {MODEL_NAME_TO_TYPE=}
 """
 
-__all__ = ["get_language_model_from_vl", "get_model_type", "is_multimodal_model"]
+__all__ = [
+    "TiedWeightMap",
+    "get_language_model_from_vl",
+    "get_model_type",
+    "is_multimodal_model",
+]
 
 
 def get_model_type(model):
@@ -88,10 +92,6 @@ def is_multimodal_model(model):
     This function detects various multimodal model architectures by checking for:
     - Standard vision configurations (vision_config)
     - Language model attributes (language_model)
-    - Specific multimodal model types (phi4mm)
-    - Vision LoRA configurations
-    - Audio processing capabilities
-    - Image embedding layers
     - Nemotron-Parse conditional generation models
 
     Args:
@@ -104,10 +104,6 @@ def is_multimodal_model(model):
         >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
         >>> is_multimodal_model(model)
         True
-
-        >>> model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-4-multimodal-instruct")
-        >>> is_multimodal_model(model)
-        True
     """
     config = model.config
 
@@ -118,12 +114,6 @@ def is_multimodal_model(model):
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or hasattr(model, "language_model")  # Language model attribute (e.g., LLaVA)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 
@@ -164,82 +154,62 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
-def _collect_canonical_tied_patterns(
-    model: nn.Module,
-) -> tuple[list[re.Pattern], list[str]]:
-    """Walk the model and collect canonical-side tied-weight matchers.
+class TiedWeightMap:
+    """Name-based lookups over HF's ``{alias: canonical}`` tie map (``model.all_tied_weights_keys``).
 
-    Patterns are submodule-prefixed regexes from each module's
-    ``_tied_weights_keys`` dict-style declaration (the prefix matters
-    for nested models where the dict lives on an inner submodule).
-    Side substrings are dot-separated tokens that appear only on the
-    canonical side of those declarations — needed because modelopt's
-    per-expert unpacking creates post-export keys (e.g.
-    ``…experts.Y.gate_proj.input_scale``) that HF's regexes never knew
-    about. List-style (legacy) declarations are skipped.
+    Export sites ask for a *group key*: both sides of a tie share one key, an untied parameter
+    returns ``None``. The key is a name, so it survives packing / FSDP / offload, where a
+    ``data_ptr`` would not.
     """
-    patterns: list[re.Pattern] = []
-    alias_token_set: set[str] = set()
-    canonical_token_set: set[str] = set()
 
-    def _tokens(s: str) -> set[str]:
-        """Identifiers in a regex string, with regex specials as separators."""
-        return {tok for tok in re.split(r"[^A-Za-z0-9_]+", s) if tok}
+    def __init__(self, model: nn.Module) -> None:
+        """Source the tie map from HF's ``all_tied_weights_keys`` (transformers >=5.0).
 
-    for name, submodule in model.named_modules():
-        tied = getattr(submodule, "_tied_weights_keys", None)
-        if not isinstance(tied, dict) or not tied:
-            continue
-        prefix = f"{name}." if name else ""
-        for alias_pat, canonical_pat in tied.items():
-            patterns.append(re.compile(prefix + canonical_pat))
-            alias_token_set.update(_tokens(prefix + alias_pat))
-            canonical_token_set.update(_tokens(prefix + canonical_pat))
+        HF's ``{target: source}`` == our ``{alias: canonical}``, resolved at load, config-gated,
+        ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on
+        transformers <5.0 -> empty map (the ``data_ptr`` backstop in postprocess is the net).
+        """
+        all_tied = getattr(model, "all_tied_weights_keys", None)
+        # Warn whenever a tie is declared (embedding tie or any ``_tied_weights_keys`` entry, e.g.
+        # encoder/decoder or fused-MoE) but the name-based map is missing, not just for embeddings.
+        declares_tie = bool(
+            getattr(getattr(model, "config", None), "tie_word_embeddings", False)
+        ) or bool(getattr(model, "_tied_weights_keys", None))
+        if all_tied is None and declares_tie:
+            warnings.warn(
+                "This model may contain tied/shared weights, but deduplicating them on export "
+                "requires transformers>=5.0 (it uses model.all_tied_weights_keys, which is only "
+                "supported in newer versions). On older versions the exported checkpoint may keep "
+                "duplicate copies of the tied weights (larger files), and tied weights may not be "
+                "deduplicated correctly during export. Upgrade to transformers>=5.0 for correct "
+                "tied-weight export."
+            )
+        # Drop any self-entry (alias == canonical): HF should not emit one, but a target==source
+        # pair would schedule the kept canonical for deletion, so filter it out defensively.
+        self.alias_to_canonical: dict[str, str] = {
+            alias: canonical for alias, canonical in (all_tied or {}).items() if alias != canonical
+        }
+        self.canonical_names: set[str] = set(self.alias_to_canonical.values())
 
-    # Tokens unique to the canonical side become substring matchers.
-    side_substrings = sorted(canonical_token_set - alias_token_set)
-    return patterns, side_substrings
+    def group_key(self, param_full_name: str) -> str | None:
+        """Canonical group key for a parameter name, or ``None`` if untied.
 
+        Both sides of a tie return the same key, so it does not matter which side export
+        visits first.
+        """
+        if param_full_name in self.alias_to_canonical:
+            return self.alias_to_canonical[param_full_name]
+        if param_full_name in self.canonical_names:
+            return param_full_name
+        return None
 
-def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
-    r"""Reorder ``state_dict`` so canonical-side tied keys iterate first.
+    def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
+        """Group key for a fused-experts container, or ``None`` if untied.
 
-    Lets the downstream first-wins data_ptr dedup keep canonical names.
-    Uses both regex patterns and substring matchers from
-    :func:`_collect_canonical_tied_patterns`. Gated on the model class
-    name to scope the reorder to DiffusionGemma; other tied
-    encoder-decoder models that ship dict-style ``_tied_weights_keys``
-    can be added to the allowlist here. Mirrors the ``model_type``
-    dispatch used for the Whisper and Nemotron-VL branches elsewhere
-    in ``unified_export_hf.py``.
-    """
-    model_type = type(model).__name__.lower()
-    if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:
-        return state_dict
-
-    canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
-    if not canonical_patterns and not side_substrings:
-        return state_dict
-
-    def _has_side_substring(key: str) -> bool:
-        # Require the token to appear as a proper dot-separated path
-        # component, not just as a substring of an unrelated identifier.
-        for tok in side_substrings:
-            if (
-                f".{tok}." in key
-                or key.startswith(f"{tok}.")
-                or key.endswith(f".{tok}")
-                or key == tok
-            ):
-                return True
-        return False
-
-    head: dict = {}
-    tail: dict = {}
-    for k, v in state_dict.items():
-        if any(p.search(k) for p in canonical_patterns) or _has_side_substring(k):
-            head[k] = v
-        else:
-            tail[k] = v
-    head.update(tail)
-    return head
+        The tie lives on the container's 3-D projection (e.g. ``…experts.gate_up_proj``);
+        stripping that suffix gives one key shared by all the container's projections.
+        """
+        gk = self.group_key(f"{container_name}.{first_proj_attr}")
+        if gk is None:
+            return None
+        return gk.removesuffix(f".{first_proj_attr}")

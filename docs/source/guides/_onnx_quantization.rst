@@ -74,6 +74,16 @@ Call PTQ function
         quantize_mode="int8",
     )
 
+Optionally enable Autotune for more optimized Q/DQ placement. Note that this will likely increase the time required to calibrate the model.
+
+.. code-block:: python
+
+    moq.quantize(
+        ...
+        # Default Autotune settings, can be tuned with the autotune_* arguments below.
+        autotune=True,
+    )
+
 Alternatively, you can call PTQ function in command line:
 
 .. argparse::

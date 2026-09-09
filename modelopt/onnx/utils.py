@@ -1502,7 +1502,9 @@ def _is_foldable_constant_cast_pattern(model: onnx.ModelProto, node: onnx.NodePr
     return False
 
 
-def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.NodeProto) -> None:
+def _convert_constant_values(
+    onnx_model: onnx.ModelProto, constant_node: onnx.NodeProto, cast_node: onnx.NodeProto
+) -> None:
     """Convert the Constant node's values to the Cast node's target type."""
     cast_to_type = get_cast_to_type(cast_node)
     for attr in constant_node.attribute:
@@ -1529,7 +1531,35 @@ def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.Node
                 new_tensor = onnx.numpy_helper.from_array(new_array, attr.t.name)
 
             attr.t.CopyFrom(new_tensor)
+            if not _sync_value_info_elem_type(
+                onnx_model.graph, constant_node.output[0], cast_to_type
+            ):
+                onnx_model.graph.value_info.append(
+                    onnx.helper.make_tensor_value_info(
+                        constant_node.output[0], cast_to_type, list(new_tensor.dims)
+                    )
+                )
             break
+
+
+def _sync_value_info_elem_type(graph: onnx.GraphProto, tensor_name: str, elem_type: int) -> bool:
+    """Synchronize declarations for a tensor whose producer dtype changed."""
+    updated = False
+    for value_info in list(graph.value_info) + list(graph.input) + list(graph.output):
+        if value_info.name == tensor_name and value_info.type.HasField("tensor_type"):
+            value_info.type.tensor_type.elem_type = elem_type
+            updated = True
+
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                updated = _sync_value_info_elem_type(attr.g, tensor_name, elem_type) or updated
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    updated = (
+                        _sync_value_info_elem_type(subgraph, tensor_name, elem_type) or updated
+                    )
+    return updated
 
 
 def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
@@ -1570,7 +1600,7 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 cast_producers = get_producer_nodes(onnx_model, node.input[0])
                 assert len(cast_producers) == 1 and cast_producers[0].op_type == "Constant"
                 constant_producer = cast_producers[0]
-                _convert_constant_values(constant_producer, node)
+                _convert_constant_values(onnx_model, constant_producer, node)
                 _bypass_cast_node(onnx_model, node)
                 logger.debug(f"Found foldable Constant->Cast pattern, removing {node.name}")
 
@@ -2020,3 +2050,89 @@ def clear_stale_value_info(model: onnx.ModelProto) -> int:
     fixed_shapes = _reconcile_stale_output_shapes(model)
 
     return fixed_outputs + fixed_shapes + n_cleared
+
+
+def topologically_sort_graph_nodes(graph: onnx.GraphProto) -> None:
+    """Stable-sort graph nodes so tensor producers precede consumers.
+
+    Unlike GraphSurgeon topological sorting, this operates directly on GraphProto
+    nodes and does not import/export tensor metadata that may include ONNX enum
+    dtypes such as BF16, which can be misinterpreted as NumPy dtypes during
+    conversion.
+    """
+
+    def get_graph_outer_scope_inputs(subgraph: onnx.GraphProto) -> set[str]:
+        local_names = {
+            value.name for value in (*subgraph.input, *subgraph.initializer) if value.name
+        }
+        local_names.update(output_name for node in subgraph.node for output_name in node.output)
+
+        outer_scope_inputs = set()
+        for node in subgraph.node:
+            outer_scope_inputs.update(
+                input_name
+                for input_name in node.input
+                if input_name and input_name not in local_names
+            )
+            for attr in node.attribute:
+                graphs = []
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    graphs.append(attr.g)
+                elif attr.type == onnx.AttributeProto.GRAPHS:
+                    graphs.extend(attr.graphs)
+
+                for nested_graph in graphs:
+                    outer_scope_inputs.update(
+                        input_name
+                        for input_name in get_graph_outer_scope_inputs(nested_graph)
+                        if input_name not in local_names
+                    )
+        return outer_scope_inputs
+
+    nodes = list(graph.node)
+    producer_by_tensor: dict[str, int] = {}
+    for node_index, node in enumerate(nodes):
+        for output_name in node.output:
+            if not output_name:
+                continue
+            if output_name in producer_by_tensor:
+                raise ValueError(f"Duplicate producer for tensor {output_name!r}.")
+            producer_by_tensor[output_name] = node_index
+
+    dependencies: list[set[int]] = [set() for _ in nodes]
+    dependents: list[set[int]] = [set() for _ in nodes]
+
+    for consumer_index, node in enumerate(nodes):
+        input_names = set(node.input)
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                input_names.update(get_graph_outer_scope_inputs(attr.g))
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    input_names.update(get_graph_outer_scope_inputs(subgraph))
+
+        for input_name in input_names:
+            producer_index = producer_by_tensor.get(input_name)
+            if producer_index is None:
+                continue
+            if producer_index == consumer_index:
+                raise ValueError(f"Node {node.name!r} consumes its own output {input_name!r}.")
+            dependencies[consumer_index].add(producer_index)
+            dependents[producer_index].add(consumer_index)
+
+    ready = [node_index for node_index, dependency in enumerate(dependencies) if not dependency]
+    sorted_nodes: list[onnx.NodeProto] = []
+    while ready:
+        node_index = ready.pop(0)
+        sorted_nodes.append(nodes[node_index])
+        for dependent_index in sorted(dependents[node_index]):
+            dependencies[dependent_index].remove(node_index)
+            if not dependencies[dependent_index]:
+                ready.append(dependent_index)
+        ready.sort()
+
+    if len(sorted_nodes) != len(nodes):
+        raise ValueError("Cycle detected while sorting ONNX graph nodes.")
+
+    graph.ClearField("node")
+    graph.node.extend(sorted_nodes)

@@ -12,7 +12,7 @@ runs:
     - shell: bash
       run: echo "TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions" >> "$GITHUB_ENV"
     - id: cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: /root/.cache/torch_extensions
         key: torch-ext-${{ inputs.cache-key }}-${{ hashFiles('modelopt/torch/kernels/quantization/**', 'modelopt/torch/quantization/extensions.py', 'modelopt/torch/utils/cpp_extension.py')

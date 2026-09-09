@@ -1,0 +1,103 @@
+# DSpark streaming speculative-decoding training for Kimi-K2.6 (multi-node).
+# DSpark = the DFlash backbone + a lightweight Markov head + a confidence head,
+# generating a causal block semi-autoregressively; see dspark.yaml for the head
+# and loss config. Runs the shared streaming pipeline
+# (common/eagle3/train_eagle_streaming.sh) with the K2.6-specific base, draft
+# dims and mask token; trained from scratch. A starting point for reproduction —
+# tune node counts, batch, steps and serve limits for your cluster.
+#
+# Run ON the cluster login node (paramiko can't reach it through the login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
+#          SLURM_PARTITION=<multi_node_partition> \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/moonshotai/Kimi-K2.6/hf_streaming_dspark_multi_node.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+#
+# The export lands in /scratchspace/export.
+
+job_name: Kimi-K2.6_DSpark_streaming_multi_node
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/moonshotai/Kimi-K2.6
+
+  # Build /scratchspace/data/train.jsonl. Point data.data_path at the full
+  # Spec-Decoding-Dataset-v2 corpus to reproduce the released checkpoint.
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=true
+      - data.mode=streaming
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/dspark
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      - training.save_steps=1000
+      - training.logging_steps=20
+      - training.learning_rate=1.0e-4
+      - training.warmup_steps=2000
+      # Kimi's slow tokenizer can't emit assistant masks; recovered from token ids.
+      - training.answer_only_loss=true
+      # The vLLM serve container has no tensorboard -> trainer init crash.
+      - training.report_to=none
+      # The DSpark draft does NOT inherit the base GQA/FFN dims, so set them
+      # explicitly to match the K2.6 backbone (else a silently wrong-shape draft).
+      - dflash.dflash_architecture_config.num_hidden_layers=6
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.intermediate_size=18432
+      # Semi-AR generation block (dspark.yaml ships 16; the Kimi backbone uses 8).
+      - dflash.dflash_block_size=8
+      # Kimi has no dedicated mask token; 163838 is a reserved slot.
+      - dflash.dflash_mask_token_id=163838
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # 6 aux capture layers + the true final hidden (61). Requires the aux-capture
+      # fix vllm#46788; without it use 60, which caps acceptance length.
+      - EAGLE_CAPTURE_IDS: "[2,13,25,36,48,59,61]"
+      - SERVE_NODES: "8"
+      - SERVE_TP: "4"
+      - STREAMING_NUM_WORKERS: "4"
+      # Kimi's custom-modeling base needs --trust_remote_code at export.
+      - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+      - SERVE_MAX_MODEL_LEN: "4160"
+      - SERVE_MAX_NUM_SEQS: "24"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_READY_TIMEOUT: "5400"
+      - SERVE_EXTRA_ARGS: "--trust-remote-code"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # RDMA transport is UCX (InfiniBand) by default. On AWS EFA, uncomment:
+      # - NIXL_BACKENDS: "LIBFABRIC"
+      # - FI_PROVIDER: "efa"
+      # - NCCL_IB_DISABLE: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 12
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      # vLLM x86_64 build with the aux-capture fix (vllm#46788).
+      container: <vllm-image-with-aux-capture-fix>

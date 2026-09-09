@@ -7,7 +7,9 @@
 # multi_tier_bucketing,text_to_video_dataset}). The diffusion extras install diffusers +
 # accelerate with matching pins. Bounded to a tested range (0.4.0 == the validated commit);
 # fastgen_data/__init__.py adds a runtime guard with an actionable message if the helpers move.
-nemo_automodel[diffusion]>=0.4.0,<1.0
+# Capped below 0.6.0, which dropped ``recipes.diffusion.train.is_main_process`` (imported by
+# dmd2_recipe.py) without a replacement.
+nemo_automodel[diffusion]>=0.4.0,<0.6
 
 # Optional but recommended for the smoke logs.
 wandb

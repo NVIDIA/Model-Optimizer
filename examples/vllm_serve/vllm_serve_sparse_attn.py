@@ -15,14 +15,14 @@
 
 """Launch vLLM with sparse attention.
 
-Configuration is read exclusively from ``<ckpt>/config.json``'s
-``sparse_attention_config`` block, written during calibration by
+The default ``SparseAttnWorker`` reads configuration exclusively from
+``<ckpt>/config.json``'s ``sparse_attention_config`` block, written by
 ``examples/llm_sparsity/attention_sparsity/hf_sa.py``. If the checkpoint has
-no such block, the worker logs a message and the server runs as standard
+no such block, that worker logs a message and the server runs as standard
 vLLM.
 
-Combined sparse attention + quantization is not handled by this launcher; it
-will be added in a follow-up PR once the combined path is tested.
+The launcher defaults to ``sparse_attn_worker.SparseAttnWorker``. Pass
+``--worker-cls sparse_attn_worker.QuantSparseAttnWorker`` for quant+sparse.
 
 Usage:
     python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>

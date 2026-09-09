@@ -6,7 +6,7 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 ## NeMo Evaluator
 
-[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
+[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [hf_ptq](../hf_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
 
 ## LM-Eval-Harness
 
@@ -14,7 +14,12 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 The supported eval tasks are [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
 
+For guidance on shortening research iteration cycles while preserving meaningful model comparisons, see
+[ModelOpt for Researchers: Fast Experimentation Workflows](../researcher_guide/README.md#efficient-evaluation-with-lm-eval-harness).
+
 ### Baseline
+
+Both standard HuggingFace models and heterogeneous pruned checkpoints produced by Puzzletron are supported.
 
 - For models which fit on a single GPU:
 
@@ -22,15 +27,23 @@ The supported eval tasks are [here](https://github.com/EleutherAI/lm-evaluation-
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card> --tasks <comma separated tasks> --batch_size 4
 ```
 
-- With model-sharding (for models which require multiple GPUs):
+For a quick smoke test, add `--limit 10` to any of the above commands to evaluate on only 10 samples per task.
+
+- To fit one model across multiple GPUs (model sharding) and enable larger batches that may speed up evaluation:
 
 ```sh
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
 ```
 
+> **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to the `python` commands above to fix this. This does not limit GPU usage — `parallelize=True` independently enables model parallelism across all available GPUs within the single process. The `accelerate launch` command manages `WORLD_SIZE` itself and does not require this workaround.
+
 - For data-parallel evaluation with model-sharding:
 
-With the following command, the model will be sharded across `total_num_of_available_gpus/num_copies_of_your_model` with a data-parallelism of `num_copies_of_your_model`
+`--num_processes` controls how many model copies evaluate samples concurrently. More
+copies usually make evaluation faster but leave fewer GPUs for each copy. With `N`
+GPUs, each copy uses approximately `N / num_processes` GPUs. For example, on 8 GPUs,
+8 processes run eight single-GPU copies. Choose the largest number of processes for
+which each model copy fits.
 
 ```sh
 accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
@@ -39,22 +52,6 @@ accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
     --model_args pretrained=<HF model folder or model card>,parallelize=True \
     --batch_size 4
 ```
-
-### Heterogeneous Pruned Checkpoints (Puzzletron)
-
-Heterogeneous pruned checkpoints produced by Puzzletron are automatically detected and loaded with the appropriate model patcher. No additional flags are needed beyond specifying the checkpoint path:
-
-```sh
-python lm_eval_hf.py --model hf \
-    --model_args pretrained=path/to/anymodel/checkpoint,dtype=bfloat16,parallelize=True \
-    --tasks mmlu \
-    --num_fewshot 5 \
-    --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
-
-> **Note:** Requires the `puzzletron` extra to be installed (`pip install -e ".[puzzletron]"`).
 
 ### Quantized (simulated)
 
@@ -82,39 +79,81 @@ For data-parallel evaluation, launch with `accelerate launch --multi_gpu --num_p
 Multi-GPU evaluation without data-parallelism:
 
 ```sh
-# MODELOPT_QUANT_CFG_TO_SEARCH: Choose the formats to search separated by commas from [W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE]
+# MODELOPT_QUANT_CFG_TO_SEARCH: Comma-separated list of the formats auto_quantize searches over.
+# Pick each one from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG|NONE],
+# where NONE lets auto_quantize leave a layer unquantized.
 # EFFECTIVE_BITS: Effective bits constraint for auto_quantize
 
-# Examples settings for optimally quantized model with W4A8 & FP8 with effective bits to 4.8:
-# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE
+# Example settings for an optimally quantized model with W4A8 & FP8 with effective bits of 4.8:
+# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG,NONE
 # EFFECTIVE_BITS=4.8
 
 python lm_eval_hf.py --model hf \
     --tasks <comma separated tasks> \
     --model_args pretrained=<HF model folder or model card>,parallelize=True \
-    --quant_cfg <AUTOQUANTIZE_SEARCH_FORMATS> \
+    --quant_cfg <MODELOPT_QUANT_CFG_TO_SEARCH> \
     --auto_quantize_bits <EFFECTIVE_BITS> \
     --batch_size 4
 ```
 
 For data-parallel evaluation, launch with `accelerate launch --multi_gpu --num_processes <num_copies_of_your_model>` (as shown earlier).
 
-- If evaluating T5 models:
-
-  - use `--model hf-seq2seq` instead.
+- If evaluating encoder-decoder models such as T5, keep `--model hf`: lm-eval detects the
+  encoder-decoder architecture from `config.json`. There is no `hf-seq2seq` backend in the
+  supported lm-eval versions (>= 0.4.12); add `backend=seq2seq` to `--model_args` only for
+  checkpoints lm-eval cannot classify on its own.
 
 ```sh
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG]
-python lm_eval_hf.py --model hf-seq2seq --model_args pretrained=t5-small --quant_cfg=<MODELOPT_QUANT_CFG> --tasks <comma separated tasks> --batch_size 4
+python lm_eval_hf.py --model hf --model_args pretrained=t5-small --quant_cfg <MODELOPT_QUANT_CFG> --tasks <comma separated tasks> --batch_size 4
 ```
 
 If `trust_remote_code` needs to be true, please append the command with the `--trust_remote_code` flag.
 
 ### TensorRT-LLM
 
+Uses the `trtllm` backend built into lm-eval (>= 0.4.12), which loads the quantized
+checkpoint directly with the TensorRT-LLM LLM API.
+
 ```sh
-python lm_eval_tensorrt_llm.py --model trt-llm --model_args tokenizer=<HF model folder>,checkpoint_dir=<Quantized checkpoint dir> --tasks <comma separated tasks> --batch_size <max batch size>
+python lm_eval_trtllm.py --model trtllm \
+    --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512,kv_cache_free_gpu_memory_fraction=0.8 \
+    --tasks <comma separated tasks> \
+    --batch_size <max batch size>
 ```
+
+> **_NOTE:_** Loglikelihood tasks (mmlu, hellaswag, arc, ...) need **TensorRT-LLM >=
+> 1.3.0rc11**, which is when the engine started returning the requested token in every
+> `prompt_logprobs` entry. Earlier releases return only the top-1 token per position, so a
+> continuation token's logprob cannot be recovered and the run aborts with a clear error.
+> Generative tasks (gsm8k, ifeval) are unaffected.
+
+> **_NOTE:_** Set `max_input_len` and `max_output_len` explicitly. They default to 2048 and
+> 512, and prompts longer than `max_input_len` are silently truncated — 5-shot MMLU or
+> gsm8k prompts exceed 2048 tokens. `max_seq_len` of the engine is their sum.
+
+> **_NOTE:_** `tensor_parallel_size` defaults to 1; set it to the number of GPUs the
+> checkpoint needs. `pipeline_parallel_size` is also supported.
+
+> **_NOTE:_** Use `lm_eval_trtllm.py` rather than the plain `lm_eval` CLI. lm-eval 0.4.12's
+> `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so every
+> loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
+> `lm_eval_trtllm.py` overrides the alignment. It goes away once the fix lands upstream.
+
+> **_NOTE:_** `kv_cache_free_gpu_memory_fraction` is the share of the GPU memory left after
+> loading the weights that the KV cache may take. TensorRT-LLM's own default of 0.9 can leave
+> too little room for the `prompt_logprobs` buffers and OOM on a large-memory GPU, so
+> `lm_eval_trtllm.py` defaults it to 0.8; lm-eval's backend drops the key, which is why this
+> entry point forwards it. `huggingface_example.sh` passes its
+> `--kv_cache_free_gpu_memory_fraction` (default 0.8) through.
+
+> **_NOTE:_** Other than the KV cache fraction, the backend forwards only a fixed set of
+> arguments to TensorRT-LLM, so the remaining tuning the old `lm_eval_tensorrt_llm.py`
+> applied is not reachable: expert parallelism is left at the TensorRT-LLM default (MoE
+> checkpoints can fail in DeepEP kernels on some GPUs, e.g. SM 12.0). Lower
+> `tensor_parallel_size` if you hit that.
+
+`lm_eval_tensorrt_llm.py` (`--model trt-llm`) has been removed; use the command above.
 
 ## MMLU
 
@@ -126,10 +165,12 @@ Download data
 
 ```bash
 mkdir -p data
-wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O data/mmlu.tar
+wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+    https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar -O data/mmlu.tar
 tar -xf data/mmlu.tar -C data && mv data/data data/mmlu
-cd ..
 ```
+
+Run the commands below from `examples/llm_eval`; `mmlu.py` resolves its default `--data_dir data/mmlu` relative to the current directory.
 
 ### Baseline
 
@@ -141,17 +182,19 @@ python mmlu.py --model_name causal --model_path <HF model folder or model card>
 
 ```bash
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG]
-python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg MODELOPT_QUANT_CFG
+python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg <MODELOPT_QUANT_CFG>
 ```
 
 ### auto_quantize (simulated)
 
 ```bash
-# MODELOPT_QUANT_CFG_TO_SEARCH: Choose the formats to search separated by commas from [W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE]
+# MODELOPT_QUANT_CFG_TO_SEARCH: Comma-separated list of the formats auto_quantize searches over.
+# Pick each one from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG|NONE],
+# where NONE lets auto_quantize leave a layer unquantized.
 # EFFECTIVE_BITS: Effective bits constraint for auto_quantize
 
-# Examples settings for optimally quantized model with W4A8 & FP8 with effective bits to 4.8:
-# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG,NONE
+# Example settings for an optimally quantized model with W4A8 & FP8 with effective bits of 4.8:
+# MODELOPT_QUANT_CFG_TO_SEARCH=W4A8_AWQ_BETA_CFG,FP8_DEFAULT_CFG,NONE
 # EFFECTIVE_BITS=4.8
 
 python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg $MODELOPT_QUANT_CFG_TO_SEARCH --auto_quantize_bits $EFFECTIVE_BITS --batch_size 4
@@ -180,8 +223,10 @@ bash run_livecodebench.sh <custom defined model name> <prompt batch size in para
 Similarly, we support running simple evals against a local running OpenAI API compatible server. Once the local server is up, the following command can be used to run the Simple Evals:
 
 ```bash
-bash run_simple_eval.sh <custom defined model name> <comma separated eval names> <max output tokens> <local model server port>
+bash run_simple_eval.sh <custom defined model name> <comma separated eval names> <max output tokens> <local model server port> [num examples per eval]
 ```
+
+The optional fifth argument caps the number of examples per eval (`--examples`); omit it to run the full eval.
 
 ## Customize quantization method for evaluation
 
@@ -228,12 +273,12 @@ This is useful for evaluating quantized models deployed with vLLM or any model s
    ```bash
    # Example using vLLM's built-in server
    vllm serve nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --quantization modelopt
-    --port 8000 \
-    --tensor-parallel-size <tp_size> # Adjust as needed
+       --quantization modelopt \
+       --port 8000 \
+       --tensor-parallel-size <tp_size> # Adjust as needed
    ```
 
-   To generate the quantized model such as `nvidia/Llama-3.1-8B-Instruct-FP8`, please refer to instructions [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#deploy-fp8-quantized-model-using-vllm-and-sglang). Note currently modelopt quantized model support in vLLM is limited, we are working on expanding the model and quant formats support.
+   To generate the quantized model such as `nvidia/Llama-3.1-8B-Instruct-FP8`, please refer to instructions [here](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#deploy-fp8-quantized-model-using-vllm-and-sglang). Note currently modelopt quantized model support in vLLM is limited, we are working on expanding the model and quant formats support.
 
 1. **Make the script executable (if not already):**
 

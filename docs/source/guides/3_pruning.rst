@@ -16,9 +16,10 @@ These pruning methods support pruning the convolutional and linear layers, and
 attention heads of the model. More details on these pruning modes is as follows:
 
 #.  ``mcore_minitron``: A pruning method developed by NVIDIA Research for pruning GPT, Mamba and Hybrid
-    Transformer Mamba models in NVIDIA Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
+    Transformer Mamba models (including MoE, and the language model of vision-language models) in NVIDIA
+    Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
     the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
-    mamba heads and head dimension, and number of layers of the model.
+    mamba heads and head dimension, MoE experts, and number of layers of the model.
     Checkout more details of the algorithm in the `paper <https://arxiv.org/abs/2408.11796>`_.
 #.  ``puzzletron``: An advanced LLM/VLM pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 #.  ``fastnas``: A pruning method recommended for Computer Vision models. Given a pretrained model,

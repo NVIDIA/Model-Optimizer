@@ -37,7 +37,7 @@ accelerate launch \
     --packing true packing_strategy wrapped \
     --run_name 20b-full-qat \
     --attn_implementation kernels-community/vllm-flash-attn3
-    --quant_cfg MXFP4_MLP_WEIGHT_ONLY_CFG
+    --recipe general/ptq/mxfp4_mlp_weight_only
 """
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
@@ -70,7 +70,7 @@ def main(script_args, training_args, model_args, quant_args):
     # ------------------------
     model_kwargs = {
         "revision": model_args.model_revision,
-        "trust_remote_code": model_args.trust_remote_code,
+        "trust_remote_code": getattr(model_args, "trust_remote_code", False),
         "attn_implementation": model_args.attn_implementation,
         "dtype": getattr(model_args, "dtype", "bfloat16"),
         "use_cache": not training_args.gradient_checkpointing,

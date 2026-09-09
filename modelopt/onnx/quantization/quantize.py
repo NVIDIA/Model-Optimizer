@@ -31,11 +31,14 @@ This tool inserts Quantize-Dequantize (QDQ) nodes following compiler-friendly pa
 model.
 """
 
+import copy
+import math
 import os
 import platform
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +66,8 @@ from modelopt.onnx.quantization.graph_utils import (
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
-from modelopt.onnx.quantization.ort_utils import update_trt_ep_support
+from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
+from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
@@ -83,6 +87,35 @@ from modelopt.onnx.utils import (
 __all__ = ["quantize"]
 
 
+@dataclass
+class _AutotuneContext:
+    ort_config: tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]
+    baseline_model: onnx.ModelProto
+    performance_threshold: float
+    output_dir: Path
+    temporary_output_dir: tempfile.TemporaryDirectory | None = None
+
+    def cleanup(self) -> None:
+        if self.temporary_output_dir is not None:
+            self.temporary_output_dir.cleanup()
+            self.temporary_output_dir = None
+
+
+def _run_with_autotune_cleanup(
+    context: _AutotuneContext | None, function: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    try:
+        return function(*args, **kwargs)
+    except BaseException:
+        if context is not None:
+            context.cleanup()
+        raise
+
+
+def _has_qdq_site(model: onnx.ModelProto) -> bool:
+    return any(node.op_type in {"QuantizeLinear", "DequantizeLinear"} for node in model.graph.node)
+
+
 def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
     """Map variants like "int4_awq", "int4_rtn", "nvfp4" to their base precision types for lookup purposes."""
     mode_lower = quantize_mode.lower()
@@ -92,6 +125,25 @@ def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
         return "float4_e2m1fn"
     # For "int8", "fp8", etc., return as-is (fp8 falls back to BASE_MIN_OPSET which is correct)
     return quantize_mode
+
+
+def _realign_input_shapes_profile(
+    input_shapes_profile: Sequence[dict[str, str]],
+    original_calibration_eps: list[str],
+    calibration_eps: list[str],
+) -> Sequence[dict[str, str]]:
+    """Keep per-EP profiles aligned after ``calibration_eps`` is updated."""
+    assert len(input_shapes_profile) == len(original_calibration_eps), (
+        "Number of calibration EPs and number of input-shapes-profile don't match"
+    )
+    assert len(set(original_calibration_eps)) == len(original_calibration_eps), (
+        "Calibration EPs must be unique when input_shapes_profile is provided"
+    )
+    if original_calibration_eps == calibration_eps:
+        return input_shapes_profile
+
+    profiles_by_ep = dict(zip(original_calibration_eps, input_shapes_profile, strict=True))
+    return [profiles_by_ep.get(ep, {}) for ep in calibration_eps]
 
 
 def _preprocess_onnx(
@@ -271,6 +323,11 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str] | None,
     high_precision_dtype: str = "fp16",
+    direct_io_types: bool = False,
+    op_types_to_exclude_fp16: list[str] | None = None,
+    custom_ops_to_cast_fp32: dict | None = None,
+    opset: int | None = None,
+    mha_accumulation_dtype: str = "fp16",
     output_dir: str | None = None,
     num_schemes_per_region: int = 50,
     pattern_cache_file: str | None = None,
@@ -283,7 +340,7 @@ def _find_nodes_to_quantize_autotune(
     warmup_runs: int = 50,
     timing_runs: int = 100,
     trtexec_args: str | None = None,
-) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
+) -> _AutotuneContext:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
 
@@ -310,20 +367,101 @@ def _find_nodes_to_quantize_autotune(
     if benchmark_instance is None:
         raise RuntimeError("Failed to initialize TensorRT benchmark")
 
+    temporary_output_dir = None
+    if output_dir is None:
+        temporary_output_dir = tempfile.TemporaryDirectory(prefix="modelopt_autotune_")
+        resolved_output_dir = Path(temporary_output_dir.name)
+    else:
+        resolved_output_dir = Path(output_dir)
+
+    def model_transform(model: onnx.ModelProto) -> onnx.ModelProto:
+        return _convert_to_runtime_precision(
+            model,
+            quantize_mode=quantize_mode,
+            high_precision_dtype=high_precision_dtype,
+            direct_io_types=direct_io_types,
+            op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+            custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+            trt_extra_plugin_lib_paths=trt_plugins,
+            opset=opset,
+            mha_accumulation_dtype=mha_accumulation_dtype,
+        )
+
     precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
-    autotuner = region_pattern_autotuning_workflow(
-        onnx_model,
-        output_dir=Path(output_dir) if output_dir else None,
-        num_schemes_per_region=num_schemes_per_region,
-        pattern_cache_file=pattern_cache_file,
-        state_file=state_file,
-        quant_type=quantize_mode,
-        default_dq_dtype=precision_map[high_precision_dtype],
-        qdq_baseline_model=qdq_baseline_model,
-        node_filter_list=node_filter_list,
-        verbose=verbose,
+    try:
+        autotuner = region_pattern_autotuning_workflow(
+            onnx_model,
+            output_dir=resolved_output_dir,
+            num_schemes_per_region=num_schemes_per_region,
+            pattern_cache_file=pattern_cache_file,
+            state_file=state_file,
+            quant_type=quantize_mode,
+            default_dq_dtype=precision_map[high_precision_dtype],
+            qdq_baseline_model=qdq_baseline_model,
+            node_filter_list=node_filter_list,
+            verbose=verbose,
+            model_transform=model_transform,
+        )
+        return _AutotuneContext(
+            ort_config=autotuner.get_ort_quantization_config(),
+            baseline_model=model_transform(copy.deepcopy(onnx_model)),
+            performance_threshold=autotuner.config.performance_threshold,
+            output_dir=resolved_output_dir,
+            temporary_output_dir=temporary_output_dir,
+        )
+    except BaseException:
+        if temporary_output_dir is not None:
+            temporary_output_dir.cleanup()
+        raise
+
+
+def _apply_autotune_final_guard(
+    candidate_model: onnx.ModelProto,
+    context: _AutotuneContext,
+    *,
+    use_external_data_format: bool,
+) -> onnx.ModelProto:
+    """Keep the calibrated artifact only when it beats its no-Q/DQ reference."""
+    # Keep Autotune's Torch and TensorRT imports off the ordinary quantization path.
+    from modelopt.onnx.quantization.autotune.workflows import benchmark_onnx_model
+
+    logs_dir = context.output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = context.output_dir / "calibrated_baseline.onnx"
+    candidate_path = context.output_dir / "calibrated_candidate.onnx"
+    baseline_model = copy.deepcopy(context.baseline_model)
+    candidate_model = copy.deepcopy(candidate_model)
+    save_onnx(baseline_model, str(baseline_path), use_external_data_format)
+    save_onnx(candidate_model, str(candidate_path), use_external_data_format)
+
+    baseline_latency = benchmark_onnx_model(
+        str(baseline_path), str(logs_dir / "calibrated_baseline.log")
     )
-    return autotuner.get_ort_quantization_config()
+    if not math.isfinite(baseline_latency) or baseline_latency <= 0:
+        raise RuntimeError(
+            "Autotune could not establish a finite positive latency for the "
+            "high-precision no-Q/DQ reference"
+        )
+
+    candidate_latency = benchmark_onnx_model(
+        str(candidate_path), str(logs_dir / "calibrated_candidate.log")
+    )
+    candidate_is_valid = math.isfinite(candidate_latency) and candidate_latency > 0
+    speedup = baseline_latency / candidate_latency if candidate_is_valid else 0.0
+    keep_candidate = _has_qdq_site(candidate_model) and speedup >= context.performance_threshold
+
+    selection = "qdq" if keep_candidate else "no_qdq"
+    logger.info(
+        "Autotune selected %s: baseline=%.3f ms, candidate=%.3f ms, speedup=%.3fx, threshold=%.3fx",
+        selection,
+        baseline_latency,
+        candidate_latency,
+        speedup,
+        context.performance_threshold,
+    )
+    if not keep_candidate:
+        logger.warning("The saved Autotune artifact is not quantized.")
+    return candidate_model if keep_candidate else baseline_model
 
 
 def quantize(
@@ -358,8 +496,11 @@ def quantize(
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    model_id: str | None = None,
+    trust_remote_code: bool = False,
     direct_io_types: bool = False,
     opset: int | None = None,
+    target_dla: bool = False,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
     autotune_num_schemes_per_region: int = 50,
@@ -373,6 +514,7 @@ def quantize(
     autotune_warmup_runs: int = 50,
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
+    trt_rtx_backend: str = "legacy",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -398,9 +540,14 @@ def quantize(
         calibration_eps:
             Priority order for the execution providers (EP) to calibrate the model.
             Any subset of ['NvTensorRtRtx', 'trt', 'cuda:x', 'dml:x', 'cpu'], where 'x' is the device id.
+            For TensorRT-RTX, pass 'NvTensorRtRtx' for either backend; select the backend with trt_rtx_backend.
 
             .. note::
                 If a custom op is detected in the model, 'trt' will automatically be added to the EP list.
+        trt_rtx_backend:
+            TensorRT-RTX implementation used when calibration_eps contains 'NvTensorRtRtx'.
+            Either 'legacy' (default) or 'abi'. The legacy backend uses TensorRT-RTX
+            libraries on PATH; the ABI backend uses the standalone EP plugin.
         override_shapes:
             Override model input shapes with static shapes.
         op_types_to_quantize:
@@ -491,6 +638,12 @@ def quantize(
             If None of the calibration_eps require any such shapes profile for model inputs, then nothing needs to be
             set for this "input_shapes_profile" parameter.
             Default value is None.
+        model_id:
+            Hugging Face model ID, local config directory, or local ``config.json`` path used to infer input shape
+            profiles when ``input_shapes_profile`` is not provided.
+        trust_remote_code:
+            Whether to allow custom code to be loaded when resolving ``model_id`` with Hugging Face transformers.
+            Defaults to False.
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
@@ -498,6 +651,9 @@ def quantize(
             Target ONNX opset version for the quantized model. If None, uses required minimum opset
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
+        target_dla:
+            If True, enable Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has
+            effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -538,6 +694,14 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+    if trt_plugins and "NvTensorRtRtx" in calibration_eps:
+        raise ValueError(
+            "TensorRT plugin paths are not supported with the TensorRT-RTX backend. "
+            "Remove --trt_plugins or select the classic TensorRT EP."
+        )
+
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
     logger.info(f"Quantization mode: {quantize_mode}")
@@ -599,7 +763,20 @@ def quantize(
         quantize_mode,
         opset,
     )
+    if autotune and _has_qdq_site(onnx_model):
+        raise ValueError("Autotune requires an unquantized source model without Q/DQ nodes")
+
+    original_calibration_eps = list(calibration_eps)
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
+
+    if input_shapes_profile is not None:
+        input_shapes_profile = _realign_input_shapes_profile(
+            input_shapes_profile, original_calibration_eps, calibration_eps
+        )
+    elif model_id:
+        input_shapes_profile = create_input_shapes_profile(
+            model_id, calibration_eps, trust_remote_code=trust_remote_code
+        )
 
     if calibration_data_reader is None:
         # Use random scales if calibration data is not supplied
@@ -621,32 +798,36 @@ def quantize(
     # MatMuls in MHA pattern.
     # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
     # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-    nodes_to_exclude = find_nodes_from_mha_to_exclude(
-        onnx_path,
-        use_external_data_format,
-        nodes_to_exclude,
-        disable_mha_qdq,
-        quantize_mode,
-        intermediate_generated_files,
-        calibration_data_reader,
-        calibration_eps,
-    )
+    if not (target_dla and quantize_mode == "int8"):
+        nodes_to_exclude = find_nodes_from_mha_to_exclude(
+            onnx_path,
+            use_external_data_format,
+            nodes_to_exclude,
+            disable_mha_qdq,
+            quantize_mode,
+            intermediate_generated_files,
+            calibration_data_reader,
+            calibration_eps,
+            input_shapes_profile,
+            trt_rtx_backend,
+        )
 
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
 
+    autotune_context = None
     if quantize_mode in ["fp8", "int8"]:
         if autotune:
-            (
-                nodes_to_quantize_autotune,
-                op_types_to_quantize_autotune,
-                no_quantize_inputs,
-                op_types_needing_output_quant,
-            ) = _find_nodes_to_quantize_autotune(
+            autotune_context = _find_nodes_to_quantize_autotune(
                 onnx_model,
                 quantize_mode,
                 trt_plugins,
                 high_precision_dtype,
+                direct_io_types=direct_io_types,
+                op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+                custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+                opset=opset,
+                mha_accumulation_dtype=mha_accumulation_dtype,
                 output_dir=autotune_output_dir,
                 num_schemes_per_region=autotune_num_schemes_per_region,
                 pattern_cache_file=autotune_pattern_cache_file,
@@ -660,13 +841,22 @@ def quantize(
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
             )
+            (
+                nodes_to_quantize_autotune,
+                op_types_to_quantize_autotune,
+                no_quantize_inputs,
+                op_types_needing_output_quant,
+            ) = autotune_context.ort_config
             op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
             nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
             kwargs["no_quantize_inputs"] = no_quantize_inputs
             kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
 
+        kwargs["target_dla"] = target_dla
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
-        onnx_model = quantize_func(
+        onnx_model = _run_with_autotune_cleanup(
+            autotune_context,
+            quantize_func,
             onnx_path=onnx_path,
             calibration_method=calibration_method or "entropy",
             calibration_data_reader=calibration_data_reader,
@@ -691,6 +881,8 @@ def quantize(
             direct_io_types=direct_io_types,
             opset=opset,
             autotune=autotune,
+            input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
 
@@ -706,34 +898,50 @@ def quantize(
             use_zero_point=use_zero_point,
             log_level=log_level,
             input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
     else:
         raise RuntimeError(f"Invalid quantization mode choice: {quantize_mode}")
 
     if onnx_model:
-        # Fuse Q nodes for INT8/FP8 mode
         if quantize_mode in ["int8", "fp8"]:
             if dq_only:
-                onnx_model = qdq_to_dq(onnx_model)
+                onnx_model = _run_with_autotune_cleanup(autotune_context, qdq_to_dq, onnx_model)
             if custom_ops_to_quantize:
-                # Remove DQ nodes from the input and Q from the output of the requested custom ops
-                onnx_model = remove_input_dq_and_output_q(
-                    onnx_model, quantizable_custom_ops=custom_ops_to_quantize
+                onnx_model = _run_with_autotune_cleanup(
+                    autotune_context,
+                    remove_input_dq_and_output_q,
+                    onnx_model,
+                    quantizable_custom_ops=custom_ops_to_quantize,
                 )
             if direct_io_types:
-                onnx_model = remove_graph_input_q(onnx_model)
+                onnx_model = _run_with_autotune_cleanup(
+                    autotune_context, remove_graph_input_q, onnx_model
+                )
+            if autotune_context is not None:
+                onnx_model = _run_with_autotune_cleanup(
+                    autotune_context,
+                    _apply_autotune_final_guard,
+                    onnx_model,
+                    autotune_context,
+                    use_external_data_format=use_external_data_format,
+                )
         else:
-            # Remove redundant cast nodes in the quantized model
-            # Note. This is called within the qdq_to_dq function as well
             remove_redundant_cast_nodes(onnx_model.graph)
 
-        # Collect and print stats of the quantized model
-        print_stat(gs.import_onnx(onnx_model))
+        graph = _run_with_autotune_cleanup(autotune_context, gs.import_onnx, onnx_model)
+        _run_with_autotune_cleanup(autotune_context, print_stat, graph)
+        _run_with_autotune_cleanup(
+            autotune_context, save_onnx, onnx_model, output_path, use_external_data_format
+        )
+        if autotune_context is not None and not _has_qdq_site(onnx_model):
+            logger.info(f"Autotune high-precision ONNX model is saved as {output_path}")
+        else:
+            logger.info(f"Quantized onnx model is saved as {output_path}")
 
-        # Save the quantized model to the output path
-        save_onnx(onnx_model, output_path, use_external_data_format)
-        logger.info(f"Quantized onnx model is saved as {output_path}")
+    if autotune_context is not None:
+        autotune_context.cleanup()
 
     # Check if intermediate files should be deleted
     if not keep_intermediate_files:

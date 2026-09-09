@@ -16,10 +16,13 @@
 """Utility to dump imagenet data for calibration."""
 
 import argparse
+import os
+from pathlib import Path
 
 import numpy as np
-import timm
+import torchvision.transforms as T
 from datasets import load_dataset
+from PIL import Image
 
 
 def main():
@@ -37,17 +40,75 @@ def main():
     parser.add_argument(
         "--output_path", type=str, default="calib.npy", help="Path to output npy file."
     )
+    parser.add_argument(
+        "--imagenet_path",
+        type=str,
+        default="zh-plus/tiny-imagenet",
+        help="HF dataset card or local ImageNet root dir (expects train/<synset>/*.JPEG).",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help=(
+            "timm model name (e.g. tf_efficientnet_b0). When set, derives input_size, mean, "
+            "and std from the model's default data config. Overrides --input_size."
+        ),
+    )
+    parser.add_argument(
+        "--input_size",
+        type=int,
+        default=224,
+        help="Spatial resolution for calibration images. Ignored when --model_name is set.",
+    )
 
     args = parser.parse_args()
-    dataset = load_dataset("zh-plus/tiny-imagenet")
-    model = timm.create_model("vit_base_patch16_224", pretrained=True)
-    data_config = timm.data.resolve_model_data_config(model)
-    transforms = timm.data.create_transform(**data_config, is_training=False)
-    images = dataset["train"][0 : args.calibration_data_size]["image"]
+    if args.calibration_data_size < 1:
+        raise ValueError("--calibration_data_size must be >= 1")
 
-    calib_tensor = [transforms(image) for image in images]
+    if args.model_name is not None:
+        import timm  # optional dependency: only required when --model_name is set
 
-    calib_tensor = np.stack(calib_tensor, axis=0)
+        data_config = timm.data.resolve_model_data_config(
+            timm.create_model(args.model_name, pretrained=False)
+        )
+        input_size = data_config["input_size"][1]  # (C, H, W) -> H
+        mean = list(data_config["mean"])
+        std = list(data_config["std"])
+    else:
+        input_size = args.input_size
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+    transforms = T.Compose(
+        [
+            T.Resize(input_size),
+            T.CenterCrop(input_size),
+            T.ToTensor(),
+            T.Normalize(mean=mean, std=std),
+        ]
+    )
+
+    if os.path.isdir(args.imagenet_path):
+        all_images = sorted(Path(args.imagenet_path, "train").rglob("*.JPEG"))
+        if len(all_images) < args.calibration_data_size:
+            raise ValueError(
+                f"Requested {args.calibration_data_size} images, but only "
+                f"{len(all_images)} found under {Path(args.imagenet_path, 'train')}"
+            )
+        rng = np.random.default_rng(0)
+        chosen = rng.choice(len(all_images), size=args.calibration_data_size, replace=False)
+        images = [Image.open(all_images[i]).convert("RGB") for i in chosen]
+    else:
+        dataset = load_dataset(args.imagenet_path)
+        images = dataset["train"][0 : args.calibration_data_size]["image"]
+        if len(images) < args.calibration_data_size:
+            raise ValueError(
+                f"Requested {args.calibration_data_size} images, but only {len(images)} "
+                f"available in '{args.imagenet_path}' train split"
+            )
+
+    calib_tensor = np.stack([transforms(image).numpy() for image in images], axis=0)
     if args.fp16:
         calib_tensor = calib_tensor.astype(np.float16)
     np.save(args.output_path, calib_tensor)

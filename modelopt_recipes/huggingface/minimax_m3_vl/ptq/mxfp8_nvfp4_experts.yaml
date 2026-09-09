@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  mxfp8: configs/numerics/mxfp8
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    MiniMax-M3 mixed MXFP8 and NVFP4 PTQ. Routed experts use MSE-calibrated
+    NVFP4 weights and dynamic NVFP4 activations with input_scale fixed to 1.0;
+    other language-model linear layers use MXFP8. The vision branch, routers,
+    lm_head, and KV cache stay unquantized.
+
+quantize:
+  algorithm:
+    method: mse
+    fp8_scale_sweep: false
+    layerwise:
+      enable: true
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: "*weight_quantizer"
+      cfg: {$import: mxfp8}
+    - quantizer_name: "*input_quantizer"
+      cfg: {$import: mxfp8}
+    - quantizer_name: "*mlp.experts*weight_quantizer"
+      cfg: {$import: nvfp4_static}
+    - quantizer_name: "*mlp.experts*input_quantizer"
+      cfg:
+        $import: nvfp4
+        # 2688 = E2M1_MAX * E4M3_MAX (6 * 448), so input_scale is exactly 1.0.
+        constant_amax: 2688.0
+    - $import: default_disabled_quantizers

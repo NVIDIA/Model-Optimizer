@@ -1,0 +1,313 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Convert a full-precision distilled Megatron checkpoint (produced by distill.py) to HuggingFace.
+
+Two mechanisms, dispatched on the model type:
+
+  - LLM (Homogeneous or Puzzletron Heterogeneous): the full model is on disk, so it is exported directly with
+    ``AutoBridge.export_ckpt`` (which reads the checkpoint's actual per-layer shapes and therefore
+    handles both homogeneous and heterogeneous students).
+  - VLM: only the ``language_model`` submodule is distilled and checkpointed, so the full VLM is
+    reassembled in memory -- vision tower + projector from the original HF model (--student_hf_path),
+    the distilled language model from the checkpoint -- and written with ``AutoBridge.save_hf_weights``.
+
+These two helpers (``export_llm_to_hf`` / ``save_vlm_to_hf``) are also reused by distill.py for its
+final-checkpoint export.
+
+Example LLM (Homogeneous or Puzzletron Heterogeneous):
+
+    torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+        --student_hf_path Qwen/Qwen3-0.6B \
+        --megatron_path /tmp/distill-out/checkpoints/iter_0000500 \
+        --hf_export_path /tmp/distilled-hf_iter_0000500
+
+Example VLM (checkpoint reshards on load, so TP/PP/EP need not match training):
+
+    torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+        --student_hf_path Qwen/Qwen3-VL-4B-Instruct \
+        --megatron_path /tmp/distill-out/checkpoints/iter_0000500 \
+        --hf_export_path /tmp/distilled-vlm-hf_iter_0000500
+
+Example selected validation iterations:
+
+    torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+        --student_hf_path Qwen/Qwen3-0.6B \
+        --megatron_path /tmp/distill-out/checkpoints \
+        --hf_export_path /tmp/distilled-hf-validation \
+        --export_iterations all
+
+    Replace ``all`` with explicit iteration numbers, e.g. ``200 400 600``, to export only
+    selected checkpoints.
+
+See `README.md` in this directory for more details.
+"""
+
+import argparse
+from pathlib import Path
+
+import torch
+from megatron.bridge import AutoBridge
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from transformers import AutoConfig
+
+import modelopt.torch.utils.distributed as dist
+from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
+    load_mbridge_model_from_hf,
+    load_modelopt_megatron_checkpoint,
+)
+
+# Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
+_ITER_DIR_PREFIX = "iter_"
+
+
+def _iteration_dir_name(iteration: int) -> str:
+    return f"{_ITER_DIR_PREFIX}{iteration:07d}"
+
+
+def _get_checkpoint_export_paths(args: argparse.Namespace) -> list[tuple[Path, Path]]:
+    """Return ``(Megatron checkpoint path, HF export path)`` pairs for this invocation."""
+    megatron_path = Path(args.megatron_path)
+    hf_export_path = Path(args.hf_export_path)
+
+    if not args.export_iterations:
+        return [(megatron_path, hf_export_path)]
+
+    if len(args.export_iterations) == 1 and args.export_iterations[0].lower() == "all":
+        checkpoint_dirs = [
+            path
+            for path in megatron_path.iterdir()
+            if path.is_dir() and path.name.startswith(_ITER_DIR_PREFIX)
+        ]
+        checkpoint_dirs = sorted(checkpoint_dirs)
+    else:
+        iterations = sorted({int(iteration) for iteration in args.export_iterations})
+        checkpoint_dirs = [
+            megatron_path / _iteration_dir_name(iteration) for iteration in iterations
+        ]
+        for checkpoint_dir in checkpoint_dirs:
+            if not checkpoint_dir.is_dir():
+                raise ValueError(f"Checkpoint not found: {checkpoint_dir}")
+
+    return [
+        (checkpoint_dir, hf_export_path / checkpoint_dir.name) for checkpoint_dir in checkpoint_dirs
+    ]
+
+
+def export_llm_to_hf(
+    megatron_path: str,
+    hf_export_path: str,
+    student_hf_path: str,
+    template_hf: str | None = None,
+    trust_remote_code: bool = False,
+) -> None:
+    """Export a LLM (Homogeneous or Puzzletron Heterogeneous) Megatron checkpoint to HF.
+
+    Args:
+        megatron_path: Megatron checkpoint directory (an ``iter_*`` dir or its parent).
+        hf_export_path: Directory to write the HuggingFace checkpoint to.
+        student_hf_path: Student HF model used for the exported config / tokenizer.
+        template_hf: Reference HF model with a homogeneous architecture, used as the export template
+            for a heterogeneous (Puzzletron/NAS) student. Defaults to ``student_hf_path`` (correct for
+            homogeneous students).
+        trust_remote_code: Whether to trust remote code when loading the HF model.
+    """
+    # TODO: unify with save_vlm_to_hf's in-memory export path. This LLM path re-loads the checkpoint
+    # from disk via export_ckpt (which reads the actual per-layer shapes, so it handles heterogeneous
+    # Puzzletron/NAS students); an in-memory export would need to rebuild the (possibly heterogeneous)
+    # student first.
+    export_bridge = AutoBridge.from_hf_pretrained(
+        template_hf or student_hf_path, trust_remote_code=trust_remote_code
+    )
+    export_bridge.export_ckpt(
+        megatron_path=megatron_path, hf_path=hf_export_path, show_progress=True, strict=True
+    )
+    # Config / tokenizer come from the student definition (handles local paths and HF model IDs).
+    AutoConfig.from_pretrained(
+        student_hf_path, trust_remote_code=trust_remote_code
+    ).save_pretrained(hf_export_path)
+
+
+def save_vlm_to_hf(
+    full_model,
+    hf_export_path: str,
+    student_hf_path: str,
+    trust_remote_code: bool = False,
+) -> None:
+    """Write an in-memory full VLM (distilled LM already in place) to HF format.
+
+    Only the language model is distilled; the vision tower / projector are the original weights, so
+    the original VLM config / tokenizer / remote code are reused and only the weights are written.
+    ``full_model.language_model`` must already be a plain module (any KD wrapper stripped by the
+    caller). Requires the model-parallel groups to be initialized (for the weight gather).
+
+    Args:
+        full_model: The in-memory full VLM with the distilled language model in place.
+        hf_export_path: Directory to write the HuggingFace checkpoint to.
+        student_hf_path: Original VLM HF model providing config / tokenizer / remote code.
+        trust_remote_code: Whether to trust remote code when loading the HF model.
+    """
+    export_bridge = AutoBridge.from_hf_pretrained(
+        student_hf_path, trust_remote_code=trust_remote_code
+    )
+    export_bridge.hf_pretrained.save_artifacts(hf_export_path)
+    export_bridge.save_hf_weights([full_model], hf_export_path)
+    copy_hf_ckpt_remote_code(student_hf_path, hf_export_path)
+
+
+def get_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        "--student_hf_path",
+        type=str,
+        required=True,
+        help="Student HF model (used for the exported config / tokenizer, and, for VLMs, the vision "
+        "tower / projector weights). Must match the model distilled by distill.py.",
+    )
+    parser.add_argument(
+        "--megatron_path",
+        type=str,
+        required=True,
+        help=(
+            "Distilled Megatron checkpoint to convert, or checkpoint root when using "
+            "--export_iterations."
+        ),
+    )
+    parser.add_argument(
+        "--hf_export_path",
+        type=str,
+        required=True,
+        help=(
+            "Directory to write the exported HuggingFace checkpoint to. When exporting multiple "
+            "checkpoints, each checkpoint is written under this root as iter_<iteration>."
+        ),
+    )
+    parser.add_argument(
+        "--export_iterations",
+        nargs="+",
+        default=None,
+        help=(
+            "Export checkpoints from the checkpoint root passed to --megatron_path. Use "
+            "'all' for every iter_<iteration> checkpoint, or pass selected iteration numbers, "
+            "for example: --export_iterations all or --export_iterations 100 200 300."
+        ),
+    )
+    parser.add_argument(
+        "--student_hf_model",
+        type=str,
+        default=None,
+        help="Reference HF model with a homogeneous architecture, used as the export template for a "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "correct for homogeneous students; unused for VLMs.",
+    )
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically. VLMs only: the "
+            "LLM path reads the expert layout from the checkpoint and ignores this flag."
+        ),
+    )
+    parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
+
+    args = parser.parse_args()
+    print_args(args)
+
+    return args
+
+
+def main(args: argparse.Namespace):
+    checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
+    # This path drops quantization, so a QAD checkpoint would export silently unquantized.
+    # ``has_modelopt_state`` ignores ``kd_loss``, so plain distillation still passes.
+    quantized = [str(p) for p, _ in checkpoint_export_paths if has_modelopt_state(str(p))]
+    if quantized:
+        raise ValueError(
+            f"{quantized[0]} is quantized; this script exports full precision only and would drop "
+            "the quantizers. Use export_quantized_megatron_to_hf.py instead."
+        )
+    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
+
+    if is_vlm:
+        # Build the full VLM (vision tower / projector + original LM from HF), then overwrite the LM
+        # with the distilled checkpoint weights, then export the assembled VLM.
+        print_rank_0("Reassembling distilled VLM and exporting to HF format")
+        _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
+            hf_model_name_or_path=args.student_hf_path,
+            trust_remote_code=args.trust_remote_code,
+            # Mirrors distill.py's unquantized branch
+            moe_grouped_gemm=not args.no_moe_grouped_gemm,
+            provider_overrides={
+                "tensor_model_parallel_size": args.tp_size,
+                "pipeline_model_parallel_size": args.pp_size,
+                "expert_model_parallel_size": args.ep_size,
+                "context_parallel_size": args.cp_size,
+                # VLMs run with sequence parallelism off (see distill.py).
+                "sequence_parallel": False,
+                "pipeline_dtype": torch.bfloat16,
+            },
+            init_model_parallel=True,
+            load_weights=True,  # vision tower / projector + original LM; the LM is overwritten below
+        )
+        for megatron_path, hf_export_path in checkpoint_export_paths:
+            # Load only the distilled language-model weights (skip ModelOpt-state restore -- the kd_loss
+            # mode / teacher are irrelevant for export and would otherwise require a teacher model).
+            load_modelopt_megatron_checkpoint(
+                [full_model.language_model], str(megatron_path), restore_modelopt_state=False
+            )
+            save_vlm_to_hf(
+                full_model,
+                str(hf_export_path),
+                args.student_hf_path,
+                trust_remote_code=args.trust_remote_code,
+            )
+            print_rank_0(f"Saved distilled VLM to {hf_export_path} in HF format")
+    else:
+        print_rank_0("Exporting distilled checkpoint(s) to HF format")
+        # Save rank before destroying process group (dist.rank() won't work after destruction).
+        is_rank_0 = dist.rank() == 0
+        # export_ckpt creates its own temporary process group; destroy this one first so cleanup
+        # does not hang on a barrier once rank 0 has left.
+        dist.cleanup()
+        if is_rank_0:
+            for megatron_path, hf_export_path in checkpoint_export_paths:
+                print(f"Exporting {megatron_path} to HF format at {hf_export_path}")
+                export_llm_to_hf(
+                    megatron_path=str(megatron_path),
+                    hf_export_path=str(hf_export_path),
+                    student_hf_path=args.student_hf_path,
+                    template_hf=args.student_hf_model,
+                    trust_remote_code=args.trust_remote_code,
+                )
+                print(f"Exported HuggingFace checkpoint to {hf_export_path}")
+
+
+if __name__ == "__main__":
+    dist.setup()
+    args = get_args()
+    try:
+        main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
+    finally:
+        dist.cleanup()

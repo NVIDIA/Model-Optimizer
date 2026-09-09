@@ -7,12 +7,10 @@ These instructions apply to AI-assisted work in this repository.
 - Start with `README.md` for project overview and install.
 - Use `modelopt/` for source, `tests/` for focused test coverage, and
   `examples/` or `docs/` for usage patterns.
-- **Agent skills and shared config live under `.agents/`** — the canonical,
-  agent-agnostic source of truth (`.agents/skills/<name>/SKILL.md`,
-  `.agents/scripts/`, `.agents/clusters.yaml.example`). Claude Code's
-  `.claude/skills`, `.claude/scripts`, and `.claude/clusters.yaml.example` are
-  relative symlinks into `.agents/`. Always edit files under `.agents/`, not the
-  symlink path. See `.agents/README.md` for the convention.
+- **Agent skills live under `plugins/modelopt/skills/`**, the installable
+  plugin's canonical skill tree. `.agents/skills` and `.claude/skills` expose
+  those skills through relative symlinks. Shared agent config and scripts
+  remain under `.agents/`. See `.agents/README.md` for the convention.
 
 ## Coding guidelines
 
@@ -44,3 +42,32 @@ These instructions apply to AI-assisted work in this repository.
 - Before opening or marking a PR ready for review, read the
   [submitting your code](CONTRIBUTING.md#submitting-your-code) guidance.
 - Read `.github/PULL_REQUEST_TEMPLATE.md` and satisfy the checklist.
+- **PR description:** fill the template sections — what changed and why, a usage
+  snippet if it adds an API or flag, and what you actually ran under Testing.
+  Root cause, benchmark numbers, and design rationale belong here. Don't restate
+  the diff file by file.
+- **Only changelog-worthy changes get a `CHANGELOG.rst` entry:** new features,
+  backward breaking changes, deprecations, and fixes for critical or known bugs
+  from a previous release. Skip bugs introduced and fixed within the same
+  unreleased cycle.
+- **Keep each entry to one or two sentences** written for external users: what
+  changed and what they need to do. No internal bug numbers (e.g. NVBug IDs),
+  root-cause analysis, or implementation detail — that belongs in the PR
+  description. File features under the matching `**New Features**` sub-section
+  used by recent releases (e.g. `*Quantization*`, `*Speculative Decoding*`,
+  `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`) rather than relabeling
+  existing ones.
+
+## Responding to PR review feedback
+
+- **Judge each comment on its merits before acting.** Check it against the
+  current code — reviewers comment on stale diffs, and bot findings (CodeRabbit,
+  Claude) are claims to verify, not instructions. Weight CODEOWNERS reviewers
+  above bots; if a reviewer reaffirms after your pushback, that settles it.
+- **Pick one outcome per thread:** address it in a commit, push back citing the
+  code that shows the comment is wrong, or postpone it as out of scope. Report
+  which threads got which when you ask for push approval.
+- **Reply in every thread the pushed commits addressed** — a sentence on what
+  changed and where. Those replies need no extra approval; pushback and postpone
+  replies do, since no commit backs them. Never resolve threads: that is the
+  reviewer's call.

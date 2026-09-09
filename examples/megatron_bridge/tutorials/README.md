@@ -1,7 +1,7 @@
 # Megatron-Bridge Tutorials
 
 End-to-end tutorials that combine ModelOpt optimization techniques on [NVIDIA Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) models.
-Each one walks through a complete workflow using the scripts in [examples/megatron_bridge](../README.md) (`prune_minitron.py`, `distill.py`, `quantize.py`, `export.py`).
+Each one walks through a complete workflow using the scripts in [examples/megatron_bridge](../README.md) (`prune_minitron.py`, `distill.py`, `quantize.py`, `export_quantized_megatron_to_hf.py`, `export_distilled_megatron_to_hf.py`).
 
 ## Available tutorials
 

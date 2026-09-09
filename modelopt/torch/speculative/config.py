@@ -149,6 +149,71 @@ class DFlashConfig(ModeloptBaseConfig):
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
 
+    dflash_swa_window_size: int | None = ModeloptField(
+        default=None,
+        description=(
+            "Sliding-window attention (SWA) window size for the DFlash draft. When set, ALL "
+            "draft layers use sliding-window attention: each draft query attends only to "
+            "context positions within `dflash_swa_window_size` tokens before it. None "
+            "(default) keeps full attention over all context. Must be >= dflash_block_size. "
+            "Exported to the draft config as dflash_config.use_swa/swa_window_size (+ "
+            "top-level sliding_window) so vLLM applies the same window at inference. Whether "
+            "block-internal attention is bidirectional or causal is controlled separately by "
+            "`dflash_draft_attention`."
+        ),
+    )
+
+    dflash_draft_attention: Literal["bidirectional", "causal"] = ModeloptField(
+        default="bidirectional",
+        description=(
+            "Attention pattern *inside* each draft block (context attention is always "
+            "restricted to positions before the block's anchor, and additionally windowed "
+            "when dflash_swa_window_size is set).\n"
+            "- 'bidirectional' (default): every query in a block sees all block_size draft "
+            "positions, including ones after it (MiMo-style). This is what ModelOpt has "
+            "always trained and matches drafts such as XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash "
+            "and z-lab/Qwen3.5-9B-DFlash.\n"
+            "- 'causal': a query at block position i only sees draft positions <= i, so the "
+            "block is predicted autoregressively. Required to faithfully train drafts whose "
+            "config declares dflash_config.causal=true, e.g. "
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark.\n"
+            "Exported verbatim to dflash_config.causal, which vLLM's "
+            "qwen3_dflash._dflash_layer_causal reads as a per-model override."
+        ),
+    )
+
+    dflash_attention_sink: bool = ModeloptField(
+        default=False,
+        description=(
+            "Add a learnable per-head attention sink to every draft attention layer. The "
+            "sink is one extra logit per head appended to the attention logits before the "
+            "softmax and dropped afterwards, letting a head place probability mass nowhere "
+            "instead of being forced to attend within a (possibly short) window — the "
+            "GPT-OSS/Nemotron formulation. Adds one `self_attn.attention_sink_bias` "
+            "parameter of shape [num_attention_heads] per layer. Required to load and "
+            "continue training drafts whose checkpoint carries those weights, e.g. "
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark. Exported to "
+            "dflash_config.attention_sink_bias for vLLM."
+        ),
+    )
+
+    dflash_init_checkpoint: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Path to an exported draft checkpoint to warm-start from, so training continues "
+            "from published weights instead of a fresh random init. Accepts either a "
+            "directory in the deployment layout this repo exports (``model.safetensors`` "
+            "with no ``dflash_module.`` prefix, alongside ``config.json``) or the "
+            "``model.safetensors`` file itself. Weights are loaded into the draft module "
+            "after it is built, so the architecture still comes from "
+            "``dflash_architecture_config`` — the checkpoint must match it. Any mismatch "
+            "(missing, unexpected, or wrong-shaped tensors) raises rather than silently "
+            "leaving part of the draft randomly initialized. ``embed_tokens``/``lm_head`` "
+            "entries are ignored: the draft takes those from the base model. None "
+            "(default) trains from scratch."
+        ),
+    )
+
     dflash_export_rope_scaling: dict = ModeloptField(
         default={},
         description=(
@@ -163,12 +228,158 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_lambda_base_start: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Domino only: initial weight of the base (backbone-only) loss in the "
+            "loss = (1 - lambda)*final + lambda*base mixture; linearly decayed to 0. "
+            "Ignored unless dflash_architecture_config.projector_type == 'domino'."
+        ),
+    )
+
+    dflash_lambda_base_decay_ratio: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Domino only: fraction of total training steps over which lambda_base "
+            "decays from dflash_lambda_base_start to 0."
+        ),
+    )
+
+    dflash_ce_loss_alpha: float = ModeloptField(
+        default=0.1,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the cross-entropy term in the three-term loss "
+            "(ce_alpha*CE + l1_alpha*TVD + conf_alpha*BCE). "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    dflash_l1_loss_alpha: float = ModeloptField(
+        default=0.9,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the L1/total-variation distribution-matching term "
+            "between the corrected draft and the target distribution. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    dflash_confidence_head_alpha: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the confidence-head BCE term (predicts the per-position "
+            "acceptance probability). 0 disables the term; requires "
+            "dflash_architecture_config.use_confidence_head=true when > 0. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    dflash_fp32_master_weights: bool = ModeloptField(
+        default=False,
+        description=(
+            "Keep the draft's parameters in fp32 while its matmuls run in bf16, i.e. "
+            "classic mixed precision with fp32 master weights.\n\n"
+            "Requires a bf16 autocast around the forward, which HF Trainer supplies under "
+            "TrainingArguments.bf16. Paths that do not go through the Trainer -- "
+            "evaluation, pseudo_speculative_generate, a plain convert() and forward -- "
+            "currently need the caller to supply it. No shipped recipe exercises those "
+            "(estimate_ar: false, do_eval: false).\n\n"
+            "The cost is memory: about 12 bytes per parameter for the weight plus Adam's "
+            "two moments, instead of 6. Compute is unchanged, but note that fp32 "
+            "parameters also mean fp32 gradients, so under DDP the gradient all-reduce "
+            "moves twice the bytes it would for a bf16 draft. Under FSDP2 that is what "
+            "`MixedPrecisionPolicy(reduce_dtype=...)` exists to control.\n\n"
+            "The parameter dtype decides the OPTIMIZER's dtype, because AdamW allocates its "
+            "moments with `zeros_like(p)`, and that is where bf16 hurts most. Adam's second "
+            "moment `v` is a running average of the squared gradient. At beta2=0.999 a "
+            "single step can change `v` by at most 0.1%, but the smallest change bf16 can "
+            "represent near `v` is about 0.4%. Every DECREASE therefore rounds back to the "
+            "same number, `v` can only grow, and since the update is divided by `sqrt(v)` "
+            "the effective step size only shrinks -- from step 1, at any learning rate.\n\n"
+            "Applies to every projector_type. Off by default; both LiLiCorr recipes set it "
+            "to true, which is the arithmetic their published results were trained with."
+        ),
+    )
+
+    dflash_lilicorr_w_ce: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
+            "per-slot conditional. The objective is "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "absolute — there is no outer multiplier scaling the three terms as a group — so "
+            "each is the coefficient with which its term enters the total, and "
+            "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
+            "weights are reported in the `lilicorr_metrics` dict the model attaches to its "
+            "forward output, so a consumer of those metrics can check the identity per step "
+            "and read which composition produced a checkpoint. The three weights are validated "
+            "all-or-nothing (a negative value means unset): a config that sets some but not "
+            "others is rejected rather than inheriting a default composition. Shipped "
+            "variants: 0.25 ('base') and 0.125 ('margin'). "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_margin: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the per-slot max-margin (hinge) term, which "
+            "pushes the ground-truth candidate's node potential above the best competing "
+            "candidate by dflash_lilicorr_margin. 0 disables the term (the 'base' variant); "
+            "the 'margin' variant splits the cross-entropy weight convexly into 0.125/0.125. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_margin: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: hinge width for the max-margin term, in units of the log-potential "
+            "(itself bounded by lilicorr_logit_scale). Required when "
+            "dflash_lilicorr_w_margin > 0 and unused otherwise; the shipped 'margin' variant "
+            "uses 2.0. Not one of the three term weights, so it is exempt from their "
+            "all-or-nothing validation. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_pen: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the target-weighted distractor penalty, the "
+            "reranker's expected target-rejection over its own candidate distribution. Each "
+            "competing candidate is weighted by the target model's logit gap to the ground "
+            "truth, so candidates the target finds plausible are penalized lightly and "
+            "confident wrong ones hard. Requires the target's logits, hence online training "
+            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha
         # is rejected even if it only becomes active after a later objective override.
         if not 0.0 < self.dflash_dpace_alpha <= 1.0:
             raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {self.dflash_dpace_alpha}")
+        if self.dflash_swa_window_size is not None:
+            # Block-internal attention is left un-windowed, so the window must cover a full
+            # block; otherwise the effective inference window would differ.
+            if self.dflash_swa_window_size < self.dflash_block_size:
+                raise ValueError(
+                    f"dflash_swa_window_size ({self.dflash_swa_window_size}) must be >= "
+                    f"dflash_block_size ({self.dflash_block_size})."
+                )
         return self
 
 

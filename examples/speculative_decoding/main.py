@@ -56,6 +56,8 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
+from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
@@ -185,8 +187,12 @@ def train():
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
-        # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
-        training_args.parallelism_config.sp_backend = None
+        # accelerate requires an fsdp_plugin when cp_size > 1; the --fsdp launcher flags that
+        # used to provide one were dropped from launch_train.sh.
+        if not training_args.fsdp_plugin_args:
+            training_args.fsdp = "full_shard"
+            training_args.fsdp_config = {"fsdp_version": 2}
+            training_args.fsdp_plugin_args = training_args._process_fsdp_args()
     if is_master():
         pprint(recipe)
 
@@ -265,6 +271,15 @@ def train():
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
+    # On the HF-format restore path above, DFlash's modify() ran with the base model still on
+    # meta, so the draft has no device, dtype or rotary buffer yet. Re-apply them here, before
+    # the Trainer is built: create_optimizer freezes the Adam moment dtype off the parameters,
+    # so a draft still sitting at the checkpoint's loaded dtype would silently spend the rest
+    # of the run without fp32 master weights. Passing the checkpoint also restores the
+    # precision `dtype="auto"` dropped on load. A no-op on a fresh convert.
+    if isinstance(model, HFDFlashModel):
+        model.restore_draft_precision(checkpoint if checkpoint_is_hf else None)
+
     if dry_run:
         # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,
         # so use local_rank() (env-based) to keep a single writer to output_dir.
@@ -286,6 +301,7 @@ def train():
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
+        final_aux_is_base_hidden=recipe.data.final_aux_is_base_hidden,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]
@@ -295,10 +311,20 @@ def train():
         and recipe.eagle.eagle_base_lora_warmup_steps > 0
     ):
         callbacks.append(LoRAWarmupCallback(recipe.eagle.eagle_base_lora_warmup_steps))
+    # Domino (dflash recipe with projector_type=domino) needs the lambda_base
+    # curriculum schedule driven by the trainer's global step.
+    if (
+        isinstance(recipe, ModelOptDFlashRecipe)
+        and recipe.dflash.dflash_architecture_config.get("projector_type") == "domino"
+    ):
+        callbacks.append(DominoLambdaCallback())
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the
     # exact data position. Setting it True would restart the data order from the top.
+
+    # Tell the draft model the CP degree so it skips the dense eagle mask under CP.
+    model.eagle_cp_size = training_args.cp_size
 
     trainer = EagleTrainerWithAccLog(
         model=model,

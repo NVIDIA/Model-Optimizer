@@ -64,6 +64,11 @@ class DataArguments(BaseModel):
     sample_size: int = -1
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
+    # Set for a draft whose top aux layer already is the base's last layer (e.g. the released
+    # Nemotron-3.5 DSpark draft: aux ids [1,5,19,29,41,51], zero-based, on a 52-layer base).
+    # vLLM captures each layer once, so there is no distinct extra plane for the base hidden
+    # and the final plane must serve both roles.
+    final_aux_is_base_hidden: bool = False
 
     @field_validator("sample_size")
     @classmethod

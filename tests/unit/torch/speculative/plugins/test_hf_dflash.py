@@ -21,21 +21,23 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import json
 import logging
 import os
-from copy import deepcopy
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
 from transformers import AutoModelForCausalLM
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
+import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
@@ -51,32 +53,20 @@ NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
 
 
-def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
-    """Create a DFlash config for testing."""
-    config = deepcopy(DFLASH_DEFAULT_CFG["config"])
-    config["dflash_block_size"] = block_size
-    config["dflash_use_torch_compile"] = False
-    config["dflash_mask_token_id"] = 0  # use token 0 as mask for tiny model
-    config["dflash_architecture_config"] = {
-        "num_hidden_layers": num_layers,
-    }
-    return config
-
-
 class TestDFlashConvert:
     """Test DFlash model conversion."""
 
     def test_convert_creates_dflash_model(self):
         """Test that convert produces an HFDFlashModel."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert isinstance(model, HFDFlashModel)
 
     def test_convert_creates_dflash_module(self):
         """Test that convert attaches a DFlashModule."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "dflash_module")
         assert isinstance(model.dflash_module, DFlashModule)
@@ -84,7 +74,7 @@ class TestDFlashConvert:
     def test_convert_freezes_base_model(self):
         """Test that base model parameters are frozen after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         for name, param in model.named_parameters():
             if "dflash_module" not in name:
@@ -93,7 +83,7 @@ class TestDFlashConvert:
     def test_convert_dflash_module_trainable(self):
         """Test that DFlash module parameters are trainable after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         dflash_params = [(n, p) for n, p in model.named_parameters() if "dflash_module" in n]
         assert len(dflash_params) > 0
@@ -103,7 +93,7 @@ class TestDFlashConvert:
     def test_convert_sets_target_layer_ids(self):
         """Test that target layer IDs are set correctly."""
         model = get_tiny_llama(num_hidden_layers=8)
-        config = _get_dflash_config(num_layers=3)
+        config = get_dflash_config(num_layers=3)
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "target_layer_ids")
         assert len(model.target_layer_ids) == 3
@@ -113,10 +103,226 @@ class TestDFlashConvert:
     def test_convert_sets_mask_token_id(self):
         """Test that mask_token_id is set from config."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
+
+
+def test_qwen3_vl_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Only mRoPE receives a per-frame video grid on Transformers 5.3.0."""
+    original_grid = torch.tensor([[3, 4, 5], [2, 6, 7]])
+    expected_position_ids = torch.ones(3, 1, 12, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    compute_position_ids = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(
+            get_rope_index=get_rope_index,
+            compute_3d_position_ids=compute_position_ids,
+        ),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 12, dtype=torch.long),
+        attention_mask=torch.ones(1, 12, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": original_grid,
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert not compute_position_ids.called
+    assert torch.equal(original_grid, torch.tensor([[3, 4, 5], [2, 6, 7]]))
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 5], [1, 4, 5], [1, 4, 5], [1, 6, 7], [1, 6, 7]]),
+    )
+
+
+def test_qwen3_vl_moe_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Qwen3-VL family variants use the same 5.3.0 mRoPE workaround."""
+    expected_position_ids = torch.ones(3, 1, 4, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl_moe"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[2, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 4], [1, 4, 4]]),
+    )
+
+
+def test_qwen3_vl_transformers_53_patch_release_raises(monkeypatch):
+    """Avoid double expansion when a 5.3 patch backports the upstream fix."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.1")
+
+    with pytest.raises(RuntimeError, match=r"5\.3\.0 or >=5\.4\.0"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+            },
+        )
+
+
+def test_qwen3_vl_transformers_54_uses_native_position_ids(monkeypatch):
+    """Transformers 5.4+ performs the grid expansion inside get_rope_index."""
+    get_rope_index = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.4.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[1, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is None
+    assert not get_rope_index.called
+
+
+def test_qwen3_vl_transformers_530_rejects_bad_video_frame_groups(monkeypatch):
+    """Fail before mRoPE construction when processor and video-grid contracts differ."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="video frame groups"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[2, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 2, 0, 0]]),
+            },
+        )
+
+
+def test_multimodal_forward_kwargs_exclude_non_model_inputs():
+    """Do not forward Trainer or collator-only fields to Hugging Face models."""
+    pixel_values = torch.ones(1)
+    mm_token_type_ids = torch.zeros(1, 4, dtype=torch.long)
+
+    forwarded = hf_dflash._multimodal_forward_kwargs(
+        {
+            "pixel_values": pixel_values,
+            "mm_token_type_ids": mm_token_type_ids,
+            "assistant_masks": torch.ones(1, 4),
+            "loss_mask": torch.ones(1, 4),
+            "num_items_in_batch": 4,
+            "unexpected_dataset_column": "drop me",
+        }
+    )
+
+    assert set(forwarded) == {"pixel_values", "mm_token_type_ids"}
+    assert forwarded["pixel_values"] is pixel_values
+    assert forwarded["mm_token_type_ids"] is mm_token_type_ids
+
+
+def test_eval_does_not_precompute_qwen3_vl_position_ids(monkeypatch):
+    """Evaluation delegates mRoPE construction to the base model and its cache."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    precompute_position_ids = MagicMock()
+    monkeypatch.setattr(model, "_qwen3_vl_position_ids", precompute_position_ids)
+
+    model.eval()
+    model(input_ids=torch.tensor([[1, 2, 3, 4]]))
+
+    precompute_position_ids.assert_not_called()
+
+
+def test_qwen3_vl_transformers_53_position_ids_require_mm_token_types(monkeypatch):
+    """Never silently fall back to one-dimensional positions for a visual batch."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="mm_token_type_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={"image_grid_thw": torch.tensor([[1, 4, 4]])},
+        )
+
+
+def test_qwen3_vl_transformers_53_position_ids_reject_bad_mm_token_shape(monkeypatch):
+    """Keep processor-produced modality ids aligned with the padded text sequence."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="same shape as input_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "image_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.zeros(1, 11, dtype=torch.long),
+            },
+        )
 
 
 class TestDPaceWeights:
@@ -178,26 +384,26 @@ class TestDPaceWeights:
     def test_default_objective_is_dpace(self):
         """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
         model = get_tiny_llama(num_hidden_layers=4)
-        mtsp.convert(model, [("dflash", _get_dflash_config())])
+        mtsp.convert(model, [("dflash", get_dflash_config())])
         assert model.dflash_loss_objective == "dpace"
         assert model.dflash_dpace_alpha == 0.5
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_dpace_alpha"] = 0.3
         mtsp.convert(model, [("dflash", config)])
         assert model.dflash_dpace_alpha == 0.3
 
     def test_convert_rejects_bad_objective(self):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "nope"
         with pytest.raises(ValueError, match="dflash_loss_objective"):
             mtsp.convert(model, [("dflash", config)])
 
     def test_convert_rejects_degenerate_alpha(self):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "dpace"
         config["dflash_dpace_alpha"] = 0.0
         with pytest.raises(ValueError, match="dflash_dpace_alpha"):
@@ -206,7 +412,7 @@ class TestDPaceWeights:
     def test_convert_dpace_with_decay_factor_warns(self, caplog):
         """dpace + a non-zero decay factor converts but warns that decay is ignored."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "dpace"
         config["dflash_loss_decay_factor"] = 4.0
         with caplog.at_level(logging.WARNING):
@@ -230,7 +436,7 @@ class TestDPaceLossIntegration:
 
     def _converted_model(self, objective, **overrides):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = objective
         config.update(overrides)
         mtsp.convert(model, [("dflash", config)])
@@ -268,7 +474,7 @@ class TestDFlashSaveRestore:
         """Test round-trip save/load preserves modelopt state and outputs."""
         mto.enable_huggingface_checkpointing()
         model_ref = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model_ref, [("dflash", config)])
 
         model_ref.save_pretrained(tmp_path / "modelopt_model")
@@ -280,29 +486,45 @@ class TestDFlashSaveRestore:
 
 
 class TestDFlashLazyRotaryEmb:
-    """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
+    """Rotary embedding creation: eager on a real device, still lazy on meta.
 
-    rotary_emb is not created in __init__ — it's lazily initialized on first
-    forward call to avoid meta-tensor issues during from_pretrained restore.
+    The laziness exists for one reason — ``__init__`` runs on the meta device during
+    ``from_pretrained`` restore, and building ``inv_freq`` there produces a meta buffer.
+    That reason only applies on meta, and deferring everywhere else costs a correctness
+    property under DDP: ``inv_freq`` is non-persistent, so a rank whose batch has no
+    valid anchor returns before running the draft and ends the step one buffer short.
+    ``broadcast_buffers`` then coalesces mismatched buffer lists across ranks and hangs
+    rather than raising, which single-node runs never reproduce.
+
+    So the buffer is built during ``modify()`` when the base model is on a real device,
+    and still deferred when it is on meta.
     """
 
-    def test_rotary_emb_not_created_in_init(self):
-        """rotary_emb should not exist after convert (before forward)."""
+    def test_rotary_emb_created_during_convert_on_a_real_device(self):
+        """On a real device the buffer exists after convert, before any forward."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+        assert hasattr(model.dflash_module, "rotary_emb")
+        assert not any(b.is_meta for b in model.dflash_module.rotary_emb.buffers())
+
+    def test_rotary_emb_deferred_on_meta(self):
+        """On meta the buffer is still deferred, which is what the laziness is for."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
 
-    def test_rotary_emb_created_on_forward(self):
-        """rotary_emb should be created on first forward call."""
+    def test_rotary_emb_init_is_idempotent(self):
+        """A later _maybe_init_rotary_emb must not replace an existing buffer."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
-        # Call _maybe_init_rotary_emb directly
+        first = dflash_mod.rotary_emb
         dflash_mod._maybe_init_rotary_emb(device="cpu")
-        assert hasattr(dflash_mod, "rotary_emb")
+        assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
 
@@ -370,6 +592,75 @@ class TestDFlashSlidingWindow:
         )
         attn = DFlashAttention(config, layer_idx=0)
         assert attn.sliding_window is None
+
+
+class TestDFlashSwaMask:
+    """Test all-layer non-causal sliding-window attention mask (MiMo-style)."""
+
+    def test_window_masks_context_beyond_window(self):
+        """Context beyond the window (relative to each query's real position) is masked out."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        window = 6
+        config["dflash_swa_window_size"] = window
+        mtsp.convert(model, [("dflash", config)])
+
+        seq_len = 16
+        block_size = 4
+        # One block anchored at position 10 → query real positions [10, 11, 12, 13].
+        anchor_positions = torch.tensor([[10]], dtype=torch.long)
+        block_keep_mask = torch.tensor([[True]])
+        dtype = torch.float32
+        device = torch.device("cpu")
+
+        mask = model._build_draft_attention_mask(
+            seq_len, anchor_positions, block_keep_mask, 1, dtype, device, window=window
+        )
+        neg = torch.finfo(dtype).min
+        attend = mask > neg / 2  # True where a position is attended (additive mask == 0)
+
+        # Context kv are positions [0, seq_len). For query k (real pos 10 + k) only context
+        # positions in (10 + k - window, 10) are visible.
+        for k in range(block_size):
+            q_real = 10 + k
+            for c in range(seq_len):
+                visible = attend[0, 0, k, c].item()
+                if c < 10:  # context strictly before the anchor
+                    assert visible == (c > q_real - window), (
+                        f"query k={k} (pos {q_real}), context c={c}: "
+                        f"expected visible={c > q_real - window}, got {visible}"
+                    )
+
+    def test_window_is_subset_of_full(self):
+        """The windowed mask attends to a subset of what the full-attention mask attends to."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 6
+        mtsp.convert(model, [("dflash", config)])
+
+        args = (
+            16,
+            torch.tensor([[10]]),
+            torch.tensor([[True]]),
+            1,
+            torch.float32,
+            torch.device("cpu"),
+        )
+        full = model._build_draft_attention_mask(*args, window=None)
+        windowed = model._build_draft_attention_mask(*args, window=6)
+        neg = torch.finfo(torch.float32).min
+        # Everything masked by full attention must also be masked by the windowed mask.
+        assert ((full <= neg / 2) <= (windowed <= neg / 2)).all()
+        # The window strictly removes some connections (it is not a no-op here).
+        assert (windowed <= neg / 2).sum() > (full <= neg / 2).sum()
+
+    def test_window_smaller_than_block_rejected(self):
+        """A window smaller than the block size is rejected at config validation."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 2  # < block_size
+        with pytest.raises(ValueError, match="dflash_swa_window_size"):
+            mtsp.convert(model, [("dflash", config)])
 
 
 class TestValidateOnline:
@@ -462,7 +753,7 @@ class TestDFlashExporter:
         """Test that export produces model.safetensors and config.json."""
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -477,7 +768,7 @@ class TestDFlashExporter:
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -493,7 +784,7 @@ class TestDFlashExporter:
     def test_export_config_fields(self, tmp_path):
         """Exported config.json should have required DFlash fields."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -513,13 +804,40 @@ class TestDFlashExporter:
         assert "vocab_size" in cfg
         assert "layer_types" in cfg
         assert len(cfg["layer_types"]) == NUM_DRAFT_LAYERS
+        # Without SWA configured, no sliding-window fields are emitted.
+        assert "sliding_window" not in cfg
+        assert "use_swa" not in cfg["dflash_config"]
+
+    def test_export_swa_fields(self, tmp_path):
+        """With dflash_swa_window_size set, exported config carries vLLM's SWA fields."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_swa_window_size"] = 256
+        mtsp.convert(model, [("dflash", config)])
+
+        exporter = model.get_exporter()
+        export_dir = tmp_path / "exported"
+        exporter.export(export_dir)
+
+        with open(export_dir / "config.json") as f:
+            cfg = json.load(f)
+
+        # vLLM _resolve_layer_attention reads these; all-full layer_types + use_swa=True
+        # → non-causal sliding window on every draft layer.
+        assert cfg["sliding_window"] == 256
+        assert cfg["dflash_config"]["use_swa"] is True
+        assert cfg["dflash_config"]["swa_window_size"] == 256
+        assert cfg["dflash_config"]["causal"] is False
+        # The pre-existing dflash_config keys must survive the update.
+        assert "mask_token_id" in cfg["dflash_config"]
+        assert "target_layer_ids" in cfg["dflash_config"]
 
     def test_export_tensor_count(self, tmp_path):
         """Exported model should have the right number of tensors."""
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -612,3 +930,217 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def _dflash_batch(vocab_size, bsz=2, seq_len=SEQ_LEN):
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, vocab_size, (bsz, seq_len))
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def _converted(fp32_master_weights=None, num_hidden_layers=4):
+    model = get_tiny_llama(num_hidden_layers=num_hidden_layers)
+    config = get_dflash_config()
+    if fp32_master_weights is not None:
+        config["dflash_fp32_master_weights"] = fp32_master_weights
+    mtsp.convert(model, [("dflash", config)])
+    return model
+
+
+class TestDFlashFp32MasterWeights:
+    """``dflash_fp32_master_weights``: what is promoted, and what the optimizer inherits.
+
+    The parameter dtype is the visible half; the OPTIMIZER's dtype is the point of the
+    change, and it is not decided until AdamW allocates its moments with ``zeros_like(p)``
+    inside the first step. A test that looked only at parameters would pass while the
+    feature was broken.
+    """
+
+    def test_flag_off_leaves_the_draft_in_the_base_dtype(self):
+        model = _converted(fp32_master_weights=False)
+        assert model._base_model.dtype == torch.bfloat16
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
+
+    def test_flag_on_promotes_only_the_draft(self):
+        model = _converted(fp32_master_weights=True)
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.float32}
+        # The frozen base is deliberately left alone: no trainable parameters, no
+        # optimizer state, and promoting it would change the hidden states the draft
+        # is trained against.
+        assert model._base_model.dtype == torch.bfloat16
+
+    def test_adam_moments_follow_the_parameters(self):
+        """The half that actually matters, and the one a parameter check would miss.
+
+        The forward runs under ``torch.autocast`` because the flag needs one: a promoted
+        fp32 draft is fed bf16 hidden states by the frozen target. HF Trainer supplies it
+        under ``TrainingArguments.bf16``, so this mirrors the training path.
+        """
+        moments = {}
+        for flag, expected in ((False, torch.bfloat16), (True, torch.float32)):
+            model = _converted(fp32_master_weights=flag)
+            model.train()
+            trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            optimizer.step()
+
+            seen = {
+                state[key].dtype
+                for state in optimizer.state.values()
+                for key in ("exp_avg", "exp_avg_sq")
+            }
+            assert seen == {expected}, f"flag={flag}: moment dtypes {seen}"
+            moments[flag] = seen
+        assert moments[False] != moments[True]
+
+    def test_promotion_keeps_the_full_precision_draw(self):
+        """Promoted and unpromoted runs share a draw; only the stored precision differs.
+
+        The draft is drawn in fp32 by ``_init_weights``. An unpromoted run rounds that draw
+        to the base model's dtype; a promoted one keeps it. So the two arms of a
+        bf16-vs-fp32 comparison start from the same initialization, each at the precision it
+        trains in, rather than from two different draws.
+        """
+        torch.manual_seed(1234)
+        bf16_model = _converted(fp32_master_weights=False)
+        torch.manual_seed(1234)
+        fp32_model = _converted(fp32_master_weights=True)
+
+        bf16_params = dict(bf16_model.dflash_module.named_parameters())
+        fp32_params = dict(fp32_model.dflash_module.named_parameters())
+        assert bf16_params.keys() == fp32_params.keys()
+        keeps_finer_bits = False
+        for name, bf16_param in bf16_params.items():
+            promoted = fp32_params[name]
+            assert promoted.dtype == torch.float32
+            # Same draw: rounding the promoted copy down recovers the unpromoted arm exactly.
+            assert torch.equal(promoted.to(torch.bfloat16), bf16_param), name
+            keeps_finer_bits |= not torch.equal(promoted, bf16_param.float())
+        assert keeps_finer_bits, "the promoted draft should hold bits bf16 cannot represent"
+
+    def test_promotion_survives_a_checkpoint_restore(self):
+        """A resumed run must not quietly drop back to the base dtype.
+
+        ``modify()`` runs with the base on meta during ``from_pretrained``, so it cannot
+        place the draft at all. If nothing re-applies it, the draft resumes at the loaded
+        dtype and AdamW allocates its moments to match, which switches the feature off for
+        the whole remainder of a long run.
+        """
+        mto.enable_huggingface_checkpointing()
+        model = _converted(fp32_master_weights=True)
+        reference = {n: p.detach().clone() for n, p in model.dflash_module.named_parameters()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model.save_pretrained(tmp)
+            # `dtype="auto"` is what the resume path in examples/speculative_decoding/main.py
+            # uses, and it is also what collapses every tensor onto the base model's dtype.
+            restored = AutoModelForCausalLM.from_pretrained(tmp, dtype="auto")
+
+            # What the restore leaves behind on its own, which is the bug this guards: the
+            # draft comes back at the base model's dtype with the flag still set.
+            assert {p.dtype for p in restored.dflash_module.parameters()} == {
+                restored._base_model.dtype
+            }
+
+            restored.restore_draft_precision(tmp)
+
+        assert {p.dtype for p in restored.dflash_module.parameters()} == {torch.float32}
+        assert hasattr(restored.dflash_module, "rotary_emb")
+        # The checkpoint stores the draft in fp32; reloading at the stored dtype is what
+        # keeps a resume from costing the run a rounding of its master weights.
+        for name, param in restored.dflash_module.named_parameters():
+            assert torch.equal(param.detach(), reference[name]), name
+
+        restored.train()
+        optimizer = torch.optim.AdamW(
+            [p for p in restored.dflash_module.parameters() if p.requires_grad], lr=1e-4
+        )
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = restored(**_dflash_batch(restored.dflash_config.vocab_size))
+        out.loss.backward()
+        optimizer.step()
+        assert {
+            state[key].dtype
+            for state in optimizer.state.values()
+            for key in ("exp_avg", "exp_avg_sq")
+        } == {torch.float32}
+
+    def test_generation_names_the_flag_instead_of_failing_on_a_matmul(self):
+        """AR validation runs outside the Trainer's autocast, so it has to say so.
+
+        ``pseudo_speculative_generate`` is called directly by ``AcceptanceRateValidation``
+        under ``estimate_ar``, which is outside the wrapper HF Trainer puts around
+        ``forward``. Without the guard a promoted draft dies there on a bare
+        ``F.linear`` dtype mismatch, potentially hours into a run.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            model.pseudo_speculative_generate(input_ids, steps=2)
+
+        # Under the autocast the flag needs, the same call goes through.
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+    def test_the_guard_is_silent_when_the_flag_is_off(self):
+        """An unpromoted draft matches the base dtype, so nothing needs reconciling."""
+        model = _converted(fp32_master_weights=False)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+
+class TestDFlashDraftActivationCheckpointing:
+    """``training.gradient_checkpointing`` has to reach the draft, and be inert when it does.
+
+    The draft is the only trainable part of a DFlash setup, so it is the only part where
+    checkpointing saves anything: the frozen target runs under ``no_grad`` and stores no
+    activations, and a flag that landed only there would report the feature as enabled
+    while saving nothing.
+    """
+
+    def test_the_flag_reaches_the_draft_layers(self):
+        model = _converted()
+        layers = list(model.dflash_module.layers)
+        assert layers
+        # Inheriting the supported base class is what makes HF's own recursion find them.
+        assert all(isinstance(layer, GradientCheckpointingLayer) for layer in layers)
+        assert all(layer.gradient_checkpointing is False for layer in layers)
+
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        assert all(layer.gradient_checkpointing for layer in layers)
+
+    def test_gradients_are_bit_identical_with_and_without(self):
+        """Recompute is mathematically neutral; it trades step time for memory only."""
+        grads = {}
+        for enabled in (False, True):
+            torch.manual_seed(99)
+            model = _converted()
+            model.train()
+            if enabled:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            torch.manual_seed(99)
+            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            grads[enabled] = {
+                name: param.grad.detach().clone()
+                for name, param in model.dflash_module.named_parameters()
+                if param.grad is not None
+            }
+
+        assert grads[False] and grads[False].keys() == grads[True].keys()
+        for name, grad in grads[False].items():
+            assert torch.equal(grad, grads[True][name]), name

@@ -24,7 +24,7 @@ from megatron.core.inference.communication_utils import (
     send_to_next_pipeline_rank,
 )
 from megatron.core.models.gpt import GPTModel
-from megatron.core.models.mamba import MambaModel
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import (
     get_expert_model_parallel_group,
     get_expert_tensor_parallel_group,
@@ -46,7 +46,9 @@ from modelopt.torch.utils import to_empty_if_meta_device
 
 @torch.no_grad()
 def run_mcore_inference(
-    model: GPTModel | MambaModel, prompt_tokens: torch.Tensor, active_hidden_size: int | None = None
+    model: GPTModel | HybridModel,
+    prompt_tokens: torch.Tensor,
+    active_hidden_size: int | None = None,
 ) -> torch.Tensor:
     """Run inference on a Megatron GPT or Mamba model with pipeline parallel support.
 
@@ -98,7 +100,7 @@ def run_mcore_inference(
 
 
 def run_mcore_inference_with_dummy_input(
-    model: GPTModel | MambaModel, batch_size: int = 2, hidden_size: int | None = None
+    model: GPTModel | HybridModel, batch_size: int = 2, hidden_size: int | None = None
 ) -> torch.Tensor:
     """Run inference on a Megatron GPT or Mamba model with random dummy input."""
     prompt_tokens = torch.randint(
@@ -129,8 +131,8 @@ def get_forward(model, batch_size=2):
     input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model, batch_size)
 
     def forward(model):
-        # MambaModel doesn't accept loss_mask argument
-        if isinstance(model, MambaModel):
+        # Mamba/Hybrid forward doesn't accept loss_mask argument
+        if isinstance(model, HybridModel):
             return model.forward(
                 input_ids=input_ids,
                 position_ids=position_ids,
@@ -350,7 +352,7 @@ def compare_amax_sync_across_expert_parallel(model, compare_across_experts=True)
     # Group ranks by ETP rank for fc1 (ColumnParallel: same output channels should match)
     etp_groups = defaultdict(list)
     for info in all_rank_info:
-        etp_groups[info["etp_rank"] if info["etp_rank"] else 0].append(info["global_rank"])
+        etp_groups[info["etp_rank"] or 0].append(info["global_rank"])
 
     for quantizer_type, rank_values in expert_quantizers.items():
         # Determine which ranks should have same amax

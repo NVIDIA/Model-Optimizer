@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "modelopt",
+  "version": "0.1.0",
+  "description": "Model Optimizer agent plugins.",
+  "owner": {
+    "name": "NVIDIA Corporation"
+  },
+  "plugins": [
+    {
+      "name": "modelopt",
+      "source": "./plugins/modelopt",
+      "description": "Skills for Model Optimizer development, quantization, deployment, and evaluation.",
+      "version": "0.1.0",
+      "author": {
+        "name": "NVIDIA Corporation"
+      },
+      "category": "development"
+    }
+  ]
+}

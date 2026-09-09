@@ -18,6 +18,7 @@
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  mixer_mlp_nvfp4: configs/ptq/units/mixer_mlp_nvfp4
   nvfp4: configs/numerics/nvfp4
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
@@ -36,6 +37,7 @@ quantize:
     - quantizer_name: '*mlp*input_quantizer'
       cfg:
         $import: nvfp4
+    - $import: mixer_mlp_nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
       cfg:
         $import: nvfp4

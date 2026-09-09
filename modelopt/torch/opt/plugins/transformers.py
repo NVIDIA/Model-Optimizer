@@ -55,6 +55,10 @@ __all__ = [
     "ModelOptTrainerArguments",
 ]
 
+# transformers 5.0 changed `_tied_weights_keys` from a list to a {target: source} dict and added
+# the `load_config` parameter to `_load_state_dict_into_zero3_model`.
+_TRANSFORMERS_GE_5_0 = Version(transformers.__version__) >= Version("5.0")
+
 
 def is_liger_available():
     try:
@@ -110,16 +114,34 @@ def _restore_qtensor_wrappers(model, model_path):
         q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
         if not q_tensor_state:
             continue
-        for name, module in model.named_modules():
-            if (
-                isinstance(module, RealQuantLinear)
-                and name in q_tensor_state
-                and not isinstance(module.weight, QTensorWrapper)
-            ):
-                module._parameters["weight"] = QTensorWrapper(
-                    qtensor=module.weight.data,
-                    metadata=q_tensor_state[name]["metadata"],
-                )
+        # PEFT nests the quantized linear as `<name>.base_layer`, and either the saved keys or the
+        # live names may carry that suffix. Normalize both so the lookup works in either direction.
+        q_tensor_state = {k.removesuffix(".base_layer"): v for k, v in q_tensor_state.items()}
+
+        pending = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, RealQuantLinear) and not isinstance(module.weight, QTensorWrapper)
+        ]
+        matched = 0
+        for name, module in pending:
+            key = name.removesuffix(".base_layer")
+            if key not in q_tensor_state:
+                continue
+            module._parameters["weight"] = QTensorWrapper(
+                qtensor=module.weight.data,
+                metadata=q_tensor_state[key]["metadata"],
+            )
+            matched += 1
+
+        # A total miss means some wrapper renamed the modules. Warn instead of letting it surface
+        # as an opaque shape error at dequantization.
+        if pending and not matched:
+            warnings.warn(
+                f"Found {len(q_tensor_state)} compressed weight(s) in {modelopt_state_path} but "
+                f"re-wrapped none of the {len(pending)} candidate module(s); their names may have "
+                "been remapped. The model will likely fail when the packed weights are used."
+            )
 
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
@@ -147,20 +169,54 @@ def _new_from_config(cls, /, config, **kwargs):
     return model
 
 
+@contextmanager
+def _legacy_tied_weights_keys_as_dict(model: nn.Module):
+    """Temporarily normalize legacy list-style ``_tied_weights_keys`` to dict-style.
+
+    transformers 5.0 changed ``_tied_weights_keys`` from ``list[str]`` to a
+    ``{target: source}`` dict, and ``save_pretrained`` calls ``.keys()`` on the attribute of
+    every submodule (``_get_tied_weight_keys``) without a type check. Modeling code still on
+    the 4.x list format - common for ``trust_remote_code`` checkpoints, e.g.
+    ``stepfun-ai/Step-3.7-Flash`` - therefore loads fine but dies on save with
+    ``AttributeError: 'list' object has no attribute 'keys'``.
+
+    Mapping each entry to itself preserves the legacy semantics: the list entries were exactly
+    the dedup patterns ``_get_tied_weight_keys`` is expected to return. The original attribute
+    is restored on exit so the shim stays invisible to the rest of the model's lifetime.
+    """
+    if not _TRANSFORMERS_GE_5_0:
+        yield
+        return
+
+    patched = []
+    try:
+        for module in model.modules():
+            tied = getattr(module, "_tied_weights_keys", None)
+            if isinstance(tied, (list, tuple, set)):
+                # The attribute is usually a class attribute; remember whether this instance
+                # had its own so the restore does not leave a shadowing copy behind.
+                patched.append((module, tied, "_tied_weights_keys" in module.__dict__))
+                module._tied_weights_keys = {key: key for key in tied}
+        yield
+    finally:
+        for module, tied, had_own_attr in patched:
+            if had_own_attr:
+                module._tied_weights_keys = tied
+            else:
+                del module._tied_weights_keys
+
+
 def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
     if getattr(self, "_tp_size", None) is not None and ModeloptStateManager.is_converted(self):
         raise NotImplementedError(
             "ModelOpt does not support saving tensor parallel sharded Huggingface transformer models yet. "
         )
-    return _new_save_pretrained(self, save_directory, *args, **kwargs)
+    with _legacy_tied_weights_keys_as_dict(self):
+        return _new_save_pretrained(self, save_directory, *args, **kwargs)
 
 
 # [Fix for huggingface bug] deepspeed zero3 training backend only loads params into the model from
 # state_dict, but not buffers. So lets explicitly load the buffers into the model from state_dict.
-# The `load_config` parameter was added to `_load_state_dict_into_zero3_model` in transformers 5.0.
-_TRANSFORMERS_GE_5_0 = Version(transformers.__version__) >= Version("5.0")
-
-
 def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict, load_config=None):
     buffer_names = [name for name, _ in model_to_load.named_buffers()]
     buffer_state_dict = {k: v for k, v in state_dict.items() if k in buffer_names}
@@ -231,7 +287,7 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
             "help": (
                 "Path to a YAML file mapping fnmatch patterns to optimizer kwargs "
                 "(e.g. lr, weight_decay). First matching pattern wins per parameter. "
-                "See examples/llm_qat/configs/train/lr_config_example.yaml."
+                "See examples/llm_qat/configs/train/lr/lr_config_example.yaml."
             ),
         },
     )

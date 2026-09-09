@@ -1,0 +1,38 @@
+name: PR merge base
+description: >
+  Resolve the commit to diff a copied PR branch against: the merge base of the PR's head and its
+  target branch. Outputs are empty for non-PR triggers, which have no diff to inspect.
+  Requires a prior actions/checkout with fetch-depth 0.
+
+outputs:
+  merge_base:
+    description: Commit to use as the base for changed-file comparisons.
+    value: ${{ steps.calculate-merge-base.outputs.merge-base }}
+  head_sha:
+    description: The PR's head commit.
+    value: ${{ steps.pr-shas.outputs.head_sha }}
+
+runs:
+  using: composite
+  steps:
+    - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      id: get-pr-info
+      uses: nv-gha-runners/get-pr-info@main
+    # Extract SHAs from pr-info JSON via shell to avoid fromJSON on potentially-empty outputs
+    - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      id: pr-shas
+      shell: bash
+      env:
+        PR_INFO: ${{ steps.get-pr-info.outputs.pr-info }}
+      run: |
+        echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
+        echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
+    # Get commit from the target branch that is present in the PR to use as base for changed files
+    - if: startsWith(github.ref, 'refs/heads/pull-request/')
+      id: calculate-merge-base
+      shell: bash
+      run: |
+        # Assign first: piping git into tee would mask a merge-base failure behind tee's exit
+        # status and emit an empty base, silently changing which lanes run.
+        merge_base=$(git merge-base "${{ steps.pr-shas.outputs.base_sha }}" "${{ steps.pr-shas.outputs.head_sha }}")
+        echo "merge-base=$merge_base" | tee --append "${GITHUB_OUTPUT}"

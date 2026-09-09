@@ -313,7 +313,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
 
     seen_batch_sizes: list[int] = []
 
-    def fake_forward(x):
+    def fake_call(x):
         seen_batch_sizes.append(x.shape[0])
         # First call is the single-batch probe — succeeds.
         # Second call is the target-batch attempt — OOMs.
@@ -322,7 +322,9 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
-    model.forward = fake_forward
+    # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
+    # so route the mock's __call__ via side_effect.
+    model.side_effect = fake_call
     model.__class__.__name__ = "DummyModel"  # not enc/dec
 
     free_before = 1000
@@ -344,7 +346,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             sample_input_single_batch=sample_input,
         )
 
-    # Forward calls: probe(1), retry-at-target(10), retry-after-halve(5)
+    # Model calls: probe(1), retry-at-target(10), retry-after-halve(5)
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
@@ -699,7 +701,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokeniz
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
-    Without shuffle, source A's 8x-oversampled docs would all come first in
+    Without shuffle, source A's 16x-oversampled docs would all come first in
     ``all_samples`` and (with sufficient row consumption per doc) fill every row.
     With the deterministic shuffle, both sources appear within the first
     ``total_rows`` worth of consumed samples.
@@ -869,6 +871,19 @@ class TestLocalDatasetDirRoundTrips:
         train_samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert default_samples == train_samples
 
+    def test_zero_quota_split_is_not_loaded(self, monkeypatch, make_toy_hf_dataset):
+        """1 sample over 2 splits → quotas [0, 1]: the zero-quota split is never opened."""
+        datasets = pytest.importorskip("datasets")
+        loaded, real_load_dataset = [], datasets.load_dataset
+
+        def _spy(*args, **kwargs):
+            loaded.append(kwargs.get("split"))
+            return real_load_dataset(*args, **kwargs)
+
+        monkeypatch.setattr(datasets, "load_dataset", _spy)
+        get_dataset_samples(make_toy_hf_dataset(), num_samples=1, split=["train", "test"])
+        assert loaded == ["test"]
+
     def test_download_to_jsonl_then_load(self, tmp_path, make_toy_hf_dataset):
         """Dump the dataset to JSONL, then reload it via the local-jsonl path."""
         dataset = make_toy_hf_dataset()
@@ -903,3 +918,74 @@ class TestLocalDatasetDirRoundTrips:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
+
+
+class TestVLMShardedIterable:
+    """DP sharding of a streaming VLM calibration set: uneven per-rank counts deadlock calibration."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_transformers(self):
+        pytest.importorskip("transformers")
+
+    @staticmethod
+    def _counts(total: int, world: int, *, delivered: int | None = None) -> list[int]:
+        """Per-rank counts when the stream delivers ``delivered`` items but ``total`` were asked for."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(
+            list(range(total if delivered is None else delivered)), num_samples=total
+        )
+        return [
+            len(list(_ShardedIterable(base, rank=r, world=world, per_rank=total // world)))
+            for r in range(world)
+        ]
+
+    @pytest.mark.parametrize("total", [1024, 1023, 1022, 510, 7])
+    @pytest.mark.parametrize("world", [2, 4])
+    def test_every_rank_gets_the_same_count(self, total, world):
+        counts = self._counts(total, world)
+        assert len(set(counts)) == 1, f"uneven shards {counts} for total={total} world={world}"
+        assert counts[0] == total // world
+
+    def test_shards_are_disjoint_and_ordered(self):
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        shards = [list(_ShardedIterable(base, rank=r, world=4, per_rank=5)) for r in range(4)]
+        assert shards[0][:3] == [0, 4, 8]
+        flat = [x for s in shards for x in s]
+        assert len(flat) == len(set(flat)), "shards overlap"
+
+    @pytest.mark.parametrize(
+        ("num_samples", "n_subsets"), [(1024, 3), (512, 3), (256, 3), (100, 7), (2, 3), (0, 3)]
+    )
+    def test_nemotron_subset_budget_sums_to_num_samples(self, num_samples, n_subsets):
+        """A stream that delivers fewer than requested is what hands the sharder uneven counts."""
+        from modelopt.torch.utils.nemotron_vlm_dataset_utils import subset_sample_targets
+
+        subsets = [f"subset_{i}" for i in range(n_subsets)]
+        targets = subset_sample_targets(num_samples, subsets)
+        assert sum(targets.values()) == num_samples
+        assert set(targets) == set(subsets)
+
+    def test_short_stream_still_yields_equal_counts(self):
+        """The stream can come up short (skipped shards, decode failures); ranks must stay in step."""
+        counts = self._counts(total=64, world=4, delivered=57)
+        assert counts == [16, 16, 16, 16], counts
+
+    def test_stream_shorter_than_world_is_rejected(self):
+        """Fewer samples than ranks would leave some ranks with nothing to forward."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper([], num_samples=0)
+        with pytest.raises(RuntimeError, match="no calibration samples"):
+            list(_ShardedIterable(base, rank=0, world=2, per_rank=1))

@@ -43,6 +43,18 @@ quantize:
     - quantizer_name: '*mlp*input_quantizer'
       cfg:
         $import: nvfp4
+    - quantizer_name: '*.mixer.up_proj.weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*.mixer.up_proj.input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.mixer.down_proj.weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*.mixer.down_proj.input_quantizer'
+      cfg:
+        $import: nvfp4
     - quantizer_name: '*block_sparse_moe*weight_quantizer'
       cfg:
         $import: nvfp4_static

@@ -931,7 +931,7 @@ class TestQTensor:
 
         quantizer = MockQuantizer()
 
-        with pytest.raises(AssertionError, match="Scale shape .* does not match expected shape"):
+        with pytest.raises(AssertionError, match=r"Scale shape .* does not match expected shape"):
             MXFP8QTensor.get_weights_scaling_factor_from_quantizer(weight, quantizer)
 
     @pytest.mark.parametrize("device", ["cuda"])
