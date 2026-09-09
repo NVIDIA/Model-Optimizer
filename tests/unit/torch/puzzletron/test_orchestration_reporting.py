@@ -184,3 +184,19 @@ def test_optional_html_failure_is_nonfatal(monkeypatch, tmp_path: Path):
     assert result["report_manifest_path"] is None
     assert result["report_log_paths"] == []
     assert Path(result["result_path"]).is_file()
+
+
+def test_structured_result_failure_is_nonfatal(monkeypatch, tmp_path: Path):
+    plan = _plan(tmp_path)
+    controller = CampaignController(plan, executor=_NoSubmissionExecutor(), poll_interval_seconds=0)
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.publish_controller_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("result failed")),
+    )
+
+    result = controller.run()
+
+    assert result["halted"] is False
+    assert result["result_path"] is None
+    assert result["result_finalized"] is False
+    assert result["report_status"] == "failed"

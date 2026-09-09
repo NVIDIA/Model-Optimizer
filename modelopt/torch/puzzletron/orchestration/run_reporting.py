@@ -44,9 +44,11 @@ __all__ = [
     "canonical_json_bytes",
     "compare_metrics",
     "export_run_result",
+    "finalized_result_path",
     "inspect_run",
     "publish_controller_result",
     "refresh_run_report",
+    "result_path",
     "result_sha256",
     "validate_result",
 ]
@@ -376,8 +378,36 @@ def _atomic_write(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _result_path(run_root: str | Path) -> Path:
+def result_path(run_root: str | Path) -> Path:
+    """Return the canonical structured-result path for a run root."""
+
     return Path(run_root) / "results" / "result.json"
+
+
+def finalized_result_path(plan: CampaignPlan) -> Path | None:
+    """Return the validated final result for the plan's active resolved bundle."""
+
+    path = result_path(plan.puzzle_dir)
+    try:
+        result = json.loads(path.read_text())
+        validate_result(result)
+        expected_run_id, _, _ = _active_bundle(plan.puzzle_dir, fallback_run_id=plan.contract_hash)
+        run = _mapping(result.get("run"), "run")
+        identity = _mapping(run.get("identity"), "run identity")
+        status = _mapping(run.get("status"), "run status")
+        timing = _mapping(run.get("timing"), "run timing")
+    except (OSError, TypeError, ValueError):
+        return None
+    if (
+        identity.get("run_id") != expected_run_id
+        or identity.get("workflow_id") != plan.contract_hash
+        or status.get("execution") != "completed"
+        or status.get("attachment") != "not_running"
+        or status.get("evidence") != "complete"
+        or timing.get("finalized_at") is None
+    ):
+        return None
+    return path
 
 
 def _active_bundle(run_root: Path, *, fallback_run_id: str) -> tuple[str, str, dict[str, str]]:
@@ -500,6 +530,14 @@ def _metric_semantics(raw_name: str) -> tuple[str, str, str, str, dict[str, Any]
             "lower_is_better",
             "mean_of_sample_token_means",
             {**dimensions, "denominator": "unmasked_target_tokens_per_sample"},
+        )
+    if name == "token_accuracy":
+        return (
+            "producer.token_accuracy",
+            "ratio",
+            "higher_is_better",
+            "producer_defined",
+            dimensions,
         )
     if name.startswith("token_accuracy") or "accuracy" in name or "exact_match" in name:
         return f"quality.{name}", "ratio", "higher_is_better", "producer_defined", dimensions
@@ -771,7 +809,7 @@ def publish_controller_result(
     run_id, producer_revision, bundle_paths = _active_bundle(
         plan.puzzle_dir, fallback_run_id=plan.contract_hash
     )
-    path = _result_path(plan.puzzle_dir)
+    path = result_path(plan.puzzle_dir)
     existing: Mapping[str, Any] = {}
     if path.is_file():
         loaded = json.loads(path.read_text())
@@ -914,7 +952,7 @@ def compare_metrics(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[s
 def inspect_run(run_root: str | Path, *, viewed_at: str | None = None) -> dict[str, Any]:
     """Read the result and qualify stale detached observations."""
 
-    path = _result_path(run_root)
+    path = result_path(run_root)
     result = json.loads(path.read_text())
     if not isinstance(result, Mapping):
         raise ResultValidationError("result root must be a mapping")
@@ -957,7 +995,7 @@ def export_run_result(run_root: str | Path, *, exported_at: str | None = None) -
 
     del exported_at
     inspect_run(run_root)
-    return _result_path(run_root)
+    return result_path(run_root)
 
 
 def refresh_run_report(run_root: str | Path, *, generated_at: str | None = None) -> RenderedView:

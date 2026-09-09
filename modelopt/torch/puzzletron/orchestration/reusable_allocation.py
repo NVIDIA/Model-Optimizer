@@ -20,13 +20,13 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import asdict
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .adapters.stage_compat import stage_is_complete
 from .compiler import plan_to_dict
 from .executors.slurm import SlurmExecutor
 from .identity import stable_hash
+from .run_reporting import finalized_result_path
 from .schema import (
     AttemptSpec,
     CampaignPlan,
@@ -127,11 +127,11 @@ def _handle_from_payload(payload: Mapping[str, Any] | None) -> JobHandle | None:
 def _result_is_complete(plan: CampaignPlan, result: Mapping[str, Any] | None) -> bool:
     if result is None:
         return False
-    result_record = plan.puzzle_dir / "results" / "result.json"
+    result_record = finalized_result_path(plan)
     has_result = (
-        result.get("result_finalized") is True
+        result_record is not None
+        and result.get("result_finalized") is True
         and result.get("result_path") == str(result_record)
-        and result_record.is_file()
     )
     return (
         (result.get("report_status") == "completed" or has_result)

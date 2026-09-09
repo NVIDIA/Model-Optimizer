@@ -1318,13 +1318,32 @@ class CampaignController:
         now = time.monotonic()
         if not force and now - self._last_structured_publication < 30:
             return
-        publish_controller_result(
-            self.plan,
-            self._stage_views(),
+        self._try_publish_structured_result(
             execution_status="running",
             attachment_status="attached",
         )
         self._last_structured_publication = now
+
+    def _try_publish_structured_result(
+        self,
+        *,
+        execution_status: str,
+        attachment_status: str,
+        finalized: bool = False,
+    ) -> Path | None:
+        """Publish evidence without abandoning controller work when reporting fails."""
+
+        try:
+            return publish_controller_result(
+                self.plan,
+                self._stage_views(),
+                execution_status=execution_status,
+                attachment_status=attachment_status,
+                finalized=finalized,
+            )
+        except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
+            self.logger.warning(f"structured result publication failed: {exc}")
+            return None
 
     def _handles_to_cancel(self) -> list[tuple[JobHandle, str, str]]:
         """Collect live handles from memory, live-job registry, and durable attempts."""
@@ -1683,17 +1702,16 @@ class CampaignController:
         else:
             execution_status = "running"
             attachment_status = "detached"
-        result_path = publish_controller_result(
-            self.plan,
-            self._stage_views(),
+        result_path = self._try_publish_structured_result(
             execution_status=execution_status,
             attachment_status=attachment_status,
             finalized=clean_completion,
         )
+        result_finalized = clean_completion and result_path is not None
         report_result = (
             self._generate_final_report()
-            if clean_completion
-            else FinalReportResult(status="skipped")
+            if result_finalized
+            else FinalReportResult(status="failed" if clean_completion else "skipped")
         )
         if detached:
             self.logger.shutdown(
@@ -1722,8 +1740,8 @@ class CampaignController:
                 self._manual_waiting.node_id if self._manual_waiting is not None else None
             ),
             "iterations": iterations,
-            "result_path": str(result_path),
-            "result_finalized": clean_completion,
+            "result_path": str(result_path) if result_path is not None else None,
+            "result_finalized": result_finalized,
             **report_result.as_dict(),
         }
         return result

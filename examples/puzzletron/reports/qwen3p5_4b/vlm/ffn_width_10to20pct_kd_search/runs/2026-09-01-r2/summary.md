@@ -90,5 +90,5 @@ examples or tokens processed or the optimizer history.
 
 Shared evidence instructions are in the
 [campaign reports guide](../../../../../../docs/campaign_reports.md). Use the
-[Qwen 3.5 4B VLM example](../../../../../../docs/qwen3p5_4b_vlm_example.md) for
-current setup and reproduction guidance.
+[maintained recipes guide](../../../../../../docs/maintained_recipes.md#qwen-35-4b-vlm-smoke-and-campaign)
+for current setup and reproduction guidance.

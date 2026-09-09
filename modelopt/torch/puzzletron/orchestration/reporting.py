@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 if TYPE_CHECKING:
     from pathlib import Path
 
+from .run_reporting import result_path
 from .schema import AttemptSpec, CampaignPlan, CommandSpec, TaskLauncher, TaskTopology
 
 __all__ = [
@@ -97,10 +98,6 @@ def _completion_path(plan: CampaignPlan) -> Path:
     return report_path.parent / "completion.json"
 
 
-def _result_path(plan: CampaignPlan) -> Path:
-    return plan.puzzle_dir / "results" / "result.json"
-
-
 def _stage_state_sha256(plan: CampaignPlan) -> str:
     """Fingerprint durable stage records consumed by the progress report."""
 
@@ -127,7 +124,7 @@ def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
             payload["schema_version"] != 3
             or payload["contract_hash"] != plan.contract_hash
             or payload["stage_state_sha256"] != _stage_state_sha256(plan)
-            or payload["result_sha256"] != _sha256(_result_path(plan))
+            or payload["result_sha256"] != _sha256(result_path(plan.puzzle_dir))
             or payload["report_sha256"] != _sha256(report_path)
             or payload["manifest_sha256"] != _sha256(manifest_path)
             or not isinstance(log_paths, list)
@@ -154,7 +151,7 @@ def record_completed_final_report(
         "schema_version": 3,
         "contract_hash": plan.contract_hash,
         "stage_state_sha256": _stage_state_sha256(plan),
-        "result_sha256": _sha256(_result_path(plan)),
+        "result_sha256": _sha256(result_path(plan.puzzle_dir)),
         "report_sha256": _sha256(report_path),
         "manifest_sha256": _sha256(manifest_path),
         "log_paths": list(log_paths),

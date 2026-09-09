@@ -6,8 +6,9 @@ seals the full configuration, then the orchestrator compiles and executes a
 resumable stage graph.
 
 Architecture support does not by itself establish that a model, pruning axis,
-or topology has been validated end to end. See the [campaign report
-catalog](campaign_reports.md) for recorded runs and their evidence status.
+or topology has been validated end to end. See the [results
+catalog](../reports/catalog.yaml) for recorded runs and their evidence status,
+and the [campaign reports guide](campaign_reports.md) for interpretation.
 
 ## Components
 

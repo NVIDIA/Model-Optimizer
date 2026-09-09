@@ -31,6 +31,7 @@ from puzzletron_orchestrator.run_reporting import (
     ResultValidationError,
     canonical_json_bytes,
     export_run_result,
+    finalized_result_path,
     inspect_run,
     publish_controller_result,
     refresh_run_report,
@@ -259,6 +260,34 @@ def test_result_supports_detached_inspection_comparison_and_export(tmp_path: Pat
     assert json.loads(path.read_text()) == result
 
 
+def test_finalized_result_path_requires_current_workflow_and_final_status(tmp_path: Path) -> None:
+    plan = SimpleNamespace(puzzle_dir=tmp_path, contract_hash="workflow-1")
+    result = _result(running=False)
+    result["run"]["identity"]["run_id"] = "workflow-1"
+    result["provenance"]["resolved_bundle"]["bundle_id"] = "workflow-1"
+    path = _write_result(tmp_path, result)
+
+    assert finalized_result_path(plan) == path
+
+    result["run"]["status"].update(execution="running", attachment="detached", evidence="partial")
+    result["run"]["timing"]["finalized_at"] = None
+    path.write_bytes(canonical_json_bytes(result))
+
+    assert finalized_result_path(plan) is None
+
+    result = _result(running=False)
+    result["run"]["identity"]["run_id"] = "workflow-1"
+    result["provenance"]["resolved_bundle"]["bundle_id"] = "workflow-1"
+    result["run"]["identity"]["workflow_id"] = "stale-workflow"
+    path.write_bytes(canonical_json_bytes(result))
+
+    assert finalized_result_path(plan) is None
+
+    path.write_text("{}\n")
+
+    assert finalized_result_path(plan) is None
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -400,6 +429,7 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
                     "source_revision_id": "revision-1",
                     "metrics": {
                         "candidate.lm_loss": 0.7,
+                        "candidate.token_accuracy": 0.75,
                         "reference.lm_loss": 0.5,
                         "delta.lm_loss": 0.2,
                     },
@@ -448,6 +478,7 @@ def test_controller_projects_existing_state_into_one_result(monkeypatch, tmp_pat
     assert stored["stages"][0]["progress"]["eta"]["qualified"] is True
     assert {subject["role"] for subject in stored["subjects"]} == {"candidate", "teacher"}
     assert {metric["name"] for metric in stored["metrics"]} == {
+        "producer.token_accuracy",
         "quality.lm_loss",
         "serving.observed_input_sequence_length",
         "serving.output_token_throughput",

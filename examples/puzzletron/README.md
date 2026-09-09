@@ -11,11 +11,11 @@ inputs:
 Puzzletron resolves the full stage configuration, validates it, and stores an
 immutable copy with the run.
 
-- [Start here: lifecycle smoke](#start-here-lifecycle-smoke)
-- [Choose the next task](#choose-the-next-task)
+- [Start here: lifecycle smoke](#quickstart)
+- [Choose the next task](#choose-a-recipe)
 - [Results and live progress](docs/campaign_reports.md)
 - [Central results catalog](reports/catalog.yaml)
-- [Documentation map](#documentation-map)
+- [Documentation map](#documentation)
 
 ## Quickstart
 

@@ -72,9 +72,9 @@ the sealed structured result remains valid and usable.
 
 Teacher, candidate, and control checkpoints use the same subject, architecture,
 metric, artifact, and limitation fields. Each teacher/candidate metric pair
-with the same name produces a comparison entry that names both source metric
-IDs. A numeric delta is emitted only when the unit, direction, aggregation,
-producer execution, workload contract, task, row manifest, prompt template,
+with the same name and producer execution produces a comparison entry that
+names both source metric IDs. A numeric delta is emitted only when the unit,
+direction, aggregation, workload contract, task, row manifest, prompt template,
 decoding contract, and dimensions match and both values are numeric. Dimensions
 carry denominators, evaluator repetitions, and sample counts when producers
 record them. Otherwise, the entry records explicit exclusion reasons.

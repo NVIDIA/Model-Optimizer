@@ -402,6 +402,14 @@ def test_controller_shutdown_cancels_active_jobs(tmp_path: Path):
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
     result = controller.run(once=True)
     assert result["halted"] is False
+    published = json.loads((plan.puzzle_dir / "results/result.json").read_text())
+    assert result["result_path"] == str(plan.puzzle_dir / "results/result.json")
+    assert published["run"]["status"] == {
+        "execution": "running",
+        "attachment": "detached",
+        "evidence": "partial",
+        "support": "unreviewed",
+    }
     assert executor.cancelled == []
     assert controller._active
 
