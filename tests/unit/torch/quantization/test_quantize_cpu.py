@@ -572,6 +572,21 @@ def test_weight_patterns_enabled_then_retracted_do_not_raise():
             assert not module.is_enabled
 
 
+def test_bare_wildcard_pattern_matching_nothing_raises():
+    """A bare `"*"` (or another pattern never mentioning "weight") still expresses weight
+    intent if it would match a `weight_quantizer` name -- and must still raise if nothing in
+    the model actually has one, exactly like an explicit `*weight_quantizer` pattern would.
+
+    A model with zero quantizable modules (e.g. `nn.Module()`, no Linear/Conv anywhere) is
+    the degenerate case where this matters: nothing in the config's own text says "weight",
+    so a substring-only check would silently return without ever looking at the model.
+    """
+    model = torch.nn.Module()  # no quantizable submodules at all
+    config = {"quant_cfg": [{"quantizer_name": "*", "cfg": {"num_bits": 8, "axis": 0}}]}
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
+        mtq.quantize(model, config)
+
+
 def test_overlapping_patterns_disabled_by_a_broader_later_one_still_raise():
     """A narrower pattern "matching" is not enough -- the final enabled state is what counts.
 
