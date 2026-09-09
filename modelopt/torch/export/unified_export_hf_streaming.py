@@ -244,6 +244,39 @@ def _build_reverse_name_mapper_or_none(model):
         return None
 
 
+def _undeclared_tied_aliases(model: nn.Module) -> set[str]:
+    """Names that share storage with an earlier tensor and are not declared in the tie map.
+
+    The resident path ends with an address pass over the whole state dict
+    (:func:`postprocess_state_dict`), which catches ties HF never declared. A streaming
+    exporter has no whole-dict view at write time, and it copies each tensor to host as it
+    goes, so the shared address is gone by then. Take the same information up front, off the
+    live model, and drop by name instead.
+
+    Needed on transformers <5.0, where ``all_tied_weights_keys`` does not exist and the tie map
+    is empty; without this the alias ships as a second full copy of the same weight. Walk order
+    matches ``state_dict()``, so the tensor kept here is the one the resident path keeps.
+    """
+    seen: dict[int, str] = {}
+    aliases: set[str] = set()
+    # remove_duplicate=False is the whole point: the default hides a shared tensor's
+    # second name, which is exactly the alias being looked for.
+    for name, tensor in itertools.chain(
+        model.named_parameters(remove_duplicate=False),
+        model.named_buffers(remove_duplicate=False),
+    ):
+        if tensor is None:
+            continue
+        ptr = tensor.data_ptr()
+        if ptr == 0:  # meta / unallocated: left to serialization, as in the resident path
+            continue
+        if ptr in seen:
+            aliases.add(name)
+        else:
+            seen[ptr] = name
+    return aliases
+
+
 def _make_tensor_sink(
     writer: "_StreamingShardWriter",
     name_mapper,
@@ -365,6 +398,7 @@ def _export_transformers_checkpoint_streaming(
     # hub keys.
     name_mapper = _build_reverse_name_mapper_or_none(model)
 
+    raw_tied_keys = raw_tied_keys | _undeclared_tied_aliases(model)
     tied_alias_keys: set[str] = (
         {name_mapper(k) for k in raw_tied_keys} if name_mapper is not None else raw_tied_keys
     )
@@ -609,7 +643,7 @@ def _export_fsdp2_checkpoint_streaming(
 
     # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
     # view to compare storage against. tied_map covers dict-style and MoE ties.
-    tied_alias_keys = set(tied_map.alias_to_canonical)
+    tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
 
     # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
     # so refuse rather than write fused tensors under unfused hub names.

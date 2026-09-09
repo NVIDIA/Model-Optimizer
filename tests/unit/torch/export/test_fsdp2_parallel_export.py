@@ -99,6 +99,28 @@ def test_streaming_export_drops_tied_alias_and_writes_config(tmp_path):
     assert not list(d.glob("__shard_part*"))
 
 
+def test_streaming_export_drops_tied_alias_without_hf_tie_map(tmp_path, monkeypatch):
+    """The alias must be dropped even when HF declares no tie map.
+
+    ``all_tied_weights_keys`` only exists on transformers>=5.0, so at our floor the map is
+    empty and nothing declares the tie by name. The resident path still catches it with an
+    address pass over the whole state dict; the streaming path has to take the same
+    information off the live model, before it copies each tensor to host.
+    """
+    model = _tiny_quantized_llama(tie=True)
+    assert model.lm_head.weight is model.model.embed_tokens.weight, "fixture is not tied"
+    # Simulate the transformers floor: the attribute is simply not there.
+    monkeypatch.setattr(
+        type(model), "all_tied_weights_keys", property(lambda self: None), raising=False
+    )
+
+    _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=tmp_path)
+
+    loaded = _load_all(tmp_path)
+    assert "lm_head.weight" not in loaded, "tied alias shipped as a duplicate copy"
+    assert "model.embed_tokens.weight" in loaded
+
+
 def test_streaming_export_subsplits_by_max_shard_size(tmp_path):
     """A tiny max_shard_size forces several shard files; the index still maps every key."""
     model = _tiny_quantized_llama()
