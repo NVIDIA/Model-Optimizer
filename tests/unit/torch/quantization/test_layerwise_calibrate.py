@@ -471,7 +471,10 @@ def test_layerwise_export_rejects_explicit_outside_forward(monkeypatch, tmp_path
     assert not (tmp_path / "export").exists()
 
 
-def test_layerwise_export_allows_weight_only_outside_quantizer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("algorithm_as_config", [False, True])
+def test_layerwise_export_allows_weight_only_outside_quantizer(
+    monkeypatch, tmp_path, algorithm_as_config
+):
     _register_test_discoverer(monkeypatch)
 
     class _FakeExporter:
@@ -491,10 +494,11 @@ def test_layerwise_export_allows_weight_only_outside_quantizer(monkeypatch, tmp_
     monkeypatch.setattr("modelopt.torch.export.layerwise_export.LayerwiseExporter", _FakeExporter)
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
     config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
-    config["algorithm"] = {
+    algorithm = {
         "method": "max",
         "layerwise": {"enable": True, "export_dir": str(tmp_path / "export")},
     }
+    config["algorithm"] = mtq.MaxCalibConfig(**algorithm) if algorithm_as_config else algorithm
     model = _TransformerWithLMHead(n_layers=1, dim=16)
     calib_data = torch.randint(0, 32, (2, 8))
     forward_calls = 0
