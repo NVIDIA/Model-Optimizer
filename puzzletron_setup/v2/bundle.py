@@ -575,7 +575,6 @@ def _bundle_readme(
                     "python",
                     str(Path(repository) / "examples/puzzletron/puzzletron.py"),
                     "setup",
-                    "custom",
                     "--resume",
                     str(campaign_dir),
                 ]

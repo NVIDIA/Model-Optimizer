@@ -32,9 +32,9 @@ import pytest
 import yaml
 from datasets import Dataset, DatasetDict
 
-from puzzletron_orchestrator.public_config import (
+from puzzletron_orchestrator.recipe_config import (
     materialize_resolved_bundle,
-    resolve_public_run,
+    resolve_recipe_run,
     site_template,
 )
 from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
@@ -107,7 +107,7 @@ def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
         "max_nodes": 1,
     }
     site.write_text(yaml.safe_dump(site_payload, sort_keys=False))
-    bundle = materialize_resolved_bundle(resolve_public_run(recipe, site), activate=True)
+    bundle = materialize_resolved_bundle(resolve_recipe_run(recipe, site), activate=True)
 
     environment = os.environ.copy()
     environment.update(

@@ -132,12 +132,13 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
         "container": contract.container,
         "container_mounts": contract.container_mounts,
         "setup_env": contract.setup_env,
-        "source_guard": contract.source_guard,
         "prerun_commands": list(contract.prerun_commands),
         "postrun_commands": list(contract.postrun_commands),
         "runner_kind": runner.kind,
         "task_topology_contract": 1,
     }
+    if contract.source_guard is not None:
+        payload["source_guard"] = contract.source_guard
     if runner.slurm is not None:
         slurm_payload = {
             "account": runner.slurm.account,

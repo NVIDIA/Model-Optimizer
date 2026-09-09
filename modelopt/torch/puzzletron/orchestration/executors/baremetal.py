@@ -21,7 +21,7 @@ import json
 import shlex
 
 # Required for fixed-argument local ssh and scheduler commands; no local shell is used.
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - required for fixed-argv SSH; shell=False.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +35,7 @@ __all__ = ["BareMetalSSHExecutor", "GpuLeaseManager"]
 
 
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    # The executable and arguments are passed directly; no local shell parses them.
     return subprocess.run(  # nosec B603
         list(argv), capture_output=True, text=True, check=False
     )

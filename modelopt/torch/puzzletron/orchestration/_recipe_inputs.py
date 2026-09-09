@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Closed recipe and site schemas for the public Puzzletron contract."""
+"""Closed schemas and parsing for human-authored recipes and site files."""
 
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ from typing import Any
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
-from ._public_catalog import ROUTES, ROUTES_BY_KEY
+from ._route_catalog import ROUTES, ROUTES_BY_KEY
 from .schema import ExecutionMode
 
-PUBLIC_SCHEMA_VERSION = 1
+RECIPE_SCHEMA_VERSION = 1
 DATA_FIELDS = {"path", "revision"}
 
 _RECIPE_FIELDS = {
@@ -77,7 +77,7 @@ _SLURM_FIELDS = {
 _BAREMETAL_FIELDS = {"hosts", "rendezvous_host", "rendezvous_port_base"}
 _HOST_FIELDS = {"hostname", "gpus"}
 _RESOURCE_FIELDS = {"mode", "gpus_per_node", "max_nodes", "partition"}
-_PUBLIC_OWNED_EXPERIMENT_PATHS = {
+_ROUTE_OWNED_EXPERIMENT_PATHS = {
     "data.revision",
     "dataset_path",
     "descriptor",
@@ -255,9 +255,9 @@ class Recipe:
     advanced_experiment: Mapping[str, Any]
     advanced_execution: Mapping[str, Any]
 
-    def as_public_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "schema_version": PUBLIC_SCHEMA_VERSION,
+            "schema_version": RECIPE_SCHEMA_VERSION,
             "name": self.name,
             "model": self.model,
             "workflow": self.workflow,
@@ -290,10 +290,10 @@ def parse_recipe(path: str | Path, *, run_root: str | Path | None) -> Recipe:
     payload, locations = _load_yaml(source)
     _reject_unknown(payload, _RECIPE_FIELDS, path="", locations=locations, source=source)
     version = payload.get("schema_version")
-    if version != PUBLIC_SCHEMA_VERSION:
+    if version != RECIPE_SCHEMA_VERSION:
         raise ValueError(
             f"schema_version at {location(locations, 'schema_version', source)} must be "
-            f"{PUBLIC_SCHEMA_VERSION}; got {version!r}"
+            f"{RECIPE_SCHEMA_VERSION}; got {version!r}"
         )
     values = {
         key: required_string(payload.get(key), path=key, location=location(locations, key, source))
@@ -347,14 +347,18 @@ def parse_recipe(path: str | Path, *, run_root: str | Path | None) -> Recipe:
             raise ValueError(
                 f"advanced.experiment keys must be non-empty dotted paths; got {dotted!r}"
             )
+        overlaps_owned_path = any(
+            dotted == owned or dotted.startswith(f"{owned}.") or owned.startswith(f"{dotted}.")
+            for owned in _ROUTE_OWNED_EXPERIMENT_PATHS
+        )
         if (
-            dotted in _PUBLIC_OWNED_EXPERIMENT_PATHS
+            overlaps_owned_path
             or dotted == "model_info"
             or dotted.startswith("model_info.")
             or dotted.endswith(".evaluator_revision")
         ):
             raise ValueError(
-                f"advanced.experiment.{dotted} is owned by the selected public route, recipe, "
+                f"advanced.experiment.{dotted} is owned by the selected route, recipe, "
                 "or site and cannot be overridden"
             )
     advanced_execution = mapping(
@@ -418,10 +422,10 @@ def parse_site(path: str | Path) -> Site:
     source = Path(path).resolve()
     payload, locations = _load_yaml(source)
     _reject_unknown(payload, _SITE_FIELDS, path="", locations=locations, source=source)
-    if payload.get("schema_version") != PUBLIC_SCHEMA_VERSION:
+    if payload.get("schema_version") != RECIPE_SCHEMA_VERSION:
         raise ValueError(
             f"schema_version at {location(locations, 'schema_version', source)} must be "
-            f"{PUBLIC_SCHEMA_VERSION}; got {payload.get('schema_version')!r}"
+            f"{RECIPE_SCHEMA_VERSION}; got {payload.get('schema_version')!r}"
         )
     site = mapping(payload.get("site"), path="site", location=location(locations, "site", source))
     _reject_unknown(site, _SITE_BODY_FIELDS, path="site", locations=locations, source=source)
@@ -698,14 +702,14 @@ def recipe_template(
     run_root: str = "puzzle_runs/my-puzzletron-run",
     name: str = "my-puzzletron-run",
 ) -> dict[str, Any]:
-    """Return the exact public recipe contract used by the resolver."""
+    """Return the exact recipe contract used by the resolver."""
 
     route = ROUTES_BY_KEY.get((model, workflow, mode))
     if route is None:
         choices = ", ".join(sorted(item.route_id for item in ROUTES))
         raise ValueError(f"Unknown route {(model, workflow, mode)!r}; choose one of: {choices}")
     recipe = {
-        "schema_version": PUBLIC_SCHEMA_VERSION,
+        "schema_version": RECIPE_SCHEMA_VERSION,
         "name": name,
         "model": model,
         "workflow": workflow,
@@ -725,7 +729,7 @@ def site_template() -> dict[str, Any]:
     """Return one portable site contract with small and multi-node profiles."""
 
     return {
-        "schema_version": PUBLIC_SCHEMA_VERSION,
+        "schema_version": RECIPE_SCHEMA_VERSION,
         "site": {
             "kind": "slurm",
             "environment": {

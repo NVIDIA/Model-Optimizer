@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Strict human-facing recipes and immutable resolved-run bundles.
+"""Resolve human-authored recipes and seal immutable run bundles.
 
-The public contract deliberately has no inheritance.  It selects one maintained
+The recipe contract deliberately has no inheritance. It selects one maintained
 model/workflow route and one site-owned resource profile.  The resolver then
 materializes the established experiment, runner, and execution contracts for
 the runtime, while retaining their complete provenance as generated evidence.
@@ -38,16 +38,16 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from . import _public_source
-from ._public_catalog import MODEL_IDS, ROUTES, ROUTES_BY_KEY, RouteProfile
-from ._public_inputs import DATA_FIELDS as _DATA_FIELDS
-from ._public_inputs import Recipe as _Recipe
-from ._public_inputs import Site as _Site
-from ._public_inputs import location as _location
-from ._public_inputs import parse_recipe as _parse_recipe
-from ._public_inputs import parse_site as _parse_site
-from ._public_inputs import recipe_template, site_template
-from ._public_inputs import required_string as _required_string
+from . import _source_identity
+from ._recipe_inputs import DATA_FIELDS as _DATA_FIELDS
+from ._recipe_inputs import Recipe as _Recipe
+from ._recipe_inputs import Site as _Site
+from ._recipe_inputs import location as _location
+from ._recipe_inputs import parse_recipe as _parse_recipe
+from ._recipe_inputs import parse_site as _parse_site
+from ._recipe_inputs import recipe_template, site_template
+from ._recipe_inputs import required_string as _required_string
+from ._route_catalog import MODEL_IDS, ROUTES, ROUTES_BY_KEY, RouteProfile
 from .compiler import compile_campaign_plan, load_execution_config, load_runner_config, plan_to_dict
 from .config import _compose, _config_root
 from .identity import stable_hash
@@ -59,24 +59,24 @@ if TYPE_CHECKING:
 __all__ = [
     "MODEL_IDS",
     "ROUTES",
-    "ResolvedPublicRun",
+    "ResolvedRecipeRun",
     "RouteProfile",
     "bundle_for_run_root",
     "explain_resolved_run",
     "materialize_resolved_bundle",
     "recipe_template",
-    "resolve_public_run",
+    "resolve_recipe_run",
     "site_template",
 ]
 
-_REPOSITORY_ROOT = _public_source.REPOSITORY_ROOT
+_REPOSITORY_ROOT = _source_identity.REPOSITORY_ROOT
 _CONFIG_ROOT = _REPOSITORY_ROOT / "examples" / "puzzletron" / "configs"
 _BUNDLE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
-class ResolvedPublicRun:
-    """Validated public inputs and generated runtime contracts."""
+class ResolvedRecipeRun:
+    """Validated recipe inputs and generated runtime contracts."""
 
     recipe: _Recipe
     site: _Site
@@ -170,7 +170,7 @@ def _source_guard_command(environment: Mapping[str, Any], worker_code: Mapping[s
     repository = str(environment["repository"])
     python = str(Path(str(environment["venv"])) / "bin" / "python")
     statement = (
-        "from puzzletron_orchestrator.public_config import _assert_worker_source; "
+        "from puzzletron_orchestrator.recipe_config import _assert_worker_source; "
         f"_assert_worker_source({repository!r}, {expected!r})"
     )
     return f"PYTHONPATH={shlex.quote(repository)} {shlex.quote(python)} -c {shlex.quote(statement)}"
@@ -255,7 +255,7 @@ def _compile_preview(
     runner: Mapping[str, Any],
     execution: Mapping[str, Any],
 ) -> CampaignPlan:
-    with tempfile.TemporaryDirectory(prefix="puzzletron-public-config-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="puzzletron-recipe-config-") as temporary:
         root = Path(temporary)
         experiment_path = root / "experiment.yaml"
         runner_path = root / "runner.yaml"
@@ -311,12 +311,12 @@ def _plan_without_preview_path(plan: CampaignPlan) -> dict[str, Any]:
     return payload
 
 
-def resolve_public_run(
+def resolve_recipe_run(
     recipe_path: str | Path,
     site_path: str | Path,
     *,
     run_root: str | Path | None = None,
-) -> ResolvedPublicRun:
+) -> ResolvedRecipeRun:
     """Resolve and validate one recipe + site pair without writing its run root."""
 
     recipe = _parse_recipe(recipe_path, run_root=run_root)
@@ -327,16 +327,16 @@ def resolve_public_run(
         raise ValueError(
             f"Route {route.route_id} requires explicit immutable data values; missing: {missing}"
         )
-    public_placeholders = _placeholder_paths(
+    input_placeholders = _placeholder_paths(
         {
-            "recipe": recipe.as_public_dict(),
+            "recipe": recipe.as_dict(),
             "site": {"site": site.body},
         }
     )
-    if public_placeholders:
+    if input_placeholders:
         raise ValueError(
             "Unresolved example placeholders must be replaced before validation: "
-            + ", ".join(public_placeholders)
+            + ", ".join(input_placeholders)
         )
     controller_code = _code_revision()
     worker_code = _worker_code(site, controller_code)
@@ -523,7 +523,7 @@ def resolve_public_run(
             "value": route.route_id,
             "source": f"internal route catalog ({route.experiment_template})",
         },
-        "public_values": {
+        "recipe_values": {
             key: {
                 "value": value,
                 "source": (
@@ -532,7 +532,7 @@ def resolve_public_run(
                     else _location(recipe.locations, key, recipe.source)
                 ),
             }
-            for key, value in recipe.as_public_dict().items()
+            for key, value in recipe.as_dict().items()
             if key != "advanced"
         },
         "site": {
@@ -574,7 +574,7 @@ def resolve_public_run(
     }
     identity_payload = {
         "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "recipe": recipe.as_public_dict(),
+        "recipe": recipe.as_dict(),
         "selected_site": runner,
         "route": route.route_id,
         "experiment_runtime": experiment,
@@ -584,7 +584,7 @@ def resolve_public_run(
         "code": code,
     }
     bundle_id = stable_hash(identity_payload, prefix="resolved_bundle")
-    return ResolvedPublicRun(
+    return ResolvedRecipeRun(
         recipe=recipe,
         site=site,
         route=route,
@@ -608,20 +608,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-_working_tree_fingerprint = _public_source.working_tree_fingerprint
-_repository_revision = _public_source.repository_revision
+_working_tree_fingerprint = _source_identity.working_tree_fingerprint
+_repository_revision = _source_identity.repository_revision
 
 
 def _code_revision() -> dict[str, Any]:
-    return _public_source.code_revision()
+    return _source_identity.code_revision()
 
 
 def _worker_code(site: _Site, controller_code: Mapping[str, Any]) -> dict[str, Any]:
-    return _public_source.worker_code(site, controller_code, detect_revision=_repository_revision)
+    return _source_identity.worker_code(site, controller_code, detect_revision=_repository_revision)
 
 
 def _assert_worker_source(repository: str, expected: Mapping[str, Any]) -> None:
-    _public_source.assert_worker_source(repository, expected, detect_revision=_repository_revision)
+    _source_identity.assert_worker_source(
+        repository, expected, detect_revision=_repository_revision
+    )
 
 
 def _verify_existing_bundle(
@@ -735,7 +737,7 @@ def _replace_plan_path(plan: CampaignPlan, experiment_path: Path) -> CampaignPla
 
 
 def materialize_resolved_bundle(
-    resolved: ResolvedPublicRun,
+    resolved: ResolvedRecipeRun,
     *,
     activate: bool,
 ) -> Path:
@@ -758,7 +760,7 @@ def materialize_resolved_bundle(
             )
             _write_yaml(
                 staging / "recipe.yaml",
-                resolved.recipe.as_public_dict(),
+                resolved.recipe.as_dict(),
                 header=generated_header + ("Normalized snapshot of the human-authored recipe.",),
             )
             _write_yaml(
@@ -883,7 +885,7 @@ def bundle_for_run_root(run_root: str | Path) -> Path:
     return bundle
 
 
-def explain_resolved_run(resolved: ResolvedPublicRun) -> str:
+def explain_resolved_run(resolved: ResolvedRecipeRun) -> str:
     """Render a compact, human-readable source and allocation explanation."""
 
     lines = [
@@ -894,9 +896,9 @@ def explain_resolved_run(resolved: ResolvedPublicRun) -> str:
             f"distillation={resolved.route.distillation}"
         ),
         f"bundle: {resolved.bundle_id}",
-        "public values:",
+        "recipe values:",
     ]
-    for key, item in resolved.provenance["public_values"].items():
+    for key, item in resolved.provenance["recipe_values"].items():
         lines.append(f"  {key}: {item['value']!r} <- {item['source']}")
     lines.extend(
         [

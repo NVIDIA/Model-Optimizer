@@ -24,7 +24,7 @@ import socket
 
 # Required to supervise concurrent worker process groups; every launch uses an
 # argument sequence with ``shell=False`` and never interpolates a shell command.
-import subprocess  # nosec B404 - fixed argv is launched with shell=False.
+import subprocess  # nosec B404 - required for process-group supervision; shell=False.
 import sys
 import time
 import uuid

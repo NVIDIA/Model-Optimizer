@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Typed model/workflow facts behind the concise public recipe contract."""
+"""Maintained model and workflow routes for concise Puzzletron recipes."""
 
 from __future__ import annotations
 

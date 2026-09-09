@@ -31,9 +31,9 @@ from examples.puzzletron.evaluation.vlm import contracts as evaluation_contracts
 from examples.puzzletron.evaluation.vlm import profile as evaluation_profile
 from examples.puzzletron.evaluation.vlm import suites as evaluation_suites
 from modelopt.torch.puzzletron.dataset.multimodal import materialize_normalized_conversation_samples
-from puzzletron_orchestrator.public_config import (
+from puzzletron_orchestrator.recipe_config import (
     materialize_resolved_bundle,
-    resolve_public_run,
+    resolve_recipe_run,
     site_template,
 )
 from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
@@ -150,7 +150,7 @@ def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     )
     recipe.write_text(yaml.safe_dump(recipe_payload, sort_keys=False))
     _write_local_site(site, project_root_path, benchmark_hf_home_path)
-    bundle = materialize_resolved_bundle(resolve_public_run(recipe, site), activate=True)
+    bundle = materialize_resolved_bundle(resolve_recipe_run(recipe, site), activate=True)
     environment = os.environ.copy()
     environment.update(
         {

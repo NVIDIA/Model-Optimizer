@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from puzzletron_orchestrator.public_config import ROUTES, recipe_template, site_template
+from puzzletron_orchestrator.recipe_config import ROUTES, recipe_template, site_template
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 NEMOTRON3_NANO_30B_MODEL_CONFIG = (

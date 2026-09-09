@@ -30,12 +30,12 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.puzzletron import orchestrate  # noqa: E402
-from puzzletron_orchestrator.public_config import (  # noqa: E402
+from puzzletron_orchestrator.recipe_config import (  # noqa: E402
     ROUTES,
     bundle_for_run_root,
     explain_resolved_run,
     materialize_resolved_bundle,
-    resolve_public_run,
+    resolve_recipe_run,
 )
 
 
@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             _inspect(bundle_for_run_root(args.run_root), as_json=args.json)
             return 0
 
-        resolved = resolve_public_run(args.recipe, args.site, run_root=args.run_root)
+        resolved = resolve_recipe_run(args.recipe, args.site, run_root=args.run_root)
         if args.command == "validate":
             print(
                 f"valid: {resolved.recipe.name} -> {resolved.route.route_id} "

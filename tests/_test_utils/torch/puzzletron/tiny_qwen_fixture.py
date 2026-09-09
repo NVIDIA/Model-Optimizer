@@ -29,7 +29,7 @@ import yaml
 from _test_utils.torch.transformers_models import create_tiny_qwen3_5_dir
 from datasets import Dataset, DatasetDict
 
-import puzzletron_orchestrator.public_config as public_config
+import puzzletron_orchestrator.recipe_config as recipe_config
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
@@ -212,22 +212,22 @@ def build_tiny_qwen_campaign(project_root: Path, tmp_path: Path) -> TinyQwenCamp
 
     catalog_root = _write_tiny_route_template(project_root, tmp_path, model_dir)
     route_key = (recipe["model"], recipe["workflow"], recipe["mode"])
-    original_root = public_config._CONFIG_ROOT
-    original_routes = public_config.ROUTES_BY_KEY
+    original_root = recipe_config._CONFIG_ROOT
+    original_routes = recipe_config.ROUTES_BY_KEY
     test_routes = dict(original_routes)
     test_routes[route_key] = replace(
         original_routes[route_key],
         experiment_template="tiny_qwen.yaml",
     )
     try:
-        public_config._CONFIG_ROOT = catalog_root
-        public_config.ROUTES_BY_KEY = test_routes
-        resolved = public_config.resolve_public_run(recipe_path, site_path)
+        recipe_config._CONFIG_ROOT = catalog_root
+        recipe_config.ROUTES_BY_KEY = test_routes
+        resolved = recipe_config.resolve_recipe_run(recipe_path, site_path)
     finally:
-        public_config._CONFIG_ROOT = original_root
-        public_config.ROUTES_BY_KEY = original_routes
+        recipe_config._CONFIG_ROOT = original_root
+        recipe_config.ROUTES_BY_KEY = original_routes
 
-    smoke_bundle = public_config.materialize_resolved_bundle(resolved, activate=True)
+    smoke_bundle = recipe_config.materialize_resolved_bundle(resolved, activate=True)
     experiment_path = smoke_bundle / "experiment.runtime.yaml"
     overrides: tuple[str, ...] = ()
     config = pipeline_config_from_path(experiment_path, overrides=overrides)

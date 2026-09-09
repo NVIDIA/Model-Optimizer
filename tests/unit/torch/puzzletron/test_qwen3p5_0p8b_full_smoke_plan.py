@@ -24,9 +24,9 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.public_config import (
+from puzzletron_orchestrator.recipe_config import (
     materialize_resolved_bundle,
-    resolve_public_run,
+    resolve_recipe_run,
     site_template,
 )
 
@@ -49,7 +49,7 @@ def _compile(tmp_path: Path):
     site["site"]["slurm"].update({"account": "test", "partition": "test"})
     site_path = tmp_path / "site.yaml"
     site_path.write_text(yaml.safe_dump(site, sort_keys=False))
-    bundle = materialize_resolved_bundle(resolve_public_run(recipe_path, site_path), activate=False)
+    bundle = materialize_resolved_bundle(resolve_recipe_run(recipe_path, site_path), activate=False)
     return compile_campaign_plan(
         experiment_config_path=bundle / "experiment.runtime.yaml",
         runner=load_runner_config(bundle / "runner.yaml"),

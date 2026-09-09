@@ -532,7 +532,6 @@ def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) 
         "python",
         f"{repository}/examples/puzzletron/puzzletron.py",
         "setup",
-        "custom",
         "--resume",
         str(campaign_dir),
     ]

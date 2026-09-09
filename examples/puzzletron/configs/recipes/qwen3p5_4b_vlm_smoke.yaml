@@ -6,5 +6,5 @@ mode: smoke
 run_root: puzzle_runs/qwen3p5_4b_vlm_smoke
 resource_profile: smoke
 data:
-  path: datasets/nemotron_vlm_v2
+  path: REPLACE_WITH_PREPARED_VLM_DATASET
   revision: 51f4f4d219315c3283950994d4eb3d7fc30aa87b

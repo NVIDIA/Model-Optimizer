@@ -25,7 +25,7 @@ flowchart LR
 | Component | Primary code | Responsibility |
 |---|---|---|
 | Public command | `examples/puzzletron/puzzletron.py` | Validate, explain, launch, resume, and inspect maintained recipes |
-| Configuration | `modelopt/torch/puzzletron/orchestration/public_config.py` | Resolve recipe and site inputs and seal immutable run bundles |
+| Configuration | `modelopt/torch/puzzletron/orchestration/recipe_config.py` | Resolve recipe and site inputs and seal immutable run bundles |
 | Stage graph | `modelopt/torch/puzzletron/stages/graph.py` | Define dependencies, enablement, and completion artifacts |
 | Orchestrator | `modelopt/torch/puzzletron/orchestration/` | Compile resources, execute work, persist state, and recover |
 | Model semantics | `modelopt/torch/puzzletron/anymodel/` | Describe model structure, supported axes, and tensor bindings |

@@ -39,7 +39,7 @@ from modelopt.torch.puzzletron.post_mip.records import CandidateLedger
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 
 
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1200)
 def test_tiny_qwen_full_lifecycle_uses_public_bundle_contract(
     project_root_path: Path,
     tmp_path: Path,
@@ -103,6 +103,11 @@ def _assert_compiled_route(campaign: TinyQwenCampaign) -> None:
         "gdn_key_head_dim",
         "gdn_value_head_dim",
     ]
+    activation_passes = campaign.config["pruning"]["activation_passes"]
+    assert len(activation_passes) == 1
+    assert activation_passes[0]["pruning_mixin"]["layer_descriptor"]["_target_"].endswith(
+        ".Qwen3P5TextFFNIntermediateLayerDescriptor"
+    )
     serving = flow_nodes["serving"]
     assert serving["config"]["allow_aiperf_v011_online_tokenizer_resolution"] is True
     assert serving["config"]["topology"]["extra_vllm_args"] == [

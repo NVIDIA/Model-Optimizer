@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Source identity and worker checkout validation for public run bundles."""
+"""Source identity and worker checkout validation for resolved run bundles."""
 
 from __future__ import annotations
 
 import hashlib
 import os
 import re
-import subprocess  # nosec B404 - fixed Git argv is run without a shell.
+import subprocess  # nosec B404 - Git is invoked with fixed argv and shell=False.
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,24 +28,39 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ._public_inputs import Site
+    from ._recipe_inputs import Site
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 _SOURCE_PATHSPECS = (".", ":(exclude,attr:filter=lfs)")
+
+
+def _packaged_revision(repository: Path) -> dict[str, Any] | None:
+    """Read the revision baked beside the source tree in Puzzletron worker images."""
+
+    if repository.parent.name != "src":
+        return None
+    marker = repository.parent.parent / "modelopt_revision"
+    try:
+        revision = marker.read_text().strip().lower()
+    except OSError:
+        return None
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision):
+        return None
+    return {"revision": revision, "dirty": False}
 
 
 def working_tree_fingerprint(repository: Path = REPOSITORY_ROOT) -> str:
     """Hash tracked source changes and untracked files, excluding LFS materialization."""
 
     digest = hashlib.sha256()
-    tracked = subprocess.run(  # nosec B603 B607
+    tracked = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
         ["git", "diff", "--binary", "HEAD", "--", *_SOURCE_PATHSPECS],
         cwd=repository,
         check=True,
         capture_output=True,
     ).stdout
     digest.update(tracked)
-    untracked = subprocess.run(  # nosec B603 B607
+    untracked = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=repository,
         check=True,
@@ -67,7 +82,7 @@ def repository_revision(repository: Path) -> dict[str, Any]:
     """Return an immutable revision plus a dirty-tree fingerprint when available."""
 
     try:
-        revision = subprocess.run(  # nosec B603 B607
+        revision = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
             ["git", "rev-parse", "HEAD"],
             cwd=repository,
             check=True,
@@ -75,7 +90,7 @@ def repository_revision(repository: Path) -> dict[str, Any]:
             text=True,
         ).stdout.strip()
         dirty = bool(
-            subprocess.run(  # nosec B603 B607
+            subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
                 ["git", "status", "--porcelain", "--", *_SOURCE_PATHSPECS],
                 cwd=repository,
                 check=True,
@@ -84,7 +99,7 @@ def repository_revision(repository: Path) -> dict[str, Any]:
             ).stdout.strip()
         )
     except (OSError, subprocess.CalledProcessError):
-        return {"revision": None, "dirty": None}
+        return _packaged_revision(repository) or {"revision": None, "dirty": None}
     code = {"revision": revision, "dirty": dirty}
     if dirty:
         try:

@@ -42,6 +42,20 @@ pruning:
   eval_samples: 2
   block_size: 32
   intermediate_size_list: [768, 512, 256]
+  # The maintained route targets the VLM checkpoint layout. This hermetic
+  # fixture substitutes a text-only Qwen model, so its scoring descriptor must
+  # follow the text model's `model.layers` module paths.
+  activation_passes:
+    - name: ffn_iterative
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5TextFFNIntermediateLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+      activation_hooks_kwargs:
+        method: iterative
+        target_layer: mlp.down_proj
+        layer_input_descriptors_path:
 
 search_space:
   axes:
