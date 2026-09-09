@@ -30,7 +30,7 @@ from _test_utils.torch.megatron.models import (
     HAS_MAMBA,
     MegatronModel,
     get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
+    get_mcore_hybrid_model,
 )
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
@@ -49,6 +49,8 @@ from _test_utils.torch.quantization.quantize_common import (
     data_tensor_context_parallel_test_helper,
     verify_kv_cache_amax_sync,
 )
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
@@ -64,17 +66,22 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _output_layer_extra_state_has_data,
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    keep_gpt_output_layer_extra_state,
     megatron_replace_quant_module_hook,
+    quant_module_get_extra_state,
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
 )
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -290,7 +297,7 @@ def _gpt_model_provider(
         if is_hybrid:
             # Derive num_layers from pattern length, default to 4
             num_layers = len(hybrid_layer_pattern) if hybrid_layer_pattern else 4
-            model = get_mcore_mamba_hybrid_model(
+            model = get_mcore_hybrid_model(
                 tensor_model_parallel_size=tp_size,
                 num_layers=num_layers,
                 hidden_size=hidden_size,
@@ -1308,7 +1315,7 @@ def test_gptq_mamba_hybrid(dist_workers_size_1):
 
 def _test_gptq_mamba_hybrid(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         hidden_size=32,
         num_attention_heads=4,
@@ -1350,7 +1357,7 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
         expert_model_parallel_size=expert_model_parallel_size,
         seed=SEED,
     )
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         expert_model_parallel_size=expert_model_parallel_size,
         hidden_size=32,
@@ -1794,6 +1801,26 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
     )
 
 
+def test_output_layer_extra_state_empty_when_nothing_quantized():
+    """``GPTModel.sharded_state_dict`` asserts a disabled output_layer carries no extra state.
+
+    The subject is a ``RealQuantLinear`` with an uncompressed weight, which is what ``mtq.compress``
+    leaves behind for a disabled output_layer, and the e2e coverage
+    (``test_homogeneous_compressed_sharded_state_dict``) is Blackwell-skipped.
+    """
+    module = RealQuantLinear.convert(QuantModuleRegistry.convert(torch.nn.Linear(4, 4)))
+    module._modelopt_output_layer = True
+    assert not isinstance(module.weight, QTensorWrapper)  # disabled quantizers are not compressed
+
+    for quantizer in module.modules():
+        if isinstance(quantizer, mtq.nn.TensorQuantizer):
+            quantizer.disable()
+    assert quant_module_get_extra_state(module) == {}
+
+    module.weight_quantizer.enable()
+    assert "modelopt_quantizer_state" in quant_module_get_extra_state(module)
+
+
 def test_resolve_output_layer_untied():
     """The tiedness signal is read off the model, not from Megatron-LM global args."""
 
@@ -1902,3 +1929,109 @@ def test_output_layer_untied_not_stamped_onto_teacher_config():
 
     assert student.config.modelopt_output_layer_untied is True
     assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")
+
+
+# Captured at import, before any test can apply the patch, so tests can start from pristine mcore.
+_PRISTINE_GPT_SHARDED_STATE_DICT = GPTModel.sharded_state_dict
+
+
+def _stock_gpt_sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer.
+
+    Copied verbatim from ``GPTModel.sharded_state_dict`` in NVIDIA/Megatron-LM at ``be08ce5b1~1``
+    (Apache-2.0) so the patched path is exercised whichever megatron-core is installed.
+    """
+    sharded_state_dict = super(GPTModel, self).sharded_state_dict(prefix, sharded_offsets, metadata)
+    output_layer_extra_state_key = f"{prefix}output_layer._extra_state"
+    output_extra_state = sharded_state_dict.pop(output_layer_extra_state_key, None)
+    assert not (output_extra_state and output_extra_state.data), (
+        f"Expected output layer extra state to be empty, got: {output_extra_state}"
+    )
+    return sharded_state_dict
+
+
+class TestKeepGptOutputLayerExtraState:
+    """The GPTModel.sharded_state_dict patch that lets a quantized output_layer be checkpointed."""
+
+    @pytest.fixture(autouse=True)
+    def pristine_gpt_model(self):
+        """Run against unpatched megatron-core, then restore whatever the session had."""
+        applied = GPTModel.sharded_state_dict
+        GPTModel.sharded_state_dict = _PRISTINE_GPT_SHARDED_STATE_DICT
+        keep_gpt_output_layer_extra_state.cache_clear()
+        yield
+        GPTModel.sharded_state_dict = applied
+        keep_gpt_output_layer_extra_state.cache_clear()
+
+    @staticmethod
+    def _sharded_state_dict(entries: dict) -> dict:
+        """Run GPTModel.sharded_state_dict over a canned parent state dict, no built model needed."""
+        model = GPTModel.__new__(GPTModel)
+        with patch.object(LanguageModule, "sharded_state_dict", return_value=dict(entries)):
+            return GPTModel.sharded_state_dict(model, prefix="")
+
+    def test_keeps_populated_extra_state(self):
+        """Fails if neither our patch nor megatron-core itself keeps a quantized output_layer."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict(
+            {
+                "output_layer.weight": torch.ones(4),
+                "output_layer._extra_state": SimpleNamespace(data=b"quantizer_state"),
+            }
+        )
+        assert "output_layer._extra_state" in sharded
+
+    @pytest.mark.parametrize("empty", [None, SimpleNamespace(data=None), SimpleNamespace(data=b"")])
+    def test_drops_empty_extra_state(self, empty):
+        """Upstream behaviour for the placeholder an unquantized output_layer contributes."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict({"output_layer._extra_state": empty})
+        assert "output_layer._extra_state" not in sharded
+
+    def test_patches_stock_megatron_core(self):
+        """Pins the patched path: stock mcore matches the fingerprint and stops losing the entry."""
+        GPTModel.sharded_state_dict = _stock_gpt_sharded_state_dict
+        populated = {"output_layer._extra_state": SimpleNamespace(data=b"quantizer_state")}
+        with pytest.raises(AssertionError, match="Expected output layer extra state to be empty"):
+            self._sharded_state_dict(populated)
+
+        assert keep_gpt_output_layer_extra_state()
+        assert "output_layer._extra_state" in self._sharded_state_dict(populated)
+        assert "output_layer._extra_state" not in self._sharded_state_dict(
+            {"output_layer._extra_state": SimpleNamespace(data=b"")}
+        )
+
+    def test_second_call_is_a_no_op(self):
+        """Idempotent: @cache runs the body once, so a repeat call cannot stack a second patch."""
+        first = keep_gpt_output_layer_extra_state()
+        after_first = GPTModel.sharded_state_dict
+        assert keep_gpt_output_layer_extra_state() == first
+        assert keep_gpt_output_layer_extra_state.cache_info().hits >= 1
+        assert GPTModel.sharded_state_dict is after_first
+
+    def test_unrecognised_upstream_is_left_alone(self):
+        """An mcore whose body we do not recognise keeps its own logic, with a warning."""
+
+        def unrecognised(self, prefix="", sharded_offsets=(), metadata=None):
+            return {"untouched": True}
+
+        GPTModel.sharded_state_dict = unrecognised
+        with pytest.warns(UserWarning, match="not the version ModelOpt patches"):
+            assert not keep_gpt_output_layer_extra_state()
+        assert GPTModel.sharded_state_dict is unrecognised
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            (None, False),
+            (torch.empty(0, dtype=torch.uint8), False),
+            (torch.ones(4, dtype=torch.uint8), True),
+            (SimpleNamespace(data=None), False),
+            (SimpleNamespace(data=b""), False),
+            (SimpleNamespace(data=b"quantizer_state"), True),
+            (SimpleNamespace(data=torch.empty(0, dtype=torch.uint8)), False),
+            (SimpleNamespace(data=torch.ones(4, dtype=torch.uint8)), True),
+        ],
+    )
+    def test_extra_state_has_data(self, entry, expected):
+        assert _output_layer_extra_state_has_data(entry) is expected

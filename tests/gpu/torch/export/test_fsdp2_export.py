@@ -161,15 +161,15 @@ def _fuse_layers(rank, size, quant_config, bias):
 def _export_quantized_weight_test(rank, size, quant_config, bias):
     with patch_fsdp_mp_dtypes():
         # Initialize model
-        model = SmallQKVModel(dim=32, bias=bias).to("cuda")
-        non_fsdp_model = SmallQKVModel(dim=32, bias=bias).to("cuda")
+        model = SmallQKVModel(dim=128, bias=bias).to("cuda")
+        non_fsdp_model = SmallQKVModel(dim=128, bias=bias).to("cuda")
         non_fsdp_model.load_state_dict(copy.deepcopy(model.state_dict()))
         model.eval()
         non_fsdp_model.eval()
         _compare_parameters_and_buffers(model, non_fsdp_model)
 
         # Create calibration data ONCE
-        calib_data = torch.randn(1, 32, device="cuda")
+        calib_data = torch.randn(1, 128, device="cuda")
 
         def calib_fn(x):
             return x(calib_data)

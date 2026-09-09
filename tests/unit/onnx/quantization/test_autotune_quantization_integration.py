@@ -207,11 +207,18 @@ def test_quantize_threads_network_timeout_to_autotune(monkeypatch, tmp_path):
     def fake_preprocess(*args, **kwargs):
         return str(onnx_path), object(), [], False, False, False, {}, {}
 
+    class _FakeAutotuneContext:
+        ort_config = ([], [], [], [])
+
+        def cleanup(self):
+            pass
+
     def fake_find_nodes_autotune(*args, network_timeout_minutes=10, **kwargs):
         captured["network_timeout_minutes"] = network_timeout_minutes
-        return [], [], [], []
+        return _FakeAutotuneContext()
 
     monkeypatch.setattr(quantize_module, "_preprocess_onnx", fake_preprocess)
+    monkeypatch.setattr(quantize_module, "_has_qdq_site", lambda *a: False)
     monkeypatch.setattr(quantize_module, "update_trt_ep_support", lambda *a, **k: None)
     monkeypatch.setattr(quantize_module, "validate_op_types_spelling", lambda *a: None)
     monkeypatch.setattr(quantize_module, "find_nodes_from_mha_to_exclude", lambda *a, **k: [])

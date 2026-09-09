@@ -33,6 +33,9 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.onnx import utils
 from modelopt.onnx.export import NVFP4QuantExporter
+from modelopt.onnx.export.nvfp4_exporter import _encode_nvfp4_block_scale
+from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import is_quantized_linear
 
 
@@ -100,6 +103,103 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
     converted_model = NVFP4QuantExporter.process_model(exported_model)
     assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
     onnx.checker.check_model(converted_model)
+
+
+@pytest.mark.parametrize(
+    ("convert", "deprecated"),
+    [
+        pytest.param(NVFP4QuantExporter.process_model, False, id="exporter"),
+        pytest.param(fp4qdq_to_2dq, True, id="deprecated-shim"),
+    ],
+)
+@pytest.mark.parametrize(
+    "scale_case", ["fp8-rounding", "fp32-tensor-arithmetic", "fp32-block-arithmetic"]
+)
+def test_nvfp4_packed_weights_match_eager(scale_case, convert, deprecated):
+    block_size = 16
+    if scale_case == "fp8-rounding":
+        weight = np.zeros((4, block_size), dtype=np.float16)
+        weight[0, 0] = 6.0
+        weight[1, :2] = [0.231689453125, 0.0297393798828125]
+        expected_scale = np.array([[448.0], [18.0], [1.0], [1.0]], dtype=np.float32)
+    elif scale_case == "fp32-tensor-arithmetic":
+        weight = np.zeros((2, block_size), dtype=np.float16)
+        weight[0, 0] = 3.296875
+        weight[1, 0] = 2.099609375
+        weight[1, -2:] = [-1.501953125, 0.6181640625]
+        expected_scale = np.array([[448.0], [288.0]], dtype=np.float32)
+    else:
+        weight = np.zeros((2, block_size), dtype=np.float16)
+        weight[:, 0] = [2.24609375, 2.515625]
+        expected_scale = np.array([[384.0], [448.0]], dtype=np.float32)
+
+    weight_dq = helper.make_tensor_value_info("weight_dq", TensorProto.FLOAT, list(weight.shape))
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "TRT_FP4QDQ",
+                    ["weight"],
+                    ["weight_dq"],
+                    name="weight_qdq",
+                    block_size=block_size,
+                ),
+                helper.make_node(
+                    "MatMul",
+                    ["activation", "weight_dq"],
+                    ["output"],
+                    name="matmul",
+                ),
+            ],
+            "nvfp4_packed_weights",
+            [
+                helper.make_tensor_value_info(
+                    "activation", TensorProto.FLOAT16, [1, weight.shape[0]]
+                )
+            ],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, weight.shape[1]])],
+            [numpy_helper.from_array(weight, "weight")],
+            value_info=[weight_dq],
+        ),
+        opset_imports=[helper.make_opsetid("", 23)],
+    )
+
+    if deprecated:
+        with pytest.warns(DeprecationWarning):
+            converted = convert(model)
+    else:
+        converted = convert(model)
+    eager_qtensor, eager_scale, _ = NVFP4QTensor.quantize(
+        torch.from_numpy(weight.astype(np.float32)), block_size
+    )
+
+    np.testing.assert_array_equal(eager_scale.float().cpu().numpy(), expected_scale)
+
+    fp8_scale = next(
+        initializer
+        for initializer in converted.graph.initializer
+        if initializer.name == "weight_f8_scale"
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(fp8_scale.raw_data, dtype=np.uint8),
+        eager_scale.view(torch.uint8).cpu().numpy().reshape(-1),
+    )
+
+    fp4_weight = next(
+        initializer
+        for initializer in converted.graph.initializer
+        if initializer.name == "weight_f4"
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(fp4_weight.raw_data, dtype=np.uint8),
+        eager_qtensor._quantized_data.cpu().numpy().reshape(-1),
+    )
+
+
+@pytest.mark.parametrize("scale", [np.nan, np.inf, -1.0])
+def test_nvfp4_rejects_invalid_block_scale(scale):
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        _encode_nvfp4_block_scale(np.array([scale], dtype=np.float32))
 
 
 def test_nvfp4_shared_activation_reuses_cast():

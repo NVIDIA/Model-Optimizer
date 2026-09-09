@@ -153,9 +153,10 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/nemo:26.06"
+      docker_image: "nvcr.io/nvidia/nemo:26.08"
       example: megatron_bridge
-      timeout_minutes: 60
+      # PR runs single-GPU (~11 min); the nightly runs every test multi-GPU (~58 min).
+      timeout_minutes: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 30 || 75 }}
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',megatron_bridge,') }}

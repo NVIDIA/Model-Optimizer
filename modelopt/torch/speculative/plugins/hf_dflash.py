@@ -388,6 +388,8 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
+        self.dflash_fp32_master_weights = getattr(config, "dflash_fp32_master_weights", False)
+
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
         # auto-populated from rope_theta. DFlash draft uses Qwen3 components.
@@ -420,10 +422,27 @@ class HFDFlashModel(DFlashModel):
         # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
         # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
         # added only at export via dflash_export_rope_scaling.)
+        # A config can carry BOTH a top-level rope_theta and a rope_parameters dict
+        # with different values: Transformers 5 keeps the real base in
+        # rope_parameters while the class default (10000.0 for Qwen3) stays visible
+        # as rope_theta. rope_parameters wins, otherwise the draft trains against a
+        # RoPE base 100x off the target's.
+        base_rope_params = getattr(base_config, "rope_parameters", None)
+        if not isinstance(base_rope_params, dict):
+            base_rope_params = {}
+        # Only rope_theta is taken from the dict. rope_parameters also carries the target's
+        # scaling family and that family's own fields, and copying rope_type without them
+        # builds a draft whose rotary init function looks up keys the draft config has not
+        # got -- a llama3 or yarn target would fail in convert() with a bare KeyError. The
+        # scaling family is deliberately not inherited (see above); it is added at export
+        # via dflash_export_rope_scaling.
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if not hasattr(base_config, attr):
+            if attr == "rope_theta" and attr in base_rope_params:
+                base_val = base_rope_params[attr]
+            elif hasattr(base_config, attr):
+                base_val = getattr(base_config, attr)
+            else:
                 continue
-            base_val = getattr(base_config, attr)
             user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
                 logger.warning(
@@ -435,6 +454,12 @@ class HFDFlashModel(DFlashModel):
                     base_val,
                 )
             setattr(self.dflash_config, attr, base_val)
+            # Qwen3Config populates rope_parameters at construction, so a later
+            # setattr on the flat field alone would leave the dict — which is what
+            # the rotary module reads — holding the stale value.
+            draft_rope_params = getattr(self.dflash_config, "rope_parameters", None)
+            if isinstance(draft_rope_params, dict) and attr in draft_rope_params:
+                draft_rope_params[attr] = base_val
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
@@ -501,14 +526,12 @@ class HFDFlashModel(DFlashModel):
         # so the loaded tensors get cast alongside the rest of the module.
         if self.dflash_init_checkpoint:
             self._load_init_checkpoint(self.dflash_init_checkpoint)
-        # Match base model dtype/device. Skip if base is on meta (during from_pretrained
-        # restore — the model will be moved to the correct device after weight loading).
-        if self.dflash_offline:
-            base_device = self._base_model_lm_head.weight.device
-        else:
-            base_device = next(self._base_model.layers[-1].parameters()).device
+        # Match base model dtype/device. Skipped when the base is on meta, which is the
+        # from_pretrained restore path: the weights are not loaded yet and the draft cannot be
+        # placed. `restore_draft_precision` is what picks it up again there.
+        base_device = self._base_device()
         if base_device.type != "meta":
-            self.dflash_module.to(self._base_model.dtype).to(base_device)
+            self._place_draft(base_device)
 
         # Delete base model layers for offline training (save memory)
         if self.dflash_offline:
@@ -520,6 +543,123 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    def _base_device(self):
+        """Device the frozen base model sits on. ``meta`` during a from_pretrained restore."""
+        if self.dflash_offline:
+            return self._base_model_lm_head.weight.device
+        return next(self._base_model.layers[-1].parameters()).device
+
+    def _place_draft(self, base_device):
+        """Put the draft on its training device and dtype and build its rotary buffer.
+
+        The dtype has to be settled before the Trainer builds the optimizer, because AdamW
+        allocates its moments with ``zeros_like(p)``: a cast afterwards would fix the
+        parameters and leave the moments in the base model's dtype, which is the half that
+        cannot represent its own updates. Only the draft takes fp32 under
+        ``dflash_fp32_master_weights`` -- the frozen base has no trainable parameters and no
+        optimizer state, so promoting it would double its memory for nothing and change the
+        hidden states the draft is trained against.
+
+        The rotary buffer is built here rather than on the draft's first forward.
+        ``_maybe_init_rotary_emb`` creates the non-persistent ``inv_freq`` lazily, and the
+        DFlash forward returns early -- without running the draft -- for a rank whose batch
+        has no valid anchor. That rank ends the step one buffer short, and DDP's
+        ``broadcast_buffers`` then coalesces buffer lists of differing flattened size across
+        ranks, which hangs rather than raising. Building it up front makes every rank's
+        buffer list identical for the whole run. Numerically inert: ``inv_freq`` is a pure
+        function of the config and, being non-persistent, is absent from the state dict
+        either way.
+
+        Idempotent, so the resume path can call it again through
+        ``restore_draft_precision``.
+        """
+        draft_dtype = torch.float32 if self.dflash_fp32_master_weights else self._base_model.dtype
+        self.dflash_module.to(device=base_device, dtype=draft_dtype)
+        # Logged, not assumed: the optimizer dtype this decides is not visible until step 1.
+        logger.info(
+            "DFlash draft on %s in %s (dflash_fp32_master_weights=%s); Adam moments will "
+            "follow. Frozen base left at %s.",
+            base_device,
+            draft_dtype,
+            self.dflash_fp32_master_weights,
+            self._base_model.dtype,
+        )
+        self.dflash_module._maybe_init_rotary_emb(device=base_device)
+
+    def _require_autocast_for_promoted_draft(self, device):
+        """Fail early, and by name, when a promoted draft is about to run unautocast.
+
+        ``dflash_fp32_master_weights`` needs a bf16 autocast around the forward, and HF
+        ``Trainer`` only wraps ``forward``. AR validation reaches the draft through
+        ``pseudo_speculative_generate``, which is called directly, so it runs outside that
+        wrapper: with ``estimate_ar: true`` a run trains normally and then dies at the first
+        ``ar_validate_steps`` boundary on a bare matmul dtype mismatch, possibly hours in.
+        Name the two knobs instead of letting ``F.linear`` report it.
+        """
+        if not self.dflash_fp32_master_weights or self._base_model.dtype == torch.float32:
+            return
+        if torch.is_autocast_enabled(device.type):
+            return
+        raise RuntimeError(
+            f"DFlash: dflash_fp32_master_weights holds the draft in fp32 while the frozen "
+            f"base is {self._base_model.dtype}, and this path runs outside the autocast that "
+            f"reconciles them, so the draft's first matmul would fail. Wrap the call in "
+            f"torch.autocast(device_type={device.type!r}, dtype={self._base_model.dtype}), "
+            f"or set estimate_ar=false, or set dflash_fp32_master_weights=false."
+        )
+
+    def restore_draft_precision(self, checkpoint_dir=None):
+        """Re-apply the draft's device, dtype and rotary buffer after a checkpoint restore.
+
+        ``modify()`` runs during ``from_pretrained`` with the base model still on meta, so it
+        skips all three. Left alone, a resumed run keeps whatever dtype the checkpoint loaded
+        at, AdamW allocates its moments to match, and ``dflash_fp32_master_weights`` is
+        silently inert for the rest of the run -- the resumed half of a long training job
+        quietly loses the feature. Call this once the weights are loaded and before the
+        Trainer builds the optimizer. A no-op on a freshly converted model, which did all
+        three in ``modify()``.
+
+        ``checkpoint_dir`` additionally restores the precision the draft was *saved* at.
+        ``from_pretrained(dtype="auto")`` gives every tensor a single dtype -- the base
+        model's -- which discards the extra mantissa bits an fp32 draft wrote to disk.
+        Reloading those tensors at their stored dtype is the only way to get them back, and
+        without it a resume silently costs the run one rounding of its master weights. Pass
+        it only for an HF-format checkpoint; it raises if there are no safetensors there,
+        which is better than silently keeping the wrong precision.
+        """
+        base_device = self._base_device()
+        if base_device.type == "meta":
+            return
+        self._place_draft(base_device)
+        if checkpoint_dir is not None:
+            self._reload_draft_weights_at_stored_precision(checkpoint_dir)
+
+    def _reload_draft_weights_at_stored_precision(self, checkpoint_dir):
+        """Copy the draft's tensors back out of the checkpoint at the dtype they were saved in."""
+        # Imported here rather than at module scope: that module pulls in accelerate,
+        # huggingface_hub and torch.distributed.tensor.
+        from modelopt.torch.utils.plugins.model_load_utils import (
+            read_safetensors_subset,
+            weight_map_for,
+        )
+
+        prefix = "dflash_module."
+        stored = read_safetensors_subset(
+            checkpoint_dir, weight_map_for(checkpoint_dir), lambda k: k.startswith(prefix)
+        )
+        own = dict(self.dflash_module.named_parameters())
+        with torch.no_grad():
+            for key, saved in stored.items():
+                param = own.get(key[len(prefix) :])
+                if param is not None and param.shape == saved.shape:
+                    param.copy_(saved.to(param.dtype))
+        logger.info(
+            "DFlash draft precision restore: %d/%d tensors reloaded from %s.",
+            len(stored),
+            len(own),
+            checkpoint_dir,
+        )
 
     # Draft-module entries that legitimately come from the base model rather than the
     # exported draft checkpoint, so their absence (or presence) is not an error.
@@ -762,7 +902,15 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _compute_loss(
-        self, logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits=None
+        self,
+        logits,
+        input_ids,
+        anchor_positions,
+        block_keep_mask,
+        loss_mask,
+        base_logits=None,
+        draft_hidden=None,
+        base_outputs=None,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
@@ -773,6 +921,8 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
+            draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
+                Unused here; passed for variants whose head consumes them.
 
         Returns:
             (loss, accuracy) tuple.
@@ -1051,6 +1201,8 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask,
             loss_mask,
             base_outputs.logits if self.dflash_self_logit_distillation else None,
+            draft_hidden=hidden,
+            base_outputs=base_outputs,
         )
 
         return ModelOutput(
@@ -1162,6 +1314,7 @@ class HFDFlashModel(DFlashModel):
         attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
         # Draft forward
+        self._require_autocast_for_promoted_draft(device)
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,

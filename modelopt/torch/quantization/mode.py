@@ -230,6 +230,7 @@ def wrapped_calib_func(
     layerwise_cfg = kwargs.pop("layerwise", None) or {}
     layerwise = layerwise_cfg.get("enable", False)
     checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
+    export_dir = layerwise_cfg.get("export_dir")
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
     save_every = layerwise_cfg.get("save_every", 1)
     calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
@@ -265,6 +266,7 @@ def wrapped_calib_func(
                 forward_loop=forward_loop,
                 calib_func=func,
                 checkpoint_dir=checkpoint_dir,
+                export_dir=export_dir,
                 get_qdq_activations_from_prev_layer=qdq_from_prev,
                 save_every=save_every,
                 calib_mutates_weights=calib_mutates_weights,

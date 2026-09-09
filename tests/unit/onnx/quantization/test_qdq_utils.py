@@ -22,8 +22,9 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
-from modelopt.onnx.export.nvfp4_exporter import _cast_fp4, _cast_fp8
+from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
 from modelopt.onnx.quantization.qdq_utils import (
+    _cast_fp8,
     apply_column_major_transformation,
     fp4qdq_to_2dq,
     insert_transpose_nodes_for_column_major,

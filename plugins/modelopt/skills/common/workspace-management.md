@@ -12,6 +12,9 @@ Use the same `<session_id>` convention as the monitor skill:
 - Codex: `$CODEX_THREAD_ID`
 - If no session id is available, create a stable id for the current terminal session and reuse it for every local and remote path created by that agent
 
+`workspaces/` is gitignored — it is scratch, not source. Never commit its
+contents, and keep secrets (`.env`) there rather than under the skill tree.
+
 ## When to Reuse vs Create
 
 **Before starting any task**, check for an existing workspace in the current

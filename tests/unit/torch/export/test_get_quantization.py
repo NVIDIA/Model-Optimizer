@@ -24,6 +24,7 @@ from _test_utils.torch.export.utils import (
     partial_w4a8_config,
 )
 
+import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
@@ -31,8 +32,59 @@ from modelopt.torch.export.model_config import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
-from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.export.quant_utils import get_kv_cache_scaling_factor, get_quant_config
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+
+
+class _FakeKVCacheQuantizer(torch.nn.Module):
+    """Minimal FP8 KV cache quantizer for scaling-factor tests."""
+
+    is_enabled = True
+    num_bits = (4, 3)
+    maxbound = 448.0
+
+    def export_amax(self):
+        return torch.tensor([224.0])
+
+
+def test_get_kv_cache_scaling_factor_can_disable_fp8_clamping():
+    """FP8 KV cache scales below 1.0 are retained when explicitly requested."""
+    attention = torch.nn.Module()
+    attention.k_bmm_quantizer = _FakeKVCacheQuantizer()
+    attention.v_bmm_quantizer = _FakeKVCacheQuantizer()
+
+    clamped_scales = get_kv_cache_scaling_factor(attention)
+    unclamped_scales = get_kv_cache_scaling_factor(attention, clamp_fp8_scales=False)
+
+    assert all(torch.equal(scale, torch.tensor([1.0])) for scale in clamped_scales)
+    assert all(torch.equal(scale, torch.tensor([0.5])) for scale in unclamped_scales)
+
+
+@pytest.mark.parametrize("clamp_kv_cache_scales", [True, False])
+def test_export_mcore_gpt_to_hf_passes_kv_cache_clamping_option(
+    monkeypatch, tmp_path, clamp_kv_cache_scales
+):
+    """The public Megatron export API forwards the KV cache clamping option."""
+    exporter_args = {}
+
+    class FakeExporter:
+        def __init__(self, *args, **kwargs):
+            exporter_args.update(kwargs)
+            self.export_extra_modules = False
+
+        def save_pretrained(self, *args):
+            pass
+
+    monkeypatch.setattr(unified_export_megatron, "GPTModelExporter", FakeExporter)
+
+    unified_export_megatron.export_mcore_gpt_to_hf(
+        object(),
+        tmp_path,
+        export_dir=tmp_path,
+        clamp_kv_cache_scales=clamp_kv_cache_scales,
+    )
+
+    assert exporter_args["clamp_kv_cache_scales"] is clamp_kv_cache_scales
 
 
 @pytest.mark.parametrize(

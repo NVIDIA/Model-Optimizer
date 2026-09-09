@@ -15,9 +15,13 @@
 
 """Support quantization for megatron linear layers."""
 
+import ast
+import inspect
 import re
+import textwrap
 import types
 from contextlib import contextmanager
+from functools import cache
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -26,6 +30,7 @@ import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
@@ -146,9 +151,12 @@ def quant_module_get_extra_state(self) -> dict:
     # output_layer with nothing quantized must contribute none. Scoped to output_layer: for every
     # other module this quantizer_state is the only record that its quantizers were disabled (e.g.
     # by auto_quantize or disable_quantizer), and dropping it would restore them enabled.
+    # A disabled output_layer is still converted to RealQuantLinear by ``mtq.compress``, but its
+    # weight is left uncompressed (pack_real_quantize_weight skips disabled quantizers), so there is
+    # likewise no real-quant state to keep.
     if (
         getattr(self, "_modelopt_output_layer", False)
-        and not isinstance(self, RealQuantLinear)
+        and not isinstance(getattr(self, "weight", None), QTensorWrapper)
         and not any(isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules())
     ):
         return {}
@@ -322,6 +330,59 @@ def _output_layer_untied(config) -> bool:
         return False
 
 
+# Statement kinds of the upstream GPTModel.sharded_state_dict body patched below.
+_GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
+
+
+def _output_layer_extra_state_has_data(entry: Any) -> bool:
+    """True when a sharded state-dict entry carries a payload."""
+    data = getattr(entry, "data", entry)
+    if isinstance(data, torch.Tensor):
+        return data.numel() > 0
+    return data is not None and bool(data)
+
+
+@cache
+def keep_gpt_output_layer_extra_state() -> bool:
+    """Keep ``output_layer._extra_state`` so a quantized ``lm_head`` can be checkpointed.
+
+    ``GPTModel.sharded_state_dict`` drops that entry and asserts it is empty, so a quantized
+    output_layer otherwise fails to save and loads back unquantized. ``@cache`` makes this
+    idempotent -- the body runs once per process, so a repeat call cannot double-patch or re-warn.
+
+    TODO: remove once megatron-core migrates GPTModel to HybridModel, expected in nemo:26.10.
+    """
+    try:
+        src = textwrap.dedent(inspect.getsource(GPTModel.sharded_state_dict))
+        func = ast.parse(src).body[0]
+    except (OSError, TypeError, SyntaxError, IndexError):
+        func = None  # no usable source to compare against; leave megatron-core alone
+    body = func.body if isinstance(func, ast.FunctionDef) else []
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # docstring
+    if [type(stmt).__name__ for stmt in body] != _GPT_SSD_STATEMENTS:
+        warn_rank_0(
+            "GPTModel.sharded_state_dict is not the version ModelOpt patches; leaving it as is. "
+            "If it does not keep a populated output_layer._extra_state, saving a quantized "
+            "output_layer will fail and loading one will silently drop its quantizers."
+        )
+        return False
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        sharded_state_dict = super(GPTModel, self).sharded_state_dict(
+            prefix, sharded_offsets, metadata
+        )
+        key = f"{prefix}output_layer._extra_state"
+        if key in sharded_state_dict and not _output_layer_extra_state_has_data(
+            sharded_state_dict[key]
+        ):
+            sharded_state_dict.pop(key)  # upstream behaviour for the empty placeholder
+        return sharded_state_dict
+
+    GPTModel.sharded_state_dict = sharded_state_dict
+    return True
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -334,6 +395,9 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
        typing-matching the QuantModuleRegistry.
     3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+    # sharded_state_dict backs both save and load planning, so applying this for every
+    # Megatron model means no caller can forget it and lose a quantized output_layer.
+    keep_gpt_output_layer_extra_state()
     untied = _resolve_output_layer_untied(model)
 
     def _configure_attention_for_kv_cache_quant(module: Attention):
@@ -694,8 +758,9 @@ class _MegatronSequentialMLP(DynamicModule):
         """Sync quantizer amax across local experts in a SequentialMLP.
 
         Always syncs input quantizer amax across experts. Optionally syncs weight
-        quantizer amax as well, which matches TEGroupedMLP behavior where all
-        experts are fused into a single GEMM with one quantizer per linear layer.
+        quantizer amax as well, so all experts share one effective weight scale --
+        opt-in, since experts otherwise keep an independent amax each, as
+        ``TEGroupedLinear``'s per-expert ``GroupedQuantizer`` does.
 
         Args:
             sync_weight_amax: If True, also sync weight quantizer amax across experts.
@@ -751,7 +816,7 @@ if HAS_TE:
     ):
         pass
 
-    # Quantized subclasses to support TEGroupedMLP quantization
+    # Quantized subclasses to support TEGroupedLinear quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
