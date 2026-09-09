@@ -175,6 +175,13 @@ def get_args():
         "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
     )
     parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
+    parser.add_argument(
+        "--logit_kl_topk",
+        type=int,
+        default=None,
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
+        "replacing the full-vocab temporaries with [seq, k] ones.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
@@ -420,7 +427,9 @@ def main(args: argparse.Namespace):
         )
 
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
+        skip_lm_loss=not args.no_skip_lm_loss,
+        kd_loss_scale=args.kd_loss_scale,
+        logit_kl_topk=args.logit_kl_topk,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under

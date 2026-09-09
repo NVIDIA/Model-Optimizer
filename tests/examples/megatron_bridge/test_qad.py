@@ -95,6 +95,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
         seq_length=16,
         mbs=1,
         gbs=4,
+        logit_kl_topk=8,
         train_iters=train_iters,
         lr_warmup_iters=2,
         eval_interval=early_exit_iter,
