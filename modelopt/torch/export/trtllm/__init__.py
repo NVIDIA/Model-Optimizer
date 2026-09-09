@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Export to the TensorRT-LLM checkpoint format.
+"""Checkpoint export logic for the TensorRT-LLM specific format.
 
-Everything reachable only from :func:`export_tensorrt_llm_checkpoint
-<modelopt.torch.export.trtllm.model_config_export.export_tensorrt_llm_checkpoint>` lives
-here, so the framework-agnostic export code in :mod:`modelopt.torch.export` stays free of
-TensorRT-LLM checkpoint concerns. This subpackage is deliberately *not* re-exported from
-:mod:`modelopt.torch.export`; import from ``modelopt.torch.export.trtllm`` directly.
+**Deprecation Notice**: The ``export_tensorrt_llm_checkpoint`` API will be deprecated in future
+releases. Users are encouraged to transition to the unified HF export API
+(:meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`),
+which provides enhanced functionality and flexibility for exporting models to multiple inference
+frameworks including TensorRT-LLM, vLLM, and SGLang.
 """
 
 from .model_config import *
