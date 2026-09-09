@@ -31,6 +31,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type
+
 from .quant_aware_conversion import build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
@@ -310,7 +312,15 @@ def _export_transformers_checkpoint_streaming(
     # --- Stream tensors to shard files ---
     shard_size_bytes = _parse_shard_size(max_shard_size)
     writer = _StreamingShardWriter(export_dir, shard_size_bytes)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    # No export handler reads model_type today -- only the prepare handlers do, and this
+    # path prepares from the root model above. Carried anyway so all three ExportContext
+    # constructions agree and a future handler cannot silently receive None here.
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     seen_keys: set[str] = set()
 
     def _stream_tensor(full_key: str, tensor: torch.Tensor) -> None:
