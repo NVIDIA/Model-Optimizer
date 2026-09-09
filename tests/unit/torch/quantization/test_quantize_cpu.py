@@ -16,6 +16,8 @@
 """High-level tests for quantization."""
 
 import copy
+import os
+from unittest import mock
 
 import pytest
 import torch
@@ -456,7 +458,7 @@ def test_weight_patterns_matching_nothing_raise():
         ],
         "algorithm": "max",
     }
-    with pytest.raises(RuntimeError, match="no weight quantizer was enabled"):
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
@@ -495,10 +497,11 @@ def test_weight_quantizers_disabled_by_a_later_entry_are_allowed():
 
 
 def test_sequential_weight_quantizers_do_not_trip_the_guard():
-    """List-valued `cfg` builds `SequentialQuantizer`s — the guard must see them as matched.
+    """List-valued `cfg` builds `SequentialQuantizer`s — the guard reads `is_enabled` through
+    the container, not just through `TensorQuantizer` leaves.
 
-    Their children are named `...weight_quantizer.0`, so a plain `fnmatch` against
-    `*weight_quantizer` over `TensorQuantizer`s alone would miss them and wrongly raise.
+    `SequentialQuantizer.is_enabled` delegates to its first member; a check that only
+    looked at `TensorQuantizer` instances directly would miss these and wrongly raise.
     """
     model = SimpleLinear()
     calib_data = [model.get_input() for _ in range(2)]
@@ -510,7 +513,9 @@ def test_sequential_weight_quantizers_do_not_trip_the_guard():
 
 
 def test_fused_experts_quantizer_names_do_not_trip_the_guard():
-    """Fused-experts quantizers are named `..._weight_quantizers.N` and must count as matched."""
+    """Fused-experts quantizers are named `..._weight_quantizers.N`, plural and indexed, but
+    still contain `weight_quantizer` as a substring and so are still read by the guard.
+    """
     model = SimpleLinear()
     mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
 
@@ -529,7 +534,9 @@ def test_fused_experts_quantizer_names_do_not_trip_the_guard():
 
 
 def test_refining_an_already_quantized_model_does_not_raise():
-    """A second config that names nothing refines an already-quantized model, not a no-op run."""
+    """A second config whose own patterns match nothing still sees the earlier weight
+    quantizers as enabled, so this is refining an already-quantized model, not a no-op run.
+    """
     model = SimpleLinear()
     model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
     assert any(m.is_enabled for n, m in model.named_modules() if n.endswith("weight_quantizer"))
@@ -562,6 +569,44 @@ def test_weight_patterns_enabled_then_retracted_do_not_raise():
     for name, module in model.named_modules():
         if name.endswith("weight_quantizer"):
             assert not module.is_enabled
+
+
+def test_overlapping_patterns_disabled_by_a_broader_later_one_still_raise():
+    """A narrower pattern "matching" is not enough -- the final enabled state is what counts.
+
+    `*weight_quantizer` enables real quantizers, but the later, broader `*` disables
+    everything again; the config's net effect is still "nothing quantized" and must raise.
+    A check that asked "did any weight pattern match something" instead of "is anything
+    actually enabled" would miss this, since the narrower pattern did match.
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+def test_skip_weight_quant_check_env_var_bypasses_the_guard():
+    """Documented escape hatch for pipeline-parallel ranks whose local stage legitimately
+    has none of the targeted modules (e.g. a pure-attention stage under an experts-only
+    recipe): raising there while other ranks proceed into calibration is a collective hang,
+    not just a wrong per-rank verdict.
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    with mock.patch.dict(os.environ, {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "1"}):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
