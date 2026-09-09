@@ -421,11 +421,31 @@ checkpoint's** quant config verbatim:
   source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
   dequantizes it to BF16 before quantizers are inserted, so the scales are
   calibrated against BF16 weights, not the shipped FP8.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
+  the NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+  **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
+  sparse-MLA layers. Routed experts **and** the dense MLP → NVFP4 W4A4; KV cache
+  → FP8 cast; everything else stays BF16 (shared experts, router gate, both
+  attention families, the vision tower, embeddings and `lm_head`).
+  `mlp_layer_types` marks only layers 0-2 `dense`, so the dense-MLP scope adds
+  just 9 modules (`mlp.gate_proj` / `up_proj` / `down_proj`) on top of the routed
+  experts. The vision tower reuses those same leaf names, so a single `*visual*`
+  disable is appended **last** to keep `model.visual.*` in BF16. It pins
+  `layerwise.enable=false`, which this VLM requires because its decoder layers
+  nest under `model.language_model.layers`. The MTP layer is not built by the HF
+  class at `num_hidden_layers: 45`, so it is neither quantized nor exported.
+  (For plain experts-only NVFP4 on this model, use the general
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
+  the dense-MLP scope plus the vision-tower exclusion.)
 
-*Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
-different component types — or individual layers** — and hardcode the precise
-published layout (for Super, matched on both HF and Megatron-Core module names)
-rather than a portable wildcard scheme.
+*Why special:* unlike any general recipe, each is pinned to one checkpoint and
+captures a model-specific deviation a portable general recipe can't express. Most
+**mix FP8 and NVFP4 across different component types — or individual layers** —
+and hardcode the precise published layout (for Super, matched on both HF and
+Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flash
+is the exception: its deviation is a model-specific *scope* — a wildcard scheme
+plus a load-bearing vision-tower exclusion and the VLM-required
+`layerwise.enable=false` — rather than a per-component precision map.
 
 ---
 
