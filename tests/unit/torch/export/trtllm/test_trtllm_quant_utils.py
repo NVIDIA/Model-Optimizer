@@ -24,7 +24,6 @@ Test modules in this directory carry a ``trtllm_`` prefix because pytest runs wi
 ``test_quant_utils.py`` would collide with the one a directory up.
 """
 
-import contextlib
 import inspect
 import warnings
 
@@ -35,6 +34,7 @@ import torch.nn as nn
 import modelopt.torch.export as mte
 from modelopt.torch.export.trtllm import (
     export_tensorrt_llm_checkpoint,
+    model_config_export,
     torch_to_tensorrt_llm_checkpoint,
 )
 from modelopt.torch.export.trtllm.quant_utils import get_scaling_factor_from_weight
@@ -104,16 +104,24 @@ def test_torch_to_tensorrt_llm_checkpoint_warns_at_call_time():
     assert "torch_to_tensorrt_llm_checkpoint" in str(deprecations[0].message)
 
 
-def test_export_tensorrt_llm_checkpoint_warns_exactly_once(tmp_path):
+def test_export_tensorrt_llm_checkpoint_warns_exactly_once(tmp_path, monkeypatch):
     """One user call yields one warning, not two.
 
     ``export_tensorrt_llm_checkpoint`` drives the same generator, so it must call the private
-    form; calling the public wrapper instead would emit a second, redundant warning.
+    ``_torch_to_tensorrt_llm_checkpoint``; going through the public wrapper would emit a second,
+    redundant warning.
+
+    The generator is stubbed to yield nothing so the call completes normally. Letting a real
+    conversion fail and swallowing the exception would also pass, but it would pass for any
+    failure after the warning, which is not what this test is about.
     """
+    monkeypatch.setattr(
+        model_config_export, "_torch_to_tensorrt_llm_checkpoint", lambda **kwargs: iter(())
+    )
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with contextlib.suppress(Exception):  # a toy model cannot complete a real export
-            export_tensorrt_llm_checkpoint(nn.Linear(4, 4), "llama", export_dir=tmp_path)
+        export_tensorrt_llm_checkpoint(nn.Linear(4, 4), "llama", export_dir=tmp_path)
 
     deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert len(deprecations) == 1, f"expected 1 DeprecationWarning, got {len(deprecations)}"
