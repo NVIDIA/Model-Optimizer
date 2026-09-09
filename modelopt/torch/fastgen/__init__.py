@@ -57,12 +57,17 @@ from . import flow_matching, losses, utils
 from .config import *
 from .ema import *
 from .factory import *
+from .flow_matching import (
+    fusion_coefficients,
+    integrate_interval_velocities,
+    make_shifted_flow_grid,
+)
 from .loader import *
 from .methods.dmd import *
+from .methods.pdd import *
 from .pipeline import *
 
 # isort: off
-# Plugins must be imported after the core exports so the plugin hooks can reference
-# DMDPipeline if needed in the future; also matches the ordering used by
-# modelopt.torch.distill.
+# Plugins must be imported after the core exports so plugin hooks can reference
+# the public pipeline types; this matches the ordering used by modelopt.torch.distill.
 from . import plugins

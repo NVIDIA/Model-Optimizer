@@ -22,16 +22,16 @@ three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
 Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
 :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
-unpacking. Config: ``configs/dmd2_qwen_image.yaml`` — the canonical
+unpacking. Config: ``dmd2/configs/qwen_image.yaml`` — the canonical
 real-data run (4-step + CFG + GAN).
 
 Launch::
 
     torchrun --nproc-per-node=8 \\
-        examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
+        examples/diffusers/fastgen/dmd2/finetune.py \\
+        --config examples/diffusers/fastgen/dmd2/configs/qwen_image.yaml
 
-See ``examples/diffusers/fastgen/README.md`` for the three-phase
+See ``examples/diffusers/fastgen/dmd2/README.md`` for the three-phase
 alternation diagram + troubleshooting notes.
 """
 
@@ -46,7 +46,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 # nemo_automodel is required to run this example (installed via requirements.txt). Wrap
 # the import in a clear, actionable error, but still re-raise so it fails loudly with a
@@ -61,10 +60,10 @@ except ImportError as exc:
         "dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt"
     ) from exc
-# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
+# Local package sibling (the FastGen directory is on ``sys.path`` — see ``dmd2/finetune.py``).
 # Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
 # on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
-from fastgen_checkpoint import make_optimizer_partial_load_tolerant
+from fastgen_data import rebuild_stateful_dataloader
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
@@ -72,6 +71,8 @@ from modelopt.torch.fastgen.config import DMDConfig
 from modelopt.torch.fastgen.discriminators import Discriminator_ImageDiT
 from modelopt.torch.fastgen.methods.dmd import DMDPipeline
 from modelopt.torch.fastgen.plugins import qwen_image as qwen_image_plugin
+
+from .checkpoint import make_optimizer_partial_load_tolerant
 
 # Keys under the ``dmd2:`` YAML block that shadow fields on :class:`DMDConfig`. The
 # recipe deep-merges these on top of the loaded built-in recipe so users can tweak DMD2
@@ -138,8 +139,8 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     Classifier-free guidance, the GAN discriminator branch, and real-data training are
     configurable via the ``dmd2:`` / ``data:`` YAML blocks — all enabled in the canonical
-    ``configs/dmd2_qwen_image.yaml``. See
-    ``examples/diffusers/fastgen/README.md`` for details.
+    ``dmd2/configs/qwen_image.yaml``. See
+    ``examples/diffusers/fastgen/dmd2/README.md`` for details.
     """
 
     # ------------------------------------------------------------------ #
@@ -223,55 +224,40 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     # ------------------------------------------------------------------ #
 
     def _rebuild_dataloader_for_resume(self, global_step: int) -> None:
-        """Reset the dataloader to the true data position when resuming (no-op if ``global_step==0``).
+        """Reset the dataloader to the deterministic data position for ``global_step``.
 
         On resume the ``StatefulDataLoader``'s restored state does NOT advance past the
         resume point -- re-checkpointing after a resume fails to capture progress, so each
         window re-serves the same data slice (``_num_yielded`` climbs while the served
         sample is identical; verified on production checkpoints and the harness). The one
         reliably-restored counter is ``global_step``, so we discard the stuck loader state:
-        rebuild a FRESH ``StatefulDataLoader`` and skip the deterministic sampler to the
-        position implied by ``global_step`` -- epoch ``global_step // epoch_len``, skip
-        ``(global_step % epoch_len) * grad_acc`` batches. Not wrapped in try/except: the
-        inputs are a ``StatefulDataLoader``'s always-present attrs and the sampler's
-        ``set_epoch`` / ``_batches_to_skip``, so it cannot fail here, and silently falling
-        back to the stuck loader would reintroduce the re-serving bug. Regression test:
-        tests/examples/diffusers/fastgen/test_resume_dataloader.py.
+        rebuild a fresh loader and restore the sampler through its public state API. Silently
+        falling back to the stuck loader would reintroduce the re-serving bug. Regression test:
+        ``tests/examples/diffusers/fastgen/test_resume_dataloader.py``.
         """
-        epoch_len = int(getattr(self.step_scheduler, "epoch_len", 0) or 0)
-        grad_acc = int(getattr(self.step_scheduler, "grad_acc_steps", 1) or 1)
-        if epoch_len <= 0 or self.sampler is None or global_step <= 0:
-            return
-        cur_epoch = global_step // epoch_len
-        skip_batches = (global_step % epoch_len) * grad_acc
-        _old = self.dataloader
-        _kw = {
-            "collate_fn": getattr(_old, "collate_fn", None),
-            "num_workers": int(getattr(_old, "num_workers", 0) or 0),
-            "pin_memory": bool(getattr(_old, "pin_memory", False)),
-        }
-        if _kw["num_workers"] > 0:
-            _kw["prefetch_factor"] = getattr(_old, "prefetch_factor", 2)
-            _kw["persistent_workers"] = bool(getattr(_old, "persistent_workers", False))
-        # ``dataloader`` is already a tracked state key (registered by the parent setup);
-        # BaseRecipe.__setattr__ raises "State key 'dataloader' is already tracked" on a plain
-        # re-assignment. Update the underlying attribute directly so it stays tracked (its
-        # __state_tracked entry is unchanged) and the rebuilt loader is still checkpointed.
-        self.__dict__["dataloader"] = StatefulDataLoader(
-            _old.dataset, batch_sampler=self.sampler, **_kw
+        new_loader = rebuild_stateful_dataloader(
+            self.dataloader,
+            self.sampler,
+            self.step_scheduler,
+            global_step,
         )
-        self.step_scheduler.epoch = cur_epoch
-        self.sampler.set_epoch(cur_epoch)
-        self.sampler._batches_to_skip = skip_batches
+        if new_loader is self.dataloader:
+            return
+        epoch_len = int(self.step_scheduler.epoch_len)
+        grad_acc_steps = int(self.step_scheduler.grad_acc_steps)
+        epoch = global_step // epoch_len
+        batches_yielded = (global_step % epoch_len) * grad_acc_steps
+        self.untrack_state("dataloader")
+        self.dataloader = new_loader
         if is_main_process():
             logging.info(
                 "[DMD2][resume-fix] fresh dataloader + sampler skip: epoch=%d "
                 "skip_batches=%d (global_step=%d epoch_len=%d grad_acc=%d)",
-                cur_epoch,
-                skip_batches,
+                epoch,
+                batches_yielded,
                 global_step,
                 epoch_len,
-                grad_acc,
+                grad_acc_steps,
             )
 
     def run_train_validation_loop(self) -> None:
@@ -318,6 +304,12 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         )
 
         global_step = int(self.step_scheduler.step)
+        epoch_len = int(getattr(self.step_scheduler, "epoch_len", 0) or 0)
+        grad_acc_steps = int(getattr(self.step_scheduler, "grad_acc_steps", 1) or 1)
+        resume_epoch = global_step // epoch_len if global_step > 0 and epoch_len > 0 else None
+        resume_batches = (
+            (global_step % epoch_len) * grad_acc_steps if resume_epoch is not None else 0
+        )
 
         # On resume, discard the StatefulDataLoader's stuck restored state and reset the
         # data position, epoch, and progress bar from the reliably-restored ``global_step``
@@ -329,10 +321,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             if self.sampler is not None and hasattr(self.sampler, "set_epoch"):
                 self.sampler.set_epoch(epoch)
 
-            # Progress bar: mirror the sampler's pending skip on the resumed (first)
-            # epoch; the sampler zeroes it after the first __iter__, so later epochs
-            # start at 0 automatically.
-            tqdm_initial = int(getattr(self.sampler, "_batches_to_skip", 0) or 0)
+            tqdm_initial = resume_batches if epoch == resume_epoch else 0
 
             if is_main_process():
                 from tqdm import tqdm
