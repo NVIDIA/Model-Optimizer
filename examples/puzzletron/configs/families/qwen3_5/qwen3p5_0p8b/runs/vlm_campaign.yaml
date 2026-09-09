@@ -33,9 +33,6 @@ pruning:
 sort:
   deferred_axes: []
 
-vllm_stats:
-  model_hidden_sizes: [1024, 960, 896]
-
 sort_sanity:
   eval_samples: 16
 

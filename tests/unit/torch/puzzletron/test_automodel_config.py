@@ -51,7 +51,33 @@ def _cfg(method="independent", eval_samples=200, micro_batch_size=2):
                     },
                 },
             },
+            "scoring": {
+                "block_size": 32,
+                "micro_batch_size": 1,
+                "automodel": {
+                    "force_hf": False,
+                    "parallel": {
+                        "tp": 1,
+                        "cp": 1,
+                        "pp": 1,
+                        "ep": 1,
+                        "dp_shard": 1,
+                        "dp_replicate": 1,
+                    },
+                },
+            },
         }
+    )
+
+
+def _disable_descriptor_recipe_injection(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
     )
 
 
@@ -67,14 +93,7 @@ def test_build_recipe_config_generates_recipe_from_stage_parallelism(monkeypatch
         "sequence_parallel": False,
         "pipeline_schedule": "1f1b",
     }
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
-        lambda *args, **kwargs: None,
-    )
+    _disable_descriptor_recipe_injection(monkeypatch)
 
     recipe = build_recipe_config(cfg)
 
@@ -100,32 +119,31 @@ def test_build_recipe_config_generates_recipe_from_stage_parallelism(monkeypatch
 def test_authored_automodel_backend_reaches_scoring_and_solution_recipes(monkeypatch):
     cfg = _cfg()
     cfg.model = {"automodel_backend": {"attn": "sdpa"}}
-    cfg.scoring = {
-        "block_size": 32,
-        "micro_batch_size": 1,
-        "automodel": {
-            "force_hf": False,
-            "parallel": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "ep": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-            },
-        },
-    }
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
-        lambda *args, **kwargs: None,
-    )
+    _disable_descriptor_recipe_injection(monkeypatch)
 
     assert build_recipe_config(cfg)["model"]["backend"] == {"attn": "sdpa"}
     assert build_solution_recipe_config(cfg, "/checkpoint")["model"]["backend"] == {"attn": "sdpa"}
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        build_recipe_config,
+        lambda cfg: build_solution_recipe_config(cfg, "/checkpoint"),
+    ],
+    ids=["activation-scoring", "solution-scoring"],
+)
+def test_recipe_builders_route_checkpoint_bookkeeping_below_puzzle_root(monkeypatch, builder):
+    cfg = _cfg()
+    cfg.puzzle_dir = "/selected/run-root"
+    _disable_descriptor_recipe_injection(monkeypatch)
+
+    recipe = builder(cfg)
+
+    assert recipe["checkpoint"] == {
+        "enabled": False,
+        "checkpoint_dir": "/selected/run-root/.runtime/nemo_automodel/checkpoints",
+    }
 
 
 def test_build_recipe_config_rejects_pure_ddp_replication():
@@ -169,14 +187,7 @@ def test_solution_recipe_uses_inferred_runtime_descriptor(monkeypatch):
             },
         }
     )
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
-        lambda *args, **kwargs: None,
-    )
+    _disable_descriptor_recipe_injection(monkeypatch)
 
     recipe = build_solution_recipe_config(cfg, "/checkpoint")
 

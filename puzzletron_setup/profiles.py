@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Declarative, dependency-free model capabilities for Puzzletron setup."""
 
@@ -204,8 +216,7 @@ class UnsupportedModelError(SetupError):
         message = (
             "Unsupported model family. Detected model types "
             f"{list(model_types)} and architectures {list(architectures)}. "
-            "Use .agents/skills/running-puzzletron/SKILL.md to add the runtime "
-            "descriptor and a lightweight puzzletron_setup profile for this family."
+            "Add a runtime descriptor and setup profile for this family before rerunning setup."
         )
         super().__init__(message)
         self.model_types = model_types

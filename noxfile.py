@@ -316,7 +316,7 @@ def gpu_puzzletron(session):
         "addopts=",
         (
             "tests/gpu/torch/puzzletron/test_puzzletron.py::"
-            "test_tiny_qwen_campaign_uses_current_public_route"
+            "test_tiny_qwen_full_lifecycle_uses_public_bundle_contract"
         ),
         *_cov_args(),
     )

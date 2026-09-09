@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Test-only size and runtime overrides for the maintained 0.8B text lifecycle.
+# The fixture applies this overlay to the real full_smoke.yaml route.
+model:
+  descriptor_override: qwen3_5_text
+  revision:
+model_info:
+  model_type: qwen3_5_text
+  architectures: [Qwen3_5ForCausalLM]
+  num_hidden_layers: 2
+  layer_counts: {full_attention: 2}
+  hidden_size: 512
+  intermediate_size: 768
+  num_attention_heads: 4
+  num_key_value_heads: 2
+  head_dim: 16
+  vocab_size: 128
+  tie_word_embeddings: false
+  max_position_embeddings: 128
+
+data:
+  max_sample_length: 32
+tokenize_data:
+  workers: 1
+  caches:
+    - output: ${train_token_cache_path}
+      split: train
+      num_samples: 2
+      seq_length: 32
+      shuffle_seed: 444
+    - output: ${validation_token_cache_path}
+      split: validation
+      num_samples: 1
+      seq_length: 32
+      shuffle_seed: 445
+
+embedding_pruning:
+  widths: [512, 256]
+pruning:
+  eval_samples: 2
+  block_size: 32
+  intermediate_size_list: [768, 512, 256]
+  # The maintained route targets the VLM checkpoint layout. This hermetic
+  # fixture substitutes a text-only Qwen model, so its scoring descriptor must
+  # follow the text model's `model.layers` module paths.
+  activation_passes:
+    - name: ffn_iterative
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor.Qwen3P5TextFFNIntermediateLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+      activation_hooks_kwargs:
+        method: iterative
+        target_layer: mlp.down_proj
+        layer_input_descriptors_path:
+
+search_space:
+  axes:
+    ffn_intermediate: {enabled: true, teacher_value: 768, values: [768, 512, 256]}
+
+sort_sanity: {enabled: false}
+width_sanity: {enabled: false}
+slicing_sanity: {enabled: false}
+
+replacement_scoring:
+  granularity: block
+  eval_samples: 1
+  block_size: 32
+  automodel:
+    lm_head_backend: streaming
+
+mip:
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.output_dir}}
+  score_granularity: block
+  canonical_solutions_path: ${to_path:${replacement_scoring.block_solutions_path}}
+  runs:
+    params-90:
+      search_space: {depth: [0], embedding: [256]}
+      solver:
+        num_solutions: 1
+        min_hamming_distance: 1
+      homogeneous: {keep: 1}
+
+# External benchmark datasets are deliberately excluded from this hermetic GPU test.
+post_mip:
+  flows:
+    params-90:
+      source: {run: params-90, variants: all, objectives: all}
+      nodes:
+        online_eval:
+          type: evaluation
+          config: {eval_samples: 1, block_size: 32, micro_batch_size: 1}
+        best_lm:
+          type: filter
+          input: online_eval
+          mode: top_k
+          metric: online_eval.lm_loss
+          direction: minimize
+          top_k: 1
+        materialized: {type: materialize, input: best_lm}
+        serving:
+          type: aiperf
+          input: materialized
+          config:
+            input_tokens: 16
+            output_tokens: 4
+            concurrency: [1]
+            request_count: 1
+            use_server_token_count: true
+            readiness_timeout: 120
+            benchmark_timeout: 120
+            allow_aiperf_v011_online_tokenizer_resolution: true
+            topology:
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --max-num-batched-tokens
+                - "64"
+                - --max-num-seqs
+                - "2"
+                - --gpu-memory-utilization
+                - "0.5"
+        fastest:
+          type: filter
+          input: serving
+          mode: top_k
+          metric: serving.output_token_throughput
+          direction: maximize
+          top_k: 1
+        short_kd:
+          type: global_kd
+          input: fastest
+          config:
+            max_steps: 1
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 1
+        final_eval:
+          type: evaluation
+          input: short_kd
+          config: {eval_samples: 1, block_size: 32, micro_batch_size: 1}
+        best:
+          type: filter
+          input: final_eval
+          mode: top_k
+          metric: final_eval.lm_loss
+          direction: minimize
+          top_k: 1

@@ -29,7 +29,8 @@ attention heads of the model. More details on these pruning modes are as follows
     FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 
 The remainder of this guide covers the unified Minitron and FastNAS API.
-Puzzletron v2 instead uses its setup wizard and campaign runner.
+Puzzletron uses checked-in recipes for maintained routes and
+``python examples/puzzletron/puzzletron.py setup`` for custom-model onboarding.
 
 Follow the steps described below to obtain the optimal model satisfying your
 requirements using :mod:`mtp<modelopt.torch.prune>`:

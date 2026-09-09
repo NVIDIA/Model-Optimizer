@@ -1,0 +1,10 @@
+schema_version: 1
+name: qwen3p5-0p8b-text-smoke
+model: qwen3.5-0.8b
+workflow: text-pruning
+mode: smoke
+run_root: puzzle_runs/qwen3p5_0p8b_text_smoke
+resource_profile: single-gpu
+data:
+  path: REPLACE_WITH_PREPARED_TEXT_DATASET
+  revision: REPLACE_WITH_IMMUTABLE_DATASET_REVISION

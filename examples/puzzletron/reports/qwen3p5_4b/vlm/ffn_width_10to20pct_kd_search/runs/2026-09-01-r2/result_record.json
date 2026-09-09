@@ -59,16 +59,18 @@
     "configuration": {
       "experiment": {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
-        "packaged_sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a",
+        "packaged_sha256": "dbb2016cce98a738b3f03e52d4279745a4b905aeecd3d4c122edbafd8f32b2f8",
         "execution_equivalent_sha256": "c4e6be62bf55980d23d20a12f35e11261d8dffbe59a1f457c7bccec6cc84ec06",
         "relationship": "canonical_profile_alias_and_comments_only"
       },
       "execution": {
-        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
-        "sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce"
+        "path": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/execution.yaml",
+        "sha256": "62e294807c963f67533e1f6a0a1eeb7f00fdf8b46285d33fedb6fb40bf164095",
+        "executed_sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce",
+        "relationship": "archived maintained successor; exact executed bytes were not retained"
       },
       "runner_template": {
-        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+        "path": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/runner.slurm.yaml",
         "sha256": "f3450eaa14acdb28316ec7aeddcbe8a212bc0ced09c64cf16d97ca7a33ea8191",
         "relationship": "illustrative_placeholder"
       }
@@ -82,9 +84,9 @@
       "--experiment",
       "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
       "--runner",
-      "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+      "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/runner.slurm.yaml",
       "--execution",
-      "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+      "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/execution.yaml",
       "--stage",
       "full",
       "--dry-run"
@@ -95,9 +97,9 @@
       "--experiment",
       "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
       "--runner",
-      "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+      "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/runner.slurm.yaml",
       "--execution",
-      "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+      "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/execution.yaml",
       "--stage",
       "full"
     ],
@@ -113,15 +115,16 @@
       {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
         "role": "validated_successor_experiment_recipe",
-        "sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a"
+        "sha256": "dbb2016cce98a738b3f03e52d4279745a4b905aeecd3d4c122edbafd8f32b2f8"
       },
       {
-        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+        "path": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/execution.yaml",
         "role": "execution_recipe",
-        "sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce"
+        "sha256": "62e294807c963f67533e1f6a0a1eeb7f00fdf8b46285d33fedb6fb40bf164095",
+        "executed_sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce"
       },
       {
-        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+        "path": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/runs/2026-09-01-r2/configuration/runner.slurm.yaml",
         "role": "illustrative_runner_template",
         "sha256": "f3450eaa14acdb28316ec7aeddcbe8a212bc0ced09c64cf16d97ca7a33ea8191"
       }

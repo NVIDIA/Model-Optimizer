@@ -1,19 +1,25 @@
 # Slurm configuration
 
-Use the runner file for site-wide Slurm settings and the execution file for
-stage-specific choices.
+Use one site file for worker and Slurm settings. Its named resource profiles
+provide GPU capacity and scheduling mode. Maintained route defaults own normal
+stage behavior; rare stage changes belong under the recipe's explicit
+`advanced.execution` section.
+
+Every Slurm site must set `site.slurm.account`. Container mounts are accepted
+only with a container, and bare-metal sites reject container settings because
+their executor does not consume them.
 
 ## Reusable single-node allocations
 
-The default `execution.mode: per_attempt` submits one Slurm job for each
-logical attempt. Set `execution.mode: reusable_allocation` to submit one outer
+The resource profile mode `per_attempt` submits one Slurm job for each logical
+attempt. Select `mode: reusable_allocation` to submit one outer
 Slurm job and run the existing dependency-aware controller inside it. This is
 additive: stage records, attempts, logs, artifacts, failure policies, and
 resume validation remain separate even though they share one container and
 allocation.
 
 Reusable mode currently supports one node. Compilation rejects any stage whose
-resolved topology requires more than one. `execution.defaults.gpus_per_node`
+resolved topology requires more than one. The selected profile's `gpus_per_node`
 sets the outer allocation capacity; logical attempts lease disjoint subsets of
 the GPUs visible inside that allocation. Stage `instances` and task topology
 control how much of that capacity each ready stage can use. Capacity is not
@@ -26,7 +32,7 @@ This mode assumes a Slurm site where one containerized task can see the full
 node allocation, shared campaign paths are mounted identically, and runtime
 caches are writable for the lifetime of the outer job. The outer job uses the
 site's CPU and memory defaults for its GPU request, which must be sufficient for
-the concurrent workers. Other sites may need to adapt the runner's account,
+the concurrent workers. Other sites may need to adapt the site's account,
 partition, container integration, mounts, time limit, GPU capacity, and cache
 hooks. Use per-attempt mode when those assumptions do not hold.
 
@@ -42,7 +48,12 @@ The meaning depends on the stage strategy:
 
 Puzzletron does not generally derive `instances` from MIP `num_solutions` or post-MIP `top_k`. Set both values intentionally when a filter leaves fewer candidates than a downstream GPU stage's configured worker count.
 
-Each instance consumes the stage's resolved GPUs per instance. In reusable mode, compilation rejects a stage that cannot fit within `execution.defaults.gpus_per_node`; the controller starts ready stages only when enough of that capacity is free. For example, five one-GPU candidate instances use at most five GPUs concurrently. Lower `instances` to reduce concurrency or accommodate a larger per-instance parallel mesh.
+Each instance consumes the stage's resolved GPUs per instance. In reusable mode,
+compilation rejects a stage that cannot fit within the selected resource
+profile's `gpus_per_node`; the controller starts ready stages only when enough
+of that capacity is free. For example, five one-GPU candidate instances use at
+most five GPUs concurrently. Lower `instances` to reduce concurrency or
+accommodate a larger per-instance parallel mesh.
 
 ### Interruption and resume
 
@@ -50,28 +61,33 @@ If the launching terminal exits while the outer Slurm job is still active, the j
 
 If the allocated node fails or the outer job reaches its Slurm time limit, all subprocesses inside that allocation stop. Run the same command again after Slurm reports the job as terminal. Unless the compatible worker result already records clean completion or an uncancelled terminal stage failure, Puzzletron submits a replacement allocation, skips stages with complete validated artifacts, and retries incomplete work. A recorded cancellation and a final report failure remain retryable. An incomplete stage resumes from its own checkpoints only when that stage supports native resume; otherwise its unfinished attempt runs again.
 
-The generated job uses Slurm's no-requeue behavior, so replacement requires a new Puzzletron invocation or external automation. The runner's `runner.slurm.time_limit` covers the complete reusable campaign, not each stage separately. Allow enough headroom for the full campaign, or use per-attempt mode when independent scheduler failure domains are more important than avoiding repeated startup overhead.
+The generated job uses Slurm's no-requeue behavior, so replacement requires a
+new Puzzletron invocation or external automation. `site.slurm.time_limit`
+covers the complete reusable campaign, not each stage separately. Allow enough
+headroom for the full campaign, or use per-attempt mode when independent
+scheduler failure domains are more important than avoiding repeated startup
+overhead.
 
 ## Partitions and logs
 
-`runner.slurm.partition` sets the default allocation partition. It accepts one
+`site.slurm.partition` sets the default allocation partition. It accepts one
 partition name or a list of eligible names. Omit it to use the site's Slurm
-default. In per-attempt mode, a stage can set
-`execution.stages.<stage>.partition` to one name or its own eligible list. A
-reusable allocation has only one GPU partition; compilation rejects differing
-GPU-stage overrides, while CPU-stage partition overrides and `partition_cpu`
-do not apply to the zero-GPU subprocesses inside that allocation.
+default. A selected resource profile may replace this partition for the whole
+concise-recipe plan. Stage-specific partitions belong to external or
+wizard-generated execution files; `advanced.execution` cannot override
+site-owned partition fields. In reusable mode, `site.slurm.partition_cpu` does
+not apply to zero-GPU subprocesses inside the outer allocation.
 
-`runner.slurm.log_dir` sets the directory used for every attempt log, including
+`site.slurm.log_dir` sets the directory used for every attempt log, including
 the final-report attempt. When omitted, logs are written below
-`<puzzle_dir>/logs`. Relative values are resolved from `puzzle_dir`; absolute
+`<run-root>/logs`. Relative values are resolved from the run root; absolute
 paths are used as written.
 
-The runner loader accepts `partition_interactive`, `partition_batch`, and
+The site loader accepts `partition_interactive`, `partition_batch`, and
 `interactive_max_nodes` as compatibility fields. They infer stage routing from
-role names and node count, which assumes a particular site layout and duplicates
-execution-stage settings. Maintained configs use `runner.slurm.partition`, the
-supported `partition_cpu` fallback, and stage overrides instead.
+role names and node count, which assumes a particular site layout. Maintained
+concise-route sites use `site.slurm.partition`, the supported `partition_cpu`
+fallback, and resource-profile partitions instead.
 
 The production examples also avoid literal `interactive` and `batch` stage
 overrides because those partition names are not portable between Slurm sites.
@@ -97,13 +113,12 @@ Choosing `resource: cpu` for code that actually calls CUDA leaves GPUs hidden an
 can fail at runtime; choosing `resource: gpu` for CPU work reserves a GPU that the
 stage may not use.
 
-In per-attempt mode, set `runner.slurm.partition_cpu` when CPU work must use a
+In per-attempt mode, set `site.slurm.partition_cpu` when CPU work must use a
 different partition. Without it, CPU-routed stages request no GPUs on the
-runner's default partition. A stage-specific partition remains available when
-one CPU stage needs different routing:
+site's default partition:
 
 ```yaml
-runner:
+site:
   kind: slurm
   slurm:
     partition:
@@ -112,25 +127,15 @@ runner:
     partition_cpu:
       - cpu-general
       - cpu-overflow
-
-execution:
-  stages:
-    convert:
-      strategy: single
-      partition:
-        - cpu-large-memory
-    width_importance:
-      strategy: single
 ```
 
 Slurm selects one partition from each eligible list. The
-[`runner.slurm.example.yaml`](../configs/orchestration/runner.slurm.example.yaml)
-and [`execution.example.yaml`](../configs/orchestration/execution.example.yaml)
-files show the runner default and per-stage CPU routing together. The CPU-only
-`final_report` task accepts only a `partition` override.
+[`site.example.yaml`](../configs/site.example.yaml) shows the concise public
+site and resource-profile contract. Wizard-generated and external execution
+files retain their existing stage-partition controls.
 
-For per-attempt CPU stages, `runner.slurm.cpu_cpus_per_task` sets the requested
-CPU count and `runner.slurm.cpu_memory_mb` sets memory in MiB. Omit them to use
+For per-attempt CPU stages, `site.slurm.cpu_cpus_per_task` sets the requested
+CPU count and `site.slurm.cpu_memory_mb` sets memory in MiB. Omit them to use
 the site's Slurm defaults. These settings are part of resume identity, so
 changing either causes Puzzletron to submit the stage with the new allocation
 instead of treating an older active attempt as the same work. They do not
@@ -155,18 +160,17 @@ environment or source an access-controlled `setup_env` file.
 ## Scheduler settings and model settings
 
 Do not put `sequence_parallel` under
-`execution.stages.<stage>.parallel`. That mapping controls scheduler allocation
+`advanced.execution.stages.<stage>.parallel`. That mapping controls scheduler allocation
 and accepts mesh dimensions such as `tp`, `pp`, and `dp_replicate`.
-`sequence_parallel` changes model execution and belongs in the experiment's
-model-parallel profile. Setup-generated execution files omit it for this
-reason.
+`sequence_parallel` changes model execution and belongs in the maintained
+model or workflow profile, not in scheduler allocation.
 
-Runner and execution files reject unknown fields and suggest the closest valid
-name when possible.
+Recipe and site files reject unknown fields and suggest the closest valid name
+when possible.
 
 ## Worker setup hooks
 
-`runner.execution_contract.prerun_commands` and `postrun_commands` are copied
+`site.environment.prerun_commands` and `postrun_commands` are copied
 into generated worker scripts and appear in dry-run output. Puzzletron rejects
 obvious literal assignments to credential-like variables so those values are
 not persisted. Inherit credentials from the launch environment, require an
@@ -174,10 +178,7 @@ existing variable such as `${API_KEY:?set API_KEY}`, retrieve it from a secret
 command, or source a permission-protected `setup_env` file. This check catches
 common mistakes but is not a shell parser or a complete credential scanner.
 
-The setup defaults keep `TMPDIR` at the short worker-local `/tmp` path and put
-the vLLM, FlashInfer, Triton, and PyTorch kernel caches in explicit writable
-directories there.
-Preserve those commands for containerized workers: vLLM uses Unix-domain
-sockets with a platform path limit, and a read-only container home prevents
-the runtime caches from being initialized. Another short, worker-local writable
-directory is also valid.
+For containerized workers, use `prerun_commands` when the site needs to place
+`TMPDIR` or runtime caches in a short, worker-local writable directory. vLLM
+uses Unix-domain sockets with a platform path limit, and a read-only container
+home prevents runtime caches from being initialized.

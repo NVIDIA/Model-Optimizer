@@ -1,0 +1,7 @@
+schema_version: 1
+name: qwen3p5-0p8b-vlm-campaign
+model: qwen3.5-0.8b
+workflow: vlm-pruning
+mode: campaign
+run_root: puzzle_runs/qwen3p5_0p8b_vlm_campaign
+resource_profile: campaign

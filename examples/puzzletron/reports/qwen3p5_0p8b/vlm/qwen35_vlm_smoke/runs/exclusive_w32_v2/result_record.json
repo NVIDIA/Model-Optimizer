@@ -151,7 +151,7 @@
   "reproduction": {
     "campaign_config": "../../../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml",
     "campaign_config_relationship": "successor_not_execution_equivalent",
-    "campaign_guide": "../../../../../../docs/qwen3p5_0p8b_vlm_smoke.md",
+    "campaign_guide": "../../../../../../docs/maintained_recipes.md#qwen-35-08b-vlm-smoke-and-campaign",
     "serving_recipe": "recipe.json",
     "observations": "observations.csv",
     "exact_launcher_retained": false

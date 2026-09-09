@@ -5,10 +5,12 @@ from one MIP run and consists of named, single-input nodes. A node can branch fr
 any earlier node. Node IDs must be unique across the campaign because they are also
 stable metric namespaces.
 
-When at least one flow is configured, Puzzletron replaces the
-legacy fixed post-MIP stages with these dynamic nodes. Run such campaigns through
-`examples/puzzletron/orchestrate.py`; the simple `main.py` stage runner does not
-schedule dynamic/manual nodes.
+When at least one flow is configured, Puzzletron replaces the legacy fixed
+post-MIP stages with these dynamic nodes. Maintained public flows run through a
+typed `puzzletron.py` recipe route. Adding another public flow requires adding
+such a route. Existing external custom experiment, runner, and execution files
+remain supported through `orchestrate.py`; the simple `main.py` stage runner
+does not schedule dynamic/manual nodes.
 
 ```yaml
 post_mip:

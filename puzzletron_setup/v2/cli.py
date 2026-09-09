@@ -100,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         target = args.resume or "<campaign>"
         print(
             "\nSetup interrupted. Resume with: "
-            f"python examples/puzzletron/puzzletron_setup_v2.py --resume {target}"
+            f"python examples/puzzletron/puzzletron.py setup --resume {target}"
         )
         return 130
     except SetupError as error:

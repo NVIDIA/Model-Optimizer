@@ -1,6 +1,6 @@
 # Puzzletron Campaign Reports
 
-After a campaign completes cleanly, `orchestrate.py` attempts to generate a
+After a campaign completes cleanly, Puzzletron attempts to generate a
 cumulative HTML report through the configured runner. A report submission,
 polling, or artifact failure does not invalidate completed stages, but it is
 recorded in the run result and the command exits nonzero. Inspect the campaign
@@ -45,18 +45,3 @@ reproduction status and unresolved findings below.
 | Current configuration references | Provide migration or reconstruction starting points, not frozen executed configurations. |
 | Reproduction status | No reproduction is recorded for the listed reports. |
 | Support status | Not established while reproduction and unresolved correctness findings remain open. |
-
-## Future campaign records
-
-The current entries were curated from retained reports. Future campaigns can
-use the same catalog fields, but their evidence artifacts should be generated
-by the campaign pipeline from the structured data used to render the HTML
-report rather than assembled after the run.
-
-| Consideration | Future direction |
-|---|---|
-| Generation | Emit a versioned evidence artifact alongside the HTML report and report manifest. |
-| Provenance | Record exact code, model, data, resolved configuration, and override identities. |
-| Results | Reference canonical stage outcomes, metrics, warnings, and artifacts without copying them manually. |
-| Validation | Make schema and semantic verification part of report publication. |
-| Support | Keep model-support promotion as a separate reviewed decision after current-code reproduction and correctness gates pass. |

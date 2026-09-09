@@ -1,0 +1,7 @@
+schema_version: 1
+name: qwen3p5-0p8b-vlm-smoke
+model: qwen3.5-0.8b
+workflow: vlm-pruning
+mode: smoke
+run_root: puzzle_runs/qwen3p5_0p8b_vlm_smoke
+resource_profile: smoke

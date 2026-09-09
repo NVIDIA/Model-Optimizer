@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - mip_vlm_smoke
+  - vlm_pruning_base
   - _self_
 
 # Qwen 3.5 4B VLM FFN-width 10%-to-20% KD search. Every MIP

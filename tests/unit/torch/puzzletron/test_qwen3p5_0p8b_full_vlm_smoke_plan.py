@@ -17,47 +17,52 @@
 
 from pathlib import Path
 
+import yaml
+
 from examples.puzzletron.evaluation.vlm import contracts, suites
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.recipe_config import (
+    materialize_resolved_bundle,
+    resolve_recipe_run,
+    site_template,
+)
 from puzzletron_orchestrator.schema import ExecutionMode, ExecutionStrategy
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
-SMOKE_PATH = FAMILY_ROOT / "runs/full_vlm_smoke.yaml"
-CAMPAIGN_PATH = FAMILY_ROOT / "runs/vlm_campaign.yaml"
-RUNNER_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml"
+SMOKE_RECIPE_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_0p8b_vlm_smoke.yaml"
 )
-SMOKE_EXECUTION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml"
-)
-CAMPAIGN_EXECUTION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_campaign.yaml"
+CAMPAIGN_RECIPE_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_0p8b_vlm_campaign.yaml"
 )
 
 
-def _compile(monkeypatch, tmp_path: Path, experiment: Path, execution: Path):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / experiment.stem))
-    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
-    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+def _compile(tmp_path: Path, recipe_source: Path):
+    recipe = yaml.safe_load(recipe_source.read_text())
+    recipe["run_root"] = str(tmp_path / recipe_source.stem)
+    recipe_path = tmp_path / recipe_source.name
+    recipe_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
+    site = site_template()
+    site["site"]["environment"].update({"repository": str(REPOSITORY_ROOT), "venv": ".venv"})
+    site["site"]["paths"]["hf_home"] = str(tmp_path / "hf-home")
+    site["site"]["slurm"].update({"account": "test", "partition": "test"})
+    site_path = tmp_path / "site.yaml"
+    site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+    bundle = materialize_resolved_bundle(resolve_recipe_run(recipe_path, site_path), activate=False)
     return compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(execution),
+        experiment_config_path=bundle / "experiment.runtime.yaml",
+        runner=load_runner_config(bundle / "runner.yaml"),
+        execution=load_execution_config(bundle / "execution.yaml"),
         stage_filter="full",
     )
 
 
-def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
-    monkeypatch, tmp_path: Path
-) -> None:
-    plan = _compile(monkeypatch, tmp_path, SMOKE_PATH, SMOKE_EXECUTION_PATH)
+def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(tmp_path: Path) -> None:
+    plan = _compile(tmp_path, SMOKE_RECIPE_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
@@ -87,8 +92,8 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
 
 
-def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) -> None:
-    plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
+def test_vlm_campaign_compiles_the_multi_axis_flow(tmp_path: Path) -> None:
+    plan = _compile(tmp_path, CAMPAIGN_RECIPE_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
     candidates = config["post_mip"]["flows"]["candidates"]["nodes"]

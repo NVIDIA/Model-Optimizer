@@ -10,9 +10,12 @@ See the [exclusive-node run](runs/exclusive_w32_v2/summary.md) for the measured
 values, study conditions, limitations, structured record, and recorded recipe.
 
 The maintained
-[campaign config](../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml)
+[campaign recipe](../../../../configs/recipes/qwen3p5_0p8b_vlm_campaign.yaml)
 runs AIPerf only after candidate screening and final KD, with three repetitions
 of 32 warmup and 64 measured requests per serving cell. Follow the
-[campaign guide](../../../../docs/qwen3p5_0p8b_vlm_smoke.md) to configure,
-inspect, and run it. The maintained route does not reproduce this historical
-pre-KD study, its eight-GPU placement swap, or its 256-request cells.
+[maintained recipes](../../../../docs/maintained_recipes.md) to configure,
+inspect, and run it. The internal
+[route template](../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml)
+is retained as historical implementation context. The maintained route does
+not reproduce this historical pre-KD study, its eight-GPU placement swap, or
+its 256-request cells.
