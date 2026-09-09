@@ -13,6 +13,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
+         <button class="announcement-tag" type="button" data-tag="local-hessian" aria-pressed="false">Local Hessian</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -24,6 +25,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-09" data-title="Local Hessian: Better NVFP4 Weight Scales from Layer Inputs" data-summary="Local Hessian uses calibration inputs to choose NVFP4 block scales that minimize estimated layer-output error without changing the deployment format." data-tags="local-hessian quantization nvfp4 calibration modelopt">
+       <div class="announcement-card-meta">September 9, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/local-hessian.html">Local Hessian: Better NVFP4 Weight Scales from Layer Inputs</a></h2>
+       <p>Local Hessian uses calibration inputs to choose NVFP4 block scales that minimize estimated layer-output error without changing the deployment format.</p>
+       <div class="announcement-card-tags"><span>local-hessian</span><span>quantization</span><span>nvfp4</span><span>calibration</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
