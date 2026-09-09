@@ -88,6 +88,16 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
 
+def test_language_model_extraction_fails_closed_on_competing_roots(hf_ptq):
+    full_model = torch.nn.Module()
+    full_model.model = torch.nn.Module()
+    full_model.model.language_model = torch.nn.Module()
+    full_model.language_model = torch.nn.Module()
+
+    with pytest.raises(ValueError, match="multiple language-model roots"):
+        hf_ptq.extract_and_prepare_language_model_from_vl(full_model)
+
+
 def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
     args = SimpleNamespace(
         qformat="fp8",

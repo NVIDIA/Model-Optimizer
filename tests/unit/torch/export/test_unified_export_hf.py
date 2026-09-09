@@ -60,15 +60,29 @@ def test_language_model_extraction_accepts_aliased_compatibility_property():
     ]
 
 
-def test_language_model_extraction_rejects_competing_roots():
-    """Language-model extraction must not select distinct roots by traversal order."""
+def test_language_model_extraction_preserves_nested_preference_by_default():
+    """Generic callers retain the historical nested-root preference."""
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = torch.nn.Module()
+
+    assert get_language_model_from_vl(model) == [
+        model,
+        model.model,
+        model.model.language_model,
+    ]
+
+
+def test_language_model_extraction_rejects_competing_roots_when_strict():
+    """Search callers can fail closed instead of selecting a competing root."""
     model = torch.nn.Module()
     model.model = torch.nn.Module()
     model.model.language_model = torch.nn.Module()
     model.language_model = torch.nn.Module()
 
     with pytest.raises(ValueError, match="multiple language-model roots"):
-        get_language_model_from_vl(model)
+        get_language_model_from_vl(model, strict=True)
 
 
 @pytest.mark.parametrize(

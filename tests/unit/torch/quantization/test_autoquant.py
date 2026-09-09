@@ -545,6 +545,12 @@ def test_auto_quantize_rejects_empty_global_formats(formats):
         mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
 
 
+def test_process_quantization_formats_preserves_explicit_tuple_name():
+    assert model_quant._process_quantization_formats(
+        [(mtq.FP8_DEFAULT_CFG, "named_fp8")], "CUSTOM"
+    ) == [(mtq.FP8_DEFAULT_CFG, "named_fp8")]
+
+
 @pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
 def test_auto_quantize_rejects_non_list_module_formats(formats):
     with pytest.raises(

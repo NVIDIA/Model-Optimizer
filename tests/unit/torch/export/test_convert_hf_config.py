@@ -13,16 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-
 import pytest
-import torch
 
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.unified_export_hf import (
-    _revert_hf_quant_config_names,
-    _write_hf_export_config,
-)
+from modelopt.torch.export.unified_export_hf import _revert_hf_quant_config_names
 
 
 def test_convert_mixed_kv_cache_config_preserves_layer_map():
@@ -73,66 +67,25 @@ def test_convert_uniform_kv_cache_config_preserves_layer_map():
     assert converted["kv_cache_schema_version"] == 1
 
 
-def test_write_hf_export_config_writes_mapped_kv_autoquant_report(tmp_path):
-    layer_name = "model.layers.0.self_attn"
-    model = torch.nn.Module()
-    model._modelopt_kv_cache_auto_quantize_state = {
-        "best": {"recipe": {layer_name: "fp8"}},
-        "layers": {layer_name: {"selected": "fp8"}},
-        "search_signature": {"layers": [{"name": layer_name}]},
-    }
-    quant_config = {
-        "producer": {"name": "modelopt", "version": "test"},
-        "quantization": {
-            "quant_algo": None,
-            "kv_cache_quant_algo": "MIXED_PRECISION",
-            "kv_cache_quantized_layers": {layer_name: {"quant_algo": "FP8"}},
-            "kv_cache_schema_version": 1,
-        },
-    }
-    (tmp_path / "config.json").write_text("{}")
-
-    _write_hf_export_config(
-        model,
-        quant_config,
-        tmp_path,
-        name_mapper=lambda name: f"hub.{name}",
-    )
-
-    report = json.loads((tmp_path / "kv_cache_auto_quantize_report.json").read_text())
-    assert report["best"]["recipe"] == {f"hub.{layer_name}": "fp8"}
-    assert report["layers"] == {f"hub.{layer_name}": {"selected": "fp8"}}
-    assert report["search_signature"]["layers"] == [{"name": f"hub.{layer_name}"}]
-    assert model._modelopt_kv_cache_auto_quantize_state["layers"] == {
-        layer_name: {"selected": "fp8"}
-    }
-    assert model._modelopt_kv_cache_auto_quantize_state["best"]["recipe"] == {layer_name: "fp8"}
-    assert (tmp_path / "hf_quant_config.json").is_file()
-    exported_config = json.loads((tmp_path / "config.json").read_text())
-    assert exported_config["quantization_config"]["kv_cache_quant_algo"] == "MIXED_PRECISION"
-
-
-def test_write_hf_export_config_accepts_pending_kv_autoquant_signature(tmp_path):
-    model = torch.nn.Module()
-    model._modelopt_kv_cache_auto_quantize_state = {
-        "best": {"recipe": {}},
-        "layers": {},
-        "search_signature": None,
-    }
-    (tmp_path / "config.json").write_text("{}")
-
-    _write_hf_export_config(
-        model,
+def test_convert_uniform_asymmetric_kv_cache_preserves_semantic_algo():
+    layer_map = {"model.layers.0.self_attn": {"quant_algo": "FP8_K_NVFP4_V"}}
+    converted = convert_hf_quant_config_format(
         {
             "producer": {"name": "modelopt", "version": "test"},
-            "quantization": {"kv_cache_quant_algo": "FP8"},
-        },
-        tmp_path,
-        name_mapper=lambda name: f"hub.{name}",
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {},
+                "kv_cache_quant_algo": "FP8_K_NVFP4_V",
+                "kv_cache_quantized_layers": layer_map,
+                "kv_cache_schema_version": 1,
+            },
+        }
     )
 
-    report = json.loads((tmp_path / "kv_cache_auto_quantize_report.json").read_text())
-    assert report["search_signature"] is None
+    assert converted["quant_algo"] == "MIXED_PRECISION"
+    assert converted["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
+    assert "kv_cache_scheme" not in converted
+    assert converted["kv_cache_quantized_layers"] == layer_map
 
 
 def test_reverse_quant_config_name_mapping_is_atomic():

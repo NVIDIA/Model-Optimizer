@@ -499,9 +499,9 @@ python hf_ptq.py \
 
 Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
 keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
-formats in `kv_cache_quantized_layers` and writes
-the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
-`--auto_quantize_checkpoint` stores the resumable raw search state.
+formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitivity scores and
+selected recipe in its search state; `--auto_quantize_checkpoint` stores that resumable state,
+including the candidate quantizer tensors needed for replay.
 
 KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
 for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible

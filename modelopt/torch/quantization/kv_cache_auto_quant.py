@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Layer-wise KV-cache AutoQuant using isolated forward KL sensitivity."""
+"""Layer-wise KV-cache AutoQuantize using isolated forward KL sensitivity."""
 
 from __future__ import annotations
 
@@ -94,7 +94,9 @@ def _validate_candidate_patterns(config: QuantizeConfig) -> None:
     probe_names = _KV_CANDIDATE_NAMES | _NON_KV_PROBE_NAMES
     for entry in config.quant_cfg:
         if entry.parent_class is not None:
-            raise ValueError("KV-cache AutoQuant candidates do not support parent_class filters.")
+            raise ValueError(
+                "KV-cache AutoQuantize candidates do not support parent_class filters."
+            )
         quantizer_configs = entry.cfg if isinstance(entry.cfg, list) else [entry.cfg]
         if any(
             isinstance(quantizer_config, QuantizerAttributeConfig)
@@ -102,26 +104,26 @@ def _validate_candidate_patterns(config: QuantizeConfig) -> None:
             for quantizer_config in quantizer_configs
         ):
             raise ValueError(
-                "KV-cache AutoQuant candidates require string calibrators so search state "
+                "KV-cache AutoQuantize candidates require string calibrators so search state "
                 "remains JSON-safe and replayable."
             )
         matches = {name for name in probe_names if fnmatch.fnmatch(name, entry.quantizer_name)}
         if not matches:
             raise ValueError(
-                "KV-cache AutoQuant candidate pattern "
+                "KV-cache AutoQuantize candidate pattern "
                 f"{entry.quantizer_name!r} does not match a supported qualified K/V quantizer."
             )
         non_kv_matches = matches - _KV_CANDIDATE_NAMES
         if non_kv_matches:
             raise ValueError(
-                "KV-cache AutoQuant candidates may configure only k_bmm_quantizer and "
+                "KV-cache AutoQuantize candidates may configure only k_bmm_quantizer and "
                 f"v_bmm_quantizer; pattern {entry.quantizer_name!r} also matches "
                 f"{sorted(non_kv_matches)}."
             )
         matched_names.update(matches)
     if matched_names != _KV_CANDIDATE_NAMES:
         raise ValueError(
-            "KV-cache AutoQuant candidates must completely configure both "
+            "KV-cache AutoQuantize candidates must completely configure both "
             "k_bmm_quantizer and v_bmm_quantizer."
         )
 
@@ -138,13 +140,13 @@ def _algorithm_method(config: QuantizeConfig) -> str | None:
 def _deployable_kv_bits(quantizer: TensorQuantizer) -> float:
     """Return storage bits for the narrow K/V formats supported by unified export."""
     if quantizer.bias is not None:
-        raise ValueError("KV-cache AutoQuant does not support affine candidates yet.")
+        raise ValueError("KV-cache AutoQuantize does not support affine candidates yet.")
     if quantizer.is_fp8:
         return 8.0
     if quantizer.is_nvfp4_dynamic and quantizer.block_sizes.get(-1) == 16:
         return 4.5
     raise ValueError(
-        "KV-cache AutoQuant candidates must use unified-export-compatible per-tensor FP8 "
+        "KV-cache AutoQuantize candidates must use unified-export-compatible per-tensor FP8 "
         "or block-16 dynamic NVFP4 quantizers."
     )
 
@@ -166,20 +168,20 @@ def _validate_deployable_candidate(config: QuantizeConfig) -> None:
     if k_bits != v_bits and (k_bits, v_bits) != (8.0, 4.5):
         raise ValueError(
             "Unified export supports only uniform FP8, uniform NVFP4, or FP8-K/NVFP4-V "
-            "KV-cache AutoQuant candidates."
+            "KV-cache AutoQuantize candidates."
         )
 
     algorithm_method = _algorithm_method(config)
     for attr, quantizer in quantizers.items():
         if quantizer._dynamic:
             raise ValueError(
-                f"KV-cache AutoQuant candidate {attr} uses top-level dynamic quantization, "
+                f"KV-cache AutoQuantize candidate {attr} uses top-level dynamic quantization, "
                 "which does not retain a persistent export scale."
             )
         will_calibrate = algorithm_method == "max" and not quantizer._use_constant_amax
         if not hasattr(quantizer, "_amax") and not will_calibrate:
             raise ValueError(
-                f"KV-cache AutoQuant candidate {attr} has no persistent export scale. "
+                f"KV-cache AutoQuantize candidate {attr} has no persistent export scale. "
                 "Use max calibration or constant_amax; dynamic and use_constant_amax-only "
                 "candidates cannot be exported."
             )
@@ -188,7 +190,7 @@ def _validate_deployable_candidate(config: QuantizeConfig) -> None:
     actual_effective_bits = (k_bits + v_bits) / 2.0
     if not math.isclose(config.effective_bits, actual_effective_bits, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError(
-            "KV-cache AutoQuant candidate effective_bits does not match its configured K/V "
+            "KV-cache AutoQuantize candidate effective_bits does not match its configured K/V "
             f"storage cost: declared {config.effective_bits}, actual {actual_effective_bits}."
         )
 
@@ -196,13 +198,13 @@ def _validate_deployable_candidate(config: QuantizeConfig) -> None:
 def _validate_kv_only_config(config: QuantizeConfig) -> None:
     if config.effective_bits is None:
         raise ValueError(
-            "Each KV-cache AutoQuant candidate must declare config-level effective_bits."
+            "Each KV-cache AutoQuantize candidate must declare config-level effective_bits."
         )
     algorithm_method = _algorithm_method(config)
     if algorithm_method != "max":
         if algorithm_method is not None:
             raise ValueError(
-                "KV-cache AutoQuant supports only non-structural calibration algorithms "
+                "KV-cache AutoQuantize supports only non-structural calibration algorithms "
                 f"None and 'max'; got {algorithm_method!r}."
             )
     _validate_deployable_candidate(config)
@@ -222,7 +224,7 @@ def _validate_search_inputs(
         or constraints.get("cost") not in (None, {})
     ):
         raise ValueError(
-            "KV-cache AutoQuant requires an effective_bits target with "
+            "KV-cache AutoQuantize requires an effective_bits target with "
             f"cost_model='kv_cache'; got {constraints}."
         )
     target_bits = float(constraints["effective_bits"])
@@ -237,13 +239,13 @@ def _validate_search_inputs(
     seen_names = set()
     for raw_config, name in quantization_formats:
         if name in seen_names:
-            raise ValueError(f"Duplicate KV-cache AutoQuant candidate name: {name!r}.")
+            raise ValueError(f"Duplicate KV-cache AutoQuantize candidate name: {name!r}.")
         config = QuantizeConfig(**raw_config)
         _validate_kv_only_config(config)
         candidates.append((name, config))
         seen_names.add(name)
     if not candidates:
-        raise ValueError("KV-cache AutoQuant requires at least one candidate format.")
+        raise ValueError("KV-cache AutoQuantize requires at least one candidate format.")
     return target_bits, candidates
 
 
@@ -294,7 +296,7 @@ def _validate_candidate_cost_geometry(
             unequal_width_layers.append(f"{name} (K={k_width}, V={v_width})")
     if unequal_width_layers:
         raise ValueError(
-            "KV-cache AutoQuant cannot cost asymmetric K/V candidates on layers with unequal "
+            "KV-cache AutoQuantize cannot cost asymmetric K/V candidates on layers with unequal "
             "K/V widths: " + ", ".join(unequal_width_layers) + "."
         )
 
@@ -322,7 +324,7 @@ def _eligible_layers(
             continue
         layers.append((name, module, _kv_scalar_weight(module, name)))
     if not layers:
-        raise ValueError("KV-cache AutoQuant found no eligible attention layers.")
+        raise ValueError("KV-cache AutoQuantize found no eligible attention layers.")
     return layers
 
 
@@ -361,15 +363,25 @@ def _get_logits(
 ) -> torch.Tensor:
     logits = forward_step(model, data)
     if not isinstance(logits, torch.Tensor):
-        raise TypeError("KV-cache AutoQuant forward_step must return a logits tensor.")
+        raise TypeError("KV-cache AutoQuantize forward_step must return a logits tensor.")
     if logits.ndim < 2 or logits.shape[-1] == 0:
         raise ValueError(
-            "KV-cache AutoQuant forward_step must return logits with a non-empty vocabulary "
+            "KV-cache AutoQuantize forward_step must return logits with a non-empty vocabulary "
             "dimension."
         )
     if validate_finite and not torch.isfinite(logits).all():
-        raise ValueError("KV-cache AutoQuant encountered NaN or Inf logits.")
+        raise ValueError("KV-cache AutoQuantize encountered NaN or Inf logits.")
     return logits
+
+
+def _forward_kl(logits_quant: torch.Tensor, log_prob_ref: torch.Tensor) -> torch.Tensor:
+    """Compute the summed forward KL used by KV sensitivity scoring."""
+    return F.kl_div(
+        torch.log_softmax(logits_quant.float(), dim=-1),
+        log_prob_ref,
+        reduction="sum",
+        log_target=True,
+    )
 
 
 def _solve_additive_recipe(
@@ -393,7 +405,7 @@ def _solve_additive_recipe(
     ]
     max_cost = denominator * target_bits / 16.0
     lps = LPS(
-        name="KVCacheAutoQuant",
+        name="KVCacheAutoQuantize",
         constraints={"kv_cache_size_after_compression": max_cost},
         constraints_to_candidate_costs={"kv_cache_size_after_compression": candidate_costs},
         candidate_scores=scores,
@@ -404,12 +416,12 @@ def _solve_additive_recipe(
     if status != "Optimal":
         minimum_bits = sum(min(costs) for costs in candidate_costs) * 16.0 / denominator
         raise ValueError(
-            f"KV-cache AutoQuant could not satisfy effective_bits={target_bits}; "
+            f"KV-cache AutoQuantize could not satisfy effective_bits={target_bits}; "
             f"minimum achievable value is {minimum_bits:.4f}. Solver status: {status}."
         )
     if len(selections) != len(layer_names):
         raise RuntimeError(
-            "KV-cache AutoQuant solver returned an invalid selection count: "
+            "KV-cache AutoQuantize solver returned an invalid selection count: "
             f"{len(selections)} for {len(layer_names)} layers and candidates {candidate_names}."
         )
     return selections, status
@@ -485,14 +497,9 @@ def _validate_persistent_candidate_scales(
             for attr, quantizer in layer_quantizers.items():
                 if "_amax" not in quantizer.state_dict():
                     raise ValueError(
-                        f"KV-cache AutoQuant candidate {candidate_name!r} for "
+                        f"KV-cache AutoQuantize candidate {candidate_name!r} for "
                         f"{layer_name!r}/{attr} has no persistent export scale after calibration."
                     )
-
-
-def _report_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Return the JSON-safe search report, excluding calibration tensors."""
-    return {key: value for key, value in state.items() if key != "quantizer_state"}
 
 
 class QuantKVRecipeHparam(Hparam):
@@ -508,7 +515,6 @@ class QuantKVRecipeHparam(Hparam):
         self.name = name
         self.module = module
         self.candidates = candidates
-        self.original_quantizers = {attr: getattr(module, attr) for attr in _KV_QUANTIZER_ATTRS}
         self.reference_quantizers = {attr: _disabled_quantizer() for attr in _KV_QUANTIZER_ATTRS}
         self.candidate_quantizers = {
             index: _candidate_quantizers(config) for index, (_, config) in enumerate(candidates)
@@ -531,6 +537,7 @@ class QuantKVRecipeHparam(Hparam):
         if value is None:
             assert isinstance(self.original, int)
             value = self.original
+        value = int(value)
         assert value in self.choices
         self._active = value
         _apply_layer_quantizers(self.module, self.candidate_quantizers[value])
@@ -538,10 +545,6 @@ class QuantKVRecipeHparam(Hparam):
     def use_reference(self) -> None:
         """Use BF16/no-quant K/V as the scoring reference, never as a solver choice."""
         _apply_layer_quantizers(self.module, self.reference_quantizers)
-
-    def restore_original(self) -> None:
-        """Restore the K/V quantizer objects present before search."""
-        _apply_layer_quantizers(self.module, self.original_quantizers)
 
     def candidate_name(self, index: int) -> str:
         return self.candidates[index][0]
@@ -555,7 +558,7 @@ class QuantKVRecipeHparam(Hparam):
 
 
 class AutoQuantizeKVSearcher(BaseSearcher):
-    """KV-cache AutoQuant backend using the shared search/checkpoint lifecycle."""
+    """KV-cache AutoQuantize backend using the shared search/checkpoint lifecycle."""
 
     method_name = "kl_div"
 
@@ -604,9 +607,9 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         """Validate the data inputs required by isolated forward-KL scoring."""
         config = super().sanitize_search_config(config)
         if config["data_loader"] is None:
-            raise ValueError("data_loader must be provided for KV-cache AutoQuant.")
+            raise ValueError("data_loader must be provided for KV-cache AutoQuantize.")
         if config["forward_step"] is None:
-            raise ValueError("forward_step must be provided for KV-cache AutoQuant.")
+            raise ValueError("forward_step must be provided for KV-cache AutoQuantize.")
         return config
 
     def load_search_checkpoint(self) -> bool:
@@ -624,11 +627,6 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             }
             for hparam in self._hparams
         }
-
-    def restore_original_quantizers(self) -> None:
-        """Restore pre-search K/V objects after a failed search."""
-        for hparam in getattr(self, "_hparams", []):
-            hparam.restore_original()
 
     def _calibrate_candidates(self) -> None:
         from .model_quant import calibrate
@@ -695,7 +693,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             self.state_dict(), signature
         ):
             raise ValueError(
-                "KV-cache AutoQuant checkpoint does not match the current candidates, scoring "
+                "KV-cache AutoQuantize checkpoint does not match the current candidates, scoring "
                 "setup, or eligible layers. Use a different checkpoint path."
             )
         self.search_signature = signature
@@ -721,14 +719,14 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         if self.calibration_complete:
             if not self.quantizer_state:
                 raise ValueError(
-                    "KV-cache AutoQuant checkpoint is missing calibrated quantizer state. "
+                    "KV-cache AutoQuantize checkpoint is missing calibrated quantizer state. "
                     "Use a different checkpoint path."
                 )
             candidate_quantizers = self._candidate_quantizer_map
             _restore_quantizer_state_dict(candidate_quantizers, self.quantizer_state)
             _validate_persistent_candidate_scales(candidate_quantizers)
             if self.config["verbose"]:
-                print_rank_0("KV-cache AutoQuant restored calibration from checkpoint.")
+                print_rank_0("KV-cache AutoQuantize restored calibration from checkpoint.")
         else:
             self._calibrate_candidates()
 
@@ -765,16 +763,11 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                     batch_logits_finite.logical_and_(torch.isfinite(logits_quant).all())
                     if logits_quant.shape != logits_ref.shape:
                         raise ValueError(
-                            "KV-cache AutoQuant forward_step returned different reference and "
+                            "KV-cache AutoQuantize forward_step returned different reference and "
                             f"candidate logits shapes: {tuple(logits_ref.shape)} and "
                             f"{tuple(logits_quant.shape)}."
                         )
-                    score = F.kl_div(
-                        torch.log_softmax(logits_quant.float(), dim=-1),
-                        log_prob_ref,
-                        reduction="sum",
-                        log_target=True,
-                    )
+                    score = _forward_kl(logits_quant, log_prob_ref)
                     previous_score = score_sums[hparam.name][candidate_name]
                     score_sums[hparam.name][candidate_name] = (
                         score if previous_score is None else previous_score + score
@@ -787,10 +780,10 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             scored_steps += 1
 
         if scored_steps == 0 or scored_tokens == 0:
-            raise ValueError("KV-cache AutoQuant data_loader produced no scoring batches.")
+            raise ValueError("KV-cache AutoQuantize data_loader produced no scoring batches.")
         assert all_logits_finite is not None
         if not all_logits_finite:
-            raise ValueError("KV-cache AutoQuant encountered NaN or Inf logits.")
+            raise ValueError("KV-cache AutoQuantize encountered NaN or Inf logits.")
 
         self.layers = {}
         for hparam in self._hparams:
@@ -799,7 +792,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                 score_sum = score_sums[hparam.name][candidate_name]
                 if score_sum is None:
                     raise RuntimeError(
-                        "KV-cache AutoQuant did not collect a score for "
+                        "KV-cache AutoQuantize did not collect a score for "
                         f"{hparam.name!r}/{candidate_name!r}."
                     )
                 layer_score_sums.append(score_sum)
@@ -808,7 +801,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             for candidate_name, score in zip(candidate_names, layer_scores):
                 if not math.isfinite(score):
                     raise ValueError(
-                        "KV-cache AutoQuant produced a non-finite KL score for "
+                        "KV-cache AutoQuantize produced a non-finite KL score for "
                         f"{hparam.name!r}/{candidate_name!r}."
                     )
                 scores[candidate_name] = score
@@ -859,7 +852,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             self.layers[hparam.name]["selected"] = selected_name
             recipe[hparam.name] = selected_name
             if self.config["verbose"]:
-                print_rank_0(f"KV-cache AutoQuant selected {selected_name} for {hparam.name}.")
+                print_rank_0(f"KV-cache AutoQuantize selected {selected_name} for {hparam.name}.")
         self.requested_constraints = {
             "effective_bits": self._target_bits,
             "cost_model": COST_MODEL_KV_CACHE,
@@ -883,10 +876,6 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         self._solve()
         self.save_search_checkpoint(verbose=self.config["verbose"])
 
-    def after_search(self) -> None:
-        """Attach the JSON-safe sensitivity report used by unified export."""
-        self.model._modelopt_kv_cache_auto_quantize_state = _report_state(self.state_dict())
-
 
 def _config_entry_dict(entry: Any) -> dict[str, Any]:
     if hasattr(entry, "model_dump"):
@@ -902,7 +891,7 @@ def get_kv_cache_auto_quantize_config(
     """Build a flat K/V quantization config, optionally re-solving at a new target."""
     requested = constraints or search_state.get("requested_constraints")
     if not isinstance(requested, dict):
-        raise ValueError("KV-cache AutoQuant search state has no requested constraints.")
+        raise ValueError("KV-cache AutoQuantize search state has no requested constraints.")
     target_bits = float(requested["effective_bits"])
     if requested.get("cost_model", COST_MODEL_KV_CACHE) != COST_MODEL_KV_CACHE:
         raise ValueError("KV-cache search state can only be re-solved with cost_model='kv_cache'.")

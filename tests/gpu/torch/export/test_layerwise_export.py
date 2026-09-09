@@ -145,8 +145,6 @@ def test_layerwise_export_resolves_mixed_kv_cache_formats(tmp_path):
             "algorithm": None,
         },
     )
-    model._modelopt_kv_cache_auto_quantize_state = {}
-
     exporter = LayerwiseExporter(model, tmp_path)
 
     assert exporter._kv_cache_format == {

@@ -13,21 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
 import json
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3, get_tiny_qwen3vl
 
-import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
 from modelopt.torch.quantization import model_quant, tensor_quant
 from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
+    QuantKVRecipeHparam,
     _candidate_quantizers,
     _eligible_layers,
     _kv_scalar_weight,
@@ -250,10 +250,6 @@ class _ToyKVModel(nn.Module):
 
 def test_kv_autoquant_rejects_missing_scale_after_calibration(monkeypatch):
     model = _ToyKVModel()
-    original_quantizers = {
-        name: (module.k_bmm_quantizer, module.v_bmm_quantizer)
-        for name, module in (("attn0", model.attn0), ("attn1", model.attn1))
-    }
     monkeypatch.setattr(model_quant, "calibrate", lambda *_args, **_kwargs: None)
 
     with pytest.raises(ValueError, match="no persistent export scale after calibration"):
@@ -267,9 +263,7 @@ def test_kv_autoquant_rejects_missing_scale_after_calibration(monkeypatch):
             num_score_steps=1,
         )
 
-    assert model.training
-    for name, module in (("attn0", model.attn0), ("attn1", model.attn1)):
-        assert (module.k_bmm_quantizer, module.v_bmm_quantizer) == original_quantizers[name]
+    assert hasattr(model, "_modelopt_state")
 
 
 def test_kv_eligible_layers_supports_hybrid_attention_mixers_only():
@@ -349,7 +343,8 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
 
     assert state["best"]["constraints"]["effective_bits"] == pytest.approx(6.25)
     assert state["best"]["is_satisfied"]
-    json.dumps(model._modelopt_kv_cache_auto_quantize_state)
+    json.dumps({key: value for key, value in state.items() if key != "quantizer_state"})
+    assert not hasattr(model, "_modelopt_kv_cache_auto_quantize_state")
     assert model.training
     assert {layer["selected"] for layer in state["layers"].values()} == {
         "fp8",
@@ -457,7 +452,7 @@ def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quan
         assert layer.k_bmm_quantizer.num_bits == (4, 3)
         assert layer.v_bmm_quantizer.num_bits == (2, 1)
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] is None
+    assert exported["quant_algo"] == "MIXED_PRECISION"
     assert exported["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
     assert {layer["quant_algo"] for layer in exported["kv_cache_quantized_layers"].values()} == {
         "FP8_K_NVFP4_V"
@@ -483,12 +478,8 @@ def test_kv_autoquant_rejects_asymmetric_candidate_for_unequal_kv_widths(
         )
 
 
-def test_kv_autoquant_rejects_invalid_logits_and_restores_model_state():
+def test_kv_autoquant_runtime_failure_leaves_converted_model():
     model = _ToyKVModel()
-    original_quantizers = {
-        name: (module.k_bmm_quantizer, module.v_bmm_quantizer)
-        for name, module in (("attn0", model.attn0), ("attn1", model.attn1))
-    }
     candidates = [
         (
             {
@@ -524,9 +515,7 @@ def test_kv_autoquant_rejects_invalid_logits_and_restores_model_state():
             num_score_steps=1,
         )
 
-    assert model.training
-    for name, module in (("attn0", model.attn0), ("attn1", model.attn1)):
-        assert (module.k_bmm_quantizer, module.v_bmm_quantizer) == original_quantizers[name]
+    assert hasattr(model, "_modelopt_state")
 
 
 def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_fake_quant_stub):
@@ -646,35 +635,19 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_
     assert all(not quantizer.is_enabled for quantizer in replay_non_kv_quantizers)
 
 
-def test_kv_autoquant_report_survives_modelopt_save_restore():
-    model = get_tiny_llama(num_hidden_layers=1)
-    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
-    candidate = (
-        _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump(),
-        "fp8",
-    )
-    model, state = mtq.auto_quantize(
-        model,
-        {"effective_bits": 8.0, "cost_model": "kv_cache"},
-        [candidate],
-        data,
-        lambda search_model, batch: search_model(**batch).logits,
-        num_calib_steps=1,
-        num_score_steps=1,
-    )
-    buffer = io.BytesIO()
-    mto.save(model, buffer)
-    buffer.seek(0)
+def test_kv_recipe_hparam_accepts_numpy_solver_index():
+    module = torch.nn.Module()
+    module.k_bmm_quantizer = TensorQuantizer()
+    module.v_bmm_quantizer = TensorQuantizer()
+    module.k_proj = torch.nn.Linear(4, 4)
+    module.v_proj = torch.nn.Linear(4, 4)
+    candidates = [("fp8", _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0))]
 
-    restored = mto.restore(get_tiny_llama(num_hidden_layers=1), buffer)
+    hparam = QuantKVRecipeHparam("attention", module, candidates)
+    hparam.active = np.int64(0)
 
-    assert restored._modelopt_kv_cache_auto_quantize_state["best"] == state["best"]
-    quantization = get_quant_config(restored)["quantization"]
-    assert quantization["quant_algo"] is None
-    assert quantization["kv_cache_quant_algo"] == "FP8"
-    assert quantization["kv_cache_quantized_layers"] == {
-        "model.layers.0.self_attn": {"quant_algo": "FP8"}
-    }
+    assert hparam.active == 0
+    assert isinstance(hparam.active, int)
 
 
 @pytest.mark.parametrize(
@@ -708,16 +681,16 @@ def test_public_kv_autoquant_selects_qwen_causal_attention_only(
     )
 
     assert set(state["layers"]) == {expected_layer}
-    report = model._modelopt_kv_cache_auto_quantize_state
+    report = {key: value for key, value in state.items() if key != "quantizer_state"}
     assert json.loads(json.dumps(report))["layers"][expected_layer]["selected"] == "fp8"
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] is None
+    assert exported["quant_algo"] == "MIXED_PRECISION"
     assert exported["quantized_layers"] == {}
     assert exported["kv_cache_quant_algo"] == "FP8"
     assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
 
 
-def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():
+def test_public_kv_autoquant_validation_fails_before_conversion():
     model = get_tiny_llama(num_hidden_layers=1)
     original_types = {name: type(module) for name, module in model.named_modules()}
     invalid_candidate = _kv_config((4, 3), 8.0).model_dump()
@@ -730,22 +703,6 @@ def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():
             [invalid_candidate],
             [],
             lambda *_: pytest.fail("Validation must run before model conversion."),
-            num_calib_steps=1,
-            num_score_steps=1,
-        )
-
-    assert not hasattr(model, "_modelopt_state")
-    assert {name: type(module) for name, module in model.named_modules()} == original_types
-
-    valid_candidate = _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump()
-    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
-    with pytest.raises(ValueError, match="non-empty vocabulary dimension"):
-        mtq.auto_quantize(
-            model,
-            {"effective_bits": 8.0, "cost_model": "kv_cache"},
-            [valid_candidate],
-            data,
-            lambda *_: torch.ones(8),
             num_calib_steps=1,
             num_score_steps=1,
         )

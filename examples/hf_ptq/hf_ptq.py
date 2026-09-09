@@ -117,7 +117,7 @@ def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torc
         return logits
     if logits.shape[:-1] != attention_mask.shape:
         raise ValueError(
-            "AutoQuant KL logits and attention_mask must have matching token dimensions; "
+            "AutoQuantize KL logits and attention_mask must have matching token dimensions; "
             f"got {tuple(logits.shape[:-1])} and {tuple(attention_mask.shape)}."
         )
     return logits[attention_mask.bool()]
@@ -153,7 +153,7 @@ def extract_and_prepare_language_model_from_vl(full_model):
     Returns:
         tuple: (language_model, model_type) or (None, None) if not a VLM
     """
-    language_model_lineage = get_language_model_from_vl(full_model)
+    language_model_lineage = get_language_model_from_vl(full_model, strict=True)
     if language_model_lineage is not None:
         language_model = language_model_lineage.pop(-1)
         ancestors = language_model_lineage
@@ -365,30 +365,37 @@ def _mtq_candidate_formats(formats) -> list[dict]:
 
 def _mtq_kv_candidate_formats(formats) -> list[tuple[dict, str]]:
     """Translate format-agnostic KV candidates while preserving useful preset names."""
+    if not formats:
+        return []
+    format_type = type(formats[0])
+    normalized_presets = {
+        preset_name: format_type(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
+        for preset_name, preset in KV_QUANT_CFG_CHOICES.items()
+    }
+    fp8_quantizers = normalized_presets["fp8"]
+    if len(fp8_quantizers) != 1:
+        raise RuntimeError("The FP8 KV preset must contain exactly one quantizer entry.")
+    fp8_k_quantizer = copy.deepcopy(fp8_quantizers[0])
+    fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
+    # Ordered quantizer rules use last-match-wins semantics: start with NVFP4 K/V, then
+    # override K with FP8. Reversing these entries would produce uniform NVFP4.
+    asymmetric_quantizers = [*normalized_presets["nvfp4"], fp8_k_quantizer]
+
     candidates = []
     for idx, fmt in enumerate(formats):
         quant_cfg = fmt.model_dump(exclude_none=True)
         candidate_quantizers = quant_cfg.get("quant_cfg", [])
-        name = None
-        nvfp4_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["nvfp4"]).model_dump(exclude_none=True)[
-            "quant_cfg"
-        ]
-        fp8_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["fp8"]).model_dump(exclude_none=True)[
-            "quant_cfg"
-        ]
-        if len(fp8_quantizers) != 1:
-            raise RuntimeError("The FP8 KV preset must contain exactly one quantizer entry.")
-        fp8_k_quantizer = copy.deepcopy(fp8_quantizers[0])
-        fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
-        if candidate_quantizers == [*nvfp4_quantizers, fp8_k_quantizer]:
+        if candidate_quantizers == asymmetric_quantizers:
             name = "fp8_k_nvfp4_v"
-        for preset_name, preset in KV_QUANT_CFG_CHOICES.items():
-            normalized_preset_quantizers = (
-                type(fmt)(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
+        else:
+            name = next(
+                (
+                    preset_name
+                    for preset_name, preset_quantizers in normalized_presets.items()
+                    if preset_quantizers == candidate_quantizers
+                ),
+                None,
             )
-            if normalized_preset_quantizers == candidate_quantizers:
-                name = preset_name
-                break
         candidates.append((quant_cfg, name or f"KV_CACHE_FORMAT_{idx}"))
     return candidates
 

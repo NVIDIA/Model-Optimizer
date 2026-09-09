@@ -118,7 +118,7 @@ def is_multimodal_model(model):
     )
 
 
-def get_language_model_from_vl(model) -> list[nn.Module] | None:
+def get_language_model_from_vl(model, *, strict: bool = False) -> list[nn.Module] | None:
     """Extract the language model lineage from a Vision-Language Model (VLM).
 
     This function handles the common patterns for accessing the language model component
@@ -127,6 +127,12 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     Args:
         model: The VLM model instance to extract the language model from
+        strict: Raise if distinct direct and nested language-model roots are present. Generic
+            export callers retain the historical nested-root preference by default; search
+            boundaries can opt in to fail-closed ambiguity handling.
+
+    Raises:
+        ValueError: If ``strict`` is True and the model exposes competing language-model roots.
 
     Returns:
         list: the lineage path towards the language model
@@ -141,7 +147,8 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     nested_language_model = getattr(nested_parent, "language_model", None)
     direct_language_model = getattr(model, "language_model", None)
     if (
-        nested_language_model is not None
+        strict
+        and nested_language_model is not None
         and direct_language_model is not None
         and nested_language_model is not direct_language_model
     ):

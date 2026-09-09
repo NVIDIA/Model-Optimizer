@@ -1700,15 +1700,7 @@ def get_quant_config(
 
     kv_cache_formats: set[str] = set()
     kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
-    try:
-        language_model_lineage = get_language_model_from_vl(model)
-    except ValueError as exc:
-        if "multiple language-model roots" not in str(exc):
-            raise
-        # Generic export predates the strict KV-search boundary. If an architecture exposes
-        # genuinely competing roots, preserve that existing export behavior by considering
-        # the full model rather than choosing one root by traversal order.
-        language_model_lineage = None
+    language_model_lineage = get_language_model_from_vl(model)
     language_model_modules = (
         None
         if language_model_lineage is None
@@ -1767,18 +1759,32 @@ def get_quant_config(
             layer_config_dict[name + ".awq_block_size"] = block_size
 
         # Find kv cache quant format
-        has_kv_quantizers = all(
-            hasattr(module, quantizer_name)
-            for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer")
-        )
         is_language_model_module = (
             language_model_modules is None or id(module) in language_model_modules
         )
-        if has_kv_quantizers and is_language_model_module:
-            if module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled:
-                module_kv_quant = get_kv_cache_dtype(module)
-                if module_kv_quant != QUANTIZATION_NONE:
-                    kv_cache_formats.add(module_kv_quant)
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        output_quantizer = getattr(module, "output_quantizer", None)
+        # Projection modules also expose output_quantizer; it is a KV fallback only on an
+        # attention boundary that has at least one K/V quantizer attribute.
+        is_kv_boundary = k_quantizer is not None or v_quantizer is not None
+        enabled_kv_quantizers = [
+            quantizer
+            for quantizer in (k_quantizer, v_quantizer, output_quantizer)
+            if is_kv_boundary and quantizer is not None and quantizer.is_enabled
+        ]
+        if enabled_kv_quantizers and is_language_model_module:
+            module_kv_quant = get_kv_cache_dtype(module)
+            if module_kv_quant != QUANTIZATION_NONE:
+                kv_cache_formats.add(module_kv_quant)
+                # Per-layer mixed-KV metadata is defined only for an actual enabled K/V pair.
+                # Keep the output-quantizer/single-sided Megatron fallback top-level only.
+                if (
+                    k_quantizer is not None
+                    and v_quantizer is not None
+                    and k_quantizer.is_enabled
+                    and v_quantizer.is_enabled
+                ):
                     kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
 
     # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
@@ -1792,27 +1798,28 @@ def get_quant_config(
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    is_kv_autoquant_result = any(
-        hasattr(module, "_modelopt_kv_cache_auto_quantize_state") for module in model.modules()
-    )
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
     needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (
-        is_kv_autoquant_result or len(kv_cache_formats) > 1
+        weight_quant_algo is None or len(kv_cache_formats) > 1
     )
     if needs_layerwise_kv_metadata:
         if weight_quant_algo not in (None, "MIXED_PRECISION"):
             raise NotImplementedError(
                 "Mixed-precision KV-cache export with a uniform quantized-weight format is "
-                "not supported yet. Use BF16 weights or a mixed-weight AutoQuant recipe."
+                "not supported yet. Use BF16 weights or a mixed-weight AutoQuantize recipe."
             )
-        # Keep the complete layer map even when every layer selected the same format.
+        # A standalone KV-only checkpoint uses the mixed-precision envelope expected by
+        # consumers, including when every attention layer selected the same K/V format.
+        if weight_quant_algo is None:
+            quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
+            quant_config["quantization"].setdefault("quantized_layers", {})
         quant_config["quantization"]["kv_cache_quant_algo"] = (
             next(iter(kv_cache_formats)) if len(kv_cache_formats) == 1 else "MIXED_PRECISION"
         )
         quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
         quant_config["quantization"]["kv_cache_schema_version"] = 1
     elif len(kv_cache_formats) == 1:
-        # Preserve the pre-AutoQuant uniform KV schema, including partial coverage.
+        # Preserve the pre-AutoQuantize uniform KV schema, including partial coverage.
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
 
     return quant_config
