@@ -2,7 +2,7 @@
 TensorRT-LLM
 ==========================
 
-**Deprecation Notice**: The export_tensorrt_llm_checkpoint API will be deprecated in future releases. Users are encouraged to transition to the :doc:`unified HF export API <3_unified_hf>`, which provides enhanced functionality and flexibility for exporting models to multiple inference frameworks including TensorRT-LLM, vLLM, and SGLang.
+**Deprecation Notice**: The export_tensorrt_llm_checkpoint API is deprecated as of 0.48.0 and will be removed in 0.49.0. Users are encouraged to transition to the :doc:`unified HF export API <3_unified_hf>`, which provides enhanced functionality and flexibility for exporting models to multiple inference frameworks including TensorRT-LLM, vLLM, and SGLang.
 
 .. note::
 

@@ -86,9 +86,12 @@ with import_plugin("megatron", verbose=False):
 
 __all__ = ["export_tensorrt_llm_checkpoint", "torch_to_tensorrt_llm_checkpoint"]
 
+# Deprecated in 0.48.0, scheduled for removal in 0.49.0. The docs have carried a deprecation
+# notice since 0.39.0 (2025-11-13), but this is the first release to warn at runtime and to say
+# so in the changelog, so 0.48.0 starts the migration period the deprecation policy requires.
 _DEPRECATION_MSG = (
-    "{name} and the TensorRT-LLM checkpoint format are deprecated and will be removed in a "
-    "future release. Use modelopt.torch.export.export_hf_checkpoint instead, which exports a "
+    "{name} and the TensorRT-LLM checkpoint format are deprecated as of 0.48.0 and will be "
+    "removed in 0.49.0. Use modelopt.torch.export.export_hf_checkpoint instead, which exports a "
     "unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang."
 )
 
@@ -103,8 +106,8 @@ def torch_to_tensorrt_llm_checkpoint(
 ) -> Iterator[tuple[dict[str, Any], dict[str, torch.Tensor], dict[str, Any]]]:
     """Converts the torch model to the TensorRT-LLM checkpoint per GPU rank.
 
-    .. deprecated::
-        The TensorRT-LLM checkpoint format is deprecated. Use
+    .. deprecated:: 0.48.0
+        The TensorRT-LLM checkpoint format is deprecated and will be removed in 0.49.0. Use
         :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`
         instead.
 
@@ -486,8 +489,8 @@ def export_tensorrt_llm_checkpoint(
 ):
     """Exports the torch model to the TensorRT-LLM checkpoint and save to the export_dir.
 
-    .. deprecated::
-        The TensorRT-LLM checkpoint format is deprecated. Use
+    .. deprecated:: 0.48.0
+        The TensorRT-LLM checkpoint format is deprecated and will be removed in 0.49.0. Use
         :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`
         instead, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM,
         vLLM and SGLang.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +15,8 @@
 
 """Checkpoint export logic for the TensorRT-LLM specific format.
 
-**Deprecation Notice**: The ``export_tensorrt_llm_checkpoint`` API will be deprecated in future
-releases. Users are encouraged to transition to the unified HF export API
+**Deprecation Notice**: The ``export_tensorrt_llm_checkpoint`` API is deprecated as of 0.48.0 and
+will be removed in 0.49.0. Users are encouraged to transition to the unified HF export API
 (:meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`),
 which provides enhanced functionality and flexibility for exporting models to multiple inference
 frameworks including TensorRT-LLM, vLLM, and SGLang.

@@ -23,5 +23,15 @@ from .quant_format import *
 from .registry import *
 from .shard_cast_utils import *
 from .transformer_engine import *
+
+# Deprecated: kept only to satisfy the migration period in the deprecation policy (README.md),
+# which requires a deprecated feature to keep working while warning for one release. The
+# TensorRT-LLM checkpoint export moved to ``modelopt.torch.export.trtllm`` in 0.48.0; these two
+# names are its previously documented import path. Both warn on call. Remove this re-export in
+# 0.49.0 -- nothing inside this package may depend on it.
+from .trtllm.model_config_export import (
+    export_tensorrt_llm_checkpoint,
+    torch_to_tensorrt_llm_checkpoint,
+)
 from .unified_export_hf import *
 from .unified_export_megatron import *

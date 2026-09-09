@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,9 +24,18 @@ Test modules in this directory carry a ``trtllm_`` prefix because pytest runs wi
 ``test_quant_utils.py`` would collide with the one a directory up.
 """
 
+import contextlib
+import inspect
+import warnings
+
 import pytest
 import torch
+import torch.nn as nn
 
+from modelopt.torch.export.trtllm import (
+    export_tensorrt_llm_checkpoint,
+    torch_to_tensorrt_llm_checkpoint,
+)
 from modelopt.torch.export.trtllm.quant_utils import get_scaling_factor_from_weight
 
 
@@ -64,3 +73,49 @@ def test_get_scaling_factor_from_weight(weight, group_size, expected):
         assert list(scaling_factor.shape) == [weight.shape[0]]
 
     assert torch.allclose(scaling_factor, expected, rtol=0.0, atol=0.0)
+
+
+def test_old_top_level_import_still_works():
+    """The pre-0.48 import path stays importable for the migration period.
+
+    A DeprecationWarning is only useful if callers can still reach the code it warns about,
+    so removing this re-export before 0.49.0 would silently skip the migration window.
+    """
+    import modelopt.torch.export as mte
+
+    assert mte.export_tensorrt_llm_checkpoint is export_tensorrt_llm_checkpoint
+    assert mte.torch_to_tensorrt_llm_checkpoint is torch_to_tensorrt_llm_checkpoint
+
+
+def test_torch_to_tensorrt_llm_checkpoint_warns_at_call_time():
+    """The warning must fire on call, not on first ``next()``.
+
+    ``torch_to_tensorrt_llm_checkpoint`` hands back a generator. A bare ``warnings.warn`` in a
+    generator body does not run until the first item is pulled, so a caller that builds the
+    generator and abandons it would never be warned. Hence the public name is a plain function
+    wrapping a private generator.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        generator = torch_to_tensorrt_llm_checkpoint(nn.Linear(4, 4), "llama")
+
+    assert inspect.isgenerator(generator)
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) == 1, "expected exactly one DeprecationWarning before iteration"
+    assert "torch_to_tensorrt_llm_checkpoint" in str(deprecations[0].message)
+
+
+def test_export_tensorrt_llm_checkpoint_warns_exactly_once(tmp_path):
+    """One user call yields one warning, not two.
+
+    ``export_tensorrt_llm_checkpoint`` drives the same generator, so it must call the private
+    form; calling the public wrapper instead would emit a second, redundant warning.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with contextlib.suppress(Exception):  # a toy model cannot complete a real export
+            export_tensorrt_llm_checkpoint(nn.Linear(4, 4), "llama", export_dir=tmp_path)
+
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) == 1, f"expected 1 DeprecationWarning, got {len(deprecations)}"
+    assert "export_tensorrt_llm_checkpoint" in str(deprecations[0].message)
