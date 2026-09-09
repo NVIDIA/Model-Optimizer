@@ -96,7 +96,7 @@ class _ShardedIterable(torch.utils.data.IterableDataset):
             count += 1
             yield item
         if count < self._per_rank:
-            if last is None:
+            if count == 0:
                 raise RuntimeError(
                     f"Rank {self._rank} received no calibration samples "
                     f"(need {self._per_rank}); the dataset stream is empty."

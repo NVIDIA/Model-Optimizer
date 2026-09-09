@@ -367,6 +367,10 @@ def main(args: argparse.Namespace):
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
+    # A response-only loss mask and context parallel both need per-token loss reduction,
+    # which must not then be pre-averaged in the DDP collective below.
+    per_token_loss = args.sft or args.cp_size > 1
+
     def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
@@ -381,9 +385,7 @@ def main(args: argparse.Namespace):
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         set_moe_expert_layout(provider, moe_grouped_gemm)
-        if args.sft or args.cp_size > 1:
-            # Both a response-only loss mask and context parallel need per-token reduction.
-            # Set it here so the DDP config below can read it back.
+        if per_token_loss:
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -551,8 +553,7 @@ def main(args: argparse.Namespace):
             grad_reduce_in_fp32=True,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
-            # Per-token loss must not be pre-averaged; --sft is not its only trigger.
-            average_in_collective=not distill_provider.calculate_per_token_loss,
+            average_in_collective=not per_token_loss,
             use_distributed_optimizer=True,
         ),
         dataset=dataset_config,
