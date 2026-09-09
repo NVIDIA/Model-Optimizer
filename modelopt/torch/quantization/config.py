@@ -754,6 +754,24 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    export_dir: str | None = ModeloptField(
+        default=None,
+        title="Export each layer's quantized checkpoint as soon as it is calibrated.",
+        description=(
+            "If set, each decoder layer is written to a quantized HF checkpoint shard in "
+            "this directory the moment its calibration finishes, replacing the separate "
+            "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Calibration writes only the layer shards; the checkpoint does not load until "
+            "``finalize()`` is called on the exporter attached to the model, which adds "
+            "the tail shard, the index and the config artifacts. "
+            "Combined with ``checkpoint_dir``, an interrupted run resumes without "
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs "
+            "and weight-tied quantized modules raise NotImplementedError. Per-layer export "
+            "leaves the model in memory in export form, never valid for inference."
+        ),
+    )
+
     calib_mutates_weights: bool = ModeloptField(
         default=True,
         title="Whether layerwise calibration mutates layer weights.",
@@ -819,16 +837,6 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     def _coerce_layerwise(cls, value):
         """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
-
-    @model_validator(mode="after")
-    def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
-        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
-            raise ValueError(
-                "layerwise.checkpoint_dir requires layerwise.enable=True. "
-                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
@@ -915,7 +923,7 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP keeps a per-expert weight quantizer "
+            "one effective weight amax. TEGroupedLinear keeps a per-expert weight quantizer "
             "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
         ),
     )

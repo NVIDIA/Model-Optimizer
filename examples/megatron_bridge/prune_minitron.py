@@ -66,7 +66,7 @@ from modelopt.torch.utils import (
     print_rank_0,
     warn_rank_0,
 )
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -430,8 +430,7 @@ def main(args: argparse.Namespace):
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
     # hidden_size is shared with the vision->LM projector, so it is skipped
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: pruning model.language_model only; all non-language-model components "

@@ -697,8 +697,9 @@ class _MegatronSequentialMLP(DynamicModule):
         """Sync quantizer amax across local experts in a SequentialMLP.
 
         Always syncs input quantizer amax across experts. Optionally syncs weight
-        quantizer amax as well, which matches TEGroupedMLP behavior where all
-        experts are fused into a single GEMM with one quantizer per linear layer.
+        quantizer amax as well, so all experts share one effective weight scale --
+        opt-in, since experts otherwise keep an independent amax each, as
+        ``TEGroupedLinear``'s per-expert ``GroupedQuantizer`` does.
 
         Args:
             sync_weight_amax: If True, also sync weight quantizer amax across experts.
@@ -754,7 +755,7 @@ if HAS_TE:
     ):
         pass
 
-    # Quantized subclasses to support TEGroupedMLP quantization
+    # Quantized subclasses to support TEGroupedLinear quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in

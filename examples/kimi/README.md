@@ -16,7 +16,7 @@ one safetensors shard at a time:
   vision tower, and `lm_head` remain BF16.
 
 The exact quantization map is recorded in
-`modelopt_recipes/huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention.yaml`.
+`modelopt_recipes/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention.yaml`.
 Because the source checkpoint uses packed MXFP4 tensors rather than ordinary
 Hugging Face `Linear.weight` tensors, run the streaming converter instead of
 passing this recipe to `hf_ptq.py`:
@@ -25,7 +25,7 @@ passing this recipe to `hf_ptq.py`:
 python examples/kimi/kimi_k3/quantize_to_nvfp4.py \
     --source_ckpt /models/moonshotai/Kimi-K3 \
     --output_ckpt /models/Kimi-K3-NVFP4 \
-    --recipe huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention \
+    --recipe models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention \
     --jobs 8
 ```
 
