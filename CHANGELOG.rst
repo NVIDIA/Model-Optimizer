@@ -12,7 +12,7 @@ Changelog
 
 **Backward Breaking Changes**
 
-- Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. Models that relied on that assumption need a ``ModelSpec`` registered under ``modelopt/torch/models/``; every MoE architecture ModelOpt previously exported correctly is already registered.
+- Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
 
 **Deprecations**
 
