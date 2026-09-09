@@ -32,6 +32,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.export as mte
 from modelopt.torch.export.trtllm import (
     export_tensorrt_llm_checkpoint,
     torch_to_tensorrt_llm_checkpoint,
@@ -81,8 +82,6 @@ def test_old_top_level_import_still_works():
     A DeprecationWarning is only useful if callers can still reach the code it warns about,
     so removing this re-export before 0.49.0 would silently skip the migration window.
     """
-    import modelopt.torch.export as mte
-
     assert mte.export_tensorrt_llm_checkpoint is export_tensorrt_llm_checkpoint
     assert mte.torch_to_tensorrt_llm_checkpoint is torch_to_tensorrt_llm_checkpoint
 
