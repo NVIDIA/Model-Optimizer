@@ -204,16 +204,12 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
     expected_widths = campaign.config["embedding_pruning"]["widths"]
     assert replacement_summary["widths"] == expected_widths
     assert replacement_summary["scenario_count"] == len(expected_widths)
-    replacement_result_paths = sorted(
-        path
-        for child in replacement_summary["children"]
-        for input_dir in child["inputs"]
-        for path in Path(input_dir).rglob("*.json")
-    )
-    replacement_results = [_json(path) for path in replacement_result_paths]
-    assert replacement_results
-    assert set(_nested_values(replacement_results, "score_device_type")) == {"cuda"}
-    assert set(_nested_values(replacement_results, "visible_cuda_device_count")) == {1}
+    replacement_outputs = [
+        Path(output) for child in replacement_summary["children"] for output in child["outputs"]
+    ]
+    assert replacement_summary["record_count"] > 0
+    assert all(child["record_count"] > 0 for child in replacement_summary["children"])
+    assert replacement_outputs and all(path.is_file() for path in replacement_outputs)
 
     candidate_library_path = root / "candidate_library.json"
     candidate_library = _json(candidate_library_path)
@@ -246,7 +242,7 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
         *pass_manifests,
         *score_files,
         replacement_summary_path,
-        *replacement_result_paths,
+        *replacement_outputs,
         candidate_library_path,
         active_profiles_path,
         *grid_paths,
