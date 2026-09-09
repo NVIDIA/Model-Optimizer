@@ -191,8 +191,8 @@ def _runner_payload(
         prerun.insert(0, f"export HF_HOME={shlex.quote(str(hf_home))}")
     else:
         prerun = list(environment.get("prerun_commands") or ())
+    prerun.append(_source_guard_command(environment, worker_code))
     environment["prerun_commands"] = prerun
-    environment["source_guard"] = _source_guard_command(environment, worker_code)
     runner: dict[str, Any] = {
         "kind": kind,
         "execution_contract": environment,

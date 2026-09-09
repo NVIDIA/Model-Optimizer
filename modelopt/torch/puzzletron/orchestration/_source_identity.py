@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
-import subprocess  # nosec B404 - Git is invoked with fixed argv and shell=False.
+import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,31 @@ if TYPE_CHECKING:
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 _SOURCE_PATHSPECS = (".", ":(exclude,attr:filter=lfs)")
+
+
+async def _git_output(repository: Path, *args: str) -> bytes:
+    """Run one fixed-argument Git query without involving a shell."""
+
+    executable = shutil.which("git")
+    if executable is None:
+        raise OSError("git executable not found")
+    process = await asyncio.create_subprocess_exec(
+        executable,
+        *args,
+        cwd=repository,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode:
+        raise RuntimeError(stderr.decode(errors="replace").strip() or "Git query failed")
+    return stdout
+
+
+def _run_git(repository: Path, *args: str) -> bytes:
+    """Run a Git query from the synchronous configuration API."""
+
+    return asyncio.run(_git_output(repository, *args))
 
 
 def _packaged_revision(repository: Path) -> dict[str, Any] | None:
@@ -53,19 +79,11 @@ def working_tree_fingerprint(repository: Path = REPOSITORY_ROOT) -> str:
     """Hash tracked source changes and untracked files, excluding LFS materialization."""
 
     digest = hashlib.sha256()
-    tracked = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
-        ["git", "diff", "--binary", "HEAD", "--", *_SOURCE_PATHSPECS],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-    ).stdout
+    tracked = _run_git(repository, "diff", "--binary", "HEAD", "--", *_SOURCE_PATHSPECS)
     digest.update(tracked)
-    untracked = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-    ).stdout.split(b"\0")
+    untracked = _run_git(repository, "ls-files", "--others", "--exclude-standard", "-z").split(
+        b"\0"
+    )
     for encoded in sorted(item for item in untracked if item):
         digest.update(b"\0path\0" + encoded + b"\0")
         candidate = repository / os.fsdecode(encoded)
@@ -82,29 +100,17 @@ def repository_revision(repository: Path) -> dict[str, Any]:
     """Return an immutable revision plus a dirty-tree fingerprint when available."""
 
     try:
-        revision = subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
-            ["git", "rev-parse", "HEAD"],
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        revision = _run_git(repository, "rev-parse", "HEAD").decode().strip()
         dirty = bool(
-            subprocess.run(  # nosec B603 B607 - fixed Git argv; no shell expansion.
-                ["git", "status", "--porcelain", "--", *_SOURCE_PATHSPECS],
-                cwd=repository,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
+            _run_git(repository, "status", "--porcelain", "--", *_SOURCE_PATHSPECS).strip()
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, RuntimeError):
         return _packaged_revision(repository) or {"revision": None, "dirty": None}
     code = {"revision": revision, "dirty": dirty}
     if dirty:
         try:
             code["working_tree_sha256"] = working_tree_fingerprint(repository)
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, RuntimeError):
             code["working_tree_sha256"] = None
     return code
 

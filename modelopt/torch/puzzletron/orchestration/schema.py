@@ -154,7 +154,6 @@ class ExecutionContract:
     prerun_commands: tuple[str, ...] = ()
     postrun_commands: tuple[str, ...] = ()
     contract_hash: str = ""
-    source_guard: str | None = None
 
 
 @dataclass(frozen=True)

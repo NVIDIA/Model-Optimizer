@@ -24,7 +24,7 @@ import socket
 
 # Required to supervise concurrent worker process groups; every launch uses an
 # argument sequence with ``shell=False`` and never interpolates a shell command.
-import subprocess  # nosec B404 - required for process-group supervision; shell=False.
+import subprocess
 import sys
 import time
 import uuid
@@ -147,23 +147,9 @@ class LocalExecutor(Executor):
         )
 
     def _wrapped_argv(self, argv: tuple[str, ...]) -> list[str]:
-        if self.runner is None:
+        if self.runner is None or self._environment_prepared:
             return list(argv)
         contract = self.runner.contract
-        if self._environment_prepared:
-            if not contract.source_guard:
-                return list(argv)
-            return [
-                "bash",
-                "-c",
-                "; ".join(
-                    (
-                        "set -Eeuo pipefail",
-                        contract.source_guard,
-                        " ".join(shlex.quote(part) for part in argv),
-                    )
-                ),
-            ]
         hooks: list[str] = []
         if contract.setup_env:
             hooks.append(f"source {shlex.quote(contract.setup_env)}")
@@ -175,8 +161,6 @@ class LocalExecutor(Executor):
                 f"export PYTHONPATH={shlex.quote(contract.repository)}:${{PYTHONPATH:-}}",
             )
         )
-        if contract.source_guard:
-            parts.append(contract.source_guard)
         if contract.postrun_commands:
             postrun = "; ".join(str(command) for command in contract.postrun_commands)
             parts.append(f"trap {shlex.quote(postrun)} EXIT")
@@ -305,7 +289,7 @@ class LocalExecutor(Executor):
                 try:
                     # Popen is required so the executor can poll and terminate the
                     # whole worker process group before releasing its GPU lease.
-                    process = subprocess.Popen(  # nosec B603
+                    process = subprocess.Popen(
                         self._wrapped_argv(launcher_argv),
                         cwd=attempt.command.cwd,
                         env=env,

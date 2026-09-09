@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import json
 import shlex
-
-# Required for fixed-argument local ssh and scheduler commands; no local shell is used.
-import subprocess  # nosec B404 - required for fixed-argv SSH; shell=False.
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,10 +33,7 @@ __all__ = ["BareMetalSSHExecutor", "GpuLeaseManager"]
 
 
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    # The executable and arguments are passed directly; no local shell parses them.
-    return subprocess.run(  # nosec B603
-        list(argv), capture_output=True, text=True, check=False
-    )
+    return subprocess.run(list(argv), capture_output=True, text=True, check=False)
 
 
 @dataclass(frozen=True)
@@ -281,7 +276,6 @@ class BareMetalSSHExecutor(Executor):
                     f"set -Eeuo pipefail; cd {shlex.quote(working_directory)}; "
                     f"{hook_prefix}source {shlex.quote(contract.venv)}/bin/activate; "
                     f"export PYTHONPATH={shlex.quote(contract.repository)}:${{PYTHONPATH:-}}; "
-                    f"{contract.source_guard + '; ' if contract.source_guard else ''}"
                     f"{env_exports} rm -f {shlex.quote(exit_path)}; "
                     f"nohup setsid bash -lc {shlex.quote(payload)} > "
                     f"{shlex.quote(log_path)} 2>&1 & "

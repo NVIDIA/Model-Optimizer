@@ -201,7 +201,7 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
 
     replacement_summary_path = root / "artifacts/replacement_scoring/summary.json"
     replacement_summary = _json(replacement_summary_path)
-    assert replacement_summary["widths"] == [256]
+    assert replacement_summary["widths"] == campaign.config["embedding_pruning"]["widths"]
     assert replacement_summary["scenario_count"] == 1
     replacement_result_paths = list(
         root.glob(

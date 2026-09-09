@@ -88,9 +88,8 @@ def test_resolved_bundle_preserves_integrity_and_source_provenance(tmp_path):
     assert resolved.plan["execution_mode"] == "reusable_allocation"
     assert resolved.plan["stages"][-1]["stage_id"] == "post.params-90.best"
     assert resolved.provenance["route"]["value"] == "qwen3.5-0.8b/vlm-pruning/smoke"
-    assert (
-        "_assert_worker_source" in resolved.runner["runner"]["execution_contract"]["source_guard"]
-    )
+    prerun = resolved.runner["runner"]["execution_contract"]["prerun_commands"]
+    assert "_assert_worker_source" in prerun[-1]
 
     bundle = materialize_resolved_bundle(resolved, activate=True)
     assert bundle_for_run_root(tmp_path / "run") == bundle
