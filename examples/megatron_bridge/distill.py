@@ -374,9 +374,9 @@ def main(args: argparse.Namespace):
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         set_moe_expert_layout(provider, moe_grouped_gemm)
-        if args.sft:
-            # A response-only loss mask needs per-token reduction to combine across CP ranks.
-            # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.
+        if args.sft or args.cp_size > 1:
+            # Both a response-only loss mask and context parallel need per-token reduction.
+            # Set it here so the DDP config below can read it back.
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -542,7 +542,8 @@ def main(args: argparse.Namespace):
             grad_reduce_in_fp32=True,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
-            average_in_collective=not args.sft,  # per-token loss must not be pre-averaged
+            # Per-token loss must not be pre-averaged; --sft is not its only trigger.
+            average_in_collective=not distill_provider.calculate_per_token_loss,
             use_distributed_optimizer=True,
         ),
         dataset=dataset_config,
