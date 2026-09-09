@@ -6,12 +6,17 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
+
 **Backward Breaking Changes**
 
 **Deprecations**
 
 **Bug Fixes**
 
+- Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
 - Fix a DDP hang in DFlash training at scale where a rank whose batch contained no valid anchor skipped the draft forward, leaving its rotary buffer list shorter than other ranks' and causing ``broadcast_buffers`` to hang. The buffer is now created during ``modify()`` before training begins.
 - Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
 
@@ -26,10 +31,10 @@ Changelog
 - Add a Muse Glimmer AutoQuantize recipe that searches language-model MLP projections, self-attention projections, and ``lm_head`` over W4A16 NVFP4 Four-Over-Six, FP8, and BF16 fallback at 5.5 effective bits while leaving the vision tower unquantized.
 - Add ``examples/alpamayo/qad.py``, which runs quantization-aware distillation on the quantized Alpamayo checkpoint produced by ``examples/alpamayo/quantize.py``. It distills the quantized VLM against the original FP16 VLM with ``QADTrainer``, supports FSDP2 for multi-GPU runs, and ``--export`` reassembles the trained VLM into a full AlpamayoR1 checkpoint that ``AlpamayoR1.from_pretrained`` can reload.
 - Add a calibration-free streaming Kimi-K3 converter and checkpoint-mirror recipe for NVFP4 routed experts with ``input_scale=1.0`` and 128x128 block-FP8 KDA/MLA attention weights. The converter operates shard-by-shard on the source checkpoint's packed MXFP4 experts instead of loading the 2.8T model through the in-memory ``hf_ptq.py`` path.
+- Add end-to-end PETRv1 and PETRv2 ONNX PTQ examples covering calibration, INT8 and FP8 VoVNet backbone quantization, TensorRT deployment, and accuracy evaluation.
 - Add opt-in FP8 Vision Encoder recipes under the ``qwen3_vl`` and ``qwen3_5`` model types. The vision-only recipe keeps the language model and KV cache in high precision; the joint recipe quantizes Vision Encoder and language-model Linears and uses FP8 KV-cache cast. Both quantize primary and deepstack merger Linears where present, while leaving patch embedding and vision-attention BMMs in high precision. Exported checkpoints require an inference runtime that supports quantized Vision Encoder Linears.
 - Add ``mtq.temporarily_fold_weights`` for repeated frozen-weight inference and ``mtq.preserve_quantizer_attributes_context`` for restoring temporary quantizer property and type changes. Temporary folding snapshots affected fake-quant weights on a configurable device and restores them with their quantizer state; retained pre-quant scales are inactive, while shared weights, shared quantizers, and ``SequentialQuantizer`` weights are unsupported.
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Instead of setting the global scale from the largest per-block amax seen during calibration (plain ``max``, which leaves no room above it so any larger activation saturates), it anchors the scale to a low percentile of the per-block amax distribution, leaving the rest of the FP8 block-scale range as headroom: ``amax = max(rho * anchor, upper)``, where ``anchor`` and ``upper`` are the per-block amaxes at ``anchor_percentile`` (default 1) and ``upper_percentile`` (default 99.99; set to 100 to never clip calibration data), and ``rho`` (default 16384) is the headroom factor. Applies only to NVFP4 dynamic-block input quantizers; ``SequentialQuantizer`` activation quantizers raise. Weight scales are an orthogonal axis selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian``), so one recipe can combine a weight calibration with this activation policy in a single pass. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` with only the calibration algorithm swapped and exports a standard NVFP4 checkpoint.
-- Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Supports FP8 and NVFP4 on single-process models, resident or offloaded; other formats and placements raise ``NotImplementedError`` before calibration starts.
 
 *Speculative Decoding*
 
@@ -56,6 +61,7 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Migrate the FAR3D ONNX PTQ example to the shared evaluator and ModelOpt containers and ``quantize_vovnet.py``. Only the encoder supports INT8 and FP8; decoder calibration, quantization, and related CLI flags are removed, and the decoder remains in its exported mixed FP16/FP32 precision.
 - Image-text calibration with ``--calib_with_images`` now forwards multimodal batches through the complete VLM for all VLM families, so existing non-Nemotron commands may produce different language-model activation ranges and output scales. Recipe-based VLM PTQ also targets the complete VLM: vision modules stay in high precision by default and are quantized only when a model-specific recipe enables them, so custom recipes must explicitly exclude vision modules when required.
 - Move the checkpoint-mirror recipe tier from ``huggingface/models/<org>/<checkpoint>/`` to the top-level ``models/<org>/<model_id>/``, keyed by each recipe's canonical Hugging Face Hub id — so the Step 3.5 Flash recipe moves to ``models/stepfun-ai/Step-3.5-Flash/ptq/`` and the NVIDIA Nemotron recipes gain the ``NVIDIA-`` prefix (e.g. ``models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse``). Update any saved ``--recipe`` paths for these checkpoint recipes accordingly; the per-``model_type`` recipes under ``huggingface/`` are unchanged.
 - Move the Mistral Medium 3.5 checkpoint-mirror recipe from ``huggingface/models/nvidia/Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib`` to ``models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib``, keying it by the canonical Hugging Face base model. Update any saved ``--recipe`` paths to the new location.
@@ -86,6 +92,7 @@ Changelog
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
+- Fix ``--kv_cache_free_gpu_memory_fraction`` having no effect on the ``lm_eval`` task of ``examples/hf_ptq/scripts/huggingface_example.sh``, where the KV cache always took TensorRT-LLM's default 90% of free GPU memory and evaluation could run out of memory. ``examples/llm_eval/lm_eval_trtllm.py`` now takes ``kv_cache_free_gpu_memory_fraction`` in ``--model_args``, defaulting to 0.8.
 
 0.46.0 (2026-08-18)
 ^^^^^^^^^^^^^^^^^^^
@@ -107,6 +114,7 @@ Changelog
 - Add a ``constant_amax`` ``QuantizerAttributeConfig`` field that pins a quantizer's ``amax`` to a fixed value and skips activation calibration. Unlike ``use_constant_amax`` (which hardcodes 448.0 for KV-cache cast math and registers no buffer), ``constant_amax`` stores the constant on the ``_amax`` buffer so it is used by both the fake-quant forward and the exported scaling factor — for NVFP4 activations, ``constant_amax: 2688.0`` yields ``input_scale == 1.0``. Ships ``modelopt_recipes/general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast.yaml``, which applies this to the MoE expert activation quantizers.
 - Add ``MaxCalibConfig.skip_forward_without_activation_calib`` (opt-in, default ``False``): max calibration skips the ``forward_loop`` when no enabled quantizer needs data-driven activation statistics — e.g. an experts-only recipe using ``constant_amax`` / ``use_constant_amax``, or dynamic / MX quantization. Weight calibration still runs on the weight tensors directly, so quantized weights are unchanged. It is opt-in because the ``forward_loop`` can carry caller-side effects (notably materializing sharded parameters under DeepSpeed ZeRO-3). Enabled by the ``nvfp4_experts_only_input_scale1-kv_fp8_cast`` recipe.
 - Add ``examples/minimax_m3/hf_ptq_mixed_mxfp8_nvfp4.py`` for streaming MiniMax-M3 export and a model-specific ``hf_ptq.py`` recipe that produces an MXFP8 language-model base with MSE-calibrated NVFP4 routed experts directly from BF16. The NVFP4 expert ``input_scale`` is fixed to 1.0.
+- Add opt-in TensorRT-RTX ABI Execution Provider support for ONNX calibration on Windows arm64. Select it with ``--calibration_eps=NvTensorRtRtx --trt_rtx_backend=abi``; the legacy backend remains the default.
 
 *Speculative Decoding*
 
