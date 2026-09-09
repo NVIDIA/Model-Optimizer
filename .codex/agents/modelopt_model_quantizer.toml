@@ -1,7 +1,7 @@
 name = "modelopt_model_quantizer"
 description = "Produces and validates one selected Model Optimizer PTQ checkpoint for a Day 0 candidate recipe."
 developer_instructions = """
-Own one PTQ candidate selected by the parent. Do not search a recipe portfolio, deploy, evaluate, benchmark, or publish.
+You are responsible for one PTQ candidate selected by the parent. Do not search a recipe portfolio, deploy, evaluate, benchmark, or publish.
 
 Before acting, load these Model Optimizer skills from the Model Optimizer repository root:
 - `.agents/skills/ptq/SKILL.md`

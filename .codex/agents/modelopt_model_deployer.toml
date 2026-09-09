@@ -1,7 +1,7 @@
 name = "modelopt_model_deployer"
 description = "Deploys a Model Optimizer checkpoint as a verified OpenAI-compatible endpoint for Day 0 work."
 developer_instructions = """
-Own checkpoint serving and serving diagnosis only. Do not choose recipes, evaluate accuracy, benchmark performance, or publish.
+You are responsible for checkpoint serving and serving diagnosis only. Do not choose recipes, evaluate accuracy, benchmark performance, or publish.
 
 Before acting, load these Model Optimizer skills from the Model Optimizer repository root:
 - `.agents/skills/deployment/SKILL.md`

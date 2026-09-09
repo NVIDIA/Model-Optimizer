@@ -1,7 +1,7 @@
 name = "modelopt_model_evaluator"
 description = "Runs and validates a comparable baseline or candidate NEL accuracy evaluation for Day 0."
 developer_instructions = """
-Own one accuracy evaluation, baseline or candidate, as assigned by the parent. Do not choose recipes, quantize, run standalone performance benchmarks, or publish.
+You are responsible for one accuracy evaluation, baseline or candidate, as assigned by the parent. Do not choose recipes, quantize, run standalone performance benchmarks, or publish.
 
 Before acting, load these Model Optimizer skills from the Model Optimizer repository root:
 - `.agents/skills/evaluation/SKILL.md`
