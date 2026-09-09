@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from modelopt.torch.puzzletron.mip.profiles import normalize_mip_profiles
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -41,11 +42,23 @@ CAMPAIGN_RECIPE_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/recipes/qwen3p5_4b_vlm_campaign.yaml"
 )
 
+ALL_AXIS_DOMAINS = {
+    "hidden_width": {"enabled": True, "teacher_value": 2560, "values": [2400]},
+    "kv_groups": {"enabled": True, "teacher_value": 4, "values": [2]},
+    "q_heads_per_group": {"enabled": True, "teacher_value": 4, "values": [3]},
+    "ffn_intermediate": {"enabled": True, "teacher_value": 9216, "values": [8704]},
+    "gdn_key_groups": {"enabled": True, "teacher_value": 16, "values": [14]},
+    "gdn_value_heads_per_group": {
+        "enabled": True,
+        "teacher_value": 2,
+        "values": [1],
+    },
+    "gdn_key_head_dim": {"enabled": True, "teacher_value": 128, "values": [112]},
+    "gdn_value_head_dim": {"enabled": True, "teacher_value": 128, "values": [112]},
+}
 
-def _compile_plan(
-    tmp_path: Path,
-    recipe_source: Path,
-):
+
+def _compile_plan(tmp_path: Path, recipe_source: Path):
     run_root = tmp_path / recipe_source.stem
     dataset = tmp_path / "dataset"
     recipe = yaml.safe_load(recipe_source.read_text())
@@ -88,80 +101,137 @@ def test_qwen3p5_4b_model_pins_the_bounded_ffn_grid() -> None:
     assert model["pruning"] == {"intermediate_size_list": widths}
 
 
-def test_qwen3p5_4b_smoke_materializes_reloads_and_bounds_kd_and_evaluation(
-    tmp_path: Path,
-) -> None:
-    plan = _compile_plan(
-        tmp_path,
-        SMOKE_RECIPE_PATH,
-    )
+def test_qwen3p5_4b_smoke_covers_all_axes_and_emits_comparable_results(tmp_path: Path) -> None:
+    plan = _compile_plan(tmp_path, SMOKE_RECIPE_PATH)
     config = plan.experiment_config
-    post_stages = tuple(stage for stage in plan.stages if stage.stage_id.startswith("post."))
     nodes = config["post_mip"]["flows"]["params-80"]["nodes"]
+    post_stages = tuple(stage for stage in plan.stages if stage.stage_id.startswith("post."))
 
+    assert config["search_space"]["axes"] == ALL_AXIS_DOMAINS
+    assert config["width_sanity"]["axes"] == list(ALL_AXIS_DOMAINS)
+    assert config["depth_importance"]["max_removals"] == 1
+    profiles = normalize_mip_profiles(
+        config["mip"], available_depths=[0, 1], available_embeddings=[2560, 2400]
+    )
+    assert len(profiles) == 1
+    assert (
+        sum(
+            len(profile.embedding_widths)
+            * len(profile.depth_selections)
+            * profile.solver.num_solutions
+            for profile in profiles
+        )
+        == 4
+    )
     assert tuple(stage.stage_id for stage in post_stages) == (
         "post.params-80.image_eval",
         "post.params-80.best_vlm_loss",
         "post.params-80.materialized",
         "post.params-80.checkpoint_eval",
+        "post.params-80.serving_smoke",
         "post.params-80.short_vlm_kd",
         "post.params-80.post_kd_checkpoint_eval",
+        "post.params-80.result",
+        "post.params-80.final_serving_smoke",
         "post.params-80.final_image_eval",
         "post.params-80.best",
     )
-    assert post_stages[0].parents == ("mip",)
-    for parent, stage in pairwise(post_stages):
+    for parent, stage in pairwise(post_stages[:7]):
         assert stage.parents == (parent.stage_id,)
-    assert nodes["materialized"]["input"] == "best_vlm_loss"
-    assert nodes["checkpoint_eval"]["input"] == "materialized"
-    assert nodes["checkpoint_eval"]["failure_policy"] == "strict"
-    kd = nodes["short_vlm_kd"]
-    assert kd["input"] == "checkpoint_eval"
-    assert kd["config"]["automodel"]["parallel"]["tp"] == 2
-    assert (
-        next(stage for stage in plan.stages if stage.stage_id.endswith("short_vlm_kd")).total_gpus
-        == 2
-    )
+    result_stage = next(stage for stage in post_stages if stage.stage_id.endswith(".result"))
+    assert set(result_stage.parents) == {
+        "post.params-80.materialized",
+        "post.params-80.checkpoint_eval",
+        "post.params-80.short_vlm_kd",
+        "post.params-80.post_kd_checkpoint_eval",
+    }
+    assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_core3_24row_smoke_v2"
+    assert nodes["checkpoint_eval"]["config"] == nodes["post_kd_checkpoint_eval"]["config"]
+    assert nodes["serving_smoke"]["config"] == nodes["final_serving_smoke"]["config"]
+    assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
+    assert nodes["short_vlm_kd"]["config"]["automodel"]["parallel"]["tp"] == 2
+    assert nodes["result"]["config"]["milestones"] == [
+        {"steps": 2, "kd": "short_vlm_kd", "evaluation": "post_kd_checkpoint_eval"}
+    ]
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    assert stages["post.params-80.image_eval"].instances == 2
+    assert stages["post.params-80.short_vlm_kd"].total_gpus == 2
+    assert plan.final_report_partition == plan.runner.slurm.partition_cpu
 
 
-def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(tmp_path) -> None:
-    plan = _compile_plan(
-        tmp_path,
-        CAMPAIGN_RECIPE_PATH,
-    )
+def test_qwen3p5_4b_campaign_runs_exactly_four_candidates_through_matched_kd128(
+    tmp_path: Path,
+) -> None:
+    plan = _compile_plan(tmp_path, CAMPAIGN_RECIPE_PATH)
     config = plan.experiment_config
-    candidates = config["mip"]["runs"]["ffn-candidates"]
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
 
-    assert tuple(config["mip"]["runs"]) == ("params-80", "memory-85", "ffn-candidates")
-    assert config["mip"]["runs"]["params-80"] is False
-    assert config["mip"]["runs"]["memory-85"] is False
-    assert set(candidates["variants"]) == {"width-7168", "width-6144", "width-5120"}
-    assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert nodes["global_kd"]["model_source"] == "materialized"
-    assert tuple(stage.stage_id for stage in plan.stages)[-11:-1] == (
-        "post.candidate-evaluation.online_eval",
+    assert config["embedding_pruning"]["widths"] == [2560, 2400, 2240]
+    assert set(config["search_space"]["axes"]) == set(ALL_AXIS_DOMAINS)
+    assert config["depth_importance"]["max_removals"] == 2
+    profiles = normalize_mip_profiles(
+        config["mip"], available_depths=[0, 1, 2], available_embeddings=[2560, 2400, 2240]
+    )
+    search_profiles = [profile for profile in profiles if profile.run_id == "search-candidates"]
+    assert {profile.variant_id for profile in search_profiles} == {"params-82", "memory-85"}
+    assert (
+        sum(
+            len(profile.embedding_widths)
+            * len(profile.depth_selections)
+            * profile.solver.num_solutions
+            for profile in search_profiles
+        )
+        == 18
+    )
+    assert nodes["selected"] == {
+        "type": "filter",
+        "input": "online_eval",
+        "mode": "top_k",
+        "metric": "online_eval.lm_loss",
+        "direction": "minimize",
+        "top_k": 4,
+        "require_exact_count": True,
+    }
+    kd = nodes["kd_128"]
+    assert kd["input"] == "serving_smoke"
+    assert kd["model_source"] == "materialized"
+    assert kd["config"]["resume"] is True
+    assert kd["config"]["max_steps"] == 128
+    assert kd["config"]["global_batch_size"] == 4
+    assert kd["config"]["checkpoint_every_steps"] == 128
+    assert kd["exposure"]["cumulative_examples"] == 512
+    assert nodes["pre_kd_quality"]["config"] == nodes["quality_benchmarks"]["config"]
+    assert nodes["pre_kd_quality"]["config"]["profile"] == (
+        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+    )
+    assert nodes["comparison_ready"]["config"]["milestones"] == [
+        {"steps": 128, "kd": "kd_128", "evaluation": "quality_benchmarks"}
+    ]
+    assert [entry["weight"] for entry in nodes["best"]["metrics"]] == [100, 100, 1]
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    assert stages["replacement_scoring"].instances == 8
+    assert stages["post.candidate-evaluation.online_eval"].instances == 8
+    four_candidate_stages = {
         "post.candidate-evaluation.materialized",
-        "post.candidate-evaluation.serving",
-        "post.candidate-evaluation.screening_kd",
-        "post.candidate-evaluation.screening_eval",
-        "post.candidate-evaluation.quality_screen",
-        "post.candidate-evaluation.selected",
-        "post.candidate-evaluation.global_kd",
+        "post.candidate-evaluation.pre_kd_quality",
+        "post.candidate-evaluation.serving_smoke",
+        "post.candidate-evaluation.kd_128",
         "post.candidate-evaluation.final_eval",
         "post.candidate-evaluation.quality_benchmarks",
-    )
-    assert tuple(stage.stage_id for stage in plan.stages)[-1] == "post.candidate-evaluation.best"
-    stages = {stage.stage_id: stage for stage in plan.stages}
-    candidate_stages = {
-        "post.candidate-evaluation.online_eval",
-        "post.candidate-evaluation.materialized",
-        "post.candidate-evaluation.serving",
-        "post.candidate-evaluation.screening_kd",
-        "post.candidate-evaluation.screening_eval",
-        "post.candidate-evaluation.quality_screen",
+        "post.candidate-evaluation.student_performance",
     }
-    assert all(stages[stage_id].instances == 4 for stage_id in candidate_stages)
-    assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 8
-    assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
-    assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2
+    assert all(stages[stage_id].instances == 4 for stage_id in four_candidate_stages)
+    assert stages["post.candidate-evaluation.kd_128"].total_gpus == 8
+    assert all(
+        stages[stage_id].total_gpus == 4
+        for stage_id in four_candidate_stages - {"post.candidate-evaluation.kd_128"}
+    )
+    assert plan.runner.slurm.max_nodes == 1
+    assert all(stages[stage_id].nodes <= 1 for stage_id in four_candidate_stages)
+    performance = nodes["student_performance"]["config"]
+    assert performance["repetitions"] == 3
+    assert performance["image_batch_sizes"] == [1, 6, 12]
+    assert performance["concurrency"] == [1, 4]
+    teacher_nodes = config["post_mip"]["flows"]["teacher-performance"]["nodes"]
+    assert teacher_nodes["teacher_performance"]["config"] == performance
+    assert plan.final_report_partition == plan.runner.slurm.partition_cpu

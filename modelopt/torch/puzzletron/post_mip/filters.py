@@ -57,7 +57,8 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
     common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
     allowed = {
-        "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
+        "top_k": common
+        | {"metric", "direction", "top_k", "best_selection_mode", "require_exact_count"},
         "threshold": common | {"metric", "min", "max"},
         "pareto": common | {"metrics"},
         "aggregate_rank": common | {"metrics", "top_k"},
@@ -70,6 +71,9 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     if mode in {"top_k", "threshold"} and not config.get("metric"):
         raise ValueError(f"{mode} filter requires metric")
     if mode == "top_k":
+        require_exact_count = config.get("require_exact_count", False)
+        if not isinstance(require_exact_count, bool):
+            raise TypeError("top_k.require_exact_count must be a boolean")
         direction = str(config.get("direction", "minimize"))
         if direction not in {"minimize", "maximize"}:
             raise ValueError("top_k direction must be minimize or maximize")
@@ -89,6 +93,10 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
         top_k = config.get("top_k")
         if best_selection_mode is not None and isinstance(top_k, Mapping):
             raise ValueError("best_selection_mode requires an integer top_k")
+        if require_exact_count and (best_selection_mode is not None or isinstance(top_k, Mapping)):
+            raise ValueError(
+                "require_exact_count requires a scalar top_k without best_selection_mode"
+            )
         if isinstance(top_k, Mapping):
             if set(top_k) - {"homogeneous", "heterogeneous"}:
                 raise ValueError("top_k quotas accept homogeneous and heterogeneous only")
@@ -126,6 +134,14 @@ def _origin_kind(ledger: CandidateLedger, revision_id: str) -> str:
     while revision.parent_revision_id is not None:
         revision = ledger.revisions[revision.parent_revision_id]
     return str(revision.artifact.get("kind", "heterogeneous"))
+
+
+def _require_exact_top_k(selected: Sequence[str], config: Mapping[str, Any]) -> None:
+    if config.get("require_exact_count") and len(selected) != int(config["top_k"]):
+        raise RuntimeError(
+            f"top_k requires exactly {int(config['top_k'])} selected revisions; "
+            f"found {len(selected)} with complete finite metric evidence"
+        )
 
 
 def _ordered_metric_rows(
@@ -176,6 +192,7 @@ def _apply_sweep_top_k(
         selected = tuple(revision_id for _value, revision_id in rows[:top_k])
         for _value, revision_id in rows[top_k:]:
             excluded[revision_id] = "outside top_k"
+        _require_exact_top_k(selected, config)
         return selected, excluded, scores
 
     selected_ids = set()
@@ -238,6 +255,7 @@ def apply_filter(
         for _value, revision_id in rows:
             if revision_id not in selected:
                 excluded[revision_id] = "outside top_k"
+        _require_exact_top_k(selected, config)
         return selected, excluded, scores
 
     if mode == "threshold":

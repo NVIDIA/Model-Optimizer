@@ -1,0 +1,59 @@
+# @package _global_
+
+# Shared 4B VLM evaluator identities. The resolver replaces the evaluator
+# revision with the immutable worker-source identity before sealing a run.
+vlm_4b_quality_evaluation:
+  profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
+  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+  row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
+  reference_checkpoint: ${teacher_dir}
+  reference_once: true
+  reference_cache_id: qwen3p5-4b-core-3_344-examples-r1-vllm-teacher
+  batch_size: 1
+  timeout_seconds: 14400
+  dtype: bfloat16
+  gdn_prefill_backend: triton
+  gpu_memory_utilization: 0.7
+  max_model_len: 32768
+  limit_mm_per_prompt: {image: 32}
+  topology: &single_gpu_vllm
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    prefill_context_parallel_size: 1
+    decode_context_parallel_size: 1
+    enable_expert_parallel: false
+    distributed_executor_backend: mp
+    gpu_group_size: 1
+
+vlm_4b_campaign_evaluation:
+  profile: ${vlm_4b_quality_evaluation.profile}
+  evaluator_revision: ${vlm_4b_quality_evaluation.evaluator_revision}
+  row_manifest_sha256: ${vlm_4b_quality_evaluation.row_manifest_sha256}
+  reference_checkpoint: ${vlm_4b_quality_evaluation.reference_checkpoint}
+  reference_once: ${vlm_4b_quality_evaluation.reference_once}
+  reference_cache_id: ${vlm_4b_quality_evaluation.reference_cache_id}
+  batch_size: ${vlm_4b_quality_evaluation.batch_size}
+  timeout_seconds: ${vlm_4b_quality_evaluation.timeout_seconds}
+  dtype: ${vlm_4b_quality_evaluation.dtype}
+  gdn_prefill_backend: ${vlm_4b_quality_evaluation.gdn_prefill_backend}
+  gpu_memory_utilization: ${vlm_4b_quality_evaluation.gpu_memory_utilization}
+  max_model_len: ${vlm_4b_quality_evaluation.max_model_len}
+  limit_mm_per_prompt: ${vlm_4b_quality_evaluation.limit_mm_per_prompt}
+  topology: ${vlm_4b_quality_evaluation.topology}
+
+vlm_4b_smoke_evaluation:
+  profile: qwen35_vlm_core3_24row_smoke_v2
+  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+  row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
+  reference_checkpoint: ${teacher_dir}
+  reference_once: true
+  reference_cache_id: qwen3p5-4b-core-3_24-examples-r1-vllm-teacher
+  batch_size: 1
+  timeout_seconds: 3000
+  dtype: bfloat16
+  gdn_prefill_backend: triton
+  gpu_memory_utilization: 0.7
+  max_model_len: 16384
+  limit_mm_per_prompt: {image: 32}
+  topology: *single_gpu_vllm

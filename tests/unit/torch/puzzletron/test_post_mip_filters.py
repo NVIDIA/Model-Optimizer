@@ -224,6 +224,43 @@ def test_top_k_rejects_unknown_best_selection_mode(best_selection_mode):
         )
 
 
+def test_top_k_exact_count_fails_before_fanout_when_finite_candidates_are_missing(tmp_path):
+    ledger = _ledger(
+        tmp_path,
+        {
+            "revision-a": {"loss": 1.0},
+            "revision-b": {"loss": math.nan},
+            "revision-c": {"loss": 3.0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="requires exactly 3 selected revisions; found 2"):
+        apply_filter(
+            ledger,
+            tuple(ledger.revisions),
+            {
+                "mode": "top_k",
+                "metric": "serving.loss",
+                "direction": "minimize",
+                "top_k": 3,
+                "require_exact_count": True,
+            },
+        )
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_top_k_exact_count_requires_a_boolean(value):
+    with pytest.raises(TypeError, match="require_exact_count"):
+        validate_filter_config(
+            {
+                "mode": "top_k",
+                "metric": "serving.loss",
+                "top_k": 3,
+                "require_exact_count": value,
+            }
+        )
+
+
 def test_best_selection_mode_is_rejected_on_non_top_k_filter():
     with pytest.raises(ValueError, match="best_selection_mode"):
         validate_filter_config(

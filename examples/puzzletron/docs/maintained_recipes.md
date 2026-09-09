@@ -9,8 +9,8 @@ model and modality before running a campaign.
 | `qwen3p5_0p8b_text_smoke.yaml` | Text pruning lifecycle with bounded evaluation, serving, and distillation | `single-gpu` |
 | `qwen3p5_0p8b_vlm_smoke.yaml` | Image-text pruning lifecycle with bounded evaluation, serving, and distillation | `smoke` |
 | `qwen3p5_0p8b_vlm_campaign.yaml` | Larger multi-axis image-text integration example | `campaign` |
-| `qwen3p5_4b_vlm_smoke.yaml` | 4B FFN-pruning lifecycle with bounded evaluation and distillation | `smoke` |
-| `qwen3p5_4b_vlm_campaign.yaml` | 4B FFN-width search and screening example | `campaign` |
+| `qwen3p5_4b_vlm_smoke.yaml` | 4B all-axis lifecycle with bounded evaluation, serving, and distillation | `smoke` |
+| `qwen3p5_4b_vlm_campaign.yaml` | 4B exact-four all-axis search with matched KD128 | `campaign` |
 
 Smoke workloads validate that the configured lifecycle runs, produces usable
 checkpoints, and resumes. Their scores and throughput are not model-quality or
@@ -76,19 +76,23 @@ python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
   --max-shards-per-subset 1
 ```
 
-Set `data.path` to `/shared/data/qwen3p5-vlm`. The campaign needs at least 64
+Set `data.path` to `/shared/data/qwen3p5-vlm`. The campaign needs at least 512
 samples, so prepare a separate directory with the same command and
-`--num-samples 64`, then point the campaign recipe to it.
+`--num-samples 512`, then point the campaign recipe to it.
 
-The smoke searches aligned FFN widths and checks materialization, checkpoint
-reload, bounded RealWorldQA evaluation, two TP2 distillation steps, final
-image-text evaluation, reporting, and resume on two colocated GPUs.
+The smoke exercises hidden width, FFN width, grouped attention, GDN geometry,
+and depth before checking materialization, checkpoint reload, a frozen 24-row
+image-text evaluation, serving, two TP2 distillation steps, structured results,
+reporting, and resume on two colocated GPUs.
 
-The campaign compares roughly 10%, 15%, and 20% FFN-pruning bands using matched
-image-text loss, serving, screening distillation, and evaluation. Its ranking
-policy and training budgets are examples. Compare candidates only when their
-model, data, evaluator, sampling, generation, teacher, and runtime identities
-match.
+The campaign generates candidates from parameter and serving-memory budgets
+over every supported structural axis. It ranks complete finite pre-KD
+image-text loss, fails before fanout unless exactly four distinct architectures
+remain, and gives all four the same frozen pre/post evaluation and resumable
+128-step, 512-example TP2 distillation exposure. Final quality ranks dominate
+the serving tie-breaker. These search, ranking, and training budgets are example
+settings. Compare candidates only when their model, data, evaluator, sampling,
+generation, teacher, and runtime identities match.
 
 ## Inspect results
 
