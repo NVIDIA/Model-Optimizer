@@ -1134,6 +1134,27 @@ def copy_custom_model_files(
         print("No checkpoint sidecar files found to copy")
 
 
+def save_source_config(args, export_path) -> None:
+    """Copy the source model's config to the export path, for VLMs the exporters skip."""
+    print(f"Saving original model config to {export_path}")
+    config_kwargs = {"trust_remote_code": args.trust_remote_code}
+    if args.attn_implementation is not None:
+        config_kwargs["attn_implementation"] = args.attn_implementation
+    AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
+
+
+def save_processor_config(args, export_path) -> None:
+    """Copy the processor config, without which a VLM checkpoint cannot preprocess images."""
+    try:
+        print(f"Saving processor config to {export_path}")
+        AutoProcessor.from_pretrained(
+            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+        ).save_pretrained(export_path)
+    except Exception as e:
+        print(f"Warning: Could not save processor config: {e}")
+        print("This is normal for some VLM architectures that don't use AutoProcessor")
+
+
 def _layerwise_blocks(algorithm) -> list[dict]:
     """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
     entries = algorithm if isinstance(algorithm, list) else [algorithm]

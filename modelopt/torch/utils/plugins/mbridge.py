@@ -14,8 +14,11 @@
 # limitations under the License.
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
+import re
+from functools import cache
 from typing import Any
 
+import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
@@ -30,12 +33,94 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
-from transformers import AutoTokenizer
+from torch.distributed.checkpoint import FileSystemReader
+from transformers import AutoConfig, AutoTokenizer
 
+from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 
-__all__ = ["load_mbridge_model_from_hf", "load_modelopt_megatron_checkpoint"]
+__all__ = [
+    "get_language_model",
+    "is_vlm_config",
+    "load_mbridge_model_from_hf",
+    "load_modelopt_megatron_checkpoint",
+    "set_moe_expert_layout",
+    "use_moe_grouped_gemm",
+]
+
+
+def get_language_model(model: MegatronModule) -> tuple[MegatronModule, bool]:
+    """Return ``(language_model, is_vlm)``; VLM wrappers nest it under ``.language_model``.
+
+    Must agree with :func:`is_vlm_config`, which answers the same question before the Megatron
+    model exists, and with ``GPTModelExporter``, which repeats this because ``modelopt.torch.export``
+    cannot import this module.
+    """
+    if isinstance(model, GPTModel | HybridModel):
+        return model, False
+    language_model = getattr(model, "language_model", None)
+    return (model, False) if language_model is None else (language_model, True)
+
+
+@cache
+def _hf_config(hf_model_name_or_path: str, trust_remote_code: bool = False):
+    """Cached ``AutoConfig`` for the helpers below; a script asks the same questions repeatedly.
+
+    Shared, so treat the result as read-only.
+    """
+    return AutoConfig.from_pretrained(hf_model_name_or_path, trust_remote_code=trust_remote_code)
+
+
+def is_vlm_config(hf_model_name_or_path: str, trust_remote_code: bool = False) -> bool:
+    """Whether a HuggingFace checkpoint describes a VLM, from its config alone."""
+    return hasattr(_hf_config(hf_model_name_or_path, trust_remote_code), "vision_config")
+
+
+def use_moe_grouped_gemm(
+    hf_model_name_or_path: str,
+    trust_remote_code: bool = False,
+    force_sequential: bool = False,
+) -> bool:
+    """Pick the MoE expert layout: grouped GEMM unless that would not be HF-exportable.
+
+    Grouped GEMM calibrates faster, but only architectures with an ``experts.linear_fc1`` export
+    rule can be converted to HuggingFace from it. Every script that builds the model must agree,
+    since the layout is baked into the Megatron checkpoint -- hence a pure function of the config.
+    """
+    if force_sequential:
+        return False
+    config = _hf_config(hf_model_name_or_path, trust_remote_code)
+    text_config = getattr(config, "text_config", config)
+    is_moe = any(
+        getattr(text_config, name, None)
+        for name in ("num_experts", "num_local_experts", "n_routed_experts")
+    )
+    if not is_moe:
+        return True  # ignored for dense models
+    architectures = getattr(config, "architectures", None) or [""]
+    exportable = "experts.linear_fc1" in all_mcore_hf_export_mapping.get(architectures[0], {})
+    if not exportable:
+        warn_rank_0(
+            f"{architectures[0]} has no export rule for fused (grouped GEMM) MoE experts; "
+            "building them as SequentialMLP so the checkpoint stays exportable."
+        )
+    return exportable
+
+
+def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
+    """Apply the MoE expert layout to a provider, hybrid stack spec included.
+
+    Set ``moe_grouped_gemm`` on the provider (the bridge's native, possibly custom/hybrid spec
+    reads it at build time) rather than replacing the whole layer spec -- overwriting it would
+    drop custom layers (e.g. Qwen3.5's GatedDeltaNet or Gemma3's custom spec). A hybrid provider
+    additionally needs its stack spec rebuilt, since the native one pins ``TEGroupedMLP``.
+    """
+    if isinstance(provider, HybridModelProvider):
+        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
+    elif (provider.num_moe_experts or 0) > 0:
+        provider.moe_grouped_gemm = moe_grouped_gemm
 
 
 def load_mbridge_model_from_hf(
@@ -61,7 +146,6 @@ def load_mbridge_model_from_hf(
         provider_overrides: Overrides for the provider.
         init_model_parallel: Whether to initialize model parallel.
         moe_grouped_gemm: Whether to use grouped GEMM for MoE.
-            Pruning does not support grouped GEMM yet.
         load_weights: Whether to load the HF weights into the model. Set to ``False`` when the
             weights will be loaded from a Megatron checkpoint instead (e.g. for export), in which
             case only the model structure (with the correct layer spec) is built.
@@ -84,14 +168,7 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    # Set moe_grouped_gemm on the provider (the bridge's native, possibly custom/hybrid spec reads
-    # it at build time) rather than replacing the whole layer spec -- overwriting it would drop
-    # custom layers (e.g. Qwen3.5's GatedDeltaNet + gated-attention or Gemma3's custom spec).
-    if isinstance(provider, HybridModelProvider):
-        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
-        provider.moe_grouped_gemm = moe_grouped_gemm
-    elif (provider.num_moe_experts or 0) > 0:
-        provider.moe_grouped_gemm = moe_grouped_gemm
+    set_moe_expert_layout(provider, moe_grouped_gemm)
     provider.finalize()
     if init_model_parallel:
         provider.initialize_model_parallel(seed=0)
@@ -99,9 +176,9 @@ def load_mbridge_model_from_hf(
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
-    # VLMs (e.g. Qwen3-VL) wrap the language model as ``.language_model``; the pruning target is the
-    # inner GPTModel/HybridModel, but we still return the full wrapper so callers can save the VLM.
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
+    # The optimization target is the inner GPTModel/HybridModel, but callers get the full
+    # wrapper back so they can save the whole VLM.
+    language_model, _ = get_language_model(unwrapped_model)
     assert isinstance(language_model, GPTModel | HybridModel), (
         f"Expected a GPTModel/HybridModel (optionally wrapped as `.language_model`), "
         f"got {type(unwrapped_model)}"
@@ -118,9 +195,14 @@ def load_mbridge_model_from_hf(
     return bridge, provider, model, unwrapped_model, tokenizer
 
 
+def _checkpoint_keys(checkpoint_path: str) -> list[str]:
+    """Tensor names in a Megatron distributed checkpoint."""
+    return list(FileSystemReader(checkpoint_path).read_metadata().state_dict_metadata)
+
+
 def load_modelopt_megatron_checkpoint(
     model: list[MegatronModule], megatron_path: str, restore_modelopt_state: bool = True
-) -> None:
+) -> list[MegatronModule]:
     """Load Megatron checkpoint weights (with modelopt_state).
 
     Args:
@@ -129,10 +211,69 @@ def load_modelopt_megatron_checkpoint(
         restore_modelopt_state: Whether to restore the ModelOpt state (e.g. quantizers) before loading
             weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
             student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
+
+    Returns:
+        The modules loaded into: ``.language_model`` for a language-model-only VLM checkpoint,
+        otherwise the modules passed in. Callers that then move the ModelOpt state need this to
+        know where it landed.
     """
+    # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
+    checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
+
+    # ``distill.py`` distills a VLM's language model only, so its checkpoint holds the language
+    # model at the root and must be loaded into ``.language_model``, not the full VLM wrapper.
+    # Keyed off the same ``language_model.`` prefix ``get_language_model`` navigates, so a renamed
+    # vision tower cannot make a full-VLM checkpoint look language-model-only.
+    checkpoint_keys = _checkpoint_keys(checkpoint_path)
+    unwrapped_model = unwrap_model(model)
+    if any(get_language_model(m)[1] for m in unwrapped_model) and not any(
+        key.startswith("language_model.") for key in checkpoint_keys
+    ):
+        print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
+        model = [get_language_model(m)[0] for m in unwrapped_model]
+
+    # The expert layout is baked into the checkpoint and the two layouts use different key names,
+    # so a model built with the other one would load its experts as random init: the load is
+    # non-strict. Fires only when the layout is positively identified, so unknown naming is silent.
+    grouped_re = re.compile(r"experts\.linear_fc[12]\.weight\d")
+    ckpt_grouped = any(grouped_re.search(key) for key in checkpoint_keys)
+    ckpt_sequential = any(".local_experts." in key for key in checkpoint_keys)
+    param_names = [name for m in unwrap_model(model) for name, _ in m.named_parameters()]
+    model_has_experts = any(".experts." in name for name in param_names)
+    model_grouped = any(grouped_re.search(name) for name in param_names)
+    if torch.distributed.is_initialized():
+        # checkpoint_keys is global but named_parameters() is this PP stage only, so a stage
+        # holding no MoE layer would otherwise raise on its own and hang the ranks that do not.
+        flags = torch.tensor(
+            [int(model_has_experts), int(model_grouped)],
+            dtype=torch.int,
+            device=torch.cuda.current_device(),
+        )
+        torch.distributed.all_reduce(flags, op=torch.distributed.ReduceOp.MAX)
+        model_has_experts, model_grouped = bool(flags[0].item()), bool(flags[1].item())
+    if model_has_experts and (
+        (ckpt_grouped and not model_grouped) or (ckpt_sequential and model_grouped)
+    ):
+        raise ValueError(
+            f"{megatron_path} stores MoE experts as "
+            f"{'grouped GEMM (TEGroupedMLP)' if ckpt_grouped else 'SequentialMLP'} but the model "
+            f"was built as {'grouped GEMM' if model_grouped else 'SequentialMLP'}; the expert "
+            "weights would load as random init. Rebuild with the matching layout "
+            "(--no_moe_grouped_gemm toggles it)."
+        )
+
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
-    if restore_modelopt_state and has_modelopt_state(megatron_path):
-        load_modelopt_state(model, megatron_path)
-    # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
-    _load_model_weights_from_checkpoint(_get_modelopt_checkpoint_path(megatron_path), model)
+    if restore_modelopt_state:
+        if has_modelopt_state(megatron_path):
+            load_modelopt_state(model, megatron_path)
+        elif any("_quantizer." in key for key in checkpoint_keys):
+            # The quantizers cannot be rebuilt without the state, and the loader ignores the
+            # leftover amax tensors, so the model would silently load unquantized.
+            raise RuntimeError(
+                f"{megatron_path} holds quantizer tensors but no restorable ModelOpt state. "
+                "The state was dropped when the checkpoint was written -- re-run the step that "
+                "produced it."
+            )
+    _load_model_weights_from_checkpoint(checkpoint_path, model)
+    return model

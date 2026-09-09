@@ -994,3 +994,74 @@ class TestLocalDatasetDirRoundTrips:
         )
         batches = list(loader)
         assert sum(b["input_ids"].shape[0] for b in batches) == 5
+
+
+class TestVLMShardedIterable:
+    """DP sharding of a streaming VLM calibration set: uneven per-rank counts deadlock calibration."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_transformers(self):
+        pytest.importorskip("transformers")
+
+    @staticmethod
+    def _counts(total: int, world: int, *, delivered: int | None = None) -> list[int]:
+        """Per-rank counts when the stream delivers ``delivered`` items but ``total`` were asked for."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(
+            list(range(total if delivered is None else delivered)), num_samples=total
+        )
+        return [
+            len(list(_ShardedIterable(base, rank=r, world=world, per_rank=total // world)))
+            for r in range(world)
+        ]
+
+    @pytest.mark.parametrize("total", [1024, 1023, 1022, 510, 7])
+    @pytest.mark.parametrize("world", [2, 4])
+    def test_every_rank_gets_the_same_count(self, total, world):
+        counts = self._counts(total, world)
+        assert len(set(counts)) == 1, f"uneven shards {counts} for total={total} world={world}"
+        assert counts[0] == total // world
+
+    def test_shards_are_disjoint_and_ordered(self):
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        shards = [list(_ShardedIterable(base, rank=r, world=4, per_rank=5)) for r in range(4)]
+        assert shards[0][:3] == [0, 4, 8]
+        flat = [x for s in shards for x in s]
+        assert len(flat) == len(set(flat)), "shards overlap"
+
+    @pytest.mark.parametrize(
+        ("num_samples", "n_subsets"), [(1024, 3), (512, 3), (256, 3), (100, 7), (2, 3), (0, 3)]
+    )
+    def test_nemotron_subset_budget_sums_to_num_samples(self, num_samples, n_subsets):
+        """A stream that delivers fewer than requested is what hands the sharder uneven counts."""
+        from modelopt.torch.utils.nemotron_vlm_dataset_utils import subset_sample_targets
+
+        subsets = [f"subset_{i}" for i in range(n_subsets)]
+        targets = subset_sample_targets(num_samples, subsets)
+        assert sum(targets.values()) == num_samples
+        assert set(targets) == set(subsets)
+
+    def test_short_stream_still_yields_equal_counts(self):
+        """The stream can come up short (skipped shards, decode failures); ranks must stay in step."""
+        counts = self._counts(total=64, world=4, delivered=57)
+        assert counts == [16, 16, 16, 16], counts
+
+    def test_stream_shorter_than_world_is_rejected(self):
+        """Fewer samples than ranks would leave some ranks with nothing to forward."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper([], num_samples=0)
+        with pytest.raises(RuntimeError, match="no calibration samples"):
+            list(_ShardedIterable(base, rank=0, world=2, per_rank=1))

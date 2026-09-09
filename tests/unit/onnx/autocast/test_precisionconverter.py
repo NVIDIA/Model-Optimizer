@@ -2220,6 +2220,25 @@ def test_convert_to_f16_restores_public_io_metadata_from_entry_boundary():
     onnx.checker.check_model(converted, full_check=True)
 
 
+def test_convert_to_f16_combines_op_and_node_exclusions(simple_model):
+    model, *_ = simple_model
+    converted = convert_to_f16(
+        model,
+        keep_io_types=False,
+        op_block_list=["MatMul"],
+        nodes_to_exclude=[r"^add$"],
+    )
+
+    value_types = {
+        value.name: value.type.tensor_type.elem_type
+        for value in (*converted.graph.output, *converted.graph.value_info)
+    }
+    assert value_types["gemm_output"] == TensorProto.FLOAT
+    assert value_types["add_output"] == TensorProto.FLOAT
+    assert value_types["Y"] == TensorProto.FLOAT16
+    onnx.checker.check_model(converted, full_check=True)
+
+
 def test_convert_to_f16_refreshes_gathernd_pre_cast_declaration(monkeypatch):
     def discover_test_plugins_without_trt(self):
         self.custom_ops = {
