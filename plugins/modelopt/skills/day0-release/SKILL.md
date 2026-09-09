@@ -181,11 +181,13 @@ For example, on a 1 % gate on DeepSeek-V4-Pro, both tasks that originally failed
 | IFBench | 16 | **0.63 pp** | PASS |
 
 Add precision by submitting the benchmark **more times**, not by raising
-`num_repeats` within a run — see `recipes/tasks/aa/scicode.md` for why.
+`num_repeats` within a run. SciCode's floor is **8 runs per side**, pooled as a
+mean — `recipes/tasks/aa/scicode.md`.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
-replay cached responses — two runs came back bit-identical to 16 digits. Confirm the score
-actually moved before counting a run as an independent repeat.
+replay cached responses — two runs came back bit-identical to 16 digits. But an equal score is a
+signal to check provenance (invocation id, output dir, response artifacts), **not** proof of replay:
+discrete-scored tasks tie legitimately. Confirm replay before discarding a run as a duplicate.
 
 After recording the external status, produce per-task deltas and run:
 
