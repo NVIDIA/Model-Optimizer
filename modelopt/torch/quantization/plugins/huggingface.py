@@ -1105,8 +1105,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
 
         Overrides the base, which would go through :meth:`iter_weights_for_calibration` and
         evaluate ``weight[idx]``. Under FSDP2 that weight is a DTensor, so every expert slice
-        dispatches a redistribute collective -- tens of thousands of them on a large MoE, for
-        values a quantizer-only caller throws away.
+        dispatches a redistribute collective to produce a value a quantizer-only caller discards.
         """
         for weight_name, quantizers_name in (
             (self._first_proj_attr, self._first_proj_weight_quantizers_attr),
