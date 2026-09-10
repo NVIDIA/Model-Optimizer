@@ -177,6 +177,8 @@ To additionally apply NVFP4 scale swizzle and padding , add:
 
 **You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
 
+For a custom, non-Diffusers PyTorch model, see [Export a custom PyTorch model to a ComfyUI FP8 or NVFP4 checkpoint](./quantization/CUSTOM-TORCH-TO-COMFYUI.md).
+
 ## Quantization Aware Training (QAT)
 
 Quantization-Aware Training (QAT) is a powerful technique for optimizing your models, particularly when post-training quantization (PTQ) methods fail to meet the requirements for your tasks. By simulating the effects of quantization during training, QAT allows the model to learn to minimize the quantization error, ultimately delivering better accuracy.
