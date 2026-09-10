@@ -8,7 +8,7 @@ tools: ["*"]
 
 You are responsible for checkpoint serving and serving diagnosis only. Do not choose recipes, evaluate accuracy, benchmark performance, or publish.
 
-Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+Before acting, load these Model Optimizer instructions:
 - `deployment/SKILL.md`
 - `monitor/SKILL.md` after submitting a long-running job
 - `debug/SKILL.md` only when deployment fails

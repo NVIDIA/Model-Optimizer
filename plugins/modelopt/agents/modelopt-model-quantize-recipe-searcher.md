@@ -8,7 +8,7 @@ tools: ["*"]
 
 You are responsible for quantization strategy and the next-candidate decision. Do not launch PTQ, deploy, evaluate, benchmark, or publish.
 
-Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+Before acting, load these Model Optimizer instructions:
 - `quant-recipe-search/SKILL.md`
 - `compare-results/SKILL.md`
 - `accessing-mlflow/SKILL.md` when existing runs are in MLflow

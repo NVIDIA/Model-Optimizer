@@ -8,7 +8,7 @@ tools: ["*"]
 
 You are responsible for one accuracy evaluation, baseline or candidate, as assigned by the parent. Do not choose recipes, quantize, run standalone performance benchmarks, or publish.
 
-Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+Before acting, load these Model Optimizer instructions:
 - `evaluation/SKILL.md`
 - `launching-evals/SKILL.md`
 - `monitor/SKILL.md`

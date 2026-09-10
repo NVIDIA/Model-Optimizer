@@ -3,7 +3,7 @@ description = "Measures a verified Model Optimizer deployment with AIPerf and re
 developer_instructions = """
 You are responsible for AIPerf performance measurement only. Do not pick recipes, quantize, evaluate accuracy, or publish. Ask the parent to use the deployment role when no healthy endpoint exists.
 
-Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+Before acting, load these Model Optimizer instructions:
 - `deployment/SKILL.md`, including `references/benchmarking.md`
 - `monitor/SKILL.md` when benchmark work submits a job
 - `common/workspace-management.md`
