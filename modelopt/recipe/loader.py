@@ -218,23 +218,35 @@ def _peek_recipe_type(
     except (TypeError, KeyError, ValueError):
         pass
 
+    for base in delegated_recipe_paths(raw):
+        if str(base) in _seen:
+            continue
+        rtype = _peek_recipe_type(base, _seen)
+        if rtype is not None:
+            return rtype
+    return None
+
+
+def delegated_recipe_paths(raw: dict) -> list[Path | Traversable]:
+    """Resolve the recipe files a raw recipe body delegates to via top-level ``$import``.
+
+    Returns an empty list for an ordinary recipe. Names that do not appear in the
+    ``imports`` section, or that do not resolve to a file, are skipped here and reported
+    by ``$import`` resolution itself with a better message.
+    """
     ref = raw.get("$import")
-    if ref is None:
-        return None
     imports = raw.get("imports") or {}
-    if not isinstance(imports, dict):
-        return None
+    if ref is None or not isinstance(imports, dict):
+        return []
+    paths = []
     for name in ref if isinstance(ref, list) else [ref]:
         target = imports.get(name)
         if not target:
             continue
         resolved = _resolve_recipe_path(target)
-        if str(resolved) in _seen or not resolved.is_file():
-            continue
-        rtype = _peek_recipe_type(resolved, _seen)
-        if rtype is not None:
-            return rtype
-    return None
+        if resolved.is_file():
+            paths.append(resolved)
+    return paths
 
 
 def _load_recipe_from_file(
@@ -258,22 +270,36 @@ def _load_recipe_from_file(
     if schema_class is None:
         raise ValueError(f"Unsupported recipe type: {rtype!r}")
 
+    import yaml
+
+    raw = yaml.safe_load(recipe_file.read_text()) or {}
+    raw = raw if isinstance(raw, dict) else {}
+
+    # A recipe that delegates inherits the imported recipe's body wholesale, so the two
+    # have to be the same kind. Checked here, and against the *declared* kind on both
+    # sides, so a mismatch reads as a mismatch -- otherwise it surfaces as whatever
+    # pydantic makes of, say, an ``eagle`` section spliced into a PTQ schema.
+    for base in delegated_recipe_paths(raw):
+        base_type = _peek_recipe_type(base)
+        if base_type is not None and base_type != rtype:
+            raise ValueError(
+                f"Recipe file {recipe_file} is a {rtype.value!r} recipe but imports "
+                f"{base}, which is a {base_type.value!r} recipe. A top-level '$import' "
+                "takes over the whole body, so both must be the same kind."
+            )
+
     # Pre-flight check on the *raw* YAML so the user sees a clear loader-level error
     # rather than a generic pydantic missing-field error.  Speculative recipes' body
     # sections have field-level defaults, so this check is what keeps their loader
     # semantics consistent with PTQ.
     required_section = _REQUIRED_SECTION_PER_RECIPE_TYPE.get(rtype)
     if required_section is not None:
-        import yaml
-
-        raw = yaml.safe_load(recipe_file.read_text()) or {}
         # A recipe may delegate its whole body to another recipe with a top-level
         # ``$import`` and override only ``metadata`` -- see :ref:`recipe-alias`. The
         # body section then arrives during import resolution, so it cannot be required
         # in the raw YAML; pydantic still rejects the result if the import does not
         # supply one.
-        delegates = isinstance(raw, dict) and "$import" in raw
-        if not delegates and (not isinstance(raw, dict) or required_section not in raw):
+        if "$import" not in raw and required_section not in raw:
             # Strip only the ``speculative_`` prefix so multi-word non-speculative types
             # (e.g. ``auto_quantize``) keep their full name: AUTO_QUANTIZE, not QUANTIZE.
             kind = rtype.value.removeprefix("speculative_").upper()

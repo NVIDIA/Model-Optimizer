@@ -501,6 +501,58 @@ def test_load_recipe_without_any_kind_declaration_raises(tmp_path):
         load_recipe(recipe)
 
 
+_EAGLE_RECIPE_FOR_ALIAS = """\
+# modelopt-schema: modelopt.recipe.config.ModelOptEagleRecipe
+metadata:
+  description: an eagle recipe
+eagle: {}
+"""
+
+
+@pytest.mark.parametrize(
+    ("declaration", "label"),
+    [
+        ("# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", "schema comment"),
+        ("", "metadata.recipe_type"),
+    ],
+)
+def test_load_recipe_rejects_delegating_to_a_different_kind(tmp_path, declaration, label):
+    """Importing a recipe of another kind is an error, however the kinds were declared.
+
+    A top-level ``$import`` takes over the whole body, so a PTQ recipe importing an
+    EAGLE one would splice an ``eagle`` section into a PTQ schema. Caught as a kind
+    mismatch rather than left to surface as whatever pydantic makes of the result.
+    """
+    (tmp_path / "base.yaml").write_text(_EAGLE_RECIPE_FOR_ALIAS)
+    alias = tmp_path / "alias.yaml"
+    metadata = "metadata:\n  description: a ptq recipe\n"
+    if not declaration:  # declare the kind the other way instead
+        metadata = "metadata:\n  recipe_type: ptq\n  description: a ptq recipe\n"
+    alias.write_text(
+        f"{declaration}imports:\n  base: {tmp_path / 'base.yaml'}\n\n$import: base\n{metadata}"
+    )
+    with pytest.raises(ValueError, match=r"is a 'ptq' recipe but imports .*'speculative_eagle'"):
+        load_recipe(alias)
+
+
+def test_load_recipe_allows_delegating_within_the_same_kind(tmp_path):
+    """The matching case still loads -- the check rejects mismatches, not delegation."""
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: agrees on every axis
+""",
+    )
+    assert load_recipe(alias).recipe_type == RecipeType.PTQ
+
+
 def test_shipped_modelopt_schema_comments_are_in_the_preamble():
     """A ``modelopt-schema`` comment below the first YAML line is silently ignored.
 

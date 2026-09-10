@@ -125,6 +125,11 @@ these it likes, and the loader takes the first that answers:
 2. `metadata.recipe_type`, or
 3. the recipe it delegates to via a top-level `$import`.
 
+Whatever a recipe does state has to be true. Declaring both a schema comment and
+a `recipe_type` is fine as long as they agree, and the same holds across a
+delegation: a recipe and the recipe it imports must be the same kind, since the
+import takes over the whole body. Any disagreement is an error, not a preference.
+
 The one thing that *is* required: **a recipe another file imports must carry the
 schema comment**, because that is what `$import` resolution needs to validate the
 imported payload. A recipe nothing imports needs nothing — so aliasing a recipe
