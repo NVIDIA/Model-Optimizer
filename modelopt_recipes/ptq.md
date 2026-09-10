@@ -255,9 +255,9 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_next`, `deepseek_v4`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
-| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma`, `phi4mm` |
+| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
@@ -274,7 +274,7 @@ folder may carry a `README.md` spelling out that delta.
 > [`models/README.md`](models/README.md) for the alias format and when to write
 > one.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_next`, `deepseek_v4`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -331,29 +331,6 @@ general recipes never enable output quantizers, and the pattern must stay scoped
 to GEMM outputs — a `DynamicQuantize` on non-GEMM outputs (embedding lookup,
 pooling) fails to compile in TensorRT.
 
-**`qwen3_5/ptq/nvfp4-fp8_attn-kv_none`** is the **W4A4 twin** of the W4A16 recipe
-above: the identical layer map, but the NVFP4 MLP / `lm_head` targets also get an input
-quantizer, and the KV cache is left unquantized. It reproduces
-`nvidia/Qwen3.8-27B-NVFP4`. Reach for the W4A16 variant in low-concurrency decode and
-this one when the GEMMs are compute-bound.
-
-**`qwen3_next/ptq/nvfp4_omlp_linear_attn-kv_fp8_cast`** covers the `qwen3_next` hybrid
-MoE (gated-delta linear attention interleaved with full attention). It is the general
-`nvfp4_omlp_only` scope — MLP/MoE plus the attention **output** projection, q/k/v left
-BF16 — **extended to the linear-attention output projection** (`linear_attn.out_proj`),
-which a portable `*self_attn.o_proj*` rule cannot reach. The rest of the gated-delta path
-(`conv1d`, `in_proj_qkvz`, `in_proj_ba`) stays BF16. Reproduces both
-`nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4` and the Thinking sibling.
-
-**`deepseek_v4/ptq/{nvfp4,w4a16_nvfp4}_experts_only`** covers DeepSeek's **native
-(non-transformers)** `deepseek_v4` layout, where the routed experts are
-`layers.<i>.ffn.experts.<j>.w{1,2,3}` and `Expert` keeps those as plain
-`nn.Parameter`s — so the quantizers are `w1_weight_quantizer` and friends registered on
-the expert, not `w1.weight_quantizer`. That naming is why the general
-`nvfp4_experts_only` wildcards do not apply. One shared `quant_cfg` snippet drives the
-whole family (V4-Pro, V4-Pro-0813, V4-Flash, V4-Flash-0731); the `w4a16_` variant leaves
-expert activations in BF16 and reproduces `nvidia/DeepSeek-V4-Flash-NVFP4-W4A16`.
-
 A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is close to
 `general/ptq/nvfp4_mlp_only` (NVFP4 on MoE/MLP weights+inputs, FP8 KV) but pinned
 to one released checkpoint and carrying instance-specific disables
@@ -387,7 +364,7 @@ These quantize the **same layers** as the general recipes; only the
 *Why special:* identical scope/numerics to a general scheme, but a general
 recipe's default algorithm would overflow or regress here.
 
-### Extra exclusions — `nemotron_vl`, `diffusion_gemma`, `phi4mm`
+### Extra exclusions — `nemotron_vl`, `diffusion_gemma`
 
 Each of these is **numerically identical** to a general recipe. What makes them
 special is a model-local `disabled_quantizers.yaml` unit that *extends* the
@@ -402,14 +379,6 @@ standard exclusions so a model-specific branch stays in full precision:
   `*self_conditioning*`: the self-conditioning network is text-only and never
   exercised by standard PTQ calibration data, so its quantizers collect no amax
   and export crashes; the exclusion keeps it in BF16.
-- **`phi4mm`** (Phi-4-multimodal) — general `nvfp4_default` / `fp8_default` numerics
-  with no KV quantization, adding `*lora_A*`, `*lora_B*` and `*embed_tokens_extend*`.
-  Phi-4-multimodal wraps each decoder projection in a LoRA container
-  (`base_layer` + speech/vision adapters) and hangs both encoders off
-  `model.embed_tokens_extend`, which none of the standard `*vision_tower*` /
-  `*visual*` patterns reach. The adapters are low-rank and are the modality-switching
-  path, so quantizing them would degrade exactly the multimodal behaviour the
-  checkpoint exists for. Reproduces `nvidia/Phi-4-multimodal-instruct-{FP8,NVFP4}`.
 
 *Why special:* a general recipe would happily quantize the vision/audio
 encoders (or the never-calibrated self-conditioning branch), regressing those
@@ -517,14 +486,6 @@ checkpoint's** quant config verbatim:
   experts / Mamba in-out / attention **o_proj only** FP8, q/k/v BF16. Both add explicit
   disables for the RADIO vision tower, the Conformer sound encoder and the `mlp1` /
   `sound_projection` modality projectors, none of which match a standard exclusion.
-- **`models/Qwen/Qwen3.5-397B-A17B/ptq/nvfp4_experts-fp8_attn-fp8_shared_expert-kv_fp8`**
-  mirrors `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`, the second (mixed-precision) release:
-  routed experts NVFP4, and FP8 on everything the first release left BF16 in the language
-  path — the shared expert, all self-attention, and the three large linear-attention
-  projections (`in_proj_qkv` / `in_proj_z` / `out_proj`). `conv1d`, `in_proj_a`,
-  `in_proj_b`, the routers, the vision tower, `lm_head` and MTP stay BF16; the KV cache is
-  **calibrated** FP8. (The first release, `nvidia/Qwen3.5-397B-A17B-NVFP4`, is plain
-  experts-only NVFP4 and needs no model-specific recipe.)
 *Why special:* unlike any general recipe, each is pinned to one checkpoint and
 captures a model-specific deviation a portable general recipe can't express. Most
 **mix FP8 and NVFP4 across different component types — or individual layers** —

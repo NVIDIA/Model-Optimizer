@@ -436,6 +436,15 @@ def main() -> int:
                 failures += 1
             print(detail)
     print(f"\n{failures} failing" if failures else "\nall recipes reproduce their checkpoints")
+
+    # Coverage is partial while the backfill lands one source-model org per branch.
+    # Report what is not covered yet rather than failing on it.
+    known = set(mapping) | set(json.loads(RECIPE_MAP.read_text())["unmapped"])
+    uncovered = sorted(set(entries) - known)
+    if uncovered:
+        print(f"\n{len(uncovered)} published checkpoints not covered by this branch:")
+        for checkpoint_id in uncovered:
+            print(f"  {checkpoint_id}")
     return 1 if failures else 0
 
 

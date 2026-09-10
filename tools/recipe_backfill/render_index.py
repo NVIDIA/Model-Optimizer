@@ -49,6 +49,10 @@ collection, paired with the recipe in this package that reproduces its quantizat
 layout. The collection also carries partner-published checkpoints; those are listed under
 [Not covered](#not-covered) rather than given recipes.
 
+**Coverage is partial.** The backfill lands one source-model org per branch, so a
+released checkpoint may not be listed here yet; run
+`python tools/recipe_backfill/verify_recipes.py` to see which are still uncovered.
+
 Use it in both directions: to re-create a released checkpoint from its source weights, or
 to find a validated starting recipe for a model whose architecture resembles one of these.
 

@@ -21,14 +21,13 @@
 # The activation amax collected here is therefore the only calibrated quantity
 # that reaches the exported checkpoint.
 #
-# The layer map itself is the DeepSeek-V4 family default, shared with
-# nvidia/DeepSeek-V4-Pro-NVFP4, nvidia/DeepSeek-V4-Flash-NVFP4 and
-# nvidia/DeepSeek-V4-Flash-0731-NVFP4, so the `quant_cfg` lives in the
-# architecture-level snippet imported below rather than being repeated here. See
-# `huggingface/deepseek_v4/ptq/nvfp4_experts_only.yaml` for the portable form.
+# Module paths follow DeepSeek's native (non-transformers) layout: routed experts
+# are model.layers.<i>.ffn.experts.<j>.w{1,2,3}. The shared expert is the same
+# Expert class under a different MoE attribute, so it is disabled explicitly.
 
 imports:
-  shared_quant_cfg: huggingface/deepseek_v4/ptq/nvfp4_experts_only.quant_cfg
+  base_disable_all: configs/ptq/units/base_disable_all
+  nvfp4: configs/numerics/nvfp4
 
 metadata:
   recipe_type: ptq
@@ -42,4 +41,23 @@ quantize:
   algorithm:
     method: max
   quant_cfg:
-    - $import: shared_quant_cfg
+    # Start from everything disabled. Only Expert and MoE carry Quant wrappers,
+    # so no other quantizer instances exist -- this is an explicit safety rail.
+    - $import: base_disable_all
+    # Routed experts only.
+    - quantizer_name: "*ffn.experts.*.w*_weight_quantizer"
+      enable: true
+      cfg:
+        $import: nvfp4
+    - quantizer_name: "*ffn.experts.*.w*_input_quantizer"
+      enable: true
+      cfg:
+        $import: nvfp4
+    # The shared expert instantiates the same Expert class; keep it disabled
+    # even if the patterns above were to match it.
+    - quantizer_name: "*shared_experts*"
+      enable: false
+    # MTP is DeepSeek's speculative-decoding block. Left in the source format
+    # unless a dedicated MTP quantization path is added.
+    - quantizer_name: "*mtp.*"
+      enable: false

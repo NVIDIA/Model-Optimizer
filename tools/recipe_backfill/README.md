@@ -10,6 +10,11 @@ checkpoints (LGAI-EXAONE, stepfun-ai, thinkingmachines, black-forest-labs); the 
 still records them, but they are listed under `unmapped` in `recipe_map.json` instead of
 getting recipes.
 
+**Coverage is partial by design.** The backfill lands one source-model org per branch
+(`shengliangx/batch-backfill-recipe-<org>`), so `recipe_map.json` on any given branch
+covers only the orgs merged so far. `verify_recipes.py` prints the checkpoints that are
+not covered yet; nothing fails on them.
+
 The problem it solves: a recipe that claims to mirror a published checkpoint can drift
 from it silently. A wildcard is widened, a new architecture reuses a leaf name, an
 exclusion is dropped — and nothing fails until someone re-quantizes a 600 B model and

@@ -87,15 +87,22 @@ def test_recipe_reproduces_published_checkpoint(checkpoint_id: str, spec: dict):
     )
 
 
-def test_every_published_checkpoint_is_accounted_for():
-    """Every scanned checkpoint is either mapped to a recipe or explicitly unmapped."""
+def test_recipe_map_has_no_unknown_checkpoints():
+    """Every id in the map must exist in the scan.
+
+    Coverage is deliberately partial -- the backfill lands one source-model org per
+    branch, so a scanned checkpoint may simply not be covered yet, and
+    ``verify_recipes.py`` reports which. What must not happen is the reverse: an entry
+    naming a checkpoint the collection no longer has, which a re-scan would otherwise
+    leave dangling and unverified.
+    """
     mapping = _recipe_map()
-    known = set(mapping["recipes"]) | set(mapping["unmapped"])
-    missing = sorted(cid for cid in _snapshot_entries() if cid not in known)
-    assert not missing, (
-        "Published checkpoints with no entry in tools/recipe_backfill/recipe_map.json: "
-        f"{missing}. Add the recipe that reproduces each one, or list it under "
-        "'unmapped' with the reason it has none."
+    scanned = set(_snapshot_entries())
+    unknown = sorted((set(mapping["recipes"]) | set(mapping["unmapped"])) - scanned)
+    assert not unknown, (
+        f"tools/recipe_backfill/recipe_map.json names checkpoints that are not in "
+        f"published_checkpoints.json: {unknown}. Re-run scan_collection.py, or drop the "
+        "entries if the checkpoints are gone from the collection."
     )
 
 
