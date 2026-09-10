@@ -515,18 +515,39 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 for output projection + MLP layers, FP8 KV cache
    * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
      - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
+   * - ``general/ptq/fp8_default-kv_fp16``
+     - FP8 per-tensor W8A8, KV cache left unquantized
+   * - ``general/ptq/nvfp4_default-kv_fp16``
+     - NVFP4 W4A4, KV cache left unquantized
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp16``
+     - NVFP4 for MLP layers only, KV cache left unquantized
+   * - ``general/ptq/nvfp4_experts_only-kv_fp16``
+     - NVFP4 for MoE expert layers only, KV cache left unquantized
+
+See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for the full list and for guidance on choosing between them.
 
 Model-specific recipes
 ----------------------
 
 Model-specific recipes come in two tiers: architecture recipes keyed by a
 Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
-checkpoint mirrors keyed by a model-hub path under
+checkpoint entries keyed by a model-hub path under
 ``models/<org>/<model_id>/<task>/``. See
 `modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
 and
 `modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
 for the layout conventions and recipe-lookup order.
+
+Every checkpoint NVIDIA has published in the `Inference Optimized Checkpoints
+<https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer>`_
+collection has an entry under ``models/``, so you can go from a released checkpoint
+straight to the recipe that reproduces it. Most are **aliases**: the release is
+reproduced unchanged by a general or architecture recipe, and the entry imports that
+recipe wholesale rather than copying it. The rest are **mirrors**, whose body captures a
+per-layer scheme no portable recipe can express.
+`modelopt_recipes/published_checkpoints.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/published_checkpoints.md>`_
+is the full index.
 
 .. list-table::
    :header-rows: 1
@@ -539,6 +560,29 @@ for the layout conventions and recipe-lookup order.
    * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
      - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
+
+Delegating to another recipe
+----------------------------
+
+A recipe can hand its whole body to another recipe with a top-level ``$import`` and keep
+only its own ``metadata``.  Keys given alongside the ``$import`` override the imported
+ones, so the body -- ``quantize``, its algorithm and every ``quant_cfg`` entry -- is
+inherited unchanged:
+
+.. code-block:: yaml
+
+   imports:
+     base: general/ptq/nvfp4_default-kv_fp8_cast
+
+   $import: base
+   metadata:
+     recipe_type: ptq
+     description: What this checkpoint uses the base recipe for.
+
+The imported recipe must declare a ``# modelopt-schema:`` comment, as every importable
+file does; all ``general/``, ``huggingface/`` and ``timm/`` recipes do.  This is how the
+checkpoint aliases under ``models/`` record which recipe reproduces a release without
+duplicating it.
 
 Loading recipes
 ===============
