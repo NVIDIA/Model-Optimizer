@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,14 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API for sparsification algorithms.
+"""Decay-aware sparsity policies for persisted recurrent state."""
 
-This module provides access to weight, attention, and recurrent-state sparsity algorithms.
-For backward compatibility, weight sparsity APIs are re-exported at the module level.
-"""
-
-from . import state_sparsity
-
-# Import weight sparsity for backward compatibility
-from .weight_sparsity import mode, module, plugins
-from .weight_sparsity.sparsification import *
+from . import mode
+from .api import *
+from .config import *
+from .policy import *

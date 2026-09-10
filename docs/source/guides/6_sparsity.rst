@@ -114,6 +114,63 @@ To restore the saved sparse model you can use
     Please see :ref:`saving and restoring of ModelOpt-modified models <save-restore>` to learn
     about all the available options for saving and restoring.
 
+Decay-aware recurrent-state sparsity (experimental)
+---------------------------------------------------
+
+The :mod:`modelopt.torch.sparsity.state_sparsity` package calibrates `DASC
+<https://arxiv.org/abs/2608.30386>`_ policies for persisted Gated DeltaNet (GDN) prefix state. It
+derives one static decay horizon per complete GDN head from
+``A_log`` and ``dt_bias``, then selects the largest caller-evaluated ``Wmax`` that passes every
+configured quality, lifecycle, and physical-storage gate. ``Wmax`` may be any positive integer.
+The measurements are evidence inputs produced by a caller-owned paired evaluation; this API does
+not run the dense-versus-recovery suffix evaluation itself.
+
+The initial API exports policy metadata only. It does not change model execution, quantize state,
+pack ragged checkpoints, replay a suffix, or add a linear-attention kernel. A serving integration
+must implement storage and recovery while preserving convolution state exactly and materializing
+ordinary dense recurrent state before continuation.
+
+.. code-block:: python
+
+    import modelopt.torch.sparsity.state_sparsity as mtss
+
+    config = {
+        "variant": "dasc_wr",  # "dasc_nr" uses zero recovery instead
+        "wmax_candidates": [32],
+        "model_id": "org/model",
+        "model_revision": "immutable-model-revision",
+        "model_config_id": "sha256:<config-digest>",
+        "calibration_data_id": "sha256:<dataset-and-protocol-digest>",
+    }
+    measurements = [
+        {
+            "variant": "dasc_wr",
+            "wmax": 32,
+            "retained_heads": 40,
+            "total_heads": 96,
+            "checkpoint_savings": 0.21,
+            "quality": [
+                {
+                    "slice_id": "validation-context-1024",
+                    "perplexity_retention": 0.999,
+                    "top1_agreement": 0.99,
+                    "finite_continuation_logits": True,
+                    "retained_state_exact": True,
+                    "omitted_state_matches_recovery": True,
+                    "convolution_state_exact": True,
+                }
+            ],
+        },
+    ]
+
+    model = mtss.calibrate(model, config, measurements)
+    policy = mtss.export_policy(model)
+
+``dasc_nr`` and ``dasc_wr`` remain explicit deployment contracts: DASC-NR restores omitted heads
+from zero, while DASC-WR reconstructs them from a zero-initialized suffix replay of at most the
+selected ``Wmax`` tokens. Both retain whole GDN heads, preserve convolution state, and resume with
+dense recurrence. KDA and serving-runtime integration are not supported by this initial API.
+
 .. _sparsity-concepts:
 
 Sparsity Concepts
