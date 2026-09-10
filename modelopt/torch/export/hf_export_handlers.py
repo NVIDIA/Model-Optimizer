@@ -118,9 +118,30 @@ def _prepare_iterable_experts(name: str, moe_module: nn.Module, ctx: ExportConte
 # Export handlers are registered in the same precedence as the legacy model walk.
 
 
-@ExportModuleRegistry.register(
-    "QuantMoELinear", predicate=lambda module: hasattr(module, "experts")
-)
+def _is_quant_moe_linear(module: nn.Module) -> bool:
+    """Whether ``module`` is an expert-indexed ``MoELinear`` expanded by ``_QuantMoELinear``.
+
+    Matched by wrapper type first, not only by the dynamically generated class name
+    (``Quant`` + the model's own class name): the wrapper is registered structurally, so a
+    compatible remote-code class under any other name — or a second one, whose generated
+    name gets uniquified — would bypass this handler and export without the input-amax
+    fallback. The name check is kept as a fallback so stand-in modules match too.
+
+    The wrapper lives in the optional transformers plugin, hence the lazy import.
+    """
+    if not hasattr(module, "experts"):
+        return False
+    try:
+        from modelopt.torch.quantization.plugins.huggingface import _QuantMoELinear
+
+        if isinstance(module, _QuantMoELinear):
+            return True
+    except ImportError:
+        pass
+    return any(cls.__name__ == "QuantMoELinear" for cls in type(module).__mro__)
+
+
+@ExportModuleRegistry.register(predicate=_is_quant_moe_linear)
 def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Fill missing input amax before child expert QuantLinears are exported."""
     set_expert_quantizer_amax(list(module.experts), quantizer_attrs="input_quantizer")
