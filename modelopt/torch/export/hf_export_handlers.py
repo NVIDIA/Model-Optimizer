@@ -21,8 +21,8 @@ import warnings
 import torch.nn as nn
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
-from .model_config import QUANTIZATION_NONE
 from .moe_utils import _export_fused_experts
+from .quant_format import QUANTIZATION_NONE
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 

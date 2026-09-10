@@ -691,7 +691,7 @@ version behind each entry.
 The user can specify the inference time TP and PP size and the export API will organize the weights to fit the target GPUs.
 
 ```python
-from modelopt.torch.export import export_tensorrt_llm_checkpoint
+from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 
 with torch.inference_mode():
     export_tensorrt_llm_checkpoint(

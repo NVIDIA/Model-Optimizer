@@ -76,13 +76,13 @@ from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
-    export_tensorrt_llm_checkpoint,
     get_model_type,
     has_spec_opt,
     save_expert_token_count_table,
 )
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
+from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized

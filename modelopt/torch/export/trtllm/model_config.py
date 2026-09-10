@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""This module defines the model_config format.
+"""This module defines the TensorRT-LLM checkpoint model_config format.
 
 This format can be converted from huggingface, megatron or modelopt-quantized model.
 And we will build tensorrt_llm engine from the context saved with this format.
@@ -26,39 +26,44 @@ import torch
 
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
-QUANTIZATION_NONE = None
-QUANTIZATION_FP8 = "fp8"
-QUANTIZATION_INT8_SQ = "int8_sq"
-QUANTIZATION_INT8_WO = "int8_wo"
-QUANTIZATION_INT4_AWQ = "int4_awq"
-QUANTIZATION_W4A8_AWQ = "w4a8_awq"
-QUANTIZATION_NVFP4 = "nvfp4"
-QUANTIZATION_NVFP4_SVDQUANT = "nvfp4_svdquant"
-QUANTIZATION_W4A8_NVFP4_FP8 = "w4a8_nvfp4_fp8"
-QUANTIZATION_MXFP4 = "mxfp4"
-QUANTIZATION_MXFP8 = "mxfp8"
-QUANTIZATION_W4A8_MXFP4_FP8 = "w4a8_mxfp4_fp8"
-QUANTIZATION_W4A16_NVFP4 = "w4a16_nvfp4"
-QUANTIZATION_NVFP4_AWQ = "nvfp4_awq"
-QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
-QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
-QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
+from ..quant_format import (
+    QUANTIZATION_INT4_AWQ,
+    QUANTIZATION_NONE,
+    QUANTIZATION_NVFP4,
+    QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
+    QUANTIZATION_W4A8_AWQ,
+)
 
-# Formats whose scales are purely per-module, so export never merges them across the q/k/v
-# and gate/up groups that share an input. Every other format unifies input_amax (and, for
-# NVFP4, weight_scale_2) across such a group, which only a whole-model forward can discover.
-FUSION_FREE_FORMATS = frozenset({QUANTIZATION_FP8, QUANTIZATION_NONE, QUANTIZATION_FP8_PB_REAL})
+__all__ = [
+    "LAYERNORM_DEFAULT",
+    "LAYERNORM_RMS",
+    "LINEAR_COLUMN",
+    "LINEAR_GROUP",
+    "LINEAR_ROW",
+    "AttentionConfig",
+    "ConvConfig",
+    "DecoderLayerConfig",
+    "EmbeddingConfig",
+    "ExpertConfig",
+    "LayernormConfig",
+    "LinearActConfig",
+    "LinearConfig",
+    "MLPConfig",
+    "MOEConfig",
+    "MedusaHeadConfig",
+    "ModelConfig",
+    "QKVConfig",
+    "RecurrentConfig",
+    "RelativeAttentionTableConfig",
+    "RgLruConfig",
+]
 
-KV_CACHE_FP8 = "FP8"
-KV_CACHE_FP8_K_NVFP4_V = "FP8_K_NVFP4_V"
-KV_CACHE_INT8 = "INT8"
-KV_CACHE_NVFP4 = "NVFP4"
-KV_CACHE_NVFP4_AFFINE = "NVFP4_AFFINE"
 LINEAR_COLUMN = "column"
 LINEAR_ROW = "row"
 LINEAR_GROUP = "group"
 
-# These need to be synced with torch.export.tensorrt_llm_type
+# These need to be synced with modelopt.torch.export.trtllm.tensorrt_llm_type
 LAYERNORM_DEFAULT = "LayerNorm"
 LAYERNORM_RMS = "RmsNorm"
 

@@ -36,8 +36,8 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
 from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.quant_format import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
 from modelopt.torch.export.quant_utils import (
     _get_kv_cache_postprocess_config,
     _postprocess_single_tensor,

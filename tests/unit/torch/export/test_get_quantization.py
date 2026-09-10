@@ -28,8 +28,7 @@ from _test_utils.torch.export.utils import (
 import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.layer_utils import get_quantization_format
-from modelopt.torch.export.model_config import (
+from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_NVFP4,
@@ -41,6 +40,7 @@ from modelopt.torch.export.quant_utils import (
     _has_large_fp8_scale,
     get_kv_cache_scaling_factor,
     get_quant_config,
+    get_quantization_format,
     postprocess_state_dict,
 )
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
