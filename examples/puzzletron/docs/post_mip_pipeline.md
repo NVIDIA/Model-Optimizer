@@ -225,6 +225,8 @@ sample counts and parser outcomes remain attached as result evidence.
 ## Filters
 
 `top_k` accepts one integer or separate homogeneous/heterogeneous quotas.
+With a scalar quota, set `require_exact_count: true` to stop before downstream
+fanout when missing or non-finite evidence leaves fewer than `top_k` candidates.
 `threshold` accepts `min`, `max`, or both. `pareto` retains the nondominated set.
 `aggregate_rank` computes a weighted mean rank and retains `top_k`:
 

@@ -64,13 +64,16 @@ _VLM_CAMPAIGN_STAGES: dict[str, dict[str, Any]] = {
 }
 
 _FOUR_B_CAMPAIGN_STAGES: dict[str, dict[str, Any]] = {
-    "replacement_scoring": {"strategy": "single"},
-    "post.candidate-evaluation.online_eval": {"instances": 4},
+    "depth_importance": {"strategy": "single"},
+    "replacement_scoring": {"strategy": "persistent_pool", "instances": 8},
+    "post.candidate-evaluation.online_eval": {"instances": 8},
     "post.candidate-evaluation.materialized": {"instances": 4},
-    "post.candidate-evaluation.serving": {"instances": 4},
-    "post.candidate-evaluation.screening_kd": {"instances": 4},
-    "post.candidate-evaluation.screening_eval": {"instances": 4},
-    "post.candidate-evaluation.quality_screen": {"instances": 4},
+    "post.candidate-evaluation.pre_kd_quality": {"instances": 4},
+    "post.candidate-evaluation.serving_smoke": {"instances": 4},
+    "post.candidate-evaluation.kd_128": {"instances": 4},
+    "post.candidate-evaluation.final_eval": {"instances": 4},
+    "post.candidate-evaluation.quality_benchmarks": {"instances": 4},
+    "post.candidate-evaluation.student_performance": {"instances": 4},
 }
 
 ROUTES = (
@@ -109,21 +112,25 @@ ROUTES = (
         model="qwen3.5-4b",
         workflow="vlm-pruning",
         mode="smoke",
-        search="bounded-ffn",
+        search="bounded-all-axis",
         evaluation="smoke",
         distillation="smoke",
         experiment_template="families/qwen3_5/qwen3p5_4b/runs/vlm_smoke.yaml",
-        execution_stages={"replacement_scoring": {"strategy": "single"}},
+        execution_stages={
+            "depth_importance": {"strategy": "single"},
+            "replacement_scoring": {"strategy": "single"},
+            "post.params-80.image_eval": {"instances": 2},
+        },
         requires_data=True,
     ),
     RouteProfile(
         model="qwen3.5-4b",
         workflow="vlm-pruning",
         mode="campaign",
-        search="ffn-10-to-20pct",
+        search="multi-axis-exact-four",
         evaluation="quality",
-        distillation="screening",
-        experiment_template=("families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml"),
+        distillation="matched-kd128",
+        experiment_template="families/qwen3_5/qwen3p5_4b/runs/all_axis_kd_search.yaml",
         execution_stages=_FOUR_B_CAMPAIGN_STAGES,
         requires_data=True,
     ),

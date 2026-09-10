@@ -1,0 +1,94 @@
+# @package _global_
+
+defaults:
+  - runs/vlm_pruning_base
+  - _self_
+
+# Bounded all-axis search shared by the maintained 4B lifecycle smoke and
+# campaign. Each supported structural axis receives an isolated
+# dynamic-versus-physical diagnostic before it can enter MIP selection.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_4b_vlm_smoke}
+display_name: Qwen3p5 4B VLM all-axis search
+
+model:
+  automodel_backend: {attn: sdpa}
+
+embedding_pruning:
+  widths: [2560, 2400]
+  alignment: 32
+
+pruning:
+  intermediate_size_list: [8704]
+  # [query heads, KV groups]: teacher, query-only, KV-only, and joint targets.
+  attn_heads_list: [[16, 4], [12, 4], [8, 2], [6, 2]]
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  gdn_scored_axes:
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+
+sort:
+  deferred_axes: []
+
+width_sanity:
+  hidden_width_diagnostic: true
+  axes:
+    - hidden_width
+    - kv_groups
+    - q_heads_per_group
+    - ffn_intermediate
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+  one_case_per_axis: true
+  target_count_per_axis: 1
+  layer_count: 1
+  eval_samples: 2
+  target_values:
+    hidden_width: 2400
+    kv_groups: 2
+    q_heads_per_group: 3
+    ffn_intermediate: 8704
+    gdn_key_groups: 14
+    gdn_value_heads_per_group: 1
+    gdn_key_head_dim: 112
+    gdn_value_head_dim: 112
+
+depth_importance:
+  enabled: true
+  max_removals: 1
+  max_subblocks_to_remove: 1
+  eval_samples: 2
+
+search_space:
+  axes:
+    hidden_width: {enabled: true, teacher_value: 2560, values: [2400]}
+    kv_groups: {enabled: true, teacher_value: 4, values: [2]}
+    q_heads_per_group: {enabled: true, teacher_value: 4, values: [3]}
+    ffn_intermediate: {enabled: true, teacher_value: 9216, values: [8704]}
+    gdn_key_groups: {enabled: true, teacher_value: 16, values: [14]}
+    gdn_value_heads_per_group: {enabled: true, teacher_value: 2, values: [1]}
+    gdn_key_head_dim: {enabled: true, teacher_value: 128, values: [112]}
+    gdn_value_head_dim: {enabled: true, teacher_value: 128, values: [112]}
+
+mip:
+  depth_scenario_count: 2
+  runs:
+    params-80:
+      search_space: &all_axis_search
+        depth: [0, 1]
+        embedding: [2560, 2400]
+        axes_default: all
+        axes: {ffn.intermediate_size: all}
+      solver: &all_axis_solver
+        backend: auto
+        num_solutions: 1
+        min_hamming_distance: 1
+        max_seconds_per_solution: 30
+      homogeneous: &no_homogeneous {enabled: false}
+    memory-85:
+      search_space: *all_axis_search
+      solver: *all_axis_solver
+      homogeneous: *no_homogeneous

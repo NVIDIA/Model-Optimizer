@@ -1,0 +1,341 @@
+# @package _global_
+
+defaults:
+  - /families/qwen3_5/qwen3p5_4b/all_axis_base@_global_
+  - /families/qwen3_5/qwen3p5_4b/vlm_quality_evaluation@_global_
+  - _self_
+
+# Illustrative Qwen 3.5 4B VLM all-axis campaign. The finite pre-KD image-loss
+# screen admits exactly four distinct architectures. Every admitted candidate
+# then receives the same frozen evaluation, serving smoke, and resumable
+# 128-step KD exposure before final quality and serving comparison.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
+display_name: Qwen3p5 4B VLM exact-four all-axis KD128 campaign
+
+data:
+  require_content_digest: true
+  calibration:
+    # One immutable 512-row order backs every candidate trajectory. Fail when
+    # the prepared dataset is shorter instead of cycling a mechanics packet.
+    num_samples: 512
+
+embedding_pruning:
+  widths: [2560, 2400, 2240]
+
+pruning:
+  experiment_id: qwen35_4b_vlm_all_axis_campaign
+  intermediate_size_list: [8704, 8192]
+  eval_samples: 64
+  seed: 42
+
+sort_sanity:
+  eval_samples: 8
+
+width_sanity:
+  target_count_per_axis: 2
+  layer_count: 4
+  eval_samples: 8
+
+depth_importance:
+  max_removals: 2
+  max_subblocks_to_remove: 2
+
+replacement_scoring:
+  eval_samples: 32
+
+search_space:
+  axes:
+    hidden_width: {enabled: true, teacher_value: 2560, values: [2400, 2240]}
+    kv_groups: {enabled: true, teacher_value: 4, values: [2]}
+    q_heads_per_group: {enabled: true, teacher_value: 4, values: [3]}
+    ffn_intermediate: {enabled: true, teacher_value: 9216, values: [8704, 8192]}
+    gdn_key_groups: {enabled: true, teacher_value: 16, values: [14]}
+    gdn_value_heads_per_group: {enabled: true, teacher_value: 2, values: [1]}
+    gdn_key_head_dim: {enabled: true, teacher_value: 128, values: [112]}
+    gdn_value_head_dim: {enabled: true, teacher_value: 128, values: [112]}
+
+global_distillation:
+  enabled: false
+  domain: vlm
+  automodel:
+    activation_checkpointing: true
+  force_hf: false
+  teacher_force_hf: false
+  student_force_hf: false
+  freeze_policy: vision_frozen
+  validation_enabled: false
+  objective: &memory_safe_kd_objective
+    main_ce: {weight: 1.0}
+    main_kd: {weight: 1.0, chunk_size: 64}
+    mtp_ce: {weight: 1.0}
+    mtp_kd: {weight: 1.0, chunk_size: 64}
+
+mip:
+  depth_scenario_count: 3
+  runs:
+    params-80: false
+    memory-85: false
+    search-candidates:
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space:
+        depth: [0, 1, 2]
+        embedding: [2560, 2400, 2240]
+        axes_default: all
+        axes: {ffn.intermediate_size: all}
+      variants:
+        params-82:
+          constraints:
+            params: {max: 82%}
+        memory-85:
+          constraints:
+            memory:
+              at:
+                serving-default: {max: 85%}
+      solver:
+        backend: auto
+        num_solutions: 1
+        min_hamming_distance: 1
+        max_seconds_per_solution: 300
+      homogeneous: {enabled: false}
+    teacher-reference:
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space:
+        depth: [0]
+        embedding: [2560]
+        axes_default: teacher
+        axes: {ffn.intermediate_size: teacher}
+      variants:
+        teacher:
+          constraints:
+            params: {min: 100%, max: 100%}
+      solver:
+        backend: auto
+        num_solutions: 1
+        min_hamming_distance: 1
+        max_seconds_per_solution: 30
+      homogeneous: {enabled: false}
+
+post_mip:
+  flows:
+    candidate-evaluation:
+      source:
+        run: search-candidates
+        variants: all
+        objectives: all
+      nodes:
+        online_eval:
+          type: evaluation
+          failure_policy: strict
+          config: {eval_samples: 32, block_size: 512}
+
+        # MIP architectures are deduplicated before this deterministic screen.
+        # Missing or non-finite evidence excludes a candidate; fewer than four
+        # eligible outputs stops the campaign before materialization and KD.
+        selected:
+          type: filter
+          input: online_eval
+          mode: top_k
+          metric: online_eval.lm_loss
+          direction: minimize
+          top_k: 4
+          require_exact_count: true
+
+        materialized:
+          type: materialize
+          input: selected
+          failure_policy: strict
+
+        pre_kd_quality:
+          type: downstream_evaluation
+          input: materialized
+          failure_policy: strict
+          config: ${vlm_4b_campaign_evaluation}
+
+        serving_smoke:
+          type: aiperf
+          input: pre_kd_quality
+          failure_policy: strict
+          config:
+            endpoint_type: chat
+            input_tokens: 32
+            output_tokens: 8
+            image_batch_sizes: [1]
+            image_width_mean: 224
+            image_height_mean: 224
+            concurrency: [1]
+            request_count: 1
+            extra_inputs: {min_tokens: 8}
+            use_server_token_count: true
+            allow_aiperf_v011_online_tokenizer_resolution: true
+            seed: 42
+            readiness_timeout: 600
+            benchmark_timeout: 600
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+              server_context_overhead_tokens: 2048
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --gdn-prefill-backend
+                - triton
+                - --gpu-memory-utilization
+                - "0.7"
+                - --reasoning-parser
+                - qwen3
+                - --default-chat-template-kwargs
+                - '{"enable_thinking": false}'
+
+        kd_128:
+          type: global_kd
+          input: serving_smoke
+          model_source: materialized
+          trajectory: all_axis_recovery
+          failure_policy: strict
+          config:
+            resume: true
+            seed: 1111
+            validation_seed: 445
+            shuffle_training_data: true
+            freeze_policy: vision_frozen
+            activation_checkpointing: true
+            automodel:
+              parallel:
+                tp: 2
+                cp: 1
+                pp: 1
+                ep: 1
+                dp_shard: 1
+                dp_replicate: 1
+                sequence_parallel: false
+                pipeline_schedule: 1f1b
+            objective: *memory_safe_kd_objective
+            max_steps: 128
+            global_batch_size: 4
+            local_batch_size: 1
+            checkpoint_every_steps: 128
+          exposure:
+            cumulative_steps: 128
+            global_batch_size: 4
+            cumulative_examples: 512
+            max_sample_length: 512
+            estimated_cumulative_gpu_hours: 1.0
+
+        final_eval:
+          type: evaluation
+          input: kd_128
+          failure_policy: strict
+          config: {eval_samples: 64, block_size: 512}
+
+        quality_benchmarks:
+          type: downstream_evaluation
+          input: final_eval
+          failure_policy: strict
+          config: ${vlm_4b_campaign_evaluation}
+
+        comparison_ready:
+          type: result_manifest
+          input: quality_benchmarks
+          config:
+            pre_kd_source: materialized
+            pre_kd_evaluation: pre_kd_quality
+            profile: ${vlm_4b_campaign_evaluation.profile}
+            row_manifest: profile:core-3_344-examples_r1-vllm
+            row_manifest_sha256: ${vlm_4b_campaign_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_4b_campaign_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_4b_campaign_evaluation.reference_cache_id}
+            milestones: [{steps: 128, kd: kd_128, evaluation: quality_benchmarks}]
+
+        # Repetitions share one server lifetime per checkpoint. Quality ranks
+        # dominate the final aggregate; serving resolves equal quality ranks.
+        student_performance:
+          type: aiperf
+          input: comparison_ready
+          failure_policy: strict
+          config: &performance_config
+            endpoint_type: chat
+            input_tokens: 100
+            output_tokens: 80
+            image_batch_sizes: [1, 6, 12]
+            concurrency: [1, 4]
+            request_count: 64
+            warmup_request_count: 32
+            repetitions: 3
+            seed: 42
+            warmup_seed: 314
+            image_width_mean: 1280
+            image_height_mean: 720
+            extra_inputs: {min_tokens: 80}
+            trust_remote_code: false
+            allow_aiperf_v011_online_tokenizer_resolution: true
+            use_server_token_count: true
+            collect_peak_gpu_memory: true
+            readiness_timeout: 600
+            benchmark_timeout: 1800
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+              server_context_overhead_tokens: 32768
+              extra_vllm_args:
+                - --gdn-prefill-backend
+                - triton
+                - --reasoning-parser
+                - qwen3
+                - --default-chat-template-kwargs
+                - '{"enable_thinking": false}'
+
+        best:
+          type: filter
+          input: student_performance
+          mode: aggregate_rank
+          metrics:
+            - metric: quality_benchmarks.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
+              direction: maximize
+              weight: 100
+            - metric: quality_benchmarks.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none
+              direction: maximize
+              weight: 100
+            - metric: student_performance.images_12.concurrency_4.image_throughput
+              direction: maximize
+              weight: 1
+          top_k: 1
+
+    teacher-performance:
+      source:
+        run: teacher-reference
+        variants: teacher
+        objectives: all
+      nodes:
+        teacher_materialized:
+          type: materialize
+          failure_policy: strict
+        teacher_performance:
+          type: aiperf
+          input: teacher_materialized
+          failure_policy: strict
+          config: *performance_config
+
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false
