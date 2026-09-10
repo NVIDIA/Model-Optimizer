@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -29,19 +30,52 @@ from diffusers.models.attention_processor import Attention
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.torch.quantization as mtq
+from examples.diffusers.quantization.onnx_utils import export as diffusion_export
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 _QUANTIZATION_EXAMPLE = (
     Path(__file__).resolve().parents[3] / "examples" / "diffusers" / "quantization"
 )
-sys.path.insert(0, str(_QUANTIZATION_EXAMPLE))
+_LOCAL_IMPORT_NAMES = (
+    "calib.plugin_calib",
+    "calib",
+    "calibration",
+    "config",
+    "models_utils",
+    "pipeline_manager",
+    "quantize_config",
+    "utils",
+)
 
-from models_utils import ModelType
-from quantize import Quantizer, _restore_sdxl_fp4_policy
-from quantize_config import ModelConfig, QuantFormat, QuantizationConfig
 
-from examples.diffusers.quantization.onnx_utils import export as diffusion_export
+def _load_quantize_example():
+    script = _QUANTIZATION_EXAMPLE / "quantize.py"
+    spec = importlib.util.spec_from_file_location("diffusers_quantize_example", script)
+    assert spec is not None and spec.loader is not None
+
+    original_modules = {
+        name: sys.modules.pop(name) for name in _LOCAL_IMPORT_NAMES if name in sys.modules
+    }
+    sys.path.insert(0, str(_QUANTIZATION_EXAMPLE))
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+        for name in _LOCAL_IMPORT_NAMES:
+            sys.modules.pop(name, None)
+        sys.modules.update(original_modules)
+    return module
+
+
+_quantize = _load_quantize_example()
+ModelType = _quantize.ModelType
+ModelConfig = _quantize.ModelConfig
+QuantFormat = _quantize.QuantFormat
+QuantizationConfig = _quantize.QuantizationConfig
+Quantizer = _quantize.Quantizer
+_apply_quantization_policy = _quantize._apply_quantization_policy
 
 
 class _RecipeBackbone(nn.Module):
@@ -79,37 +113,66 @@ def test_sdxl_fp4_recipe(model_type):
         assert quantizer.is_fp8
 
 
-def test_restore_reapplies_sdxl_fp4_mha_policy():
-    attention = Attention(query_dim=16, heads=1, dim_head=16)
-    skipped_attention = Attention(query_dim=16, heads=1, dim_head=16)
-    attention._disable_fp8_mha = True
-    skipped_attention._disable_fp8_mha = True
-
-    class _PipelineManager:
-        def iter_backbones(self):
-            return (("unet", attention), ("vae", skipped_attention))
-
-    _restore_sdxl_fp4_policy(
-        _PipelineManager(),
-        QuantizationConfig(format=QuantFormat.FP4, quantize_mha=True),
-        ModelType.SDXL_BASE,
-    )
-
-    assert not attention._disable_fp8_mha
-    assert skipped_attention._disable_fp8_mha
-
-
-def _fp8_quantizer(*, enabled=True):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=None))
-    quantizer.amax = torch.tensor(448.0)
+def _quantizer(*, num_bits=(4, 3), enabled=True, calibrated=True):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None))
+    if calibrated:
+        quantizer.amax = torch.tensor(448.0)
     if not enabled:
         quantizer.disable()
     return quantizer
 
 
-def _add_fp8_quantizers(module, *, enabled=True):
-    module.input_quantizer = _fp8_quantizer(enabled=enabled)
-    module.weight_quantizer = _fp8_quantizer(enabled=enabled)
+def _add_quantizers(module, *, num_bits=(4, 3), enabled=True, calibrated=True):
+    module.input_quantizer = _quantizer(num_bits=num_bits, enabled=enabled, calibrated=calibrated)
+    module.weight_quantizer = _quantizer(num_bits=num_bits, enabled=enabled, calibrated=calibrated)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "quant_format", "backbone_name", "conv_enabled"),
+    [
+        (ModelType.SDXL_BASE, QuantFormat.FP4, "unet", True),
+        (ModelType.FLUX_DEV, QuantFormat.FP4, "transformer", False),
+        (ModelType.SD3_MEDIUM, QuantFormat.FP8, "transformer", True),
+    ],
+    ids=["sdxl-fp4", "flux-fp4", "sd3-fp8"],
+)
+def test_apply_quantization_policy(model_type, quant_format, backbone_name, conv_enabled):
+    backbone = nn.Module()
+    backbone.attention = Attention(query_dim=16, heads=1, dim_head=16)
+    backbone.conv = nn.Conv2d(1, 1, 1)
+    _add_quantizers(backbone.conv)
+    backbone.attention._disable_fp8_mha = True
+
+    _apply_quantization_policy(
+        backbone,
+        backbone_name,
+        QuantizationConfig(format=quant_format, quantize_mha=True),
+        model_type,
+    )
+
+    assert backbone.attention._disable_fp8_mha is False
+    assert backbone.conv.input_quantizer.is_enabled is conv_enabled
+    assert backbone.conv.weight_quantizer.is_enabled is conv_enabled
+
+
+@pytest.mark.parametrize("backbone_name", ["vae", "video_decoder"])
+def test_apply_quantization_policy_skips_vae_backbones(backbone_name):
+    backbone = nn.Module()
+    backbone.attention = Attention(query_dim=16, heads=1, dim_head=16)
+    backbone.conv = nn.Conv2d(1, 1, 1)
+    _add_quantizers(backbone.conv)
+    backbone.attention._disable_fp8_mha = True
+
+    _apply_quantization_policy(
+        backbone,
+        backbone_name,
+        QuantizationConfig(format=QuantFormat.FP4, quantize_mha=True),
+        ModelType.FLUX_DEV,
+    )
+
+    assert backbone.attention._disable_fp8_mha
+    assert backbone.conv.input_quantizer.is_enabled
+    assert backbone.conv.weight_quantizer.is_enabled
 
 
 @pytest.mark.parametrize("raises", [False, True])
@@ -118,11 +181,11 @@ def test_temporary_fp8_conv_export_scales_restore_state(raises):
     model.conv = nn.Conv2d(1, 1, 1)
     model.disabled_conv = nn.Conv2d(1, 1, 1)
     model.linear = nn.Linear(1, 1)
-    _add_fp8_quantizers(model.conv)
-    _add_fp8_quantizers(model.disabled_conv, enabled=False)
-    _add_fp8_quantizers(model.linear)
+    _add_quantizers(model.conv)
+    _add_quantizers(model.disabled_conv, enabled=False)
+    _add_quantizers(model.linear)
     linear_only = nn.Sequential(nn.Linear(1, 1))
-    _add_fp8_quantizers(linear_only[0])
+    _add_quantizers(linear_only[0])
     assert not diffusion_export._has_enabled_conv(linear_only)
     assert diffusion_export._has_enabled_conv(model)
     changed = (model.conv.input_quantizer, model.conv.weight_quantizer)
@@ -155,6 +218,48 @@ def test_temporary_fp8_conv_export_scales_restore_state(raises):
     for quantizer, (num_bits, amax) in original_state.items():
         assert quantizer._num_bits == num_bits
         assert quantizer._amax is amax
+
+
+@pytest.mark.parametrize(
+    ("module_type", "module_args"),
+    [(nn.Linear, (1, 1)), (nn.Conv2d, (1, 1, 1))],
+    ids=["linear", "conv2d"],
+)
+@pytest.mark.parametrize(
+    ("num_bits", "enabled", "calibrated", "expected_scaled"),
+    [
+        ((4, 3), True, True, True),
+        ((4, 3), False, True, False),
+        ((4, 3), True, False, False),
+        (8, True, True, False),
+    ],
+    ids=["enabled-fp8", "disabled-fp8", "uncalibrated-fp8", "enabled-int8"],
+)
+def test_temporary_fp8_export_scales_filters_quantizers(
+    module_type, module_args, num_bits, enabled, calibrated, expected_scaled
+):
+    model = nn.Sequential(module_type(*module_args))
+    _add_quantizers(model[0], num_bits=num_bits, enabled=enabled, calibrated=calibrated)
+    quantizers = (model[0].input_quantizer, model[0].weight_quantizer)
+    original_state = {
+        quantizer: (quantizer._num_bits, getattr(quantizer, "_amax", None))
+        for quantizer in quantizers
+    }
+
+    with diffusion_export._temporary_fp8_export_scales(model, conv_only=False):
+        for quantizer in quantizers:
+            original_num_bits, original_amax = original_state[quantizer]
+            if expected_scaled:
+                assert quantizer.num_bits == 8
+                assert quantizer.amax == 127.0
+                assert quantizer._amax is not original_amax
+            else:
+                assert quantizer._num_bits == original_num_bits
+                assert getattr(quantizer, "_amax", None) is original_amax
+
+    for quantizer, (original_num_bits, original_amax) in original_state.items():
+        assert quantizer._num_bits == original_num_bits
+        assert getattr(quantizer, "_amax", None) is original_amax
 
 
 def _make_mixed_fp4_fp8_model():

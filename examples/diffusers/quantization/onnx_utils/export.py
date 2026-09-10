@@ -147,7 +147,7 @@ def _temporary_fp8_export_scales(backbone, conv_only=False):
                 if (
                     quantizer is None
                     or not quantizer.is_enabled
-                    or quantizer.num_bits != (4, 3)
+                    or not quantizer.is_fp8
                     or getattr(quantizer, "_amax", None) is None
                 ):
                     continue

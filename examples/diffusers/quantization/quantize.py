@@ -583,17 +583,20 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _restore_sdxl_fp4_policy(
-    pipeline_manager: PipelineManager,
+def _apply_quantization_policy(
+    backbone: torch.nn.Module,
+    backbone_name: str,
     quant_config: QuantizationConfig,
     model_type: ModelType,
 ) -> None:
-    if quant_config.format != QuantFormat.FP4 or model_type not in _SDXL_MODEL_TYPES:
+    if backbone_name in ("video_decoder", "vae"):
         return
 
-    for backbone_name, backbone in pipeline_manager.iter_backbones():
-        if backbone_name not in ("video_decoder", "vae"):
-            check_conv_and_mha(backbone, False, quant_config.quantize_mha)
+    check_conv_and_mha(
+        backbone,
+        quant_config.format == QuantFormat.FP4 and model_type not in _SDXL_MODEL_TYPES,
+        quant_config.quantize_mha,
+    )
 
 
 def main() -> None:
@@ -683,7 +686,10 @@ def main() -> None:
 
         if export_config.restore_from and export_config.restore_from.exists():
             export_manager.restore_checkpoint()
-            _restore_sdxl_fp4_policy(pipeline_manager, quant_config, model_config.model_type)
+            for backbone_name, backbone in pipeline_manager.iter_backbones():
+                _apply_quantization_policy(
+                    backbone, backbone_name, quant_config, model_config.model_type
+                )
 
         else:
             logger.info("Initializing calibration...")
@@ -713,15 +719,9 @@ def main() -> None:
                     mtq.compress(backbone)
                     logger.info(f"{backbone_name} compression completed")
 
-                # For VAE backbones, skip check_conv_and_mha — the whole point
-                # of VAE quantization is to quantize Conv layers.
-                if backbone_name not in ("video_decoder", "vae"):
-                    check_conv_and_mha(
-                        backbone,
-                        quant_config.format == QuantFormat.FP4
-                        and model_config.model_type not in _SDXL_MODEL_TYPES,
-                        quant_config.quantize_mha,
-                    )
+                _apply_quantization_policy(
+                    backbone, backbone_name, quant_config, model_config.model_type
+                )
 
                 export_manager.save_checkpoint(backbone, backbone_name)
 
