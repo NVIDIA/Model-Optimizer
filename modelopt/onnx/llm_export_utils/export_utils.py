@@ -76,19 +76,61 @@ class WrapperModelForCausalLM(torch.nn.Module):
         self.lm_head = model.lm_head
         self.config = model.config
 
+        # Patch DynamicLayer.lazy_initialization so it does NOT create empty
+        # tensors (which torch.jit.trace bakes as constants). Instead, set
+        # keys/values to None; the update() cat path handles the rest.
+        from transformers.cache_utils import DynamicLayer
+
+        def _patched_update(self_layer, key_states, value_states, cache_kwargs=None):
+            if not self_layer.is_initialized:
+                self_layer.dtype = key_states.dtype
+                self_layer.device = key_states.device
+                self_layer.is_initialized = True
+                self_layer.keys = key_states
+                self_layer.values = value_states
+                return self_layer.keys, self_layer.values
+            self_layer.keys = torch.cat([self_layer.keys, key_states], dim=-2)
+            self_layer.values = torch.cat([self_layer.values, value_states], dim=-2)
+            return self_layer.keys, self_layer.values
+
+        DynamicLayer.update = _patched_update
+
+        # Monkey-patch create_causal_mask to return None during export.
+        # This avoids baking mask shapes as constants during JIT tracing.
+        # SDPA uses is_causal=True internally so the explicit mask is unnecessary.
+        import importlib
+
+        import transformers.masking_utils
+
+        setattr(transformers.masking_utils, "create_causal_mask", lambda *args, **kwargs: None)
+        model_type = getattr(self.config, "model_type", "llama")
+        try:
+            mod = importlib.import_module(f"transformers.models.{model_type}.modeling_{model_type}")
+            setattr(mod, "create_causal_mask", lambda *args, **kwargs: None)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+        # Force use_gqa_in_sdpa to return False so SDPA does manual repeat_kv
+        # instead of using enable_gqa=True (which torch.onnx.export doesn't support).
+        # With attention_mask=None and enable_gqa=False, SDPA uses is_causal=True.
+        import transformers.integrations.sdpa_attention as sdpa_mod
+
+        sdpa_mod.use_gqa_in_sdpa = lambda *args, **kwargs: False
+
     def forward(self, input_ids: torch.Tensor | None, past_key_values: tuple):
         """Forward pass."""
-        # Convert tuple cache to DynamicCache for models that require it (e.g., Qwen3)
-        cache = DynamicCache(config=self.config)
-        cache.key_cache = [kv[0] for kv in past_key_values]
-        cache.value_cache = [kv[1] for kv in past_key_values]
-        past_key_values = cache
+        cache = DynamicCache(ddp_cache_data=past_key_values, config=self.config)
 
-        outputs = self.model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
+        outputs = self.model(input_ids=input_ids, past_key_values=cache, use_cache=True)
         hidden_states = outputs[0]
-        past_key_values = outputs.past_key_values.to_legacy_cache()
+
+        if hasattr(outputs.past_key_values, "to_legacy_cache"):
+            past_key_values_out = outputs.past_key_values.to_legacy_cache()
+        else:
+            past_key_values_out = outputs.past_key_values
+
         logits = self.lm_head(hidden_states)
-        return logits, past_key_values
+        return logits, past_key_values_out
 
 
 def llm_to_onnx(model, output_dir, extra_inputs={}, extra_dyn_axes={}):
@@ -106,7 +148,7 @@ def llm_to_onnx(model, output_dir, extra_inputs={}, extra_dyn_axes={}):
     num_attention_heads = config.num_attention_heads
     num_key_value_heads = config.num_key_value_heads
     hidden_size = config.hidden_size
-    hidden_size_per_layer = hidden_size // num_attention_heads
+    hidden_size_per_layer = getattr(config, "head_dim", hidden_size // num_attention_heads)
 
     dummy_bs = 1
     dummy_len = 10
