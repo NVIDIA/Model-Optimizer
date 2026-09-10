@@ -105,7 +105,7 @@ class _SkipLayer(nn.Module):
 
 
 class _ForwardOnlyLayer(nn.Module):
-    """Hide a layer from module traversal while preserving its forward execution."""
+    """Preserve forward execution while hiding a layer's modules, parameters, and buffers."""
 
     _PROXY_BLOCKLIST = _SkipLayer._PROXY_BLOCKLIST
 
@@ -126,15 +126,8 @@ class _ForwardOnlyLayer(nn.Module):
 
 
 @contextmanager
-def _hide_modules_from_traversal(model: nn.Module, modules: Sequence[nn.Module]):
-    """Temporarily hide registered modules while retaining their forward behavior."""
-    target_ids = {id(module) for module in modules}
-    slots = [
-        (parent, child_name, child)
-        for parent in tuple(model.modules())
-        for child_name, child in tuple(parent._modules.items())
-        if child is not None and id(child) in target_ids
-    ]
+def _hide_modules_from_traversal(slots: Sequence[tuple[nn.Module, str, nn.Module]]):
+    """Retain forward behavior while hiding registered modules from traversal and state dicts."""
     proxies = {id(child): _ForwardOnlyLayer(child) for _, _, child in slots}
 
     try:
@@ -157,7 +150,6 @@ class _OutsideQuantizerCalibrator:
         calib_func: Callable,
         calib_kwargs: dict[str, Any],
         qdq_from_prev: bool,
-        activation_forward_predicate: Callable[[nn.Module], bool] | None = None,
     ):
         self.model = model
         self.transformer_layers = transformer_layers
@@ -169,40 +161,44 @@ class _OutsideQuantizerCalibrator:
         # Inline import breaks nn -> qtensor -> utils -> layerwise_calib import cycle.
         from ..nn import TensorQuantizer
 
-        decoder_owned_ids = {
-            id(module) for layer in transformer_layers for module in layer.modules()
-        }
-        self.enabled = any(
-            isinstance(module, TensorQuantizer)
-            and module.is_enabled
-            and id(module) not in decoder_owned_ids
-            for module in model.modules()
-        )
-        self.runs_forward = self.enabled
-        if self.enabled and activation_forward_predicate is not None:
-            with _hide_modules_from_traversal(model, transformer_layers):
-                needs_forward = activation_forward_predicate(model)
-            self.calib_kwargs = dict(calib_kwargs)
-            self.calib_kwargs.setdefault("skip_forward_without_activation_calib", True)
-            self.runs_forward = (
-                needs_forward or not self.calib_kwargs["skip_forward_without_activation_calib"]
+        layer_ids = {id(layer) for layer in transformer_layers}
+        self.transformer_layer_slots = [
+            (parent, child_name, child)
+            for parent in tuple(model.modules())
+            for child_name, child in parent._modules.items()
+            if child is not None and id(child) in layer_ids
+        ]
+
+        with _hide_modules_from_traversal(self.transformer_layer_slots):
+            self.enabled = any(
+                isinstance(module, TensorQuantizer) and module.is_enabled
+                for module in model.modules()
             )
 
     def calibrate(self):
-        """Run calibration while excluding decoder-owned quantizers from traversal."""
+        """Calibrate outside quantizers while decoder state is hidden from caller traversal."""
         if not self.enabled:
             return
 
-        if self.runs_forward and has_accelerate_offload(self.model):
-            warn_rank_0(
-                "Layerwise calibration found enabled quantizers outside transformer layers. "
-                "The required full-model calibration pass may be slow because CPU- or "
-                "disk-offloaded decoder weights can be transferred for every batch."
-            )
+        has_offload = has_accelerate_offload(self.model)
+        warned_for_offload = False
 
-        with _hide_modules_from_traversal(self.model, self.transformer_layers):
+        def forward_loop(model):
+            nonlocal warned_for_offload
+            if not warned_for_offload:
+                warned_for_offload = True
+                if has_offload:
+                    warn_rank_0(
+                        "Layerwise calibration found enabled quantizers outside transformer "
+                        "layers. The required full-model calibration pass may be slow because "
+                        "CPU- or disk-offloaded decoder weights can be transferred for every "
+                        "batch."
+                    )
+            return self.forward_loop(model)
+
+        with _hide_modules_from_traversal(self.transformer_layer_slots):
             if self.qdq_from_prev:
-                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
+                self.calib_func(self.model, forward_loop, **self.calib_kwargs)
                 return
 
             # Inline import breaks conversion -> utils -> layerwise_calib import cycle.
@@ -215,7 +211,7 @@ class _OutsideQuantizerCalibrator:
                             layer, [{"quantizer_name": "*", "enable": False}]
                         )
                     )
-                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
+                self.calib_func(self.model, forward_loop, **self.calib_kwargs)
 
 
 class LayerActivationCollector:

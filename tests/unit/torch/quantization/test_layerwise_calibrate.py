@@ -18,7 +18,6 @@
 import copy
 import json
 from collections import deque
-from contextlib import nullcontext
 
 import pytest
 import torch
@@ -30,7 +29,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _ForwardOnlyLayer,
-    _hide_modules_from_traversal,
+    _OutsideQuantizerCalibrator,
     _SkipLayer,
 )
 
@@ -301,21 +300,41 @@ def test_layerwise_calib_empty_forward_loop_raises(monkeypatch):
 
 
 @pytest.mark.parametrize("raises", [False, True])
-def test_hide_modules_from_traversal_restores_aliases(raises):
+def test_outside_calibrator_hides_and_restores_layer_aliases(raises):
     model = _ModelWithQuantizedTail()
     original = model.layers[0]
+    model.layers_alias = model.layers
     model.layer_alias = original
 
-    error_context = pytest.raises(RuntimeError, match="injected") if raises else nullcontext()
-    with error_context, _hide_modules_from_traversal(model, [original]):
-        assert isinstance(model.layers[0], _ForwardOnlyLayer)
-        assert model.layer_alias is model.layers[0]
-        assert original not in model.modules()
-        assert original.quantizer not in model.modules()
+    def calib_func(target, _forward_loop):
+        assert isinstance(target.layers[0], _ForwardOnlyLayer)
+        assert target.layers_alias[0] is target.layers[0]
+        assert target.layer_alias is target.layers[0]
+        assert original not in target.modules()
         if raises:
             raise RuntimeError("injected")
 
+    calibrator = _OutsideQuantizerCalibrator(
+        model,
+        [original],
+        lambda target: target(torch.tensor([2.0])),
+        calib_func,
+        {},
+        qdq_from_prev=True,
+    )
+    assert {(id(parent), name) for parent, name, _ in calibrator.transformer_layer_slots} == {
+        (id(model), "layer_alias"),
+        (id(model.layers), "0"),
+    }
+
+    if raises:
+        with pytest.raises(RuntimeError, match="injected"):
+            calibrator.calibrate()
+    else:
+        calibrator.calibrate()
+
     assert model.layers[0] is original
+    assert model.layers_alias[0] is original
     assert model.layer_alias is original
 
 
@@ -407,9 +426,9 @@ def test_layerwise_offload_warning_gating(monkeypatch, offloaded, with_tail, war
 
 @pytest.mark.parametrize(
     ("skip_forward_without_activation_calib", "expected_forward_calls", "warns"),
-    [(None, 1, False), (False, 2, True), (True, 1, False)],
+    [(None, 2, True), (False, 2, True), (True, 1, False)],
 )
-def test_layerwise_max_offload_warning_matches_outside_forward(
+def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
     monkeypatch, skip_forward_without_activation_calib, expected_forward_calls, warns
 ):
     _register_test_discoverer(monkeypatch)
@@ -456,15 +475,20 @@ def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_pat
     assert not (tmp_path / "export").exists()
 
 
-def test_layerwise_export_rejects_explicit_outside_forward(monkeypatch, tmp_path):
+@pytest.mark.parametrize("skip_forward_without_activation_calib", [None, False, True])
+def test_layerwise_export_rejects_weight_only_outside_quantizer(
+    monkeypatch, tmp_path, skip_forward_without_activation_calib
+):
     _register_test_discoverer(monkeypatch)
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
     config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
-    config["algorithm"] = {
+    algorithm = {
         "method": "max",
-        "skip_forward_without_activation_calib": False,
         "layerwise": {"enable": True, "export_dir": str(tmp_path / "export")},
     }
+    if skip_forward_without_activation_calib is not None:
+        algorithm["skip_forward_without_activation_calib"] = skip_forward_without_activation_calib
+    config["algorithm"] = algorithm
 
     with pytest.raises(ValueError, match="outside transformer layers"):
         mtq.quantize(
@@ -474,106 +498,6 @@ def test_layerwise_export_rejects_explicit_outside_forward(monkeypatch, tmp_path
         )
 
     assert not (tmp_path / "export").exists()
-
-
-@pytest.mark.parametrize("algorithm_as_config", [False, True])
-def test_layerwise_export_allows_weight_only_outside_quantizer(
-    monkeypatch, tmp_path, algorithm_as_config
-):
-    _register_test_discoverer(monkeypatch)
-
-    class _FakeExporter:
-        instances = []
-
-        def __init__(self, model, export_dir):
-            self.export_dir = export_dir
-            self.exported_layers = []
-            self.instances.append(self)
-
-        def bind(self, calibrated_layers):
-            self.calibrated_layers = calibrated_layers
-
-        def export_layer(self, layer_idx, layer, layer_inputs):
-            self.exported_layers.append(layer_idx)
-
-    monkeypatch.setattr("modelopt.torch.export.layerwise_export.LayerwiseExporter", _FakeExporter)
-    config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
-    config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
-    algorithm = {
-        "method": "max",
-        "layerwise": {"enable": True, "export_dir": str(tmp_path / "export")},
-    }
-    config["algorithm"] = mtq.MaxCalibConfig(**algorithm) if algorithm_as_config else algorithm
-    model = _TransformerWithLMHead(n_layers=1, dim=16)
-    calib_data = torch.randint(0, 32, (2, 8))
-    forward_calls = 0
-
-    def forward_loop(target):
-        nonlocal forward_calls
-        forward_calls += 1
-        target(calib_data)
-
-    mtq.quantize(model, config, forward_loop=forward_loop)
-
-    assert forward_calls == 1
-    assert model.lm_head.weight_quantizer._amax is not None
-    assert _FakeExporter.instances[0].exported_layers == [0]
-
-
-@pytest.mark.parametrize(
-    "skip_forward_without_activation_calib",
-    [None, True],
-)
-def test_layerwise_export_completed_resume_calibrates_weight_only_tail(
-    monkeypatch, tmp_path, skip_forward_without_activation_calib
-):
-    _register_test_discoverer(monkeypatch)
-    checkpoint_dir = tmp_path / "checkpoint"
-    checkpoint_dir.mkdir()
-    (checkpoint_dir / "manifest.json").write_text(
-        json.dumps({"last_completed_layer": 0, "num_layers": 1})
-    )
-
-    class _FakeExporter:
-        instances = []
-
-        def __init__(self, model, export_dir):
-            self.model = model
-            self.export_dir = export_dir
-            self.instances.append(self)
-
-        def bind(self, calibrated_layers):
-            self.calibrated_layers = calibrated_layers
-
-        def assert_shards_present(self, num_layers):
-            assert num_layers == 1
-
-    monkeypatch.setattr("modelopt.torch.export.layerwise_export.LayerwiseExporter", _FakeExporter)
-    config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
-    config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
-    algorithm = {
-        "method": "max",
-        "layerwise": {
-            "enable": True,
-            "checkpoint_dir": str(checkpoint_dir),
-            "export_dir": str(tmp_path / "export"),
-        },
-    }
-    if skip_forward_without_activation_calib is not None:
-        algorithm["skip_forward_without_activation_calib"] = skip_forward_without_activation_calib
-    config["algorithm"] = algorithm
-    model = _TransformerWithLMHead(n_layers=1, dim=16)
-    forward_calls = 0
-
-    def forward_loop(target):
-        nonlocal forward_calls
-        forward_calls += 1
-        target(torch.randint(0, 32, (2, 8)))
-
-    mtq.quantize(model, config, forward_loop=forward_loop)
-
-    assert forward_calls == 0
-    assert model.lm_head.weight_quantizer._amax is not None
 
 
 # ---------------------------------------------------------------------------

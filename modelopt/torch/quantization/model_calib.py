@@ -2092,9 +2092,8 @@ def layerwise_calibrate(
         calib_func,
         calib_kwargs,
         qdq_from_prev,
-        _needs_activation_forward_for_max_calib if calib_func is max_calibrate else None,
     )
-    if export_dir is not None and outside_calibrator.runs_forward:
+    if export_dir is not None and outside_calibrator.enabled:
         raise ValueError(
             "Layerwise export does not support enabled quantizers outside transformer layers. "
             "Calibrate without export_dir, then export the completed model separately."
