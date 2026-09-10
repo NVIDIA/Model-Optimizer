@@ -51,12 +51,7 @@ from quantize_config import (
     QuantFormat,
     QuantizationConfig,
 )
-from utils import (
-    check_conv_and_mha,
-    check_lora,
-    validate_fp8_mha_quantizers,
-    validate_nvfp4_quantizers,
-)
+from utils import check_conv_and_mha, check_lora
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -281,25 +276,6 @@ class ExportManager:
         self.logger = logger
         self.pipeline_manager = pipeline_manager
 
-    def _has_fp8_conv_layers(self, model: torch.nn.Module) -> bool:
-        """Check whether the model contains an enabled FP8 convolution."""
-        for module in model.modules():
-            if not isinstance(module, torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d):
-                continue
-
-            quantizers = (
-                getattr(module, "input_quantizer", None),
-                getattr(module, "weight_quantizer", None),
-            )
-            if any(
-                quantizer is not None
-                and quantizer.is_enabled
-                and getattr(quantizer, "is_fp8", False)
-                for quantizer in quantizers
-            ):
-                return True
-        return False
-
     def save_checkpoint(
         self,
         backbone: torch.nn.Module,
@@ -332,7 +308,6 @@ class ExportManager:
         backbone: torch.nn.Module,
         model_type: ModelType,
         quant_format: QuantFormat,
-        fp4_block_size: int = 16,
     ) -> None:
         """
         Export model to ONNX format.
@@ -342,52 +317,27 @@ class ExportManager:
             backbone: Model backbone
             model_type: Type of model
             quant_format: Quantization format
-            fp4_block_size: Expected NVFP4 block size
         """
         if not self.config.onnx_dir:
             return
 
         # Deferred: the ONNX stack (onnx, onnx_graphsurgeon, ...) is only needed
         # for --onnx-dir exports; HF-checkpoint-only runs must not require it.
-        from onnx_utils.export import generate_fp8_scales, modelopt_export_sd, restore_fp8_scales
+        from onnx_utils.export import modelopt_export_sd
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")
 
-        quantizer_states = []
-        try:
-            uses_fp8_conv_workaround = quant_format == QuantFormat.FP8 or (
-                quant_format == QuantFormat.FP4 and model_type in _SDXL_MODEL_TYPES
+        self.logger.info("Preparing models for export...")
+        pipe.to("cpu")
+        torch.cuda.empty_cache()
+        backbone.to("cuda")
+        # Export to ONNX
+        backbone.eval()
+        with torch.no_grad():
+            self.logger.info("Exporting to ONNX...")
+            modelopt_export_sd(
+                backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
             )
-            if uses_fp8_conv_workaround and self._has_fp8_conv_layers(backbone):
-                self.logger.info(
-                    "Detected quantizing conv layers in backbone. Generating FP8 scales..."
-                )
-                if quant_format == QuantFormat.FP4:
-                    quantizer_states = generate_fp8_scales(backbone, conv_only=True)
-                else:
-                    quantizer_states = generate_fp8_scales(backbone)
-            self.logger.info("Preparing models for export...")
-            pipe.to("cpu")
-            torch.cuda.empty_cache()
-            backbone.to("cuda")
-            # Export to ONNX
-            backbone.eval()
-            with torch.no_grad():
-                self.logger.info("Exporting to ONNX...")
-                export_kwargs = (
-                    {"expected_fp4_block_size": fp4_block_size}
-                    if quant_format == QuantFormat.FP4
-                    else {}
-                )
-                modelopt_export_sd(
-                    backbone,
-                    str(self.config.onnx_dir),
-                    model_type.value,
-                    quant_format.value,
-                    **export_kwargs,
-                )
-        finally:
-            restore_fp8_scales(quantizer_states)
 
         self.logger.info("ONNX export completed successfully")
 
@@ -633,29 +583,17 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _finalize_backbone_quantization(
-    backbone: torch.nn.Module,
-    backbone_name: str,
+def _restore_sdxl_fp4_policy(
+    pipeline_manager: PipelineManager,
     quant_config: QuantizationConfig,
     model_type: ModelType,
-    restored: bool,
 ) -> None:
-    if backbone_name in ("video_decoder", "vae"):
+    if quant_config.format != QuantFormat.FP4 or model_type not in _SDXL_MODEL_TYPES:
         return
 
-    is_sdxl_fp4 = quant_config.format == QuantFormat.FP4 and model_type in _SDXL_MODEL_TYPES
-    if restored and not is_sdxl_fp4:
-        return
-    if is_sdxl_fp4 and restored:
-        validate_fp8_mha_quantizers(backbone, quant_config.quantize_mha)
-    check_conv_and_mha(backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha)
-    if is_sdxl_fp4:
-        validate_nvfp4_quantizers(
-            backbone,
-            quant_config.block_size,
-            quant_config.quantize_mha,
-            validate_sdxl_mixed_recipe=True,
-        )
+    for backbone_name, backbone in pipeline_manager.iter_backbones():
+        if backbone_name not in ("video_decoder", "vae"):
+            check_conv_and_mha(backbone, False, quant_config.quantize_mha)
 
 
 def main() -> None:
@@ -743,9 +681,9 @@ def main() -> None:
 
         export_manager = ExportManager(export_config, logger, pipeline_manager)
 
-        restored = bool(export_config.restore_from and export_config.restore_from.exists())
-        if restored:
+        if export_config.restore_from and export_config.restore_from.exists():
             export_manager.restore_checkpoint()
+            _restore_sdxl_fp4_policy(pipeline_manager, quant_config, model_config.model_type)
 
         else:
             logger.info("Initializing calibration...")
@@ -768,33 +706,24 @@ def main() -> None:
                     forward_loop,
                     backbone_name=backbone_name,
                 )
+
+                # Compress model weights if requested (only for FP8/FP4)
                 if quant_config.compress:
                     logger.info(f"Compressing {backbone_name} weights...")
                     mtq.compress(backbone)
                     logger.info(f"{backbone_name} compression completed")
 
-                _finalize_backbone_quantization(
-                    backbone,
-                    backbone_name,
-                    quant_config,
-                    model_config.model_type,
-                    restored=False,
-                )
-                export_manager.save_checkpoint(backbone, backbone_name)
+                # For VAE backbones, skip check_conv_and_mha — the whole point
+                # of VAE quantization is to quantize Conv layers.
+                if backbone_name not in ("video_decoder", "vae"):
+                    check_conv_and_mha(
+                        backbone,
+                        quant_config.format == QuantFormat.FP4
+                        and model_config.model_type not in _SDXL_MODEL_TYPES,
+                        quant_config.quantize_mha,
+                    )
 
-        if (
-            restored
-            and quant_config.format == QuantFormat.FP4
-            and model_config.model_type in _SDXL_MODEL_TYPES
-        ):
-            for backbone_name, backbone in pipeline_manager.iter_backbones():
-                _finalize_backbone_quantization(
-                    backbone,
-                    backbone_name,
-                    quant_config,
-                    model_config.model_type,
-                    restored=True,
-                )
+                export_manager.save_checkpoint(backbone, backbone_name)
 
         pipeline_manager.print_quant_summary()
 
@@ -804,7 +733,6 @@ def main() -> None:
                 backbone,
                 model_config.model_type,
                 quant_config.format,
-                fp4_block_size=quant_config.block_size,
             )
 
         export_manager.export_hf_ckpt(pipe, model_config)

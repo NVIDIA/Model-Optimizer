@@ -28,7 +28,7 @@ python quantize.py \
 
 #### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantize.py)
 
-FP4 ONNX export is supported for Flux and the SDXL family. For SDXL, the FP4 recipe uses block-16 NVFP4 for non-QKV Linear/GEMM layers and FP8 for Conv2d layers. Attention `to_q`, `to_k`, and `to_v` projection Linears remain in the high-precision model dtype so TensorRT can preserve their horizontal projection fusion. The script selects this mixed-precision recipe automatically when `--format fp4` is used.
+FP4 ONNX export is supported for Flux and SDXL. SDXL uses block-16 NVFP4 for non-QKV Linear/GEMM layers and FP8 for Conv2d layers, while Q/K/V projection Linears remain in the model dtype to preserve TensorRT fusion. Add `--quantize-mha` to optionally quantize MHA with FP8. FP4 deployment requires a Blackwell GPU and TensorRT with NVFP4 support.
 
 ```sh
 python quantize.py \
@@ -38,20 +38,18 @@ python quantize.py \
     --onnx-dir {ONNX_DIR}
 ```
 
-Add `--quantize-mha` to opt in to FP8 MHA quantization; this does not quantize the QKV projection Linears.
-
 We recommend using a device with a minimum of 48GB of combined CPU and GPU memory for exporting ONNX models. If not, please use CPU for ONNX export.
 
 ## Build the TRT engine for the Quantized ONNX Backbone
 
 > [!IMPORTANT]
 > TensorRT environment must be setup prior -- Please see [Pre-Requisites](../README.md#pre-requisites)
-> INT8 requires **TensorRT version >= 9.2.0**. FP8 requires **TensorRT version 10.2.0 or higher**. FP4 requires a Blackwell GPU (SM100 or newer) and a TensorRT version with NVFP4 support. You can download the latest version of TensorRT [here](https://developer.nvidia.com/tensorrt/download). Deployment of SVDQuant is currently not supported.
+> INT8 requires **TensorRT version >= 9.2.0**. If you prefer to use the FP8 TensorRT, ensure you have **TensorRT version 10.2.0 or higher**. You can download the latest version of TensorRT at [here](https://developer.nvidia.com/tensorrt/download). Deployment of SVDQuant is currently not supported.
 
-Generate INT8/FP8/FP4 Backbone Engine
+Generate INT8/FP8 Backbone Engine
 
 ```bash
-# For SDXL INT8, FP8, or FP4
+# For SDXL
 trtexec --builderOptimizationLevel=4 --stronglyTyped --onnx=./model.onnx \
     --minShapes=sample:2x4x128x128,timestep:1,encoder_hidden_states:2x77x2048,text_embeds:2x1280,time_ids:2x6 \
     --optShapes=sample:16x4x128x128,timestep:1,encoder_hidden_states:16x77x2048,text_embeds:16x1280,time_ids:16x6 \
@@ -93,15 +91,15 @@ python demo_txt2img_xl.py "enchanted winter forest, soft diffuse light on a snow
 
 Note, it will take some time to build TRT engines for the first time
 
-- Replace the FP16 backbone TensorRT engine with the quantized engine generated in [Build the TRT engine for the Quantized ONNX Backbone](#build-the-trt-engine-for-the-quantized-onnx-backbone), e.g.:
+- Replace the fp16 backbone TRT engine with int8 engine generated in [Build the TRT engine for the Quantized ONNX Backbone](#build-the-trt-engine-for-the-quantized-onnx-backbone), e.g.,:
 
 ```sh
 cp -r {YOUR_UNETXL}.plan ./engine/
 ```
 
-The engines must be built on the same GPU, and the quantized engine name must match the FP16 engine name to enable compatibility with the demoDiffusion pipeline.
+Note, the engines must be built on the same GPU, and ensure that the INT8 engine name matches the names of the FP16 engines to enable compatibility with the demoDiffusion pipeline.
 
-- Run the above txt2img example command again. You can compare the generated images and latency for FP16 versus INT8, FP8, or FP4.
+- Run the above txt2img example command again. You can compare the generated images and latency for fp16 vs int8.
   Similarly, you could run end-to-end pipeline with Model Optimizer quantized backbone and corresponding examples in demoDiffusion with other diffusion models.
 
 ## Running the inference pipeline with DeviceModel

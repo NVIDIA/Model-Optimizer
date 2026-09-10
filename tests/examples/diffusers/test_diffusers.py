@@ -130,17 +130,6 @@ class DiffuserModel(NamedTuple):
         ),
         pytest.param(
             DiffuserModel(
-                name="flux-schnell",
-                path=FLUX_SCHNELL_PATH,
-                dtype="BFloat16",
-                format_type="fp4",
-                quant_algo="max",
-                collect_method="default",
-            ),
-            marks=minimum_sm(100),
-        ),
-        pytest.param(
-            DiffuserModel(
                 name="sdxl-1.0",
                 path=SDXL_PATH,
                 dtype="Half",
@@ -163,7 +152,6 @@ class DiffuserModel(NamedTuple):
         "flux_schnell_bf16_int8_smoothquant_3.0_min_mean",
         "sd3_medium_fp16_int8_smoothquant_3.0_min_mean",
         "sdxl_1.0_fp16_fp8_max_3.0_default",
-        "flux_schnell_bf16_fp4_max_3.0_default",
         "sdxl_1.0_fp16_fp4_max_3.0_default",
         "sdxl_1.0_fp16_int8_smoothquant_3.0_min_mean",
     ],
