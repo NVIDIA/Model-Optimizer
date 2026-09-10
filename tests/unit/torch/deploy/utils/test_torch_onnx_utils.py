@@ -60,6 +60,13 @@ deploy_benchmark_dynamo = {
 }
 
 
+class _FP8ModelWithBuffer(nn.Sequential):
+    fp32_buffer: torch.Tensor
+
+    def forward(self, inputs):
+        return super().forward(inputs) + self.fp32_buffer
+
+
 def _make_fp8_model(source_dtype, kind="fp8"):
     if kind == "format":
         model = nn.Sequential(*(nn.Linear(128, 128, bias=False) for _ in range(2)))
@@ -75,7 +82,7 @@ def _make_fp8_model(source_dtype, kind="fp8"):
             ]
         )
     else:
-        model = nn.Sequential(
+        model = _FP8ModelWithBuffer(
             nn.Conv2d(1, 1, 1, bias=False),
             nn.Flatten(),
             nn.Linear(4, 4, bias=False),
@@ -84,7 +91,7 @@ def _make_fp8_model(source_dtype, kind="fp8"):
         config = mtq.FP8_DEFAULT_CFG
     model = model.eval().to(source_dtype)
     if kind != "format":
-        model.register_buffer("unused_fp32_buffer", torch.ones(1))
+        model.register_buffer("fp32_buffer", torch.ones(4))
         if kind == "parameters":
             model.register_parameter("unused_fp32_parameter", nn.Parameter(torch.ones(1)))
     quantized_model = mtq.quantize(
@@ -217,6 +224,7 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
         (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16),
         (torch.float32, "fp16", onnx.TensorProto.FLOAT16),
     ],
+    ids=["bf16-weight-focused-buffer", "fp32-to-fp16"],
 )
 def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, expected_onnx_dtype):
     exported_model = _export_fp8_model(source_dtype, weights_dtype)
@@ -239,27 +247,47 @@ def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, ex
     for node in fp8_weight_dq_nodes:
         assert initializer_by_name[node.input[1]].data_type == expected_onnx_dtype
         assert {0x7F, 0xFF}.isdisjoint(initializer_by_name[node.input[0]].raw_data)
-    graph_io = [*exported_model.graph.input, *exported_model.graph.output]
-    assert all(value.type.tensor_type.elem_type == expected_onnx_dtype for value in graph_io)
+    assert all(
+        value.type.tensor_type.elem_type == expected_onnx_dtype
+        for value in exported_model.graph.input
+    )
+    expected_output_dtype = (
+        onnx.TensorProto.FLOAT if weights_dtype == "bf16" else expected_onnx_dtype
+    )
+    assert all(
+        value.type.tensor_type.elem_type == expected_output_dtype
+        for value in exported_model.graph.output
+    )
+    if weights_dtype == "bf16":
+        fp32_buffer = next(
+            initializer
+            for initializer in exported_model.graph.initializer
+            if initializer.name.endswith("fp32_buffer")
+        )
+        assert fp32_buffer.data_type == onnx.TensorProto.FLOAT
+        assert any(
+            node.op_type == "Add" and fp32_buffer.name in node.input
+            for node in exported_model.graph.node
+        )
 
 
 @pytest.mark.parametrize(
-    ("kind", "source_dtype", "weights_dtype", "error_type", "error"),
+    ("kind", "source_dtype", "weights_dtype", "error"),
     [
-        ("fp8", torch.float32, "bf16", AssertionError, "torch.float32"),
-        ("fp8", torch.bfloat16, "fp16", ValueError, "torch.bfloat16"),
-        ("parameters", torch.bfloat16, "bf16", AssertionError, "torch.bfloat16, torch.float32"),
-        ("format", torch.bfloat16, "bf16", AssertionError, "torch.bfloat16"),
+        ("fp8", torch.float32, "bf16", "torch.float32"),
+        ("fp8", torch.bfloat16, "fp16", "torch.bfloat16"),
+        ("parameters", torch.bfloat16, "bf16", "torch.bfloat16, torch.float32"),
+        ("format", torch.bfloat16, "bf16", "torch.bfloat16"),
     ],
     ids=["fp32-to-bf16", "bf16-to-fp16", "mixed-parameters", "mixed-format"],
 )
 def test_fp8_export_rejects_unsupported_dtype_conversion(
-    kind, source_dtype, weights_dtype, error_type, error, monkeypatch, tmp_path
+    kind, source_dtype, weights_dtype, error, monkeypatch, tmp_path
 ):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     model, sample_input = _make_fp8_model(source_dtype, kind)
     with pytest.raises(
-        error_type,
+        ValueError,
         match=rf"Converting .* to {weights_dtype.upper()}.*source parameter dtypes: {error}",
     ):
         get_onnx_bytes_and_metadata(

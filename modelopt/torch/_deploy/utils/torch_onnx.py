@@ -507,14 +507,17 @@ def get_onnx_bytes_and_metadata(
             `torch.onnx.export <https://pytorch.org/docs/stable/onnx.html#torch.onnx.export>`_.
         onnx_opset: The onnx opset version to use for exporting the model.
         dq_only: If True, the exported onnx model is converted to a dq_only model.
-        weights_dtype: The dtype of the weights in the onnx model.
+        weights_dtype: Requested high-precision dtype for exported weights. For an FP8 model,
+            ``"bf16"`` is accepted only when every floating parameter is already BF16. This is
+            a weight-focused no-op, not a graph-wide conversion: floating buffers are not
+            considered for eligibility and may preserve higher-precision regions.
 
     Returns:
         bytes: Onnx model in bytes.
         ModelMetadata: The model's meta data.
 
     Raises:
-        ValueError: If nn.Module is not passed as model.
+        ValueError: If model is not an nn.Module or the requested precision conversion is unsupported.
     """
     if not isinstance(model, nn.Module):
         raise ValueError("Only PyTorch model compilation is supported.")
@@ -598,7 +601,7 @@ def get_onnx_bytes_and_metadata(
         and (uses_fp8 or uses_other_unsupported_quantizer)
         and not is_bf16_fp8_noop
     ):
-        raise AssertionError(
+        raise ValueError(
             "Converting a quantized ONNX graph to BF16 is not supported yet "
             f"(source parameter dtypes: {source_parameter_dtype_names})"
         )
