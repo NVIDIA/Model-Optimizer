@@ -31,7 +31,6 @@ imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     Phi-4-multimodal: FP8 W8A8 per-tensor on the language decoder's LoRA base layers
     (qkv_proj / o_proj / gate_up_proj / down_proj); max calibration; KV cache left

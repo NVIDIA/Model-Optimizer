@@ -122,7 +122,8 @@ whatever the imported recipe's kind is; a recipe states its kind in whichever of
 these it likes, and the loader takes the first that answers:
 
 1. a `# modelopt-schema:` comment naming its schema class,
-2. `metadata.recipe_type`, or
+2. `metadata.recipe_type` — **deprecated**; still read, but new recipes should
+   leave it out,
 3. the recipe it delegates to via a top-level `$import`.
 
 Whatever a recipe does state has to be true. Declaring both a schema comment and

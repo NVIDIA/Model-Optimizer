@@ -32,6 +32,7 @@
 # quantize the dense MLP of layers 0-2. Step-3.7-Flash keeps those BF16, so the scope
 # here is `moe`-only.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -39,7 +40,6 @@ imports:
   kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     Step-3.7-Flash: NVFP4 (W4A4) on the routed experts of sparse layers 3-44, plus a
     calibrated FP8 KV cache; max calibration. The dense MLP of layers 0-2, the shared

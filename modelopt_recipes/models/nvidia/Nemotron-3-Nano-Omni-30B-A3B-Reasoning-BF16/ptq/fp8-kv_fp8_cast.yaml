@@ -38,6 +38,7 @@
 # all six attention layers' `mixer.{q,k,v,o}_proj`. BF16: `mixer.conv1d`, the
 # `mixer.gate` routers and `lm_head`.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -45,7 +46,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Nemotron-3-Nano-Omni-30B-A3B-Reasoning: FP8 W8A8 per-tensor on every language-decoder
     linear (MoE experts, shared experts, Mamba in/out projections and attention), plus an

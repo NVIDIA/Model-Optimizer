@@ -23,7 +23,6 @@ imports:
   block_sparse_moe_nvfp4: configs/ptq/units/block_sparse_moe_nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies dynamic NVFP4 only to expert-layer weight and input quantizers, with the KV
     cache left in BF16/FP16; uses max calibration. The KV-quantized variants are

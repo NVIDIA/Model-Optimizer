@@ -43,6 +43,7 @@
 # goes to FP8, and the routed-expert weight scales are MSE-searched. Here only the three
 # large linear-attention projections are quantized and the experts use max calibration.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -51,7 +52,6 @@ imports:
   kv_fp8: configs/ptq/units/kv_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     Qwen3.5-397B-A17B (V2 release): NVFP4 (W4A4) on the routed experts; FP8 (W8A8) on
     the shared expert, all self-attention projections and the large linear-attention

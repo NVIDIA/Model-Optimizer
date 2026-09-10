@@ -48,7 +48,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Qwen3-Next: NVFP4 (W4A4) on the routed experts, the shared expert, the attention
     output projection and the linear-attention output projection, plus an FP8 KV cache

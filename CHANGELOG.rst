@@ -17,6 +17,8 @@ Changelog
 
 **Deprecations**
 
+- Deprecate ``metadata.recipe_type`` in recipe YAML. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does; ``recipe_type`` is still read and still honoured, so no existing recipe needs changing, but new recipes should leave it out. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
+
 **Bug Fixes**
 
 - Fix ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``, which matched only ``*mlp.experts*``. The HF ``minimax_m3_vl`` classes name the MoE block ``block_sparse_moe``, so the routed experts fell through to MXFP8 instead of NVFP4 and the recipe did not reproduce ``nvidia/MiniMax-M3-NVFP4``.

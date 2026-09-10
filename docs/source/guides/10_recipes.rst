@@ -581,7 +581,10 @@ inherited unchanged:
 Note the missing ``recipe_type``.  A recipe states its kind in whichever of these it
 likes, and the loader takes the first that answers: a ``# modelopt-schema:`` comment
 naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
-delegates to.
+delegates to.  ``metadata.recipe_type`` is **deprecated**: it is still read and still
+honoured, so no existing recipe needs changing, but new recipes should declare their
+schema instead.  It remains the only option for a directory-format recipe's
+``metadata.yml``, which has no comment preamble to read.
 
 Stating more than one is allowed, but they must agree, and that extends across the
 import: a recipe and the recipe it delegates to must be the same kind, since the import

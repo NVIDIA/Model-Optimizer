@@ -32,6 +32,7 @@
 # KV cache: FP8 with a constant amax -- the published checkpoint's `k_scale` is exactly
 # 1.0, which is what `use_constant_amax` produces (amax pinned to the E4M3 max, 448).
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -39,7 +40,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     NVIDIA-Nemotron-3-Super-120B-A12B: FP8 W8A8 per-tensor on the MoE routed experts,
     the shared experts and the Mamba in/out projections, plus an FP8 KV cache in cast

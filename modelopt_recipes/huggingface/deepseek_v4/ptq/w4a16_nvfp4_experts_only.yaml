@@ -27,7 +27,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     DeepSeek-V4 recipe quantizing only the routed-expert weights to NVFP4 (W4A16);
     expert activations stay BF16. Shared experts, attention, router gates, head and the

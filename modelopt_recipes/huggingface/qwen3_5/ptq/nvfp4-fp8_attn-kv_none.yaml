@@ -22,7 +22,6 @@ imports:
   shared_quant_cfg: huggingface/qwen3_5/ptq/nvfp4-fp8_attn-kv_none.quant_cfg
 
 metadata:
-  recipe_type: ptq
   description: >-
     W4A4 (NVFP4) MLP / FP8 attention PTQ recipe for HuggingFace `qwen3_5` models:
     NVFP4 weights and activations for MLP / shared-expert projections and lm_head; FP8

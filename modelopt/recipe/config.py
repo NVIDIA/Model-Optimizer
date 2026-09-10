@@ -70,12 +70,13 @@ class RecipeMetadataConfig(ModeloptBaseConfig):
     recipe_type: RecipeType | None = ModeloptField(
         default=None,
         title="Recipe type",
-        description="The type of the recipe (e.g. PTQ). Optional in a recipe file: the "
-        "``# modelopt-schema:`` comment that names the recipe's schema class already "
-        "says which kind it is -- and that is the same declaration that makes the file "
-        "``$import``-able -- so the class fills this in. State it explicitly only where "
-        "there is no schema comment to read, as in a directory-format recipe's "
-        "``metadata.yml``. When both are present they must agree.",
+        description="The type of the recipe (e.g. PTQ). **Deprecated** in recipe YAML: "
+        "the ``# modelopt-schema:`` comment naming the recipe's schema class already says "
+        "which kind it is -- and it is the same declaration that makes the file "
+        "``$import``-able -- so the class fills this in. Still read and still honoured, so "
+        "no existing recipe needs changing, but new recipes should leave it out. It remains "
+        "the only option where there is no schema comment to read, as in a directory-format "
+        "recipe's ``metadata.yml``. When both are present they must agree.",
     )
     description: str = ModeloptField(
         default=_DEFAULT_RECIPE_DESCRIPTION,

@@ -47,6 +47,7 @@
 # while q/k/v stay BF16 -- the same `omlp`-style scoping the general
 # `nvfp4_omlp_only` recipe uses, but with FP8 rather than NVFP4 on that projection.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -55,7 +56,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Nemotron-3-Nano-Omni-30B-A3B-Reasoning: NVFP4 (W4A4) on the MoE routed experts; FP8
     (W8A8) on the shared experts, the Mamba in/out projections and the attention output

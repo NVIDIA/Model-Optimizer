@@ -22,7 +22,6 @@ imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
 
 metadata:
-  recipe_type: ptq
   description: >-
     W8A8 FP8 E4M3 on every linear, with the KV cache left in BF16/FP16; uses max
     calibration. The KV-quantized variants are fp8_default-kv_fp8_cast / -kv_fp8.

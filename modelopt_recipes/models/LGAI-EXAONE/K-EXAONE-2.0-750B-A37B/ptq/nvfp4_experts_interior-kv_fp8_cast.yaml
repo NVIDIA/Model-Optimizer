@@ -36,6 +36,7 @@
 # The trailing per-layer disables must stay last: they undo the broad
 # `*.experts.*` enables above for exactly those six layers.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -43,7 +44,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     K-EXAONE-2.0-750B-A37B: NVFP4 (W4A4) on the routed experts of the interior sparse
     layers 5-74 only, plus an FP8 KV cache in cast mode using constant amax; max

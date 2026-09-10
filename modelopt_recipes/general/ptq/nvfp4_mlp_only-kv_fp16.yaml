@@ -23,7 +23,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Dynamic NVFP4 W4A4 on MLP/MoE weight and input quantizers only, with the KV cache left
     in BF16/FP16; uses max calibration. Attention stays at the model's source precision.
