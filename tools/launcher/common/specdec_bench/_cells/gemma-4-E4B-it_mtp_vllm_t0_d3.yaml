@@ -1,0 +1,4 @@
+sampling_kwargs:
+  temperature: 0
+engine_args:
+  max_model_len: 40960
