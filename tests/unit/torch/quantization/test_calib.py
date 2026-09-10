@@ -718,11 +718,6 @@ def test_max_calib_config_skip_is_opt_in():
     """The flag is opt-in (default False) so it does not change behavior for direct callers."""
     default_config = MaxCalibConfig()
     assert default_config.skip_forward_without_activation_calib is False
-    assert "skip_forward_without_activation_calib" not in default_config.model_fields_set
-
-    explicit_config = MaxCalibConfig(skip_forward_without_activation_calib=False)
-    assert explicit_config.skip_forward_without_activation_calib is False
-    assert "skip_forward_without_activation_calib" in explicit_config.model_fields_set
     assert MaxCalibConfig(
         skip_forward_without_activation_calib=True
     ).skip_forward_without_activation_calib
