@@ -700,6 +700,7 @@ seconds rather than after a full calibration.
 | --- | --- |
 | `command.txt` | The full invocation, copy-pasteable, with credentials masked |
 | `version.txt` | The ModelOpt version that ran |
+| `experiment.json` | The experiment name, run id and run URL — the same file written into `--export_path` |
 | `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
 | `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
@@ -710,6 +711,17 @@ seconds rather than after a full calibration.
 Every command-line argument is also logged as a searchable param, alongside
 `user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
 still recorded, with status `FAILED` and its log attached.
+
+A tracked run also drops `.experiment.json` into `--export_path`, so a checkpoint found on
+disk names the run that produced it:
+
+```bash
+cat <quantized_ckpt_path>/.experiment.json
+# {"tracking_uri": ..., "experiment_name": ..., "experiment_id": ..., "run_id": ...,
+#  "run_name": ..., "run_url": ...}
+```
+
+Nothing is written when the run never opened, or when the run exported no checkpoint.
 
 Other flags:
 
