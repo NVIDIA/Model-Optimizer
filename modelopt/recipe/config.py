@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -235,10 +235,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="Optional per-module overrides for candidate formats and BF16/no-quant "
         "selectability. Matching is performed after runtime-fusion grouping.",
     )
-    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+    auto_quantize_method: Literal["gradient", "kl_div", "aumann_shapley"] = ModeloptField(
         default="gradient",
         title="Sensitivity scoring method",
-        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+        description="'gradient' uses task labels; 'kl_div' and 'aumann_shapley' compare the "
+        "model's own outputs without labels.",
+    )
+    method_options: dict[str, Any] | None = ModeloptField(
+        default=None,
+        title="Method-specific scoring options",
+        description="Options forwarded to the selected scoring method. Each method validates "
+        "its supported keys and values.",
     )
     score_size: int = ModeloptField(
         default=128,
@@ -265,8 +272,24 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "the --kv_cache_qformat CLI flag when omitted.",
     )
 
+    @property
+    def uses_predicted_damage_target(self) -> bool:
+        """Whether predicted damage, rather than effective bits, is the search target."""
+        return (self.method_options or {}).get("max_predicted_damage") is not None
+
     @model_validator(mode="after")
-    def _has_search_space(self):
+    def _validate_search_targets_and_space(self):
+        if self.uses_predicted_damage_target and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                "method_options.max_predicted_damage requires "
+                "auto_quantize_method='aumann_shapley'."
+            )
+        has_explicit_bit_budget = "effective_bits" in self.constraints.model_fields_set
+        if self.uses_predicted_damage_target and has_explicit_bit_budget:
+            raise ValueError(
+                "A damage-bound AutoQuantize recipe must omit constraints.effective_bits; "
+                "max_predicted_damage supplies the search target."
+            )
         if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
