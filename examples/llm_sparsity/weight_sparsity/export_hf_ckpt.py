@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
-from modelopt.torch.export import export_tensorrt_llm_checkpoint, get_model_type
+from modelopt.torch.export import export_hf_checkpoint
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 
@@ -103,8 +103,6 @@ def main(args):
             model=model,
         )
 
-    # Export the sparse model to trt-llm checkpoint
-    model_type = get_model_type(model)
     if args.modelopt_restore_path:
         print(f"Loading sparsity state from {args.modelopt_restore_path}")
         if not os.path.isfile(args.modelopt_restore_path):
@@ -112,17 +110,11 @@ def main(args):
 
         mto.restore(model, args.modelopt_restore_path)
 
-    print(f"Exporting trt-llm checkpoint to {args.output_dir}")
+    print(f"Exporting Hugging Face checkpoint to {args.output_dir}")
     with torch.inference_mode():
         model = mts.export(model)
-        export_tensorrt_llm_checkpoint(
-            model,
-            model_type,
-            torch.float16,
-            export_dir=args.output_dir,
-            inference_tensor_parallel=args.inference_tensor_parallel,
-            inference_pipeline_parallel=args.inference_pipeline_parallel,
-        )
+        export_hf_checkpoint(model, export_dir=args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
 
 if __name__ == "__main__":
@@ -144,18 +136,6 @@ if __name__ == "__main__":
         help="Maximum sequence length. Sequences will be right padded (and possibly truncated).",
     )
     parser.add_argument("--output_dir", default="output_dir")
-    parser.add_argument(
-        "--inference_tensor_parallel",
-        help="Number of tensor parallel groups for inference.",
-        type=int,
-        default=1,
-    )
-    parser.add_argument(
-        "--inference_pipeline_parallel",
-        help="Number of pipeline parallel groups for inference.",
-        type=int,
-        default=1,
-    )
     parser.add_argument(
         "--trust_remote_code",
         help="Set trust_remote_code for Huggingface models and tokenizers",
