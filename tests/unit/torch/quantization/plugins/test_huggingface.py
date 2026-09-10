@@ -385,7 +385,11 @@ def test_transposed_experts_calib_mixin_yields_transposed_views():
 @pytest.mark.parametrize("model_type", ["gpt_oss", "llama4"])
 @pytest.mark.parametrize("keep_attrs", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_fold_transposed_expert_weights_preserves_forward(model_type, keep_attrs, dtype):
+@pytest.mark.parametrize("offload", [None, "cpu", "disk"])
+def test_fold_transposed_expert_weights_preserves_forward(
+    model_type, keep_attrs, dtype, offload, tmp_path
+):
+    set_seed()
     if model_type == "gpt_oss":
         model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
     else:
@@ -429,16 +433,30 @@ def test_fold_transposed_expert_weights_preserves_forward(model_type, keep_attrs
 
     with torch.no_grad():
         expected = model(input_ids).logits
+        if offload is not None:
+            accelerate = pytest.importorskip("accelerate")
+            if offload == "cpu":
+                accelerate.cpu_offload(experts, execution_device=torch.device("cpu"))
+            else:
+                accelerate.disk_offload(
+                    experts, tmp_path / "offload", execution_device=torch.device("cpu")
+                )
+            assert experts.gate_up_proj.is_meta
+            torch.testing.assert_close(model(input_ids).logits, expected)
         mtq.fold_weight(model, keep_attrs=keep_attrs)
         torch.testing.assert_close(model(input_ids).logits, expected)
         for (weight, quantizer), pointer in zip(pairs, pointers):
-            assert weight.data_ptr() == pointer
+            if offload is None:
+                assert weight.data_ptr() == pointer
             assert not quantizer.is_enabled
             assert quantizer.pre_quant_scale is None
             assert hasattr(quantizer, "_amax") == keep_attrs
             assert hasattr(quantizer, "_pre_quant_scale") == keep_attrs
         mtq.fold_weight(model, keep_attrs=keep_attrs)
         torch.testing.assert_close(model(input_ids).logits, expected)
+        if offload is not None:
+            assert experts.gate_up_proj.is_meta
+            assert experts.down_proj.is_meta
 
 
 def test_hf_decoder_discoverer_registration_path():
