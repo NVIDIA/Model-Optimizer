@@ -1418,8 +1418,16 @@ def _log_experiment_json(logger: MlflowRunLogger, export_path: Path) -> None:
     pointer behind, and skipped when the export directory is absent -- a run that exported
     nothing has nowhere to put it, and creating the directory would suggest a checkpoint
     that does not exist.
+
+    There is nothing to record when the run never opened, which a URI taken from the
+    environment reaches by design: it disables tracking from inside the block rather than
+    failing the quantization. Writing then would put an empty object over the pointer left
+    by an earlier run of the same ``--export_path``.
     """
-    text = json.dumps(logger.run_info, indent=2) + "\n"
+    info = logger.run_info
+    if not info:
+        return
+    text = json.dumps(info, indent=2) + "\n"
     logger.log_text(_EXPERIMENT_JSON.removeprefix("."), text)
     if not export_path.is_dir():
         return

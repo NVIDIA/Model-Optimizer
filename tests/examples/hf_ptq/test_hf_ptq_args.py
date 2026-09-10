@@ -512,6 +512,33 @@ def test_experiment_json_is_skipped_when_nothing_was_exported(
     assert "experiment.json" in fake_mlflow.texts
 
 
+def test_no_experiment_json_when_optional_tracking_fails(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """A URI from $MLFLOW_TRACKING_URI is best-effort: an unreachable server disables
+    tracking from inside the block, and the run must not drop a contentless file on top of
+    a previous run's pointer in a reused --export_path."""
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com")
+
+    def explode(name):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.set_experiment = explode
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    previous = tmp_path / ".experiment.json"
+    previous.write_text('{"run_id": "from-an-earlier-run"}\n')
+
+    with example_utils.mlflow_run(args):
+        pass
+
+    assert args.mlflow_required is False
+    assert json.loads(previous.read_text())["run_id"] == "from-an-earlier-run"
+
+
 def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
     _, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
