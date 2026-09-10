@@ -28,7 +28,6 @@
 # branch is kept in BF16 by the shared `default_disabled_quantizers` unit imported
 # below, which globally disables `*vision_tower*` / `*visual*` / `*embed_vision*`.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

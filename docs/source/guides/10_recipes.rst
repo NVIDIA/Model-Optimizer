@@ -576,13 +576,17 @@ inherited unchanged:
 
    $import: base
    metadata:
-     recipe_type: ptq
      description: What this checkpoint uses the base recipe for.
 
-The imported recipe must declare a ``# modelopt-schema:`` comment, as every importable
-file does; all ``general/``, ``huggingface/`` and ``timm/`` recipes do.  This is how the
-checkpoint aliases under ``models/`` record which recipe reproduces a release without
-duplicating it.
+Note the missing ``recipe_type``.  A recipe states its kind in whichever of these it
+likes, and the loader takes the first that answers: a ``# modelopt-schema:`` comment
+naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
+delegates to.  Stating more than one is allowed but they must agree.
+
+What *is* required: a recipe that another file imports must carry the schema comment,
+since ``$import`` resolution needs it to validate the imported payload.  A recipe nothing
+imports needs no comment at all.  This is how the checkpoint aliases under ``models/``
+record which recipe reproduces a release without duplicating it.
 
 Loading recipes
 ===============

@@ -105,7 +105,6 @@ imports:
 
 $import: base
 metadata:
-  recipe_type: ptq
   description: >-
     meta-llama/Llama-3.1-8B-Instruct as published in nvidia/Llama-3.1-8B-Instruct-NVFP4.
     Alias for `general/ptq/nvfp4_default-kv_fp8_cast`, which reproduces this
@@ -116,9 +115,20 @@ A top-level `$import` brings in the whole imported recipe; the keys given
 alongside it override the imported ones, so the alias supplies its own
 `metadata` and inherits `quantize` — algorithm and every `quant_cfg` entry —
 unchanged. Nothing is duplicated: editing the base recipe changes every alias
-that points at it. (The imported recipe must declare
-`# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`, as every
-importable file does; all `general/`, `huggingface/` and `timm/` recipes do.)
+that points at it.
+
+Note what the alias does *not* say. It has no `recipe_type`, because the kind is
+whatever the imported recipe's kind is; a recipe states its kind in whichever of
+these it likes, and the loader takes the first that answers:
+
+1. a `# modelopt-schema:` comment naming its schema class,
+2. `metadata.recipe_type`, or
+3. the recipe it delegates to via a top-level `$import`.
+
+The one thing that *is* required: **a recipe another file imports must carry the
+schema comment**, because that is what `$import` resolution needs to validate the
+imported payload. A recipe nothing imports needs nothing — so aliasing a recipe
+for the first time means adding the comment to it in the same change.
 
 Aliases are **generated**, not hand-written, from the checkpoint-to-recipe map:
 

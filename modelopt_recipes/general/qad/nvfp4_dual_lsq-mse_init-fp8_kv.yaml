@@ -20,7 +20,6 @@ metadata:
     initialization and FP8 scale sweep; uses dynamic NVFP4 activations and FP8 KV cache.
     QAT/QAD-only: the LSQ scales are learned during training, so this recipe is not
     suitable for calibration-only PTQ.
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

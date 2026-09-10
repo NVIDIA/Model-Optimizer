@@ -17,7 +17,6 @@ metadata:
   recipe_type: ptq
   description: INT4 blockwise weight-only (W4A16, block size 128), max calibration.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

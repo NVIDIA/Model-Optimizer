@@ -35,7 +35,12 @@ from modelopt.recipe.config import (
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
-from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
+from modelopt.torch.opt.config_loader import (
+    _MODELOPT_SCHEMA_RE,
+    _load_raw_config,
+    _schema_type,
+    peek_declared_schema,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 
@@ -179,8 +184,17 @@ def test_load_recipe_huggingface_models_backward_compat_alias():
     assert isinstance(recipe, ModelOptPTQRecipe)
 
 
+_PTQ_SCHEMA = "modelopt.recipe.config.ModelOptPTQRecipe"
+
+
 def _all_shipped_ptq_recipe_paths():
-    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list.
+
+    A recipe says it is PTQ with ``metadata.recipe_type``, with a ``# modelopt-schema:``
+    comment naming :class:`ModelOptPTQRecipe`, or -- for a checkpoint alias, which states
+    neither -- by delegating to a recipe that does. All three are picked up, so every
+    shipped recipe is swept by the tests below.
+    """
     root = files("modelopt_recipes")
     paths = []
     for path in sorted(Path(str(root)).rglob("*.yaml")):
@@ -192,7 +206,13 @@ def _all_shipped_ptq_recipe_paths():
         # List-shaped fragments (layer-pattern units) are not recipes.
         if not isinstance(raw, dict):
             continue
-        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+        declared = peek_declared_schema(path)
+        delegates = "$import" in raw  # a checkpoint alias inherits its kind from its base
+        if (
+            declared == _PTQ_SCHEMA
+            or (raw.get("metadata") or {}).get("recipe_type") == "ptq"
+            or delegates
+        ):
             paths.append(str(rel.with_suffix("")))
     return paths
 
@@ -426,6 +446,83 @@ quantize:
     )
     quant_cfg = load_recipe(alias).quantize.model_dump()["quant_cfg"]
     assert [entry["quantizer_name"] for entry in quant_cfg] == ["*input_quantizer"]
+
+
+def test_load_recipe_infers_kind_from_schema_comment(tmp_path):
+    """A recipe that declares its schema needs no ``metadata.recipe_type``."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(_BASE_RECIPE_FOR_ALIAS.replace("  recipe_type: ptq\n", ""))
+    loaded = load_recipe(recipe)
+    assert loaded.recipe_type == RecipeType.PTQ
+    assert isinstance(loaded, ModelOptPTQRecipe)
+
+
+def test_load_recipe_infers_kind_from_the_recipe_it_delegates_to(tmp_path):
+    """A pure alias states neither ``recipe_type`` nor a schema; it inherits both.
+
+    This is the shape the checkpoint aliases under ``modelopt_recipes/models/`` use, so
+    a released checkpoint's entry carries nothing but a description and the import.
+    """
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  description: nothing but a description
+""",
+    )
+    loaded = load_recipe(alias)
+    assert loaded.recipe_type == RecipeType.PTQ
+    assert loaded.description == "nothing but a description"
+
+
+def test_load_recipe_rejects_recipe_type_contradicting_its_schema(tmp_path):
+    """Stating a kind that disagrees with the schema class is an error, not a preference."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace("  recipe_type: ptq\n", "  recipe_type: speculative_eagle\n")
+    )
+    with pytest.raises(ValueError, match="recipe_type"):
+        load_recipe(recipe)
+
+
+def test_load_recipe_without_any_kind_declaration_raises(tmp_path):
+    """No schema comment, no recipe_type and no delegation: the loader cannot dispatch."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace(
+            "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", ""
+        ).replace("  recipe_type: ptq\n", "")
+    )
+    with pytest.raises(ValueError, match="does not say what kind of recipe it is"):
+        load_recipe(recipe)
+
+
+def test_shipped_modelopt_schema_comments_are_in_the_preamble():
+    """A ``modelopt-schema`` comment below the first YAML line is silently ignored.
+
+    :func:`_parse_modelopt_schema` stops at the first non-comment line, so a comment
+    placed after e.g. ``metadata:`` parses as absent -- the file looks annotated but is
+    not importable and cannot be dispatched from. Catch that here rather than at the
+    point some future recipe tries to ``$import`` it.
+    """
+    root = Path(str(files("modelopt_recipes")))
+    ignored = [
+        str(path.relative_to(root))
+        for path in sorted(root.rglob("*.yaml"))
+        # Use the parser's own pattern so this can't drift from what it accepts, and so
+        # prose that merely mentions the comment is not mistaken for one.
+        if not path.is_symlink()
+        and _MODELOPT_SCHEMA_RE.search(path.read_text(encoding="utf-8"))
+        and peek_declared_schema(path) is None
+    ]
+    assert not ignored, (
+        "These files carry a modelopt-schema comment that the parser cannot see; move it "
+        f"above the first YAML line: {ignored}"
+    )
 
 
 def test_load_recipe_delegating_alias_still_needs_a_body(tmp_path):

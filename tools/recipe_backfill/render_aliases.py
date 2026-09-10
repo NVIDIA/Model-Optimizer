@@ -64,6 +64,9 @@ _TEMPLATE = """{license}
 # from that recipe; only `metadata` is local. Edit the base recipe to change what this
 # produces.
 #
+# The recipe kind is inherited from the imported recipe, so this file states neither a
+# `metadata.recipe_type` nor a schema comment of its own.
+#
 # See `modelopt_recipes/published_checkpoints.md` for the full checkpoint-to-recipe
 # index, and `modelopt_recipes/models/README.md` for when a checkpoint warrants a recipe
 # of its own instead of an alias.
@@ -73,7 +76,6 @@ imports:
 
 $import: base
 metadata:
-  recipe_type: ptq
   description: >-
     {source} as published in {checkpoint}.
     Alias for `{base}`,

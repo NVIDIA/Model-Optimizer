@@ -19,7 +19,6 @@
 # Note: fp8_scale_sweep refines ONLY static NVFP4 weights with MSE; all FP8 / dynamic / KV
 # quantizers stay max-calibrated (modelopt default) -- i.e. MSE applies only to the NVFP4 layers.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

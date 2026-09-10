@@ -17,7 +17,6 @@
 # optimal-scale search (awq_lite with alpha_step=1) to avoid overflow observed
 # in TRT-LLM kernels when using the default AWQ search on Gemma.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

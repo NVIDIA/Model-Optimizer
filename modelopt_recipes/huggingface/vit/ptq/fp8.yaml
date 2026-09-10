@@ -15,7 +15,6 @@
 
 metadata:
   recipe_type: ptq
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
   attention_qkv_fp8: configs/ptq/units/attention_qkv_fp8

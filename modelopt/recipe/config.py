@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -67,9 +67,15 @@ _DEFAULT_RECIPE_DESCRIPTION = "Model optimization recipe."
 class RecipeMetadataConfig(ModeloptBaseConfig):
     """YAML shape of the recipe metadata section."""
 
-    recipe_type: RecipeType = Field(
+    recipe_type: RecipeType | None = ModeloptField(
+        default=None,
         title="Recipe type",
-        description="The type of the recipe (e.g. PTQ).",
+        description="The type of the recipe (e.g. PTQ). Optional in a recipe file: the "
+        "``# modelopt-schema:`` comment that names the recipe's schema class already "
+        "says which kind it is -- and that is the same declaration that makes the file "
+        "``$import``-able -- so the class fills this in. State it explicitly only where "
+        "there is no schema comment to read, as in a directory-format recipe's "
+        "``metadata.yml``. When both are present they must agree.",
     )
     description: str = ModeloptField(
         default=_DEFAULT_RECIPE_DESCRIPTION,
@@ -78,10 +84,10 @@ class RecipeMetadataConfig(ModeloptBaseConfig):
     )
 
 
-def _metadata_field(recipe_type: RecipeType):
-    """Build the metadata Pydantic field with the recipe_type baked into the default."""
+def _metadata_field():
+    """Build a metadata Pydantic field that defaults to the owning class's recipe type."""
     return ModeloptField(
-        default={"recipe_type": recipe_type, "description": _DEFAULT_RECIPE_DESCRIPTION},
+        default={"description": _DEFAULT_RECIPE_DESCRIPTION},
         title="Metadata",
         description="Recipe metadata containing the recipe type and description.",
         validate_default=True,
@@ -94,16 +100,43 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
     If a layer name matches ``"*output_layer*"``, the attributes will be replaced with ``{"enable": False}``.
     """
 
+    #: The kind of recipe this class *is*. Set on every concrete subclass; it is the
+    #: single source of truth for ``metadata.recipe_type``, which the validator below
+    #: fills in so a recipe file never has to repeat what its schema already states.
+    RECIPE_TYPE: ClassVar[RecipeType | None] = None
+
     metadata: RecipeMetadataConfig = Field(
         title="Metadata",
         description="Recipe metadata containing the recipe type and description. "
         "Required: a recipe without a ``metadata`` section is rejected so that a "
-        "missing section can't silently fall back to a default recipe type.",
+        "recipe always says what it is for.",
     )
+
+    @model_validator(mode="after")
+    def _resolve_recipe_type(self):
+        """Fill ``metadata.recipe_type`` from the schema class, or reject a mismatch.
+
+        The schema class already determines the kind, so a recipe file that declares its
+        schema needs no ``recipe_type``. One that states it anyway must state the truth --
+        a silent disagreement between the two would make the file mean different things
+        to the loader and to a reader.
+        """
+        if self.RECIPE_TYPE is None:
+            return self
+        if self.metadata.recipe_type is None:
+            self.metadata.recipe_type = self.RECIPE_TYPE
+        elif self.metadata.recipe_type != self.RECIPE_TYPE:
+            raise ValueError(
+                f"metadata.recipe_type is {self.metadata.recipe_type.value!r} but this recipe "
+                f"is a {type(self).__name__}, which is {self.RECIPE_TYPE.value!r}. Drop the "
+                "recipe_type (the schema declares it) or correct it."
+            )
+        return self
 
     @property
     def recipe_type(self) -> RecipeType:
         """Return the recipe type from metadata."""
+        assert self.metadata.recipe_type is not None, "recipe_type was not resolved"
         return self.metadata.recipe_type
 
     @property
@@ -114,6 +147,8 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.PTQ
 
     quantize: QuantizeConfig = Field(
         title="PTQ config",
@@ -278,7 +313,9 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
 class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
     """Our config class for AutoQuantize recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.AUTO_QUANTIZE)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.AUTO_QUANTIZE
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     quantize: QuantizeConfig | None = ModeloptField(
         default=None,
@@ -350,7 +387,9 @@ class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):
 class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for EAGLE speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_EAGLE)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_EAGLE
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     eagle: EagleConfig = ModeloptField(
         default=EagleConfig(),
@@ -379,7 +418,9 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
 class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for DFlash speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_DFLASH)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_DFLASH
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     dflash: DFlashConfig = ModeloptField(
         default=DFlashConfig(),
@@ -401,7 +442,9 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for Medusa speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_MEDUSA)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_MEDUSA
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     medusa: MedusaConfig = ModeloptField(
         default=MedusaConfig(),
