@@ -1,8 +1,14 @@
 # Published-checkpoint recipe backfill
 
 Tooling that keeps `modelopt_recipes/` honest about NVIDIA's released quantized
-checkpoints: for every model in the [Inference Optimized Checkpoints][collection]
-collection, which recipe reproduces it, and a check that it still does.
+checkpoints: for every checkpoint NVIDIA publishes in the
+[Inference Optimized Checkpoints][collection] collection, which recipe reproduces it, and
+a check that it still does.
+
+Scope is NVIDIA's **own** releases. The collection also carries partner-published
+checkpoints (LGAI-EXAONE, stepfun-ai, thinkingmachines, black-forest-labs); the scan
+still records them, but they are listed under `unmapped` in `recipe_map.json` instead of
+getting recipes.
 
 The problem it solves: a recipe that claims to mirror a published checkpoint can drift
 from it silently. A wildcard is widened, a new architecture reuses a leaf name, an

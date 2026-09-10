@@ -2,8 +2,10 @@
 
 # Published checkpoints and the recipes that reproduce them
 
-Every model in NVIDIA's [Inference Optimized Checkpoints][collection] collection, paired
-with the recipe in this package that reproduces its quantization layout.
+Every checkpoint **NVIDIA publishes** in the [Inference Optimized Checkpoints][collection]
+collection, paired with the recipe in this package that reproduces its quantization
+layout. The collection also carries partner-published checkpoints; those are listed under
+[Not covered](#not-covered) rather than given recipes.
 
 Use it in both directions: to re-create a released checkpoint from its source weights, or
 to find a validated starting recipe for a model whose architecture resembles one of these.
@@ -30,7 +32,6 @@ python examples/hf_ptq/hf_ptq.py \
 
 | Published checkpoint | Source model | Recipe |
 |---|---|---|
-| [`LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4`](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4) | [`LGAI-EXAONE/K-EXAONE-2.0-750B-A37B`](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B) | `models/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B/ptq/nvfp4_experts_interior-kv_fp8_cast` |
 | [`nvidia/DeepSeek-R1-0528-NVFP4`](https://huggingface.co/nvidia/DeepSeek-R1-0528-NVFP4) | [`deepseek-ai/DeepSeek-R1-0528`](https://huggingface.co/deepseek-ai/DeepSeek-R1-0528) | `models/deepseek-ai/DeepSeek-R1-0528/ptq/nvfp4_mlp_only-kv_fp8_cast`<br>alias for `general/ptq/nvfp4_mlp_only-kv_fp8_cast` |
 | [`nvidia/DeepSeek-R1-0528-NVFP4-v2`](https://huggingface.co/nvidia/DeepSeek-R1-0528-NVFP4-v2) | [`deepseek-ai/DeepSeek-R1-0528`](https://huggingface.co/deepseek-ai/DeepSeek-R1-0528) | `models/deepseek-ai/DeepSeek-R1-0528/ptq/nvfp4_omlp_only-kv_fp8_cast`<br>alias for `general/ptq/nvfp4_omlp_only-kv_fp8_cast` |
 | [`nvidia/DeepSeek-R1-NVFP4`](https://huggingface.co/nvidia/DeepSeek-R1-NVFP4) | [`deepseek-ai/DeepSeek-R1`](https://huggingface.co/deepseek-ai/DeepSeek-R1) | `models/deepseek-ai/DeepSeek-R1/ptq/nvfp4_mlp_only-kv_fp16`<br>alias for `general/ptq/nvfp4_mlp_only-kv_fp16` |
@@ -119,15 +120,16 @@ python examples/hf_ptq/hf_ptq.py \
 | [`nvidia/Qwen3.8-27B-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4) | [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) | `models/Qwen/Qwen3.8-27B/ptq/nvfp4-fp8_attn-kv_none`<br>alias for `huggingface/qwen3_5/ptq/nvfp4-fp8_attn-kv_none` |
 | [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | [`Qwen/Qwen3.8-Flash-Next`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) | `models/Qwen/Qwen3.8-Flash-Next/ptq/nvfp4_experts_only-kv_fp16`<br>alias for `general/ptq/nvfp4_experts_only-kv_fp16`<br>The recipe leaves the MTP block alone, so its experts keep Qwen3.8-Flash-Next's native block-FP8 weights (hf_quant_config.json reports them as FP8_BLOCK_SCALES). That is source passthrough, not PTQ output. |
 | [`nvidia/QwQ-32B-NVFP4`](https://huggingface.co/nvidia/QwQ-32B-NVFP4) | [`Qwen/QwQ-32B`](https://huggingface.co/Qwen/QwQ-32B) | `models/Qwen/QwQ-32B/ptq/nvfp4_default-kv_fp8_cast`<br>alias for `general/ptq/nvfp4_default-kv_fp8_cast` |
-| [`stepfun-ai/Step-3.7-Flash-NVFP4`](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4) | [`stepfun-ai/Step-3.7-Flash`](https://huggingface.co/stepfun-ai/Step-3.7-Flash) | `models/stepfun-ai/Step-3.7-Flash/ptq/nvfp4_experts_only-kv_fp8`<br>alias for `huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8` |
 
 ### Not covered
 
 | Published checkpoint | Why there is no recipe |
 |---|---|
-| [`black-forest-labs/FLUX.1-dev-onnx`](https://huggingface.co/black-forest-labs/FLUX.1-dev-onnx) | ONNX export, not a ModelOpt HF checkpoint |
+| [`black-forest-labs/FLUX.1-dev-onnx`](https://huggingface.co/black-forest-labs/FLUX.1-dev-onnx) | published by black-forest-labs, not NVIDIA. It is also an ONNX export, not a ModelOpt HF checkpoint |
+| [`LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4`](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4) | published by LGAI-EXAONE, not NVIDIA; the backfill covers NVIDIA's own releases |
 | [`nvidia/Kimi-K3-NVFP4-MXFP8-BACKUP-20260814`](https://huggingface.co/nvidia/Kimi-K3-NVFP4-MXFP8-BACKUP-20260814) | dated backup snapshot of the Kimi-K3 release; its attention projections are BF16 rather than the block-FP8 of the current nvidia/Kimi-K3-NVFP4 |
 | [`nvidia/Qwen-Image-Flash`](https://huggingface.co/nvidia/Qwen-Image-Flash) | diffusers pipeline; see configs/ptq/presets/diffusers/fp8 |
 | [`nvidia/Wan2.2-T2V-A14B-Diffusers-FP8`](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8) | diffusers pipeline; see configs/ptq/presets/diffusers/fp8 |
 | [`nvidia/Wan2.2-T2V-A14B-Diffusers-NVFP4`](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-NVFP4) | diffusers pipeline; see configs/ptq/presets/diffusers/nvfp4 |
-| [`thinkingmachines/Inkling-NVFP4`](https://huggingface.co/thinkingmachines/Inkling-NVFP4) | third-party export: fused expert weights (mlp.experts.w13_weight) with a non-ModelOpt scale layout (.scale / .scale2 / .input_amax), so no modelopt_recipes PTQ recipe reproduces it |
+| [`stepfun-ai/Step-3.7-Flash-NVFP4`](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4) | published by stepfun-ai, not NVIDIA; the backfill covers NVIDIA's own releases. The `step3p7` architecture recipes still cover this model type |
+| [`thinkingmachines/Inkling-NVFP4`](https://huggingface.co/thinkingmachines/Inkling-NVFP4) | published by thinkingmachines, not NVIDIA. It is also a third-party export: fused expert weights (mlp.experts.w13_weight) with a non-ModelOpt scale layout (.scale / .scale2 / .input_amax) |

@@ -258,7 +258,7 @@ that baseline. The deviations come in four kinds:
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_next`, `deepseek_v4`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma`, `phi4mm` |
-| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B`, `models/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B` |
+| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
@@ -359,7 +359,7 @@ A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is clo
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).
 
-**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_experts_only-kv_fp8,nvfp4_mlp_only-kv_fp8}`** are the
+**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_mlp_only-kv_fp8}`** are the
 Step-3.7 equivalents, and the reason they exist is **module naming**: Step calls
 the MoE block `moe` and the dense sibling `share_expert`, so the general
 recipes' `*.experts.*`, `*block_sparse_moe*` and `*mlp*` patterns match nothing
@@ -367,11 +367,6 @@ on the routed experts — the general recipe would quantize *nothing* and export
 checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
 router (`moe.gate`) and `share_expert` on top. Use them, not the general
 recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
-
-The `-kv_fp8` twin of the experts-only recipe exists because that is what
-`stepfun-ai/Step-3.7-Flash-NVFP4` published: it matches the `_cast` variant on every
-module and differs only in calibrating the KV scales rather than pinning them to a
-constant amax. Prefer the `_cast` variant unless you are reproducing that checkpoint.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
@@ -505,14 +500,6 @@ checkpoint's** quant config verbatim:
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
   the dense-MLP scope plus the vision-tower exclusion.)
 
-- **`models/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B/ptq/nvfp4_experts_interior-kv_fp8_cast`**
-  mirrors `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4`: routed experts NVFP4 W4A4, but
-  **only on the interior sparse layers 5-74**. The three leading sparse layers (2-4) and
-  the three trailing ones (75-77) keep BF16 experts — 4608 of the 58 368 expert linears —
-  because the first and last MoE layers are the most sensitive to 4-bit experts. Shared
-  experts, router gate, the dense MLP of layers 0-1, attention, `lm_head` and the MTP
-  block stay BF16; KV cache FP8 cast. The same edge-layer idea as
-  `models/mistralai/Mistral-Medium-3.5-128B`, which keeps its edge MLP layers at FP8.
 - **`models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/{nvfp4,fp8}_moe_mamba-kv_fp8_cast`**
   mirror `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-{NVFP4,FP8}`: MoE routed and shared
   experts plus the Mamba `mixer.in_proj` / `mixer.out_proj` quantized, **except on layers

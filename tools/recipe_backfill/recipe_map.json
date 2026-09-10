@@ -1,5 +1,5 @@
 {
- "_comment": "Published checkpoint -> the modelopt_recipes recipe that reproduces it. Verified by tools/recipe_backfill/verify_recipes.py against published_checkpoints.json.",
+ "_comment": "Published checkpoint -> the modelopt_recipes recipe that reproduces it. Scope is NVIDIA's own releases: the collection also carries partner-published checkpoints, which are listed under 'unmapped' rather than given recipes. Verified by tools/recipe_backfill/verify_recipes.py against published_checkpoints.json.",
  "_source_model_comment": "source_model: the checkpoint's source weights, used to key its alias folder under modelopt_recipes/models/. Only needed when the release's model card carries no base_model field; otherwise it is read from published_checkpoints.json.",
  "recipes": {
   "nvidia/Llama-3.1-8B-Instruct-FP8": "general/ptq/fp8_default-kv_fp8_cast",
@@ -46,7 +46,6 @@
   "nvidia/GLM-5.2-NVFP4": "general/ptq/nvfp4_experts_only-kv_fp8_cast",
   "nvidia/Qwen3.5-122B-A10B-NVFP4": "general/ptq/nvfp4_experts_only-kv_fp8_cast",
   "nvidia/Qwen3.5-397B-A17B-NVFP4": "general/ptq/nvfp4_experts_only-kv_fp8_cast",
-  "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4": "models/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B/ptq/nvfp4_experts_interior-kv_fp8_cast",
   "nvidia/Gemma-4-31B-IT-NVFP4": "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
   "nvidia/GLM-4.7-NVFP4": "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
   "nvidia/GLM-5-NVFP4": "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
@@ -135,21 +134,19 @@
   },
   "nvidia/Phi-4-multimodal-instruct-NVFP4": "huggingface/phi4mm/ptq/nvfp4-kv_none",
   "nvidia/Phi-4-multimodal-instruct-FP8": "huggingface/phi4mm/ptq/fp8-kv_none",
-  "stepfun-ai/Step-3.7-Flash-NVFP4": {
-   "recipe": "huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8",
-   "source_model": "stepfun-ai/Step-3.7-Flash"
-  },
   "nvidia/Muse-Glimmer-30B-NVFP4": {
    "recipe": "models/meta-models/Muse-Glimmer-30B/auto_quantize/w4a16_nvfp4_4o6_mixed",
    "note": "AutoQuantize search recipe: the published per-layer W4A16-NVFP4/FP8 mix is the search's output at 5.5 effective bits, so it is not replayable from the YAML's quant_cfg."
   }
  },
  "unmapped": {
-  "black-forest-labs/FLUX.1-dev-onnx": "ONNX export, not a ModelOpt HF checkpoint",
+  "black-forest-labs/FLUX.1-dev-onnx": "published by black-forest-labs, not NVIDIA. It is also an ONNX export, not a ModelOpt HF checkpoint",
   "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8": "diffusers pipeline; see configs/ptq/presets/diffusers/fp8",
   "nvidia/Wan2.2-T2V-A14B-Diffusers-NVFP4": "diffusers pipeline; see configs/ptq/presets/diffusers/nvfp4",
   "nvidia/Qwen-Image-Flash": "diffusers pipeline; see configs/ptq/presets/diffusers/fp8",
   "nvidia/Kimi-K3-NVFP4-MXFP8-BACKUP-20260814": "dated backup snapshot of the Kimi-K3 release; its attention projections are BF16 rather than the block-FP8 of the current nvidia/Kimi-K3-NVFP4",
-  "thinkingmachines/Inkling-NVFP4": "third-party export: fused expert weights (mlp.experts.w13_weight) with a non-ModelOpt scale layout (.scale / .scale2 / .input_amax), so no modelopt_recipes PTQ recipe reproduces it"
+  "thinkingmachines/Inkling-NVFP4": "published by thinkingmachines, not NVIDIA. It is also a third-party export: fused expert weights (mlp.experts.w13_weight) with a non-ModelOpt scale layout (.scale / .scale2 / .input_amax)",
+  "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4": "published by LGAI-EXAONE, not NVIDIA; the backfill covers NVIDIA's own releases",
+  "stepfun-ai/Step-3.7-Flash-NVFP4": "published by stepfun-ai, not NVIDIA; the backfill covers NVIDIA's own releases. The `step3p7` architecture recipes still cover this model type"
  }
 }
