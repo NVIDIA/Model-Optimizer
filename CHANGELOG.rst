@@ -10,6 +10,10 @@ Changelog
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
 
+*Misc*
+
+- A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
+
 **Backward Breaking Changes**
 
 **Deprecations**
@@ -61,7 +65,7 @@ Changelog
 
 - Add ``nodes_to_exclude`` regex support to the Q/DQ-aware ONNX ``convert_to_f16`` API, matching ``convert_to_mixed_precision`` node-name exclusion semantics while composing with the existing operation and tensor block lists.
 - Add ``modelopt.torch.utils.mlflow.MlflowRunLogger`` for recording a script run on an MLflow tracking server: the invocation, the ModelOpt version, the run log (captured by teeing ``stdout``/``stderr``) and any caller-supplied artifacts, with configuration as searchable params. ``mlflow`` is an optional dependency, imported only when tracking is enabled.
-- Add ``--mlflow <tracking-uri>`` to ``examples/hf_ptq/hf_ptq.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too). A tracked run records the invocation, the resolved recipe (``$import``\ s expanded), the run log and the quantization summaries, with every command-line argument as a searchable param; failed runs are recorded with their traceback. The exported checkpoint gets an ``.experiment.json`` naming the experiment and run id that wrote it, uploaded with the run as well, so a checkpoint found on disk can be traced back to the run that produced it. The experiment defaults to ``$USER/hf_ptq/<checkpoint basename>-<recipe name or --qformat>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
+- Add ``--mlflow <tracking-uri>`` to ``examples/hf_ptq/hf_ptq.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too). A tracked run records the invocation, the resolved recipe (``$import``\ s expanded), the run log and the quantization summaries, with every command-line argument as a searchable param; failed runs are recorded with their traceback. The experiment defaults to ``$USER/hf_ptq/<checkpoint basename>-<recipe name or --qformat>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
 - Add ``--mlflow <tracking-uri>`` to ``examples/vllm_serve/vllm_serve_fakequant.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too), so a fake-quant serve records what it quantized and an evaluation of that endpoint can be traced back to a recipe. A tracked run uploads the launcher command, the resolved ``RECIPE_PATH`` (or the merged ``QUANT_CFG``/``KV_QUANT_CFG`` when presets are used), the worker log and the quantizer summary; the experiment defaults to ``$USER/vllm_serve_fakequant/<model basename>-<recipe name or quantization config>`` and can be overridden with ``--mlflow-experiment`` / ``--mlflow-run-name``.
 
 **Backward Breaking Changes**
