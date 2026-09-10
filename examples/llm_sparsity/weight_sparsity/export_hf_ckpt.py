@@ -132,6 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", help="Model data type.", default="fp16")
     parser.add_argument(
         "--model_max_length",
+        type=int,
         default=2048,
         help="Maximum sequence length. Sequences will be right padded (and possibly truncated).",
     )
