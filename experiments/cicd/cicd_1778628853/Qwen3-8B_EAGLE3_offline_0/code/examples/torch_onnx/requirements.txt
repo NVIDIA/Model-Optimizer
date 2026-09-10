@@ -1,0 +1,4 @@
+datasets>=2.14.4
+timm
+torchvision
+transformers
