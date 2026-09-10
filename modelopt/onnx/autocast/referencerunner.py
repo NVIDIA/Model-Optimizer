@@ -26,6 +26,7 @@ across all batches to provide more robust range information for precision conver
 
 import copy
 import io
+import os
 import sys
 import tempfile
 from collections import OrderedDict
@@ -112,8 +113,6 @@ class ReferenceRunner:
         Returns:
             List of input dictionaries, one per batch.
         """
-        import os
-
         if os.path.isdir(input_data_path):
             # Load all NPZ files in the directory as multiple batches
             npz_files = sorted([f for f in os.listdir(input_data_path) if f.endswith(".npz")])
@@ -135,7 +134,7 @@ class ReferenceRunner:
     def _validate_inputs(self, data_loader):
         """Validate that input names and shapes match the model."""
         if isinstance(data_loader, list) and (
-            isinstance(data_loader[0], (dict, np.lib.npyio.NpzFile))
+            isinstance(data_loader[0], dict | np.lib.npyio.NpzFile)
         ):
             if sorted(self.input_names) != sorted(data_loader[0].keys()):
                 raise ValueError("Input names from ONNX model do not match provided input names.")
@@ -165,8 +164,6 @@ class ReferenceRunner:
         # If no inputs are provided, use random inputs
         data_loader = DataLoader(val_range={"": (-1, 1)})
 
-        import os
-
         if inputs is not None:
             if isinstance(inputs, str):
                 if inputs.endswith(".json"):
@@ -178,7 +175,7 @@ class ReferenceRunner:
                         f"Invalid input file: {inputs}. Supported input types: .json (Polygraphy JSON format), "
                         ".npz (Numpy), or a directory containing .npz files"
                     )
-            elif isinstance(inputs, (dict, OrderedDict)):
+            elif isinstance(inputs, dict | OrderedDict):
                 data_loader = [inputs]
             else:
                 raise ValueError(
@@ -193,32 +190,32 @@ class ReferenceRunner:
         from polygraphy.backend.onnx import BytesFromOnnx
         from polygraphy.backend.onnxrt import OnnxrtRunner, SessionFromOnnx
 
-        # Check if model has external data by checking:
-        # 1. If any initializer has data_location set to EXTERNAL (even if data is loaded)
-        # 2. If model size would exceed 2GB (indicating need for external data)
-        needs_external_data = onnx_utils.check_model_uses_external_data(
-            self.model
-        ) or self.model.ByteSize() > 2 * (1024**3)
-        if needs_external_data:
-            logger.debug("Model has external data, using file-based approach")
-            # Get the actual ONNX ModelProto from ModifyOutputs wrapper
-            modified_model = model()
+        # Get the actual ONNX ModelProto from ModifyOutputs wrapper
+        modified_model = model()
 
-            # Use a persistent temp file, because we need the file to be present in an broader context
-            tmp_file = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
-            tmp_file.close()
-            tmp_file_path = tmp_file.name
-            onnx_utils.save_onnx(modified_model, tmp_file_path, save_as_external_data=True)
-            logger.debug(f"Model with all outputs saved to {tmp_file_path}")
-            build_onnxrt_session = SessionFromOnnx(tmp_file_path, providers=self.providers)
-
-        else:
-            # For models without external data, use the original BytesFromOnnx approach (no tmp files)
-            logger.debug("Model has no external data, using BytesFromOnnx approach")
-            serialize_onnx = BytesFromOnnx(model)
-            build_onnxrt_session = SessionFromOnnx(serialize_onnx, providers=self.providers)
-        runners = [OnnxrtRunner(build_onnxrt_session)]
-        return runners
+        needs_file_backed_model = onnx_utils.check_model_uses_external_data(
+            modified_model
+        ) or onnx_utils.is_model_too_large_for_protobuf(modified_model)
+        model_temp_dir = None
+        try:
+            if needs_file_backed_model:
+                logger.debug("Model has external data, using file-based approach")
+                model_temp_dir = tempfile.TemporaryDirectory()
+                tmp_file_path = os.path.join(model_temp_dir.name, "model.onnx")
+                onnx_utils.save_onnx(modified_model, tmp_file_path, save_as_external_data=True)
+                logger.debug(f"Model with all outputs saved to {tmp_file_path}")
+                build_onnxrt_session = SessionFromOnnx(tmp_file_path, providers=self.providers)
+            else:
+                # For models without external data, use the original BytesFromOnnx approach (no tmp files)
+                logger.debug("Model has no external data, using BytesFromOnnx approach")
+                serialize_onnx = BytesFromOnnx(modified_model)
+                build_onnxrt_session = SessionFromOnnx(serialize_onnx, providers=self.providers)
+            runners = [OnnxrtRunner(build_onnxrt_session)]
+        except Exception:
+            if model_temp_dir is not None:
+                model_temp_dir.cleanup()
+            raise
+        return runners, model_temp_dir
 
     def _aggregate_tensor_stats(self, all_batch_data: list[OrderedDict]) -> OrderedDict:
         """Aggregate tensor statistics across multiple batches.
@@ -300,22 +297,25 @@ class ReferenceRunner:
         modify_outputs = ModifyOnnxOutputs(model_copy, outputs=constants.MARK_ALL)
 
         # Load the modified model and create an inference session
-        runners = self._get_ort_runner(modify_outputs)
-
-        # Comparator is used despite the fact that we are using ONNXRuntime
-        # because it provides the ability to generate random inputs using DataLoader
-        data_loader = self._load_inputs(inputs)
-
-        # Temporarily redirect stdout to suppress Comparator.run() output
-        stdout = sys.stdout
-        string_buffer = io.StringIO()
-        sys.stdout = string_buffer
+        runners, model_temp_dir = self._get_ort_runner(modify_outputs)
         try:
-            results = Comparator.run(runners, data_loader=data_loader)
+            # Comparator is used despite the fact that we are using ONNXRuntime
+            # because it provides the ability to generate random inputs using DataLoader
+            data_loader = self._load_inputs(inputs)
+
+            # Temporarily redirect stdout to suppress Comparator.run() output
+            stdout = sys.stdout
+            string_buffer = io.StringIO()
+            sys.stdout = string_buffer
+            try:
+                results = Comparator.run(runners, data_loader=data_loader)
+            finally:
+                # Capture the output before restoring stdout
+                captured_output = string_buffer.getvalue()
+                sys.stdout = stdout
         finally:
-            # Capture the output before restoring stdout
-            captured_output = string_buffer.getvalue()
-            sys.stdout = stdout
+            if model_temp_dir is not None:
+                model_temp_dir.cleanup()
 
         if not results:
             logger.error(f"ONNXRuntime execution failed with output:\n{captured_output}")
