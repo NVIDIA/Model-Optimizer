@@ -20,7 +20,6 @@ import math
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -35,7 +34,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
-    _hide_modules_from_traversal,
+    _OutsideQuantizerCalibrator,
     _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -62,7 +61,6 @@ from .utils import (
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
-    has_accelerate_offload,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_row_parallel_linear,
@@ -2087,56 +2085,20 @@ def layerwise_calibrate(
             "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
-    decoder_owned_ids = {id(module) for layer in transformer_layers for module in layer.modules()}
-    has_enabled_outside_quantizer = any(
-        isinstance(module, TensorQuantizer)
-        and module.is_enabled
-        and id(module) not in decoder_owned_ids
-        for module in model.modules()
+    outside_calibrator = _OutsideQuantizerCalibrator(
+        model,
+        transformer_layers,
+        forward_loop,
+        calib_func,
+        calib_kwargs,
+        qdq_from_prev,
+        _needs_activation_forward_for_max_calib if calib_func is max_calibrate else None,
     )
-
-    outside_calib_needs_forward = has_enabled_outside_quantizer
-    outside_calib_runs_forward = has_enabled_outside_quantizer
-    outside_calib_kwargs = calib_kwargs
-    if has_enabled_outside_quantizer and calib_func is max_calibrate:
-        with _hide_modules_from_traversal(model, transformer_layers):
-            outside_calib_needs_forward = _needs_activation_forward_for_max_calib(model)
-        outside_calib_kwargs = dict(calib_kwargs)
-        outside_calib_kwargs.setdefault("skip_forward_without_activation_calib", True)
-        outside_calib_runs_forward = (
-            outside_calib_needs_forward
-            or not outside_calib_kwargs["skip_forward_without_activation_calib"]
-        )
-
-    if export_dir is not None and outside_calib_runs_forward:
+    if export_dir is not None and outside_calibrator.runs_forward:
         raise ValueError(
             "Layerwise export does not support enabled quantizers outside transformer layers. "
             "Calibrate without export_dir, then export the completed model separately."
         )
-
-    def _calibrate_outside_quantizers():
-        if not has_enabled_outside_quantizer:
-            return
-
-        if outside_calib_runs_forward and has_accelerate_offload(model):
-            warn_rank_0(
-                "Layerwise calibration found enabled quantizers outside transformer layers. "
-                "The required full-model calibration pass may be slow because CPU- or "
-                "disk-offloaded decoder weights can be transferred for every batch."
-            )
-
-        with _hide_modules_from_traversal(model, transformer_layers):
-            if qdq_from_prev:
-                calib_func(model, forward_loop, **outside_calib_kwargs)
-            else:
-                with ExitStack() as stack:
-                    for layer in transformer_layers:
-                        stack.enter_context(
-                            set_quantizer_by_cfg_context(
-                                layer, [{"quantizer_name": "*", "enable": False}]
-                            )
-                        )
-                    calib_func(model, forward_loop, **outside_calib_kwargs)
 
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
@@ -2168,7 +2130,7 @@ def layerwise_calibrate(
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers
     ):
-        _calibrate_outside_quantizers()
+        outside_calibrator.calibrate()
         warn_rank_0(
             f"Layerwise export: every layer shard in {exporter.export_dir} is already "
             f"written.{finalize_hint}"
@@ -2270,7 +2232,7 @@ def layerwise_calibrate(
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
 
-    _calibrate_outside_quantizers()
+    outside_calibrator.calibrate()
 
     if exporter is not None:
         warn_rank_0(

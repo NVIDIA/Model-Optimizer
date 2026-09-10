@@ -388,10 +388,12 @@ def test_layerwise_offload_warning_gating(monkeypatch, offloaded, with_tail, war
     model = _ModelWithQuantizedTail(with_tail=with_tail)
     warnings = []
     monkeypatch.setattr(
-        "modelopt.torch.quantization.model_calib.has_accelerate_offload",
+        "modelopt.torch.quantization.utils.layerwise_calib.has_accelerate_offload",
         lambda target: target is model and offloaded,
     )
-    monkeypatch.setattr("modelopt.torch.quantization.model_calib.warn_rank_0", warnings.append)
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.warn_rank_0", warnings.append
+    )
 
     def calib_func(target, target_forward_loop):
         target_forward_loop(target)
@@ -412,10 +414,13 @@ def test_layerwise_max_offload_warning_matches_outside_forward(
 ):
     _register_test_discoverer(monkeypatch)
     monkeypatch.setattr(
-        "modelopt.torch.quantization.model_calib.has_accelerate_offload", lambda _model: True
+        "modelopt.torch.quantization.utils.layerwise_calib.has_accelerate_offload",
+        lambda _model: True,
     )
     warnings = []
-    monkeypatch.setattr("modelopt.torch.quantization.model_calib.warn_rank_0", warnings.append)
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.utils.layerwise_calib.warn_rank_0", warnings.append
+    )
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
     config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
     algorithm = {"method": "max", "layerwise": {"enable": True}}
@@ -481,15 +486,15 @@ def test_layerwise_export_allows_weight_only_outside_quantizer(
         instances = []
 
         def __init__(self, model, export_dir):
+            self.export_dir = export_dir
             self.exported_layers = []
-            self.finalized = False
             self.instances.append(self)
+
+        def bind(self, calibrated_layers):
+            self.calibrated_layers = calibrated_layers
 
         def export_layer(self, layer_idx, layer, layer_inputs):
             self.exported_layers.append(layer_idx)
-
-        def finalize(self):
-            self.finalized = True
 
     monkeypatch.setattr("modelopt.torch.export.layerwise_export.LayerwiseExporter", _FakeExporter)
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
@@ -513,7 +518,6 @@ def test_layerwise_export_allows_weight_only_outside_quantizer(
     assert forward_calls == 1
     assert model.lm_head.weight_quantizer._amax is not None
     assert _FakeExporter.instances[0].exported_layers == [0]
-    assert _FakeExporter.instances[0].finalized
 
 
 @pytest.mark.parametrize(
@@ -535,14 +539,14 @@ def test_layerwise_export_completed_resume_calibrates_weight_only_tail(
 
         def __init__(self, model, export_dir):
             self.model = model
-            self.finalized_tail_amax = None
+            self.export_dir = export_dir
             self.instances.append(self)
+
+        def bind(self, calibrated_layers):
+            self.calibrated_layers = calibrated_layers
 
         def assert_shards_present(self, num_layers):
             assert num_layers == 1
-
-        def finalize(self):
-            self.finalized_tail_amax = self.model.lm_head.weight_quantizer._amax
 
     monkeypatch.setattr("modelopt.torch.export.layerwise_export.LayerwiseExporter", _FakeExporter)
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
@@ -569,7 +573,7 @@ def test_layerwise_export_completed_resume_calibrates_weight_only_tail(
     mtq.quantize(model, config, forward_loop=forward_loop)
 
     assert forward_calls == 0
-    assert _FakeExporter.instances[0].finalized_tail_amax is not None
+    assert model.lm_head.weight_quantizer._amax is not None
 
 
 # ---------------------------------------------------------------------------
