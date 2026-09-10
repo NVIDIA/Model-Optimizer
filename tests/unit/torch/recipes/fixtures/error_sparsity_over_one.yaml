@@ -1,0 +1,11 @@
+# Schema validation error: sparsity > 1.0 out of range
+_test:
+  description: "Schema error: sparsity 1.5 rejected (must be <= 1.0)"
+
+  validate:
+    expect_error: "Sparsity must be in"
+
+version: "1.0"
+sparsity:
+  method: sparse_gpt
+  sparsity: 1.5

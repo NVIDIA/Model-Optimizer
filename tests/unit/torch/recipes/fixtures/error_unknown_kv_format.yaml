@@ -1,0 +1,15 @@
+# Resolve error: unknown KV cache format name
+_test:
+  description: "Resolve error: unknown KV cache format raises KeyError"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    expect_error: "Unknown KV cache format"
+
+version: "1.0"
+quantization:
+  preset: fp8
+  kv_cache:
+    format: nonexistent_kv_format

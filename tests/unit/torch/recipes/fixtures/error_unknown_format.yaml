@@ -1,0 +1,16 @@
+# Resolve error: unknown format name in weights
+_test:
+  description: "Resolve error: unknown format raises KeyError"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    expect_error: "Unknown format"
+
+version: "1.0"
+quantization:
+  weights:
+    format: nonexistent_format
+  activations:
+    enable: false

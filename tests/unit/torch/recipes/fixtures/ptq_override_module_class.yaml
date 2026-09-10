@@ -1,0 +1,24 @@
+# Module-class override
+_test:
+  description: "Module-class override adds weight quantizer for nn.Linear"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_quant_cfg_has_keys: ["nn.Linear"]
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "nn.Linear":
+            "*weight_quantizer":
+              num_bits: 8
+
+version: "1.0"
+quantization:
+  preset: fp8
+  overrides:
+    - module_class: "nn.Linear"
+      weights:
+        format: int8
