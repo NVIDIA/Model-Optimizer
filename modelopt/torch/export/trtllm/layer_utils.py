@@ -214,14 +214,6 @@ def build_layernorm_config(module: nn.Module) -> LayernormConfig:
     weight = module.weight
 
     def _weights_plus_one(module):
-        # Deliberately not read from the per-model registry, unlike the equivalent
-        # _layernorm_uses_weight_plus_one in export/quant_utils.py. This module is the
-        # TensorRT-LLM builder path, which keeps its own hardcoded tables; wiring the
-        # registry in here would extend it into a backend being kept separate.
-        #
-        # The two lists agree today: nemotron's spec adds NemotronLayerNorm1P, which the
-        # substring match below already covers because it contains LayerNorm1P. Migrate
-        # this with the rest of this package if the registry ever serves it.
         if any(
             name in type(module).__name__
             for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
