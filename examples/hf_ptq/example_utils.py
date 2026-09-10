@@ -22,8 +22,8 @@ import json
 import logging
 import os
 import warnings
-from collections.abc import Callable, Iterable
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -1309,9 +1309,11 @@ def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
             "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries. MLflow's own $MLFLOW_TRACKING_URI enables tracking without this "
-            "flag, which overrides it. A URI taken from the environment is best-effort: if "
-            "it is unusable the run warns and continues untracked."
+            "summaries, and writing .experiment.json into --export_path so the checkpoint "
+            "names the run that produced it. MLflow's own $MLFLOW_TRACKING_URI enables "
+            "tracking without this flag, which overrides it. A URI taken from the "
+            "environment is best-effort: if it is unusable the run warns and continues "
+            "untracked."
         ),
     )
     parser.add_argument(
@@ -1356,6 +1358,10 @@ _MLFLOW_NON_PARAM_ARGS = frozenset(
     {"dist_state", "mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"}
 )
 
+# Dotted like the other sidecars hf_ptq drops in the export directory, so it is ignored by
+# from_pretrained and does not look like part of the model.
+_EXPERIMENT_JSON = ".experiment.json"
+
 
 def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
     """Params and start-time artifacts describing this PTQ run."""
@@ -1382,19 +1388,45 @@ def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
     )
 
 
-def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
+@contextmanager
+def mlflow_run(args: argparse.Namespace) -> Iterator[None]:
     """Track this invocation for the duration of the block, or do nothing if untracked."""
     logger = _mlflow_logger(args)
     if not logger.enabled:
         # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        return nullcontext()
+        yield
+        return
     params, texts = _mlflow_run_inputs(args)
-    return logger.track(
+    with logger.track(
         params=params,
         tags=_mlflow_run_tags(args),
         texts=texts,
         files=_mlflow_run_outputs(args),
-    )
+    ):
+        try:
+            yield
+        finally:
+            _log_experiment_json(logger, Path(args.export_path))
+
+
+def _log_experiment_json(logger: MlflowRunLogger, export_path: Path) -> None:
+    """Record which MLflow run produced this checkpoint, in the checkpoint and on the server.
+
+    The tags point from the run to the checkpoint it wrote; this file is the reverse, so a
+    checkpoint found on disk can be traced back to the run that quantized it without
+    searching the server. Written from a ``finally`` so a crashed run still leaves the
+    pointer behind, and skipped when the export directory is absent -- a run that exported
+    nothing has nowhere to put it, and creating the directory would suggest a checkpoint
+    that does not exist.
+    """
+    text = json.dumps(logger.run_info, indent=2) + "\n"
+    logger.log_text(_EXPERIMENT_JSON.removeprefix("."), text)
+    if not export_path.is_dir():
+        return
+    try:
+        (export_path / _EXPERIMENT_JSON).write_text(text)
+    except OSError as e:
+        print(f"[mlflow] WARNING: could not write {export_path / _EXPERIMENT_JSON}: {e}")
 
 
 def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:

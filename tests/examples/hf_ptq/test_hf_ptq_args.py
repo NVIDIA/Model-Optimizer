@@ -15,6 +15,7 @@
 
 import getpass
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -402,3 +403,122 @@ def test_mlflow_checkpoint_tag_is_absolute(monkeypatch, example_utils):
     )
 
     assert Path(example_utils._mlflow_run_tags(args)["checkpoint_path"]).is_absolute()
+
+
+class FakeMlflow:
+    """Stand-in for the mlflow module, so these tests need no server and no dependency."""
+
+    def __init__(self):
+        self.status = None
+        self.run_name = None
+        self.texts = {}
+        self.artifacts = {}
+
+    def set_tracking_uri(self, uri):
+        self.tracking_uri = uri
+
+    def set_experiment(self, name):
+        self.experiment = name
+
+    def start_run(self, run_name=None):
+        self.run_name = run_name
+        return SimpleNamespace(info=SimpleNamespace(experiment_id="7", run_id="deadbeef"))
+
+    def log_params(self, params):
+        pass
+
+    def set_tags(self, tags):
+        pass
+
+    def log_text(self, text, artifact_file):
+        self.texts[artifact_file] = text
+
+    def log_artifact(self, local_path, artifact_path=None):
+        self.artifacts[Path(local_path).name] = artifact_path
+
+    def log_metrics(self, metrics):
+        pass
+
+    def end_run(self, status=None):
+        self.status = status
+
+
+@pytest.fixture
+def fake_mlflow(monkeypatch):
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    return fake
+
+
+def _tracked_run(monkeypatch, export_path, *extra):
+    """Args for a run that tracks to a fake server and exports to *export_path*."""
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    _, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--export_path",
+        str(export_path),
+        "--mlflow",
+        "https://mlflow.example.com",
+        *extra,
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    return args
+
+
+def test_experiment_json_lands_in_the_checkpoint_and_on_the_server(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """The tags point run -> checkpoint; this file points checkpoint -> run."""
+    args = _tracked_run(monkeypatch, tmp_path)
+
+    with example_utils.mlflow_run(args):
+        pass
+
+    written = json.loads((tmp_path / ".experiment.json").read_text())
+    assert written["experiment_name"] == "tester/hf_ptq/Qwen3-0.6B-fp8"
+    assert written["run_id"] == "deadbeef"
+    assert written["run_url"] == "https://mlflow.example.com/#/experiments/7/runs/deadbeef"
+    # Uploaded without the leading dot, and while the run is still open.
+    assert json.loads(fake_mlflow.texts["experiment.json"]) == written
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_experiment_json_is_written_for_a_failed_run(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """A crash mid-export still leaves a checkpoint worth tracing back to its run."""
+    args = _tracked_run(monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError), example_utils.mlflow_run(args):
+        raise RuntimeError("OOM during calibration")
+
+    assert json.loads((tmp_path / ".experiment.json").read_text())["run_id"] == "deadbeef"
+    assert fake_mlflow.status == "FAILED"
+
+
+def test_experiment_json_is_skipped_when_nothing_was_exported(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """Creating the directory would suggest a checkpoint that does not exist."""
+    export_path = tmp_path / "never-written"
+    args = _tracked_run(monkeypatch, export_path)
+
+    with example_utils.mlflow_run(args):
+        pass
+
+    assert not export_path.exists()
+    assert "experiment.json" in fake_mlflow.texts
+
+
+def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+
+    with example_utils.mlflow_run(args):
+        pass
+
+    assert not (tmp_path / ".experiment.json").exists()
