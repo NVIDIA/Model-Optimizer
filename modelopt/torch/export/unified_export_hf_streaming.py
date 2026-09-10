@@ -30,13 +30,26 @@ from typing import Any
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 
-from .quant_aware_conversion import build_reverse_name_mapper
+from modelopt.torch.quantization.utils.core_utils import (
+    _get_fsdp2_mesh,
+    enable_weight_access_and_writeback,
+    module_name_maps,
+    requires_weight_materialization,
+)
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils import distributed as _dist
+
+from .model_utils import get_export_units
+from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
     _dispatch_export_handler,
+    _prepare_model_for_export,
     _prepare_moe_inputs,
     _resolve_export_dtype,
     _warn_on_unsynced_moe_gate_up,
@@ -44,7 +57,9 @@ from .unified_export_hf import (
     save_non_weight_artifacts,
 )
 
-__all__ = ["_export_transformers_checkpoint_streaming"]
+# Both exporters are internal dispatch targets of ``export_hf_checkpoint``, which is the public
+# entry point; only the shared walk is named without an underscore.
+__all__ = ["collect_export_tensors"]
 
 
 class _StreamingShardWriter:
@@ -54,11 +69,16 @@ class _StreamingShardWriter:
     at :meth:`finalize` renames temp files to canonical shard names once the total shard
     count is known.
 
-    Peak memory = 1 layer (being materialized) + 1 shard buffer, not the full checkpoint.
+    The writer itself holds one shard buffer, never the full checkpoint. What the caller holds on
+    top of that differs: the offload path feeds it one materialized layer at a time, while the
+    FSDP2 path hands over this rank's whole share (~model / world_size), because every gather must
+    finish before any rank starts writing.
     """
 
-    def __init__(self, export_dir: Path | str, max_shard_size: int) -> None:
+    def __init__(self, export_dir: Path | str, max_shard_size: int, part_tag: str = "") -> None:
         self._export_dir = Path(export_dir)
+        # Distinguishes one writer's part files from another's when several ranks write here.
+        self._part_tag = part_tag
         self._max_shard_size = max_shard_size
         self._buffer: dict[str, torch.Tensor] = {}
         self._buffer_bytes: int = 0
@@ -73,7 +93,7 @@ class _StreamingShardWriter:
         if not self._buffer:
             return
         part_idx = len(self._part_files)
-        part_path = self._export_dir / f"__shard_part_{part_idx:05d}.safetensors"
+        part_path = self._export_dir / f"__shard_part_{self._part_tag}{part_idx:05d}.safetensors"
         save_file(self._buffer, str(part_path))
         for key in self._buffer:
             self._key_to_part[key] = part_idx
@@ -102,34 +122,60 @@ class _StreamingShardWriter:
         if self._buffer_bytes >= self._max_shard_size:
             self._flush()
 
+    def close(self) -> tuple[list[str], dict[str, int], int]:
+        """Flush the buffer and stop writing, leaving the temporary files on disk.
+
+        Reports what this writer produced: its filenames, which key went into which file, and the
+        total bytes. Final names depend on how many files all writers made, so the caller does that.
+        """
+        self._flush()
+        return [p.name for p in self._part_files], self._key_to_part, self._total_bytes
+
     def finalize(self) -> dict[str, str]:
         """Flush remaining buffer, rename part files, write model.safetensors.index.json.
 
         Returns the weight_map ``{key: shard_filename}`` written to the index.
         Single-shard exports use ``model.safetensors`` without an index file.
         """
-        self._flush()
-        n_shards = len(self._part_files)
-        if n_shards == 0:
-            return {}
+        return name_shards_and_write_index(self._export_dir, [self.close()])
 
-        if n_shards == 1:
-            final_name = "model.safetensors"
-            self._part_files[0].rename(self._export_dir / final_name)
-            return dict.fromkeys(self._key_to_part, final_name)
 
-        for i, part_path in enumerate(self._part_files):
-            part_path.rename(self._export_dir / f"model-{i + 1:05d}-of-{n_shards:05d}.safetensors")
+def name_shards_and_write_index(
+    export_dir: Path | str, closed_writers: list[tuple[list[str], dict[str, int], int]]
+) -> dict[str, str]:
+    """Rename the temporary files to proper shard names and write the index.
 
-        weight_map = {
-            key: f"model-{part_idx + 1:05d}-of-{n_shards:05d}.safetensors"
-            for key, part_idx in self._key_to_part.items()
-        }
-        total_size = self._total_bytes
-        index_path = self._export_dir / "model.safetensors.index.json"
-        with open(index_path, "w") as f:
-            json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
-        return weight_map
+    Takes one :meth:`_StreamingShardWriter.close` result per writer, in rank order. A single shard
+    is named ``model.safetensors`` and gets no index.
+    """
+    export_dir = Path(export_dir)
+    part_names: list[str] = []
+    key_to_part: dict[str, int] = {}
+    total_size = 0
+    for names, keys, nbytes in closed_writers:
+        offset = len(part_names)
+        part_names.extend(names)
+        for key, part_idx in keys.items():
+            key_to_part[key] = offset + part_idx
+        total_size += nbytes
+
+    n_shards = len(part_names)
+    if n_shards == 0:
+        return {}
+
+    if n_shards == 1:
+        (export_dir / part_names[0]).rename(export_dir / "model.safetensors")
+        return dict.fromkeys(key_to_part, "model.safetensors")
+
+    shard_names = [f"model-{i + 1:05d}-of-{n_shards:05d}.safetensors" for i in range(n_shards)]
+    for part_name, shard_name in zip(part_names, shard_names):
+        (export_dir / part_name).rename(export_dir / shard_name)
+
+    weight_map = {key: shard_names[part_idx] for key, part_idx in key_to_part.items()}
+    index_path = export_dir / "model.safetensors.index.json"
+    with open(index_path, "w") as f:
+        json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
+    return weight_map
 
 
 def _parse_shard_size(size: int | str) -> int:
@@ -163,19 +209,100 @@ def _parse_shard_size(size: int | str) -> int:
 
 
 def _assert_no_split_rules(model: nn.Module) -> None:
-    """Refuse to stream a model whose conversion mapping needs tensor-level splits."""
-    from .quant_aware_conversion import _build_reverse_rules
+    """Refuse to stream a model whose conversion mapping needs tensor-level splits.
 
+    A split rule regroups tensors across the whole state dict, which per-tensor name reversal
+    cannot do.
+    """
     try:
         split_rules, _, _ = _build_reverse_rules(model)
     except Exception:
         return  # build_reverse_name_mapper reports the failure with a warning
     if split_rules:
         raise NotImplementedError(
-            "Disk/CPU-offloaded export cannot reverse tensor-level split rules in this "
-            "model's transformers conversion mapping: the streaming path reverses names "
-            "per tensor, while splits need the full state dict. Export without offloading."
+            "Streaming export cannot reverse tensor-level split rules in this model's "
+            "transformers conversion mapping: it reverses names one tensor at a time, while a "
+            "split rule regroups tensors across the whole state dict. Export the model resident "
+            "instead -- without disk/CPU offload and without FSDP2 -- so the full state dict is "
+            "built in memory."
         )
+
+
+def _build_reverse_name_mapper_or_none(model):
+    """Build the map from current tensor names back to checkpoint names, or None if unavailable.
+
+    Refuses models whose renaming has to regroup tensors, which is impossible one tensor at a time.
+    """
+    _assert_no_split_rules(model)
+    try:
+        return build_reverse_name_mapper(model)
+    except Exception as exc:
+        warnings.warn(
+            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
+            "the original HF hub checkpoint."
+        )
+        return None
+
+
+def _undeclared_tied_aliases(model: nn.Module) -> set[str]:
+    """Names that share storage with an earlier tensor and are not declared in the tie map.
+
+    The resident path ends with an address pass over the whole state dict
+    (:func:`postprocess_state_dict`), which catches ties HF never declared. A streaming
+    exporter has no whole-dict view at write time, and it copies each tensor to host as it
+    goes, so the shared address is gone by then. Take the same information up front, off the
+    live model, and drop by name instead.
+
+    Needed on transformers <5.0, where ``all_tied_weights_keys`` does not exist and the tie map
+    is empty; without this the alias ships as a second full copy of the same weight. Walk order
+    matches ``state_dict()``, so the tensor kept here is the one the resident path keeps.
+    """
+    seen: dict[int, str] = {}
+    aliases: set[str] = set()
+    # remove_duplicate=False is the whole point: the default hides a shared tensor's
+    # second name, which is exactly the alias being looked for.
+    for name, tensor in itertools.chain(
+        model.named_parameters(remove_duplicate=False),
+        model.named_buffers(remove_duplicate=False),
+    ):
+        if tensor is None:
+            continue
+        ptr = tensor.data_ptr()
+        if ptr == 0:  # meta / unallocated: left to serialization, as in the resident path
+            continue
+        if ptr in seen:
+            aliases.add(name)
+        else:
+            seen[ptr] = name
+    return aliases
+
+
+def _make_tensor_sink(
+    writer: "_StreamingShardWriter",
+    name_mapper,
+    tied_alias_keys: set[str],
+    kv_cache_max_bound: float,
+    kv_cache_format: str | None,
+    is_modelopt_qlora: bool,
+):
+    """Build the per-tensor step both streaming exporters use.
+
+    It fixes up one tensor, renames it, skips it if it duplicates another, and writes it out on CPU.
+    """
+
+    def sink(full_key: str, tensor: torch.Tensor) -> None:
+        new_key, new_value = _postprocess_single_tensor(
+            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
+        )
+        if new_key is None or new_value is None:
+            return
+        if name_mapper is not None:
+            new_key = name_mapper(new_key)
+        if new_key in tied_alias_keys:
+            return
+        writer.add(new_key, new_value.detach().contiguous().cpu())
+
+    return sink
 
 
 def _export_transformers_checkpoint_streaming(
@@ -223,17 +350,14 @@ def _export_transformers_checkpoint_streaming(
         NotImplementedError: if the model's conversion mapping contains split rules.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
+    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import (
-        enable_weight_access_and_writeback,
-        requires_weight_materialization,
-    )
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     export_dir = Path(export_dir)
-    # Materialization dispatch walks the module tree from the root; without this cache each
-    # call re-derives it, which is O(N^2) over a MoE model's expert modules.
-    name_to_module = dict(model.named_modules())
+    # Materialization dispatch walks the module tree from the root; without these maps each
+    # call re-derives them, which is O(N^2) over a MoE model's expert modules.
+    names = module_name_maps(model)
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)
@@ -272,16 +396,9 @@ def _export_transformers_checkpoint_streaming(
     # revert_weight_conversion_quant_aware() for split rules, which need the whole state
     # dict to regroup tensors, so refuse rather than emit fused tensors under unfused
     # hub keys.
-    _assert_no_split_rules(model)
-    name_mapper = None
-    try:
-        name_mapper = build_reverse_name_mapper(model)
-    except Exception as exc:
-        warnings.warn(
-            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
-            "the original HF hub checkpoint."
-        )
+    name_mapper = _build_reverse_name_mapper_or_none(model)
 
+    raw_tied_keys = raw_tied_keys | _undeclared_tied_aliases(model)
     tied_alias_keys: set[str] = (
         {name_mapper(k) for k in raw_tied_keys} if name_mapper is not None else raw_tied_keys
     )
@@ -313,25 +430,20 @@ def _export_transformers_checkpoint_streaming(
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     seen_keys: set[str] = set()
 
-    def _stream_tensor(full_key: str, tensor: torch.Tensor) -> None:
-        new_key, new_value = _postprocess_single_tensor(
-            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
-        )
-        if new_key is None or new_value is None:
-            return
-        if name_mapper is not None:
-            new_key = name_mapper(new_key)
-        if new_key in tied_alias_keys:
-            return
-        writer.add(new_key, new_value.detach().contiguous().cpu())
+    _stream_tensor = _make_tensor_sink(
+        writer,
+        name_mapper,
+        tied_alias_keys,
+        kv_cache_max_bound,
+        kv_cache_format,
+        is_modelopt_qlora,
+    )
 
     # Decoder layers: materialize one at a time
     for layer_name, layer_module in model.named_modules():
         if id(layer_module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(
-            layer_module, model, name_to_module, writeback=False
-        ):
+        with enable_weight_access_and_writeback(layer_module, model, names, writeback=False):
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -378,9 +490,9 @@ def _export_transformers_checkpoint_streaming(
     for name, module in model.named_modules():
         if id(module) in decoder_owned_ids:
             continue
-        if not requires_weight_materialization(module, model, name_to_module):
+        if not requires_weight_materialization(module, model, names):
             continue
-        with enable_weight_access_and_writeback(module, model, name_to_module, writeback=False):
+        with enable_weight_access_and_writeback(module, model, names, writeback=False):
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -419,5 +531,175 @@ def _export_transformers_checkpoint_streaming(
     writer.finalize()
 
     save_non_weight_artifacts(model, export_dir)
+
+    return None, quant_config
+
+
+def _assert_fsdp2_owns_every_mesh_dim(model: nn.Module) -> None:
+    """Refuse FSDP2 composed with another DTensor parallelism, e.g. FSDP2 + TP on a 2-D mesh.
+
+    The gather window replicates a parameter over the FSDP mesh dims only, leaving any further
+    dim sharded. The owner would then pack that still-partial tensor and write it under the full
+    weight's name, so the checkpoint would silently hold one TP rank's slice. HSDP is fine: both
+    of its dims belong to the FSDP mesh.
+    """
+    fsdp_meshes = [_get_fsdp2_mesh(m) for m in model.modules() if isinstance(m, FSDPModule)]
+    fsdp_ndim = max((mesh.ndim for mesh in fsdp_meshes if mesh is not None), default=0)
+    for name, param in model.named_parameters():
+        if isinstance(param, DTensor) and param.device_mesh.ndim > fsdp_ndim:
+            raise NotImplementedError(
+                f"Export does not support FSDP2 combined with another DTensor parallelism: "
+                f"{name} lives on a {param.device_mesh.ndim}-D mesh "
+                f"{param.device_mesh.mesh_dim_names} while FSDP2 shards over "
+                f"{fsdp_ndim} of its dims, so gathering it leaves it sharded on the rest."
+            )
+
+
+def collect_export_tensors(
+    model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool, *, owner: str
+) -> list[tuple[str, torch.Tensor]]:
+    """Pack each export unit and return this rank's ``(key, CPU tensor)`` pairs.
+
+    Every rank must call this: each unit's gather is a collective that only completes once every
+    rank arrives. ``owner`` decides who keeps a unit -- ``"share"`` deals them round-robin so each
+    rank keeps roughly ``1/world`` of the model, ``"rank0"`` gives every unit to rank 0, which then
+    holds the whole thing and must have room for it.
+
+    All the gathers finish before this returns, so the caller can write or postprocess without
+    stalling anyone. Returning a list rather than a generator is what guarantees that.
+    """
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers
+    # is an optional extra -- keep ``import modelopt.torch.export`` working without it.
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
+    _assert_fsdp2_owns_every_mesh_dim(model)
+    my_rank, world = _dist.rank(), _dist.size()
+    names = module_name_maps(model)
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    owned: list[tuple[str, torch.Tensor]] = []
+    seen_keys: set[str] = set()
+
+    for index, unit in enumerate(get_export_units(model)):
+        is_owner = my_rank == 0 if owner == "rank0" else index % world == my_rank
+        for module in unit:
+            base = names.module_to_name.get(id(module), "")
+            # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
+            # it exactly as a single-process export does. Every rank must enter -- gating around it
+            # instead of inside it would leave the non-owners out of the collective.
+            #
+            # ``writeback=True`` is load-bearing, not a copy of the offload path above (which
+            # passes False). False takes the ``fsdp_module.unshard()`` branch, which materializes
+            # the *whole enclosing FSDP module*: for the non-layer unit that is the root, so every
+            # rank would hold the entire model and the ~model/world bound this design exists for
+            # would be gone. True instead redistributes only this module's own parameters. The
+            # writeback itself is a no-op here -- packing rebinds the parameter, so the restore
+            # copies the untouched gathered data back and drops the packed tensor, which is
+            # exactly what we want.
+            with enable_weight_access_and_writeback(module, model, names, writeback=True):
+                if not is_owner:
+                    continue
+                for sub_name, sub_module in module.named_modules():
+                    full_name = f"{base}.{sub_name}" if sub_name else base
+                    _dispatch_export_handler(full_name, sub_module, ctx)
+                _reconstruct_fused_moe_linear(module)
+                prefix = f"{base}." if base else ""
+                for key, tensor in module.state_dict().items():
+                    full_key = prefix + key
+                    if full_key in seen_keys or tensor.is_meta:
+                        continue
+                    seen_keys.add(full_key)
+                    # Copy out inside the window: on exit the weights revert to sharded and the
+                    # packed ones are dropped, so nothing is ever re-registered with FSDP.
+                    owned.append((full_key, tensor.detach().contiguous().cpu()))
+    return owned
+
+
+def _export_fsdp2_checkpoint_streaming(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    export_dir: Path | str = ".",
+    max_shard_size: int | str = "10GB",
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
+    **kwargs: Any,
+) -> tuple[None, dict[str, Any]]:
+    """Export an FSDP2 model by writing each rank's own layers straight to its own files.
+
+    Every rank must call this and walks every layer, since rebuilding a layer needs all of them;
+    only its owner keeps and writes it, so a rank buffers its own share (~model / world) rather
+    than the whole checkpoint. Rank 0 names the shards
+    and writes the index at the end. Returns ``(None, quant_config)`` -- no state dict is built, and
+    the caller writes ``hf_quant_config.json``.
+    """
+    export_dir = Path(export_dir)
+    my_rank, world = _dist.rank(), _dist.size()
+
+    # Setup only -- no global packing pass. Each layer is packed below once it has been gathered,
+    # so the packer always sees a whole weight exactly as a single-process export would.
+    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+
+    kv_cache_max_bound = 448
+    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+
+    # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
+    # view to compare storage against. tied_map covers dict-style and MoE ties.
+    tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
+
+    # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
+    # so refuse rather than write fused tensors under unfused hub names.
+    name_mapper = _build_reverse_name_mapper_or_none(model)
+    if name_mapper is not None:
+        tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
+
+    writer = _StreamingShardWriter(
+        export_dir, _parse_shard_size(max_shard_size), part_tag=f"r{my_rank:02d}_"
+    )
+    seen_keys: set[str] = set()
+
+    _stream = _make_tensor_sink(
+        writer,
+        name_mapper,
+        tied_alias_keys,
+        kv_cache_max_bound,
+        kv_cache_format,
+        is_modelopt_qlora,
+    )
+
+    # Every gather is done before this returns, so no rank waits on any other below: all ranks
+    # postprocess and write their own share at the same time, and a slow writer delays nobody.
+    owned = collect_export_tensors(model, dtype, is_modelopt_qlora, owner="share")
+    for full_key, tensor in owned:
+        if full_key in seen_keys:
+            continue
+        seen_keys.add(full_key)
+        _stream(full_key, tensor)
+    owned.clear()
+
+    # Tensors the model never held (e.g. MTP weights). Rank 0 owns that slot, and they are already
+    # materialized, so they skip the per-tensor postprocessing -- only the hub-name reversal applies.
+    if my_rank == 0:
+        for name, tensor in (extra_state_dict or {}).items():
+            if name in seen_keys:
+                continue
+            seen_keys.add(name)
+            writer.add(
+                name_mapper(name) if name_mapper is not None else name,
+                tensor.detach().contiguous().cpu(),
+            )
+
+    # Rank 0 can only name the shards once every rank has finished writing its parts.
+    closed = writer.close()
+    _dist.barrier()
+    gathered: list[Any]
+    if world > 1:
+        # gather_object wants the receive list on the destination rank and None everywhere else.
+        recv: list[Any] | None = [None] * world if my_rank == 0 else None
+        torch.distributed.gather_object(closed, recv, dst=0)
+        gathered = recv or []
+    else:
+        gathered = [closed]
+    if my_rank == 0:
+        name_shards_and_write_index(export_dir, gathered)
+        save_non_weight_artifacts(model, export_dir)
 
     return None, quant_config

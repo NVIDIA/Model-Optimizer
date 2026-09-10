@@ -20,8 +20,6 @@ import warnings
 
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
-
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .model_config import QUANTIZATION_NONE
 from .moe_utils import _export_fused_experts
@@ -151,21 +149,26 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers.
 
+    Under FSDP2 each rank holds only some experts, so it packs just those (kept fused) and the
+    split into per-expert keys is deferred until the gather brings all experts together.
+
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
     """
-    with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-        _export_fused_experts(module, ctx.dtype)
+    _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
 def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Export a standard quantized linear layer."""
+    """Export a standard quantized linear layer.
+
+    The caller has already made the weight readable, so this packs it the same way for every
+    parallelism setup.
+    """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     try:
-        with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-            _export_weight(module, ctx)
+        _export_weight(module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export module '{name}' (type={type(module).__name__}): {e}"
@@ -195,8 +198,7 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
         )
         return
     try:
-        with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-            _export_weight(module, ctx)
+        _export_weight(module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export embedding '{name}' (type={type(module).__name__}): {e}"
@@ -205,7 +207,11 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
 
 @ExportModuleRegistry.register("Llama4TextExperts", "GptOssExperts")
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Export fused BMM-style expert weights and quantization metadata."""
+    """Export fused BMM-style expert weights (Llama4 / GPT-OSS).
+
+    Its weight quantizer has one amax covering all experts, so under FSDP2 each rank can pack
+    just the experts it owns and produce identical bytes -- no gather or unshard needed.
+    """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     # TODO: consolidate uncalibrated experts handling logic
@@ -217,6 +223,5 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
         modules=module,
         quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
     )
-    with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-        for weight_name in ["gate_up_proj", "down_proj"]:
-            _export_weight(module, ctx, weight_name)
+    for weight_name in ["gate_up_proj", "down_proj"]:
+        _export_weight(module, ctx, weight_name)
