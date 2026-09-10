@@ -114,7 +114,8 @@
   "nvidia/DeepSeek-V4-Flash-NVFP4-W4A16": {
    "recipe": "huggingface/deepseek_v4/ptq/w4a16_nvfp4_experts_only",
    "quantizer_naming": "fused_parameter",
-   "note": "DeepSeek-V4's Expert keeps w1/w2/w3 as nn.Parameter, so the quantizers are w1_weight_quantizer etc. on the expert (examples/deepseek/deepseek_v4/ptq.py)."
+   "note": "The release's card lists nvidia/DeepSeek-V4-Flash-NVFP4 as its base_model, but the recipe runs against the original deepseek-ai/DeepSeek-V4-Flash weights, so the alias is keyed there next to the W4A4 sibling.",
+   "source_model": "deepseek-ai/DeepSeek-V4-Flash"
   },
   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4": "models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/nvfp4_moe_mamba-kv_fp8_cast",
   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": "models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast",
