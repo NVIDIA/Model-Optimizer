@@ -222,8 +222,13 @@ def test_temporary_fp8_conv_export_scales_restore_state(raises):
 
 @pytest.mark.parametrize(
     ("module_type", "module_args"),
-    [(nn.Linear, (1, 1)), (nn.Conv2d, (1, 1, 1))],
-    ids=["linear", "conv2d"],
+    [
+        (nn.Linear, (1, 1)),
+        (nn.Conv1d, (1, 1, 1)),
+        (nn.Conv2d, (1, 1, 1)),
+        (nn.Conv3d, (1, 1, 1)),
+    ],
+    ids=["linear", "conv1d", "conv2d", "conv3d"],
 )
 @pytest.mark.parametrize(
     ("num_bits", "enabled", "calibrated", "expected_scaled"),
@@ -260,6 +265,33 @@ def test_temporary_fp8_export_scales_filters_quantizers(
     for quantizer, (original_num_bits, original_amax) in original_state.items():
         assert quantizer._num_bits == original_num_bits
         assert getattr(quantizer, "_amax", None) is original_amax
+
+
+def test_flux_export_saves_converted_rope_model(monkeypatch, tmp_path):
+    original_model = object()
+    converted_model = object()
+    saved_models = []
+
+    monkeypatch.setattr(
+        diffusion_export,
+        "generate_dummy_kwargs_and_dynamic_axes_and_shapes",
+        lambda *args: ({}, {}, None),
+    )
+    monkeypatch.setattr(diffusion_export, "onnx_export", lambda *args, **kwargs: None)
+    monkeypatch.setattr(diffusion_export.onnx, "load", lambda *args, **kwargs: original_model)
+
+    def convert_rope_weight_type(model):
+        assert model is original_model
+        return converted_model
+
+    monkeypatch.setattr(diffusion_export, "flux_convert_rope_weight_type", convert_rope_weight_type)
+    monkeypatch.setattr(
+        diffusion_export, "save_onnx", lambda model, path: saved_models.append((model, path))
+    )
+
+    diffusion_export.modelopt_export_sd(nn.Module(), tmp_path, "flux-dev", "fp8")
+
+    assert saved_models == [(converted_model, tmp_path / "model.onnx")]
 
 
 def _make_mixed_fp4_fp8_model():

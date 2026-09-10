@@ -136,7 +136,11 @@ def _has_enabled_conv(backbone):
 @contextmanager
 def _temporary_fp8_export_scales(backbone, conv_only=False):
     # temporary solution due to a known bug in torch.onnx._dynamo_export
-    module_types = (torch.nn.Conv2d,) if conv_only else (torch.nn.Linear, torch.nn.Conv2d)
+    module_types = (
+        (torch.nn.Conv2d,)
+        if conv_only
+        else (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)
+    )
     quantizer_states = []
     try:
         for _, module in backbone.named_modules():
@@ -600,7 +604,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
             if not model_name.startswith("flux"):
                 onnx_model = _normalize_fp8_qdq(onnx_model)
             else:
-                flux_convert_rope_weight_type(onnx_model)
+                onnx_model = flux_convert_rope_weight_type(onnx_model)
         if precision == "fp4":
             onnx_model = _process_fp4_onnx_graph(onnx_model, model_name)
         save_onnx(onnx_model, q_output)
