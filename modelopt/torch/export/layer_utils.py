@@ -342,11 +342,6 @@ def set_expert_quantizer_amax(
     return uncalibrated_modules
 
 
-# Gate/up naming pairs for standard (unfused) MoE architectures.
-# Fused variants (gate_up_proj, linear_fc1) already share a single quantizer and need no sync.
-_GATE_UP_PAIRS = [("gate_proj", "up_proj"), ("w1", "w3")]
-
-
 def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 

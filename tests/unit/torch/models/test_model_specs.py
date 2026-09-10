@@ -283,7 +283,8 @@ def test_pqs_fuse_rules_match_legacy_mapping():
 
 
 def test_gate_up_pairs_match_legacy():
-    # Aggregated per-model pairs must reproduce the legacy _GATE_UP_PAIRS set.
+    # Aggregated per-model pairs must reproduce the hardcoded set this replaced
+    # (the former _GATE_UP_PAIRS in export/layer_utils.py).
     assert set(list_all_possible("gate_up_pairs")) == {("gate_proj", "up_proj"), ("w1", "w3")}
 
 
