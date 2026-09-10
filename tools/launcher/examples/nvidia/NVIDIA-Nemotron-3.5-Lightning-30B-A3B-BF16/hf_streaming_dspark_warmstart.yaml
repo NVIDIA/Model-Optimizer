@@ -56,7 +56,7 @@ pipeline:
     # config.json layer-type vocabulary already patched for tf5 (see header).
     hf_model: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
     # The published drafter the warm start continues from.
-    drafter: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark
+    draft_model: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark
 
   # Build /scratchspace/data/train.jsonl. Point data.data_path at the full
   # Spec-Decoding-Dataset-v2 corpus to reproduce; eagle_utils also accepts a
@@ -80,7 +80,7 @@ pipeline:
       # causal attention and attention sink all come from this recipe — see header.
       - --config modules/Model-Optimizer/modelopt_recipes/huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/speculative_decoding/dspark_warmstart.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - dflash.dflash_init_checkpoint=<<global_vars.drafter>>
+      - dflash.dflash_init_checkpoint=<<global_vars.draft_model>>
       - data.data_path=/scratchspace/data/train.jsonl
       # The stock Nemotron template has no {% generation %} tags; without a tagged copy
       # answer_only_loss trains on an all-zero mask (see header).
