@@ -31,34 +31,23 @@ import os
 import pytest
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 
-DFLASH_YAML = str(
-    MODELOPT_ROOT / "modelopt_recipes" / "general" / "speculative_decoding" / "dflash.yaml"
-)
+DFLASH_YAML = str(MODELOPT_ROOT / "modelopt_recipes" / "models" / "Qwen3-0.6B" / "dflash.yaml")
 
 CHAT_TEMPLATE = str(
-    MODELOPT_ROOT
-    / "tools"
-    / "launcher"
-    / "examples"
-    / "Qwen"
-    / "Qwen3-0.6B"
-    / "chat_template_train.jinja"
+    MODELOPT_ROOT / "modelopt_recipes" / "models" / "Qwen3-0.6B" / "chat_template_train.jinja"
 )
 
 SYNTH_DATA = str(MODELOPT_ROOT / "examples" / "dataset" / "synthetic_conversations_1k.jsonl")
 
-# Match tools/launcher/examples/Qwen/Qwen3-0.6B/hf_online_dflash.yaml
+# Match tools/launcher/examples/Qwen/Qwen3-0.6B/hf_online_dflash.yaml. Model-specific
+# settings (block_size, mask_token_id, training_seq_len, answer_only_loss, draft
+# num_hidden_layers) live in the per-model recipe at DFLASH_YAML.
 _DFLASH_OVERRIDES = [
     f"data.data_path={SYNTH_DATA}",
     f"data.chat_template={CHAT_TEMPLATE}",
-    "training.training_seq_len=512",
     "training.per_device_train_batch_size=2",
     "training.logging_steps=100",
-    "training.answer_only_loss=true",
-    "dflash.dflash_block_size=8",
-    "dflash.dflash_mask_token_id=151669",
     "dflash.dflash_use_torch_compile=False",
-    "dflash.dflash_architecture_config.num_hidden_layers=2",
 ]
 
 

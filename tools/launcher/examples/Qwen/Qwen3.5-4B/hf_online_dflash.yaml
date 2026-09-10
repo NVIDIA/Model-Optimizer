@@ -5,9 +5,6 @@
 #   task_1: vLLM smoke test with DFlash speculative decoding
 #   task_2: HF AR evaluation (1 GPU)
 #
-# NOTE: Qwen3.5-4B has non-standard head_dim=160. The draft model uses z-lab's
-# architecture (32 heads, head_dim=128) for vLLM KV cache compatibility.
-#
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
 # Usage:
@@ -23,28 +20,13 @@ pipeline:
   task_0:
     script: common/specdec/dflash_online_training.sh
     args:
-      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - --config modules/Model-Optimizer/modelopt_recipes/models/Qwen3.5-4B/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - model.trust_remote_code=false
       - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K-openai.jsonl
-      - data.chat_template=examples/Qwen/Qwen3.5-4B/chat_template_train.jinja
+      - data.chat_template=modules/Model-Optimizer/modelopt_recipes/models/Qwen3.5-4B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_qwen3.5_4b
       - training.num_train_epochs=1
-      - training.training_seq_len=4096
-      - training.save_steps=5000
       - training.logging_steps=1000
-      - training.disable_tqdm=true
-      - training.answer_only_loss=true
-      - dflash.dflash_block_size=8
-      - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=4
-      - dflash.dflash_mask_token_id=248070
-      - dflash.dflash_architecture_config.num_hidden_layers=5
-      - dflash.dflash_architecture_config.num_attention_heads=32
-      - dflash.dflash_architecture_config.num_key_value_heads=8
-      - dflash.dflash_architecture_config.head_dim=128
-      - dflash.dflash_architecture_config.intermediate_size=9728
-      - dflash.dflash_architecture_config.rope_theta=10000000
     environment:
     slurm_config:
       _factory_: "slurm_factory"
