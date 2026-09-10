@@ -17,6 +17,7 @@
 
 import copy
 import itertools
+import warnings
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -1107,10 +1108,13 @@ def promote_static_block_weight_quantizers(model: nn.Module) -> int:
         for quantizer in state._member_quantizers()
     }
     converted = 0
+    # Quantizer-only iteration: this loop reads quantizer state and never the weight, and asking
+    # for weights here costs one DTensor collective per expert on a fused-MoE model under FSDP2.
+    warned_dtensor_amax = False
     for _name, module in list(model.named_modules()):
         if not isinstance(module, QuantModule):
             continue
-        for _, quantizer in module.iter_weights_for_calibration():
+        for quantizer in module.iter_weight_quantizers_for_calibration():
             if isinstance(quantizer, SequentialQuantizer):
                 if len(quantizer) == 0:
                     continue
@@ -1123,6 +1127,16 @@ def promote_static_block_weight_quantizers(model: nn.Module) -> int:
             amax = quantizer.amax
             if amax is None:
                 continue
+            if isinstance(amax, DTensor) and not warned_dtensor_amax:
+                # _amax is a buffer, so FSDP2 leaves it replicated and reduce_amax below stays
+                # local. If that ever stops holding, the reduction becomes a per-quantizer
+                # collective and this loop needs a batched reduction instead.
+                warned_dtensor_amax = True
+                warnings.warn(
+                    "promote_static_block_weight_quantizers: _amax is a DTensor, so the "
+                    "per-quantizer global-amax reduction is a collective. Batch the reduction "
+                    "before running this at scale."
+                )
             if quantizer.is_nvfp4_static:
                 # Grouped siblings share one canonical global_amax (common FP8 grid); otherwise
                 # fall back to this quantizer's own per-block amax.
