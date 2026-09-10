@@ -158,17 +158,19 @@ class NF4QTensor(BaseQuantizedTensor):
         cuda_ext = get_cuda_ext()
 
         # get kwargs
-        scales = kwarg["scale"]
         block_sizes = kwarg["block_sizes"]
         double_scale = kwarg["double_scale"]
         scale_zeros = kwarg["scale_zeros"]
 
-        # unpadd the scales if needed
-        scales = scales.view(-1)[: (self._quantized_data.numel() * 2) // block_sizes[-1]]
+        # Dequantize the scales while they are still shaped (num_scale_groups, scale_block_size),
+        # then drop the padding. The stored int8 scales are grouped and each group has its own
+        # double_scale, so dividing a flattened vector by double_scale.unsqueeze(-1) would
+        # broadcast against the group axis instead of pairing each scale with its own group.
+        scales = _dequantize_scalers(kwarg["scale"], double_scale, scale_zeros, dtype).flatten()
+        scales = scales[: (self._quantized_data.numel() * 2) // block_sizes[-1]]
 
         if cuda_ext and self._quantized_data.is_cuda:
             # with a custom cuda kernel
-            scales = _dequantize_scalers(scales, double_scale, scale_zeros, dtype).flatten()
             output = cuda_ext.NF4_dequantize(self._quantized_data, scales, block_sizes[-1])
             return (
                 output.view(-1)[: np.prod(self.metadata["shape"])]  # handle padding
@@ -176,8 +178,6 @@ class NF4QTensor(BaseQuantizedTensor):
                 .to(dtype)
             )
         else:
-            # de-qauntize scales
-            scales = _dequantize_scalers(scales, double_scale, scale_zeros, dtype).flatten()
             # indexing in torch required long dtype, we may need to optimize this with customized kernels
             first_half_idx = (self._quantized_data >> 4).to(torch.long)
             second_half_idx = (self._quantized_data & 0x0F).to(torch.long)
