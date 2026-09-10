@@ -143,7 +143,7 @@ Export the PTS model to a Hugging Face checkpoint:
 python export_hf_ckpt.py --model_name_or_path meta-llama/Llama-2-7b-hf \
     --model_max_length 1024 \
     --dtype fp16 \
-    --modelopt_restore_path saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/pts_modelopt_state.pth \
+    --modelopt_restore_path saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/pts/pts_modelopt_state.pth \
     --output_dir saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/hf/pts
 ```
 
