@@ -18,15 +18,15 @@
 Qwen3.5 interleaves GatedDeltaNet linear-attention layers (fused ``in_proj``, split here into
 HF's ``in_proj_qkv`` / ``_z`` / ``_b`` / ``_a``) with gated full-attention layers, and adds MoE
 shared experts. Only the language model is exported; the vision tower is copied from HF.
-Routed experts are packed as ``[num_experts, out, in]``, exported from either expert layout.
+Routed experts are written one entry per expert, exported from either expert layout.
 """
 
 from .mcore_custom import (
     GatedDeltaNetSlicing,
     GatedMLPSlicing,
-    GroupedMLPPacking,
+    GroupedGatedMLPSlicing,
+    GroupedMLPSlicing,
     NameRemapping,
-    PackNameRemapping,
     with_language_model_prefix,
 )
 from .mcore_qwen import qwen3_causal_lm_export
@@ -47,19 +47,11 @@ _qwen3_5_extra_export: dict = {
         "model.layers.{}.linear_attn.norm.", {"zero_centered_gamma": True}
     ),
     "linear_attn.out_proj": NameRemapping("model.layers.{}.linear_attn.out_proj."),
-    # Routed experts are stored packed: [num_experts, out, in], keeping Megatron's orientation.
-    "use_packed_local_experts": True,
-    "local_experts.linear_fc1": PackNameRemapping(
-        "model.layers.{}.mlp.experts.gate_up_proj",
-        {"layer_type": "linear_fc1", "transpose": False},
-    ),
-    "local_experts.linear_fc2": PackNameRemapping(
-        "model.layers.{}.mlp.experts.down_proj",
-        {"layer_type": "linear_fc2", "transpose": False},
-    ),
-    # Same packed layout from fused TEGroupedMLP, so grouped GEMM stays usable.
-    "experts.linear_fc1": GroupedMLPPacking("model.layers.{}.mlp.experts.gate_up_proj"),
-    "experts.linear_fc2": GroupedMLPPacking("model.layers.{}.mlp.experts.down_proj"),
+    # Grouped experts export one entry per expert with gate/up split, matching the released NVFP4
+    # checkpoints: vLLM has no parameter for a packed `experts.down_proj_weight_scale_2`.
+    # ``local_experts.*`` (SequentialMLP) already does this in the Qwen3 rules.
+    "experts.linear_fc1": GroupedGatedMLPSlicing("model.layers.{}.mlp.experts.{{}}"),
+    "experts.linear_fc2": GroupedMLPSlicing("model.layers.{}.mlp.experts.{{}}.down_proj"),
     # MoE shared experts (routed experts + router come from the Qwen3 rules).
     "shared_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.shared_expert."),
     "shared_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.shared_expert.down_proj."),

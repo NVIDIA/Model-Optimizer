@@ -103,6 +103,7 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
         qformat="fp8",
         calib_with_images=True,
         specdec_offline_dataset=None,
+        layerwise_export=False,
     )
     full_model = torch.nn.Module()
     calib_dataloader = object()

@@ -131,8 +131,8 @@ def get_args() -> argparse.Namespace:
         default=None,
         help=(
             "PTQ recipe YAML file or builtin name (e.g. 'general/ptq/fp8_default-kv_fp8'). "
-            "When set, --quant_cfg, --kv_cache_quant, --weight_only, and --moe_calib_experts_ratio "
-            "are ignored; the recipe is authoritative for quant_cfg, algorithm, and KV-cache config."
+            "When set, --quant_cfg, --kv_cache_quant and --weight_only are ignored; the recipe "
+            "is authoritative for quant_cfg, algorithm, and KV-cache config."
         ),
     )
     parser.add_argument(
@@ -162,16 +162,6 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
     )
-    parser.add_argument(
-        "--moe_calib_experts_ratio",
-        type=float,
-        default=None,
-        help=(
-            "Fraction of experts (in (0.0, 1.0]) to calibrate per forward pass for MoE models. "
-            "Lower values speed up calibration of models with many experts; ignored for dense models."
-        ),
-    )
-
     # Calibration dataset arguments (matched to hf_ptq.py)
     parser.add_argument(
         "--calib_dataset_name",
@@ -217,9 +207,6 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
-        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
-
     print_args(args)
 
     return args
@@ -229,17 +216,13 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     """Build the ModelOpt quantization config dict from the parsed arguments."""
     if args.recipe is not None:
         # A YAML recipe is authoritative: it encodes quant_cfg + algorithm + KV-cache config
-        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only / --moe_calib_experts_ratio
-        # customizations below are skipped.
+        # directly, so the --quant_cfg / --kv_cache_quant / --weight_only customizations below
+        # are skipped.
         print_rank_0(f"Using recipe {args.recipe} for quantization")
-        if (
-            args.kv_cache_quant != KV_CACHE_NONE
-            or args.weight_only
-            or args.moe_calib_experts_ratio is not None
-        ):
+        if args.kv_cache_quant != KV_CACHE_NONE or args.weight_only:
             warn_rank_0(
-                "--kv_cache_quant / --weight_only / --moe_calib_experts_ratio are ignored when "
-                "--recipe is set; the recipe is authoritative."
+                "--kv_cache_quant / --weight_only are ignored when --recipe is set; the recipe "
+                "is authoritative."
             )
         recipe = load_recipe(args.recipe)
         if not isinstance(recipe, ModelOptPTQRecipe):
@@ -270,21 +253,6 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     if args.kv_cache_quant != KV_CACHE_NONE:
         kv_cache_quant_cfg = KV_QUANT_CFG_CHOICES[args.kv_cache_quant]["quant_cfg"]
         mtq_config = mtq.utils.update_quant_cfg_with_kv_cache_quant(mtq_config, kv_cache_quant_cfg)
-
-    # For MoE models, optionally calibrate only a fraction of experts per forward pass for speed.
-    if args.moe_calib_experts_ratio is not None:
-        algorithm = mtq_config.get("algorithm")
-        if isinstance(algorithm, str):
-            mtq_config["algorithm"] = {
-                "method": algorithm,
-                "moe_calib_experts_ratio": args.moe_calib_experts_ratio,
-            }
-        elif isinstance(algorithm, dict):
-            algorithm["moe_calib_experts_ratio"] = args.moe_calib_experts_ratio
-        else:
-            warn_rank_0(
-                f"Quantization algorithm {algorithm!r} does not support moe_calib_experts_ratio; ignoring."
-            )
 
     return mtq_config
 
