@@ -147,27 +147,6 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
 _SKIP_WEIGHT_QUANT_CHECK_ENV = "MODELOPT_SKIP_WEIGHT_QUANT_CHECK"
 
 
-def _targets_weight_quantizer(pattern: str) -> bool:
-    """Whether ``pattern`` (a ``quant_cfg`` entry's ``quantizer_name``) targets weight quantizers.
-
-    A pattern naming ``weight_quantizer`` explicitly is the common case
-    (``*weight_quantizer``, ``*.experts.*weight_quantizer``), caught by the substring
-    check. But a broad wildcard that never mentions "weight" can still match weight
-    quantizers at runtime -- a bare ``"*"`` catch-all, or ``"*_quantizer"`` -- and a config
-    built only from patterns like that would otherwise never trip the guard, regardless of
-    what the model contains, since nothing in the pattern's own text says "weight".
-    ``fnmatch`` against the literal probe string ``"weight_quantizer"`` catches those: a
-    pattern that would match a bare ``weight_quantizer`` name is, by construction, asking
-    for it.
-
-    This deliberately does not replace the substring check with the probe:
-    ``*.experts.*weight_quantizer`` does not match the bare probe string (there is no
-    ``.experts.`` in it), so the substring check is still what recognizes model-scoped
-    patterns like the Step / MoE recipes use.
-    """
-    return "weight_quantizer" in pattern or fnmatch.fnmatch("weight_quantizer", pattern)
-
-
 def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
     """Raise when a config asks for weight quantization but no weight quantizer is enabled.
 
@@ -196,11 +175,22 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         return
 
     # Later entries override earlier ones, so only each pattern's final state states intent.
+    # A pattern naming ``weight_quantizer`` explicitly (the common case, e.g.
+    # ``*weight_quantizer``, ``*.experts.*weight_quantizer``) is caught by the substring
+    # check. A broad wildcard that never mentions "weight" -- a bare ``"*"`` catch-all, or
+    # ``"*_quantizer"`` -- can still match weight quantizers at runtime, so it must count
+    # too, or a config built only from patterns like that would never trip the guard
+    # regardless of what the model contains. ``fnmatch`` against the literal probe string
+    # ``"weight_quantizer"`` catches those (a pattern matching that bare name is, by
+    # construction, asking for one) without replacing the substring check: the probe alone
+    # would miss ``*.experts.*weight_quantizer`` (there is no ``.experts.`` in the probe
+    # string), which is what recognizes model-scoped patterns like the Step / MoE recipes use.
     last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
     weight_patterns = [
         pattern
         for pattern, entry in last_entry_per_pattern.items()
-        if entry.enable and _targets_weight_quantizer(pattern)
+        if entry.enable
+        and ("weight_quantizer" in pattern or fnmatch.fnmatch("weight_quantizer", pattern))
     ]
     if not weight_patterns:
         return
