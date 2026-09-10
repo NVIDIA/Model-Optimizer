@@ -272,6 +272,13 @@ def build_layernorm_config(module: nn.Module) -> LayernormConfig:
     weight = module.weight
 
     def _weights_plus_one(module):
+        # Deliberately not read from the registry, unlike the equivalent
+        # _layernorm_uses_weight_plus_one in quant_utils.py: build_layernorm_config serves
+        # the deprecated TRT-LLM export path, which this PR leaves on its existing
+        # branches. Wiring it up would extend the registry into a path being moved out
+        # separately. The two lists agree today -- nemotron's spec adds
+        # NemotronLayerNorm1P, which the substring match below already covers because it
+        # contains LayerNorm1P -- so migrate this with the rest of the TRT-LLM path.
         if any(
             name in type(module).__name__
             for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
