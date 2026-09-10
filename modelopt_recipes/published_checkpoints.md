@@ -119,7 +119,7 @@ python examples/hf_ptq/hf_ptq.py \
 | [`nvidia/Qwen3.8-27B-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4) | [`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B) | `models/Qwen/Qwen3.8-27B/ptq/nvfp4-fp8_attn-kv_none`<br>alias for `huggingface/qwen3_5/ptq/nvfp4-fp8_attn-kv_none` |
 | [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | [`Qwen/Qwen3.8-Flash-Next`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) | `models/Qwen/Qwen3.8-Flash-Next/ptq/nvfp4_experts_only-kv_fp16`<br>alias for `general/ptq/nvfp4_experts_only-kv_fp16`<br>The recipe leaves the MTP block alone, so its experts keep Qwen3.8-Flash-Next's native block-FP8 weights (hf_quant_config.json reports them as FP8_BLOCK_SCALES). That is source passthrough, not PTQ output. |
 | [`nvidia/QwQ-32B-NVFP4`](https://huggingface.co/nvidia/QwQ-32B-NVFP4) | [`Qwen/QwQ-32B`](https://huggingface.co/Qwen/QwQ-32B) | `models/Qwen/QwQ-32B/ptq/nvfp4_default-kv_fp8_cast`<br>alias for `general/ptq/nvfp4_default-kv_fp8_cast` |
-| [`stepfun-ai/Step-3.7-Flash-NVFP4`](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4) | — | `models/stepfun-ai/Step-3.7-Flash/ptq/nvfp4_experts_only-kv_fp8` |
+| [`stepfun-ai/Step-3.7-Flash-NVFP4`](https://huggingface.co/stepfun-ai/Step-3.7-Flash-NVFP4) | [`stepfun-ai/Step-3.7-Flash`](https://huggingface.co/stepfun-ai/Step-3.7-Flash) | `models/stepfun-ai/Step-3.7-Flash/ptq/nvfp4_experts_only-kv_fp8`<br>alias for `huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8` |
 
 ### Not covered
 

@@ -135,7 +135,10 @@
   },
   "nvidia/Phi-4-multimodal-instruct-NVFP4": "huggingface/phi4mm/ptq/nvfp4-kv_none",
   "nvidia/Phi-4-multimodal-instruct-FP8": "huggingface/phi4mm/ptq/fp8-kv_none",
-  "stepfun-ai/Step-3.7-Flash-NVFP4": "models/stepfun-ai/Step-3.7-Flash/ptq/nvfp4_experts_only-kv_fp8",
+  "stepfun-ai/Step-3.7-Flash-NVFP4": {
+   "recipe": "huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8",
+   "source_model": "stepfun-ai/Step-3.7-Flash"
+  },
   "nvidia/Muse-Glimmer-30B-NVFP4": {
    "recipe": "models/meta-models/Muse-Glimmer-30B/auto_quantize/w4a16_nvfp4_4o6_mixed",
    "note": "AutoQuantize search recipe: the published per-layer W4A16-NVFP4/FP8 mix is the search's output at 5.5 effective bits, so it is not replayable from the YAML's quant_cfg."

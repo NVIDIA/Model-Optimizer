@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model-specific PTQ recipe: Step-3.7 routed-experts-only NVFP4 with a *calibrated*
+# FP8 KV cache -- the `kv_fp8` twin of `nvfp4_experts_only-kv_fp8_cast` in this folder.
+#
+# This is the layout `stepfun-ai/Step-3.7-Flash-NVFP4` publishes. It matches the cast
+# variant on every module; the release simply calibrated its KV scales rather than
+# pinning them to a constant amax (its exported `k_scale` is 0.104, not the 1.0 a
+# constant amax gives). Prefer the cast variant unless you are reproducing that
+# checkpoint -- it is usually as accurate and skips the KV calibration step.
+#
+# Step's remote code names the MoE block `moe` (not `experts` / `block_sparse_moe`), so the
+# general experts-only recipe matches nothing on this architecture. The routed experts are
+# `moe.{gate,up,down}_proj`, the router is `moe.gate`, and each MoE layer also has a dense
+# `share_expert` that stays in BF16.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  description: >-
+    Applies dynamic NVFP4 to Step-3.7 routed-expert weight and input quantizers, plus a
+    calibrated FP8 KV cache; the router, the shared expert and the dense MLPs stay
+    unquantized. Uses max calibration.
+
+quantize:
+  algorithm:
+    method: max
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers
+    # The router (`moe.gate`) is matched by `*moe*` above, so it must be disabled last
+    # (later wins). `share_expert` is not matched by any rule above — it is listed as an
+    # explicit guard so the shared expert stays BF16 if the patterns are ever widened.
+    - quantizer_name: '*moe.gate.*'
+      enable: false
+    - quantizer_name: '*share_expert*'
+      enable: false

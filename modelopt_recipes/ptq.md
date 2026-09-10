@@ -359,7 +359,7 @@ A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is clo
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).
 
-**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_mlp_only-kv_fp8}`** are the
+**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_experts_only-kv_fp8,nvfp4_mlp_only-kv_fp8}`** are the
 Step-3.7 equivalents, and the reason they exist is **module naming**: Step calls
 the MoE block `moe` and the dense sibling `share_expert`, so the general
 recipes' `*.experts.*`, `*block_sparse_moe*` and `*mlp*` patterns match nothing
@@ -367,6 +367,11 @@ on the routed experts — the general recipe would quantize *nothing* and export
 checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
 router (`moe.gate`) and `share_expert` on top. Use them, not the general
 recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
+
+The `-kv_fp8` twin of the experts-only recipe exists because that is what
+`stepfun-ai/Step-3.7-Flash-NVFP4` published: it matches the `_cast` variant on every
+module and differs only in calibrating the KV scales rather than pinning them to a
+constant amax. Prefer the `_cast` variant unless you are reproducing that checkpoint.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
@@ -533,13 +538,6 @@ checkpoint's** quant config verbatim:
   `in_proj_b`, the routers, the vision tower, `lm_head` and MTP stay BF16; the KV cache is
   **calibrated** FP8. (The first release, `nvidia/Qwen3.5-397B-A17B-NVFP4`, is plain
   experts-only NVFP4 and needs no model-specific recipe.)
-- **`models/stepfun-ai/Step-3.7-Flash/ptq/nvfp4_experts_only-kv_fp8`** mirrors
-  `stepfun-ai/Step-3.7-Flash-NVFP4`: NVFP4 W4A4 on the routed experts
-  (`moe.{gate,up,down}_proj`, sparse layers 3-44) and a calibrated FP8 KV cache;
-  the dense MLP of layers 0-2, the `share_expert`, the `moe.gate` router, attention
-  (including Step's extra `g_proj`), the vision tower and `lm_head` stay BF16. Unlike its
-  Step-3.5 sibling, which also enables `*mlp*`, the scope here is `moe`-only.
-
 *Why special:* unlike any general recipe, each is pinned to one checkpoint and
 captures a model-specific deviation a portable general recipe can't express. Most
 **mix FP8 and NVFP4 across different component types — or individual layers** —
