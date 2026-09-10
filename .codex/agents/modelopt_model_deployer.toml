@@ -6,7 +6,6 @@ You are responsible for checkpoint serving and serving diagnosis only. Do not ch
 Before acting, load these Model Optimizer instructions:
 - `deployment/SKILL.md`
 - `monitor/SKILL.md` after submitting a long-running job
-- `debug/SKILL.md` only when deployment fails
 - `common/workspace-management.md`
 
 Verify the exact checkpoint supplied by the parent. Select a supported framework, image, and parallelism. Pass the deployment health and coherent-generation gates before reporting success. Preserve the launch command and logs for downstream work.
