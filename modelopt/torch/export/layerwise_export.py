@@ -28,15 +28,16 @@ from safetensors.torch import save_file
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
+    module_name_maps,
     requires_weight_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 
 from .layer_utils import is_moe, sync_moe_gate_up_amax
-from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
-from .model_utils import TiedWeightMap
+from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
+from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import _postprocess_single_tensor, get_quant_config, get_quantization_format
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
@@ -56,6 +57,10 @@ from .unified_export_hf_streaming import _assert_no_split_rules
 _PER_LAYER_FUSABLE_FORMATS = frozenset({QUANTIZATION_NVFP4})
 
 SUPPORTED_FORMATS = FUSION_FREE_FORMATS | _PER_LAYER_FUSABLE_FORMATS
+
+#: Set on the model handed to ``mtq.quantize``, so calibration and the export that follows
+#: it reach the same exporter.
+LAYERWISE_EXPORTER_ATTR = "_layerwise_exporter"
 
 _TAIL_SHARD = "model-tail.safetensors"
 _INDEX_FILE = "model.safetensors.index.json"
@@ -159,10 +164,49 @@ class LayerwiseExporter:
         export_dir: Path | str,
         dtype: torch.dtype | None = None,
     ) -> None:
-        """Validate support and capture model-level state.
+        """Name the model the checkpoint describes and where it goes.
 
-        Runs before calibration, so nothing amax-dependent exists yet.
+        Nothing is inspected: the caller builds this before ``mtq.quantize``, when there is
+        no quantizer yet to validate or read a config from. :meth:`bind` does that.
         """
+        self._model = model
+        self._export_dir = Path(export_dir)
+        self._export_dir.mkdir(parents=True, exist_ok=True)
+        self._dtype = dtype
+        self._bound = False
+        self._finalized = False
+        self._announced_on: list[nn.Module] = []
+        # A VLM calibrates its language model but exports the whole thing, so announce on
+        # both: whichever of the two mtq.quantize is handed will find this exporter.
+        self.announce(model)
+        lineage = get_language_model_from_vl(model)
+        if lineage:
+            self.announce(lineage[-1])
+
+    @property
+    def export_dir(self) -> Path:
+        """Where the shards go. The exporter owns this, not the caller's config."""
+        return self._export_dir
+
+    def announce(self, module: nn.Module) -> None:
+        """Publish this exporter on ``module`` for a later pass to pick up.
+
+        Calibration and export are handed different models -- a VLM calibrates its language
+        model but exports the whole thing -- so each end is told separately.
+        """
+        setattr(module, LAYERWISE_EXPORTER_ATTR, self)
+        if not any(m is module for m in self._announced_on):
+            self._announced_on.append(module)
+
+    def bind(self, calibrated_layers: list[nn.Module]) -> None:
+        """Validate the model and snapshot what the tail pass needs.
+
+        Called from calibration, after quantizer insertion and before any layer is converted
+        -- the only window where both hold.
+        """
+        if self._bound:
+            return
+        model = self._model
         assert_layerwise_export_supported(model)
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
@@ -184,7 +228,12 @@ class LayerwiseExporter:
                 "Layerwise export requires discoverable decoder layers. The model "
                 "architecture is not supported by LayerActivationCollector."
             )
-        # The same call calibration uses, so layer_idx means the same thing on both sides.
+        if len(layers) != len(calibrated_layers):
+            raise RuntimeError(
+                f"the exporter found {len(layers)} decoder layers but calibration will drive "
+                f"{len(calibrated_layers)}, so layer_idx would not agree. The exporter's "
+                "model must contain exactly the layers being calibrated."
+            )
         self._layers = layers
         layer_ids = {id(m): i for i, m in enumerate(layers)}
         self._layer_names: dict[int, str] = {}
@@ -193,16 +242,12 @@ class LayerwiseExporter:
             if idx is not None:
                 self._layer_names[idx] = name
 
-        self._ctx = ExportContext(model=model, dtype=_resolve_export_dtype(model, dtype))
-
-        self._export_dir = Path(export_dir)
-        self._export_dir.mkdir(parents=True, exist_ok=True)
-        # Read here, not in finalize(): it reports on the quantizer modules, which
-        # export_layer replaces as it goes, so by finalize() the model looks unquantized.
+        self._ctx = ExportContext(model=model, dtype=_resolve_export_dtype(model, self._dtype))
+        # get_quant_config reports on the quantizer modules, which export_layer replaces as
+        # it goes, so by finalize() the model would look unquantized.
         self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
         self._kv_cache_format = self._quant_config["quantization"]["kv_cache_quant_algo"]
-        self._finalized = False
 
         self._name_mapper = None
         try:
@@ -212,6 +257,8 @@ class LayerwiseExporter:
                 f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
                 "match the original HF hub checkpoint."
             )
+
+        self._bound = True
 
     def export_layer(
         self,
@@ -228,6 +275,7 @@ class LayerwiseExporter:
         # Local, as in every other export module: the plugin imports transformers.
         from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
+        assert self._bound, "export_layer() before bind()"
         assert not self._finalized, "export_layer() called after finalize()"
         if layer_module is not self._layers[layer_idx]:
             # Not an assert: -O would strip it, and the failure is silent -- layer N's
@@ -290,12 +338,21 @@ class LayerwiseExporter:
             self._ctx.model, input_to_linear, quantization_format=layer_format
         )
 
-    def finalize(self) -> dict:
+    def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
         """Export the tail, write the config artifacts, and index all shards.
 
-        Leaves ``export_dir`` a complete checkpoint; no ``export_hf_checkpoint()`` needed.
+        ``extra_state_dict`` carries tensors with no slot in ``model.state_dict()`` -- MTP
+        weights, whichever convention the checkpoint uses. They are already in export form,
+        so only the hub-name reversal applies, and they win on a name clash exactly as they
+        do in ``export_hf_checkpoint``.
         """
-        assert not self._finalized, "finalize() called twice"
+        if not self._bound:
+            raise RuntimeError(
+                "finalize() before calibration bound the exporter: layerwise calibration "
+                "never ran, so there are no layer shards to finish."
+            )
+        if self._finalized:
+            raise RuntimeError("finalize() called twice; the checkpoint is already written.")
         self._finalized = True
 
         model = self._ctx.model
@@ -309,7 +366,7 @@ class LayerwiseExporter:
             with contextlib.suppress(Exception):
                 revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
 
-        name_to_module = dict(model.named_modules())
+        names = module_name_maps(model)
         # Recomputed, not snapshotted in __init__: calibration adds modules inside the
         # layers (SharedQuantState), and a stale set would leave them to the tail pass.
         decoder_owned_ids = {id(m) for layer in self._layers for m in layer.modules()}
@@ -325,9 +382,9 @@ class LayerwiseExporter:
         for name, module in model.named_modules():
             if id(module) in decoder_owned_ids:
                 continue
-            if not requires_weight_materialization(module, model, name_to_module):
+            if not requires_weight_materialization(module, model, names):
                 continue
-            with enable_weight_access_and_writeback(module, model, name_to_module, writeback=False):
+            with enable_weight_access_and_writeback(module, model, names, writeback=False):
                 for sub_name, sub_mod in module.named_modules():
                     full_name = f"{name}.{sub_name}" if sub_name else name
                     _dispatch_export_handler(full_name, sub_mod, self._ctx)
@@ -354,10 +411,19 @@ class LayerwiseExporter:
                 continue
             self._collect(tail, name, tensor)
 
+        for name, tensor in (extra_state_dict or {}).items():
+            key = self._name_mapper(name) if self._name_mapper is not None else name
+            tail[key] = tensor.detach().contiguous().cpu()
+
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
         self._write_index()
         save_non_weight_artifacts(model, self._export_dir)
         _write_hf_export_config(model, quant_config, self._export_dir)
+        for module in self._announced_on:
+            if getattr(module, LAYERWISE_EXPORTER_ATTR, None) is self:
+                delattr(module, LAYERWISE_EXPORTER_ATTR)
+        self._announced_on.clear()
+
         warnings.warn(
             "The exported checkpoint is complete, but per-layer export leaves the model in "
             "export form: it must not be used for inference."

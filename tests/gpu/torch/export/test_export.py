@@ -35,7 +35,7 @@ from _test_utils.torch.export.utils import (
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import (
+from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
     QUANTIZATION_FP8,
@@ -52,10 +52,10 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     get_scaling_factor,
-    get_scaling_factor_from_weight,
     get_weight_block_size,
     postprocess_state_dict,
     process_layer_quant_config,
+    to_quantized_weight,
 )
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.config import (
@@ -69,6 +69,7 @@ from modelopt.torch.quantization.config import (
     W4A8_AWQ_BETA_CFG,
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
 
 @pytest.mark.parametrize(
@@ -164,42 +165,6 @@ def test_process_layer_quant_config(layer_config_dict, expected_processed_dict):
 def test_all_items_same(item_list, expected):
     generated = all_items_same(item_list)
     assert generated == expected
-
-
-@pytest.mark.parametrize(
-    ("weight", "group_size", "expected"),
-    [
-        (
-            torch.tensor([[0.0, 0.35, 0.28, 7.0], [0.49, 0.84, -0.77, 0.07]]),
-            2,
-            torch.tensor([[0.05, 1.0], [0.12, 0.11]]),
-        ),  # group_size != 0 and divides weight.shape[1]
-        (
-            torch.tensor([[0.127, 0.0, 1.27, -12.7], [0.0, 127.0, 0.254, 2.54]]),
-            0,
-            torch.tensor([0.1, 1.0]),
-        ),  # group_size = 0
-        (
-            torch.tensor([[0.0, 0.0, 0.0, 0.0], [0.0, -0.127, 0.254, 2.54]]),
-            0,
-            torch.tensor([1.0, 0.02]),
-        ),  # zero replaced with 1.0
-        (
-            torch.tensor([[0.0, 0.84, -0.77, 0.07], [0.0, 0.0, 0.0, 0.0]]),
-            2,
-            torch.tensor([[0.12, 0.11], [1.0, 1.0]]),
-        ),  # zero replaced with 1.0
-    ],
-)
-def test_get_scaling_factor_from_weight(weight, group_size, expected):
-    scaling_factor = get_scaling_factor_from_weight(weight, group_size)
-    # Check if shapes match
-    if group_size != 0:
-        assert list(scaling_factor.shape) == [weight.shape[0], weight.shape[1] // group_size]
-    else:
-        assert list(scaling_factor.shape) == [weight.shape[0]]
-
-    assert torch.allclose(scaling_factor, expected, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.parametrize(
@@ -391,6 +356,41 @@ def test_get_weight_block_size(config, expected_block_size):
 
         else:
             assert block_size == 0
+
+
+@pytest.mark.parametrize("quantization", [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ])
+def test_to_quantized_weight_int4_block_size(quantization):
+    block_size = 128
+    in_dim = 2 * block_size
+    scales = torch.tensor([[1.0, 2.0]] * 4, device="cuda")
+    quantized_values = torch.arange(1, 5, device="cuda")[:, None]
+    weight = scales.repeat_interleave(block_size, dim=-1) * quantized_values
+
+    packed = to_quantized_weight(weight, scales, quantization, block_size=block_size)
+
+    assert packed.shape == (2, in_dim)
+    assert torch.equal(packed[0], torch.full((in_dim,), 0x21, dtype=torch.uint8, device="cuda"))
+    assert torch.equal(packed[1], torch.full((in_dim,), 0x43, dtype=torch.uint8, device="cuda"))
+
+    partial_weight = torch.cat((weight, quantized_values.repeat(1, 2)), dim=-1)
+    with pytest.raises(NotImplementedError, match="partial blocks are not supported"):
+        to_quantized_weight(partial_weight, scales, quantization, block_size=block_size)
+
+    compressed_weight, _ = INT4QTensor.quantize(partial_weight, block_size)
+    with pytest.raises(NotImplementedError, match="partial blocks are not supported"):
+        to_quantized_weight(
+            QTensorWrapper(compressed_weight), scales, quantization, block_size=block_size
+        )
+
+
+@pytest.mark.parametrize("quantization", [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ])
+@pytest.mark.parametrize("block_size", [None, 0, -1, 2.0])
+def test_to_quantized_weight_invalid_int4_block_size(quantization, block_size):
+    weight = torch.ones((4, 4), device="cuda")
+    scales = torch.ones((4, 2), device="cuda")
+
+    with pytest.raises(ValueError, match="Block size must be a positive integer"):
+        to_quantized_weight(weight, scales, quantization, block_size=block_size)
 
 
 @pytest.mark.parametrize(

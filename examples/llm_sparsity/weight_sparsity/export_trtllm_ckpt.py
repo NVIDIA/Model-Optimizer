@@ -23,7 +23,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
-from modelopt.torch.export import export_tensorrt_llm_checkpoint, get_model_type
+from modelopt.torch.export import get_model_type
+from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 

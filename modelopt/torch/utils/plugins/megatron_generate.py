@@ -394,10 +394,12 @@ def megatron_generate(
             .expand(batch_size, -1)
         )
 
-        # Check if this is a VLM model (vision inputs only passed at step 0 / prefill)
-        _has_pixel_values = step == 0 and pixel_values is not None
-        _has_image_grid_thw = step == 0 and image_grid_thw is not None
-        _has_image_sizes = step == 0 and image_sizes is not None
+        # VLM vision inputs: KV-cache decoding consumes them in the prefill step only, but without
+        # a cache every step recomputes the full prefix and must replay them to stay grounded.
+        _replay_vision_inputs = step == 0 or inference_context is None
+        _has_pixel_values = _replay_vision_inputs and pixel_values is not None
+        _has_image_grid_thw = _replay_vision_inputs and image_grid_thw is not None
+        _has_image_sizes = _replay_vision_inputs and image_sizes is not None
         has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
 
         # For PP, receive activations from the previous stage before calling forward.
