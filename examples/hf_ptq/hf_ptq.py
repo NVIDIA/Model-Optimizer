@@ -880,6 +880,7 @@ def export_quantized(
         # No tokenizer saving needed for spec ckpts
         if has_spec_opt(full_model):
             export_speculative_decoding(full_model, export_dir=export_path)
+            args.checkpoint_exported = True
             print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
             return
 
@@ -976,6 +977,7 @@ def export_quantized(
                 exclude_files=exclude_files,
             )
 
+        args.checkpoint_exported = True
         end_time = time.time()
         print_rank_0(
             f"Quantized model exported to: {export_path}. Total time used {end_time - start_time}s"
@@ -1689,6 +1691,9 @@ def parse_args() -> argparse.Namespace:
     add_mlflow_args(parser)
 
     args = parser.parse_args()
+    # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
+    # is gated on it rather than on --export_path existing, which proves nothing.
+    args.checkpoint_exported = False
     resolve_mlflow_args(args, parser)
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):

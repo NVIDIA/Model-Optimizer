@@ -721,7 +721,12 @@ cat <quantized_ckpt_path>/.experiment.json
 #  "run_name": ..., "run_url": ...}
 ```
 
-Nothing is written when the run never opened, or when the run exported no checkpoint.
+The local file is written only once the export itself completes, so a run that fails
+earlier leaves whatever checkpoint is already in `--export_path` — and its pointer —
+untouched. The `experiment.json` artifact is uploaded for every run that opened, so a
+failed run stays traceable from the server. An export that is *not* tracked removes any
+pointer it would otherwise inherit, from a reused `--export_path` or from a tracked source
+checkpoint.
 
 Other flags:
 

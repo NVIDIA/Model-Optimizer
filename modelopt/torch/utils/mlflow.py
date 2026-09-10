@@ -290,6 +290,8 @@ class MlflowRunLogger:
 
         Enough for a consumer holding only this run's outputs to find it again: ``run_id``
         is MLflow's own identifier for the run, a uuid4 hex, unique across experiments.
+        Every field is read back off the run the server returned rather than off what was
+        requested, so a run MLflow resolved differently is reported as it really is.
         """
         if self._run is None:
             return {}
@@ -299,7 +301,7 @@ class MlflowRunLogger:
             "experiment_name": self.experiment_name,
             "experiment_id": str(info.experiment_id),
             "run_id": str(info.run_id),
-            "run_name": self.run_name or "",
+            "run_name": getattr(info, "run_name", None) or self.run_name or "",
             "run_url": self.run_url,
         }
 
