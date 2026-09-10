@@ -1,47 +1,117 @@
-# Puzzletron Campaign Reports
+# Puzzletron results and campaign progress
 
-After a campaign completes cleanly, Puzzletron attempts to generate a
-cumulative HTML report through the configured runner. A report submission,
-polling, or artifact failure does not invalidate completed stages, but it is
-recorded in the run result and the command exits nonzero. Inspect the campaign
-logs, then regenerate the report without rerunning model work:
+Puzzletron stores each run's evidence in one structured JSON result. That
+document drives live and detached status, portable result export, the central
+results catalog, and the optional HTML summary. The HTML is a replaceable view:
+it does not contain evidence that is absent from the structured result.
+
+Use the generated [results catalog](../reports/catalog.yaml) to find every
+retained run. It is the single central listing and points to each structured
+result and any available human-readable summary. Regenerate it after
+adding or updating checked-in result leaves:
 
 ```bash
-python examples/puzzletron/generate_campaign_progress_report.py \
-  --puzzle-dir /shared/puzzle_runs/my_campaign \
-  --model-name 'My model'
+python examples/puzzletron/generate_results_catalog.py
+```
+
+The catalog is YAML so it is easy to scan and review. Run results remain JSON
+because their canonical bytes are validated, hashed, and atomically replaced.
+
+## Inspect a running or detached campaign
+
+The controller atomically refreshes `<run-root>/results/result.json`. It
+contains the run, DAG stages, attempts, completed and total work, native
+evaluator dimensions, timing, freshness, and qualified ETA. Detached
+inspection reads that same file and does not require the original controller
+process:
+
+```bash
+python examples/puzzletron/puzzletron.py results inspect /shared/puzzle_runs/my_campaign
+python examples/puzzletron/puzzletron.py results inspect /shared/puzzle_runs/my_campaign --json
+```
+
+Treat `attachment: detached` separately from scheduler state: work may still be
+running after its launching terminal exits. Check `freshness` before acting on
+a status. An ETA is qualified only after the producer has a stable total and
+observed progress; otherwise its reason explains why no estimate is shown.
+Completed progress remains visible so engineers can reconstruct what finished,
+not only what is active now.
+
+Evaluator records distinguish repetitions, evaluator iterations, tasks,
+samples, and optimizer steps. The controller polling count is never presented
+as evaluator work. A failed evaluator with zero processed samples stays a
+failure with its diagnostic artifacts; it cannot become a numeric score.
+
+## Export and refresh
+
+After clean completion, Puzzletron finalizes `result.json` before it generates
+any presentation. The result is already portable. Validate and locate it
+without rerunning model work:
+
+```bash
+python examples/puzzletron/puzzletron.py results export /shared/puzzle_runs/my_campaign
+```
+
+Regenerate the optional HTML from that structured evidence:
+
+```bash
+python examples/puzzletron/puzzletron.py results refresh /shared/puzzle_runs/my_campaign
 ```
 
 The output is
-`<puzzle-dir>/artifacts/campaign_report/campaign_report.html`. Section inputs
-and configuration fingerprints are cached under
-`<puzzle-dir>/artifacts/campaign_report/section_cache`. Use
-`--rebuild-section aiperf` to rebuild one section, or `--no-cache` to rebuild
-the whole report.
+`<run-root>/artifacts/campaign_report/campaign_report.html`; its neighboring
+`report_manifest.json` records `source_result_digest`, the renderer revision,
+output digest, and validation status. The summary visibly includes
+run and subject identity, teacher and candidate roles, heterogeneous
+architecture axes, execution and attachment state, freshness, timing, DAG
+parents and phases, active and completed progress, metric values and qualified
+comparisons, artifacts, provenance, and limitations. If HTML generation fails,
+the sealed structured result remains valid and usable.
 
-This page also catalogs retained Puzzletron campaign reports and the status of
-their evidence. The compact [campaign report index](../reports/campaign_report_index.yaml)
-records each report's producer state, reproduction and support status, metadata
-origin, current-configuration relationship, and known limitations. Detailed
-run facts remain in the reports.
+## Metric and comparison boundaries
 
-Retained reports are self-contained HTML files and may be hundreds of MB.
-Download them and open them locally. Interpret their results together with the
-reproduction status and unresolved findings below.
+Teacher, candidate, and control checkpoints use the same subject, architecture,
+metric, artifact, and limitation fields. Each teacher/candidate metric pair
+with the same name and producer execution produces a comparison entry that
+names both source metric IDs. A numeric delta is emitted only when the unit,
+direction, aggregation, workload contract, task, row manifest, prompt template,
+decoding contract, and dimensions match and both values are numeric. Dimensions
+carry denominators, evaluator repetitions, and sample counts when producers
+record them. Otherwise, the entry records explicit exclusion reasons.
 
-## Report status
+Language-model loss is `quality.lm_loss` in `nats_per_target_token` and uses
+`lower_is_better`. Producers must distinguish a target-token-weighted mean over
+all unmasked target tokens from the current scoring route's unweighted mean of
+per-sample token means. Those aggregation and denominator contracts are not
+interchangeable. Record teacher loss and candidate loss under the same frozen
+workload when both were explicitly measured; do not infer teacher loss from a
+candidate loss or teacher-relative metric. Token accuracy follows the same
+rule: preserve whether ratios are token-weighted or averaged per sample.
+`training.effective_tokens` is cumulative loss-bearing exposure after masking
+and packing. It records tokenizer and data identity and whether it was measured
+or derived; it is not inferred from optimizer steps times maximum sequence
+length. Requested input/output tokens, observed sequence lengths, aggregate
+output-token throughput, per-user throughput, token accuracy, examples,
+samples, steps, latency, and GPU-hours remain distinct measures.
 
-| Model | Report | Producer state | Reproduction | Support | Current configuration relationship |
-|---|---|---|---|---|---|
-| Nemotron-3 Nano 30B-A3B | [Campaign report](../reports/nemotron3_nano_30b_a3b.html) | `development_snapshot`; revision `unknown` | `not_reproduced` | `not_established` | `migration`: [default.yaml](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) is not the executed configuration |
-| Qwen3.5-9B | [Campaign report](../reports/qwen3p5_9b.html) | `development_snapshot`; revision `unknown` | `not_reproduced` | `not_established` | `reconstruction`: [default.yaml](../configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) is not the executed configuration; the report records additional overrides and width values |
+## Historical evidence
 
-## Evidence boundary
+Older retained runs use the provisional
+`modelopt.puzzletron-result-record/v1` schema and retain their historical
+`result_record.json` filenames. Their summaries and structured files remain
+available through the central catalog, but the catalog marks them as qualified
+historical evidence and does not translate nested historical values into new
+tidy metrics. This preserves the original claim boundaries, including bespoke
+or superseded selection policies, unmatched teacher/student conditions,
+missing row manifests, missing repetitions, and incomplete runtime provenance.
 
-| Record | Status |
-|---|---|
-| Retained reports | Preserve the detailed configuration, stage, result, and warning data from their producing development state. |
-| Campaign report index | Records only curated status, metadata origin, current-configuration relationship, and known limitations. |
-| Current configuration references | Provide migration or reconstruction starting points, not frozen executed configurations. |
-| Reproduction status | No reproduction is recorded for the listed reports. |
-| Support status | Not established while reproduction and unresolved correctness findings remain open. |
+The two standalone historical HTML reports have structured legacy wrappers.
+Those wrappers carry their producer, reproduction, support, current-config
+relationship, and known limitations. They do not infer missing values from the
+HTML. A current configuration linked from a legacy record is a migration or
+reconstruction starting point, not proof of the executed configuration.
+
+Run summaries remain useful derived explanations of recorded results and
+limitations. There are no reports-level or campaign-level README indexes;
+navigation belongs to `reports/catalog.yaml`, and this guide owns the shared
+operational and interpretation instructions.

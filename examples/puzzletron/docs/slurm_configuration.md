@@ -29,12 +29,16 @@ profiles have been qualified only in the documented eight-GPU node
 environment.
 
 This mode assumes a Slurm site where one containerized task can see the full
-node allocation, shared campaign paths are mounted identically, and runtime
-caches are writable for the lifetime of the outer job. The outer job uses the
+node allocation and shared campaign paths are mounted identically. Puzzletron
+places XDG, Triton, FlashInfer, Torch extension, and vLLM caches in an isolated
+task-local directory below `TMPDIR` (or the platform temporary directory when
+unset). Explicit cache
+environment variables from the launch environment or site hooks take
+precedence. The outer job uses the
 site's CPU and memory defaults for its GPU request, which must be sufficient for
 the concurrent workers. Other sites may need to adapt the site's account,
 partition, container integration, mounts, time limit, GPU capacity, and cache
-hooks. Use per-attempt mode when those assumptions do not hold.
+root. Use per-attempt mode when those assumptions do not hold.
 
 ### Stage instances
 
@@ -178,7 +182,12 @@ existing variable such as `${API_KEY:?set API_KEY}`, retrieve it from a secret
 command, or source a permission-protected `setup_env` file. This check catches
 common mistakes but is not a shell parser or a complete credential scanner.
 
-For containerized workers, use `prerun_commands` when the site needs to place
-`TMPDIR` or runtime caches in a short, worker-local writable directory. vLLM
-uses Unix-domain sockets with a platform path limit, and a read-only container
-home prevents runtime caches from being initialized.
+Puzzletron gives each task writable defaults for `XDG_CACHE_HOME`,
+`TRITON_CACHE_DIR`, `FLASHINFER_WORKSPACE_BASE`, `TORCH_EXTENSIONS_DIR`, and
+`VLLM_CACHE_ROOT` below `TMPDIR`, falling back to the platform temporary
+directory. Existing values are preserved, so most containerized workers need
+no cache hooks, including when the
+container home is read-only. Set `TMPDIR` with `prerun_commands` only when the
+site's `/tmp` is unsuitable or when vLLM needs a shorter root for its
+Unix-domain sockets. Override an individual cache variable only for a site that
+requires a different location.

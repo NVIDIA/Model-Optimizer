@@ -21,7 +21,9 @@ import argparse
 import hashlib
 import math
 import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .schema import TaskLauncher
@@ -186,6 +188,25 @@ def _required_index(env: Mapping[str, str], primary: str, fallback: str) -> int:
     return int(value)
 
 
+def _set_runtime_cache_defaults(env: dict[str, str], *, attempt_id: str, task_index: int) -> None:
+    """Place runtime caches in a writable, task-local temporary directory."""
+
+    attempt_hash = hashlib.sha256(attempt_id.encode()).hexdigest()[:12]
+    temporary_root = env.get("TMPDIR") or tempfile.gettempdir()
+    runtime_root = Path(temporary_root) / "puzzletron" / attempt_hash / f"task-{task_index}"
+    defaults = {
+        "XDG_CACHE_HOME": runtime_root / "xdg",
+        "TRITON_CACHE_DIR": runtime_root / "triton",
+        "FLASHINFER_WORKSPACE_BASE": runtime_root / "flashinfer",
+        "TORCH_EXTENSIONS_DIR": runtime_root / "torch-extensions",
+        "VLLM_CACHE_ROOT": runtime_root / "vllm",
+    }
+    for key, path in defaults.items():
+        if key not in env:
+            path.mkdir(parents=True, exist_ok=True)
+            env[key] = str(path)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--attempt-id", required=True)
@@ -222,6 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     env = os.environ.copy()
     task_index = _required_index(env, "PUZZLETRON_TASK_INDEX", "SLURM_PROCID")
     local_task_index = _required_index(env, "PUZZLETRON_LOCAL_TASK_INDEX", "SLURM_LOCALID")
+    _set_runtime_cache_defaults(env, attempt_id=args.attempt_id, task_index=task_index)
     visible_gpus = tuple(gpu for gpu in env.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu)
     if args.gpus_per_task == 0:
         visible_gpus = ()

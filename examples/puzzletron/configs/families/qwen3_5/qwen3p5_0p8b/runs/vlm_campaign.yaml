@@ -170,7 +170,7 @@ post_mip:
           input: post_kd_eval
           mode: aggregate_rank
           metrics:
-            - metric: post_kd_eval.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
+            - metric: post_kd_eval.modelopt_vlm_benchmark_realworldqa.exact_match_none
               direction: maximize
             - metric: post_kd_eval.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none
               direction: maximize

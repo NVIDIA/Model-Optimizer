@@ -63,3 +63,20 @@ def test_existing_setup_scripts_keep_their_wizard_help():
 
         assert completed.returncode == 0, completed.stderr
         assert expected_option in completed.stdout
+
+
+def test_public_cli_setup_keeps_the_wizard_help():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "examples/puzzletron/puzzletron.py"),
+            "setup",
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--campaign-dir" in completed.stdout

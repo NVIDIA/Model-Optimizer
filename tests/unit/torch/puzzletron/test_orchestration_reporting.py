@@ -13,15 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the runner-backed orchestration report finalizer."""
+"""Tests for structured-first orchestration report finalization."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
@@ -30,9 +26,6 @@ from puzzletron_orchestrator.schema import (
     AttemptSpec,
     CampaignPlan,
     ExecutionContract,
-    JobHandle,
-    JobState,
-    JobStatus,
     RunnerEnvironment,
     SlurmRunnerConfig,
     TaskLauncher,
@@ -118,119 +111,69 @@ def test_build_final_report_attempt_uses_configured_log_directory(tmp_path: Path
     assert attempt.command.log_path == str(log_dir / "final_report_report-attempt.log")
 
 
-class _ReportExecutor(Executor):
+class _NoSubmissionExecutor(Executor):
     backend = "fake"
 
-    def __init__(self, terminal_state: JobState) -> None:
-        self.terminal_state = terminal_state
-        self.submitted: list[AttemptSpec] = []
+    def submit(self, attempt: AttemptSpec):
+        raise AssertionError(f"unexpected executor submission: {attempt.stage_id}")
 
-    def submit(self, attempt: AttemptSpec) -> JobHandle:
-        self.submitted.append(attempt)
-        return JobHandle(
-            backend=self.backend,
-            handle_id=f"fake-{attempt.attempt_id}",
-            attempt_id=attempt.attempt_id,
-            metadata={
-                "log_paths": (attempt.command.log_path,) if attempt.command.log_path else (),
-            },
-        )
+    def poll(self, handles):
+        raise AssertionError(f"unexpected executor poll: {handles}")
 
-    def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-        if self.terminal_state is JobState.COMPLETED:
-            plan_root = Path(self.submitted[-1].command.argv[3])
-            report_dir = plan_root / "artifacts" / "campaign_report"
-            report_dir.mkdir(parents=True, exist_ok=True)
-            (report_dir / "campaign_report.html").write_text("<html></html>\n")
-            (report_dir / "report_manifest.json").write_text("{}\n")
-        return [
-            JobStatus(
-                handle=handle,
-                state=self.terminal_state,
-                reason="report failed" if self.terminal_state is JobState.FAILED else None,
-                log_paths=self.fetch_logs(handle),
-            )
-            for handle in handles
-        ]
+    def cancel(self, handles) -> None:
+        raise AssertionError(f"unexpected executor cancellation: {handles}")
 
-    def cancel(self, handles: Sequence[JobHandle]) -> None:
-        pass
-
-    def recover(self, handle: JobHandle) -> JobStatus:
-        return JobStatus(handle=handle, state=self.terminal_state)
+    def recover(self, handle):
+        raise AssertionError(f"unexpected executor recovery: {handle}")
 
 
 def test_clean_completion_generates_and_returns_final_report(tmp_path: Path):
     plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.COMPLETED)
+    executor = _NoSubmissionExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0)
 
     result = controller.run()
 
     report_dir = plan.puzzle_dir / "artifacts" / "campaign_report"
-    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report"]
     assert result["halted"] is False
     assert result["report_status"] == "completed"
     assert result["report_path"] == str(report_dir / "campaign_report.html")
     assert result["report_manifest_path"] == str(report_dir / "report_manifest.json")
-    assert result["report_log_paths"] == [executor.submitted[0].command.log_path]
+    assert result["report_log_paths"] == []
+    assert result["result_path"] == str(plan.puzzle_dir / "results/result.json")
 
 
-def test_clean_completion_reuses_sealed_final_report(tmp_path: Path):
+def test_clean_completion_regenerates_the_same_derived_report(tmp_path: Path):
     plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.COMPLETED)
+    executor = _NoSubmissionExecutor()
 
     first = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
     resumed = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
 
-    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report"]
     assert resumed == first
 
 
 def test_clean_completion_regenerates_tampered_final_report(tmp_path: Path):
     plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.COMPLETED)
+    executor = _NoSubmissionExecutor()
     CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
     report_path = plan.puzzle_dir / "artifacts/campaign_report/campaign_report.html"
     report_path.write_text("tampered\n")
 
     result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
 
-    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
+    assert report_path.read_text().startswith("<!doctype html>")
     assert result["report_status"] == "completed"
 
 
-def test_clean_completion_regenerates_after_stage_state_changes(tmp_path: Path):
+def test_optional_html_failure_is_nonfatal(monkeypatch, tmp_path: Path):
     plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.COMPLETED)
-    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
-    stage_root = plan.puzzle_dir / "orchestration/stages"
-    stage_root.mkdir(parents=True)
-    (stage_root / "later-stage.json").write_text('{"status": "completed"}\n')
-
-    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
-
-    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
-    assert result["report_status"] == "completed"
-
-
-def test_clean_completion_regenerates_oversized_completion_record(tmp_path: Path):
-    plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.COMPLETED)
-    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
-    completion_path = plan.puzzle_dir / "artifacts/campaign_report/completion.json"
-    completion_path.write_bytes(completion_path.read_bytes() + b" " * (1 << 20))
-
-    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
-
-    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
-    assert result["report_status"] == "completed"
-
-
-def test_final_report_failure_is_nonfatal(tmp_path: Path):
-    plan = _plan(tmp_path)
-    executor = _ReportExecutor(JobState.FAILED)
+    executor = _NoSubmissionExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0)
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.refresh_run_report",
+        lambda _run_root: (_ for _ in ()).throw(OSError("report failed")),
+    )
 
     result = controller.run()
 
@@ -239,4 +182,21 @@ def test_final_report_failure_is_nonfatal(tmp_path: Path):
     assert result["report_status"] == "failed"
     assert result["report_path"] is None
     assert result["report_manifest_path"] is None
-    assert result["report_log_paths"] == [executor.submitted[0].command.log_path]
+    assert result["report_log_paths"] == []
+    assert Path(result["result_path"]).is_file()
+
+
+def test_structured_result_failure_is_nonfatal(monkeypatch, tmp_path: Path):
+    plan = _plan(tmp_path)
+    controller = CampaignController(plan, executor=_NoSubmissionExecutor(), poll_interval_seconds=0)
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.publish_controller_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("result failed")),
+    )
+
+    result = controller.run()
+
+    assert result["halted"] is False
+    assert result["result_path"] is None
+    assert result["result_finalized"] is False
+    assert result["report_status"] == "failed"

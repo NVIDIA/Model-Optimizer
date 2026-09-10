@@ -40,13 +40,8 @@ from .executors.slurm import render_slurm_attempt_script
 from .identity import stable_hash
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
-from .reporting import (
-    FinalReportResult,
-    build_final_report_attempt,
-    completed_final_report,
-    final_report_paths,
-    record_completed_final_report,
-)
+from .reporting import FinalReportResult, final_report_paths, record_completed_final_report
+from .run_reporting import publish_controller_result, refresh_run_report
 from .schema import (
     AttemptSpec,
     CampaignPlan,
@@ -270,6 +265,7 @@ class CampaignController:
         self._active: dict[str, tuple[JobHandle, str, str]] = {}
         self._last_states: dict[str, JobState] = {}
         self._last_heartbeat = 0.0
+        self._last_structured_publication = 0.0
         self._progress_samples: dict[str, tuple[float, float, float]] = {}
         self._campaign_started_monotonic = time.monotonic()
         self._shutdown_requested = False
@@ -1316,6 +1312,39 @@ class CampaignController:
             drain_pending=drain_pending,
         )
 
+    def _publish_structured_progress(self, *, force: bool = False) -> None:
+        """Persist a detached-readable snapshot without coupling it to terminal rendering."""
+
+        now = time.monotonic()
+        if not force and now - self._last_structured_publication < 30:
+            return
+        self._try_publish_structured_result(
+            execution_status="running",
+            attachment_status="attached",
+        )
+        self._last_structured_publication = now
+
+    def _try_publish_structured_result(
+        self,
+        *,
+        execution_status: str,
+        attachment_status: str,
+        finalized: bool = False,
+    ) -> Path | None:
+        """Publish evidence without abandoning controller work when reporting fails."""
+
+        try:
+            return publish_controller_result(
+                self.plan,
+                self._stage_views(),
+                execution_status=execution_status,
+                attachment_status=attachment_status,
+                finalized=finalized,
+            )
+        except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
+            self.logger.warning(f"structured result publication failed: {exc}")
+            return None
+
     def _handles_to_cancel(self) -> list[tuple[JobHandle, str, str]]:
         """Collect live handles from memory, live-job registry, and durable attempts."""
 
@@ -1366,66 +1395,19 @@ class CampaignController:
             time.sleep(min(0.2, remaining))
 
     def _generate_final_report(self) -> FinalReportResult:
-        """Generate the canonical campaign report through the configured executor."""
+        """Regenerate the optional HTML view from the sealed structured result."""
 
-        completed = completed_final_report(self.plan)
-        if completed is not None:
-            self.logger.skip("final_report: completion artifacts validated")
-            return completed
-        attempt = build_final_report_attempt(self.plan, attempt_id=str(uuid.uuid4()))
-        fallback_logs = (attempt.command.log_path,) if attempt.command.log_path is not None else ()
-        self.logger.stage("generating final campaign report")
+        self.logger.stage("generating optional campaign HTML from structured results")
         try:
-            handle = self.executor.submit(attempt)
-        except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
-            self.logger.error(f"final campaign report submission failed: {exc}")
-            return FinalReportResult(status="failed", log_paths=fallback_logs)
-        self.logger.submit(f"final_report:0 [{handle.handle_id}]")
-        last_state: JobState | None = None
-        while True:
-            try:
-                status = self.executor.poll([handle])[0]
-            except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
-                self.logger.error(f"final campaign report polling failed: {exc}")
-                return FinalReportResult(
-                    status="failed",
-                    log_paths=self.executor.fetch_logs(handle) or fallback_logs,
-                )
-            log_paths = status.log_paths or self.executor.fetch_logs(handle) or fallback_logs
-            if status.state is not last_state:
-                if status.state is JobState.PENDING:
-                    self.logger.pending(f"final_report:0 [{handle.handle_id}]")
-                elif status.state is JobState.RUNNING:
-                    self.logger.running(f"final_report:0 [{handle.handle_id}]")
-                elif status.state is JobState.UNKNOWN:
-                    self.logger.warning(
-                        f"final_report:0 scheduler state unavailable [{handle.handle_id}]"
-                    )
-                last_state = status.state
-            if status.state in {JobState.PENDING, JobState.RUNNING, JobState.UNKNOWN}:
-                time.sleep(self.poll_interval_seconds)
-                continue
-            if status.state is not JobState.COMPLETED:
-                detail = f": {status.reason}" if status.reason else ""
-                self.logger.error(
-                    f"final campaign report {status.state.value} [{handle.handle_id}]{detail}"
-                )
-                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
+            refresh_run_report(self.plan.puzzle_dir)
             report_path, manifest_path = final_report_paths(self.plan)
-            missing = [str(path) for path in (report_path, manifest_path) if not path.is_file()]
-            if missing:
-                self.logger.error(
-                    "final campaign report completed without required artifact(s): "
-                    + ", ".join(missing)
-                )
-                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
-            try:
-                result = record_completed_final_report(self.plan, log_paths=tuple(log_paths))
-            except OSError as exc:
-                self.logger.error(f"final campaign report sealing failed: {exc}")
-                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
-            self.logger.success(f"final campaign report: {report_path}")
-            return result
+            result = record_completed_final_report(self.plan, log_paths=())
+        except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
+            self.logger.error(f"optional campaign HTML generation failed: {exc}")
+            return FinalReportResult(status="failed")
+        self.logger.success(f"optional campaign HTML: {report_path}")
+        self.logger.success(f"HTML source manifest: {manifest_path}")
+        return result
 
     def _prompt_shutdown_action(self) -> ShutdownAction:
         """Suspend live rendering and collect one interactive exit decision."""
@@ -1567,6 +1549,7 @@ class CampaignController:
             self._recover_failed_stages()
             self._log_completed_stages()
             self._refresh_dashboard()
+            self._publish_structured_progress(force=True)
             self.terminal_controls.start()
             self._interactive_ready = True
 
@@ -1623,6 +1606,7 @@ class CampaignController:
                             self._failed_stages and (self._active or self._ready_nodes())
                         )
                     )
+                    self._publish_structured_progress()
                     if self._shutdown_requested:
                         cancelled = True
                         halted = True
@@ -1703,10 +1687,31 @@ class CampaignController:
             and not detached
             and self._manual_waiting is None
         )
+        if clean_completion:
+            execution_status = "completed"
+            attachment_status = "not_running"
+        elif cancelled:
+            execution_status = "cancelled"
+            attachment_status = "not_running"
+        elif halted:
+            execution_status = "failed"
+            attachment_status = "not_running"
+        elif self._manual_waiting is not None:
+            execution_status = "waiting_for_input"
+            attachment_status = "not_running"
+        else:
+            execution_status = "running"
+            attachment_status = "detached"
+        result_path = self._try_publish_structured_result(
+            execution_status=execution_status,
+            attachment_status=attachment_status,
+            finalized=clean_completion,
+        )
+        result_finalized = clean_completion and result_path is not None
         report_result = (
             self._generate_final_report()
-            if clean_completion
-            else FinalReportResult(status="skipped")
+            if result_finalized
+            else FinalReportResult(status="failed" if clean_completion else "skipped")
         )
         if detached:
             self.logger.shutdown(
@@ -1735,6 +1740,8 @@ class CampaignController:
                 self._manual_waiting.node_id if self._manual_waiting is not None else None
             ),
             "iterations": iterations,
+            "result_path": str(result_path) if result_path is not None else None,
+            "result_finalized": result_finalized,
             **report_result.as_dict(),
         }
         return result

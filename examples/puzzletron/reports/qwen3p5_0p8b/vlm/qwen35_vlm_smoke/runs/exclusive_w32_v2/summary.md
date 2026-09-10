@@ -54,3 +54,6 @@ The structured evidence is in [result_record.json](result_record.json), summary
 metrics are in [metrics.csv](metrics.csv), and the 128 serving observations are
 in [observations.csv](observations.csv). [recipe.json](recipe.json) records the
 serving setup. The exact launcher for this historical study was not retained.
+The maintained route measures serving after final KD and is documented in the
+[maintained recipes guide](../../../../../../docs/maintained_recipes.md#qwen-35-08b-vlm-smoke-and-campaign);
+it does not reproduce this historical pre-KD comparison.

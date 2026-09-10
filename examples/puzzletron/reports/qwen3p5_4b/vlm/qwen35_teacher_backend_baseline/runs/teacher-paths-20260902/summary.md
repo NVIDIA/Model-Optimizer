@@ -45,5 +45,6 @@ output. A cause therefore cannot be separated from these records.
   checked-in versioned profile.
 
 See [result_record.json](result_record.json) for provenance,
-[metrics.csv](metrics.csv) for structured scores, and the campaign
-[README](../../README.md) for the reproduction entrypoint.
+[metrics.csv](metrics.csv) for structured scores, and the
+[campaign reports guide](../../../../../../docs/campaign_reports.md) for the
+shared evidence and reproduction boundary.

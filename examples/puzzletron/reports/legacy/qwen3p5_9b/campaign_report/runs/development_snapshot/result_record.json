@@ -1,0 +1,44 @@
+{
+  "schema": "modelopt.puzzletron.legacy-result-wrapper/v1",
+  "record_id": "legacy:qwen3p5_9b:campaign-report",
+  "run": {
+    "id": "qwen3p5_9b-development-snapshot",
+    "status": "unknown"
+  },
+  "campaign": {
+    "id": "qwen3p5_9b",
+    "modality": "text"
+  },
+  "model": {
+    "family": "qwen3p5_9b",
+    "display_name": "Qwen3.5-9B"
+  },
+  "producer": {
+    "state": "development_snapshot",
+    "revision": "unknown",
+    "metadata_origin": "curated_from_retained_report"
+  },
+  "reproduction_status": "not_reproduced",
+  "legacy_support_status": "not_established",
+  "evidence_status": "not_reproducible",
+  "support_status": "unsupported",
+  "artifacts": [
+    {
+      "role": "legacy_summary_html",
+      "path": "examples/puzzletron/reports/qwen3p5_9b.html",
+      "producer_revision": "unknown",
+      "metadata_origin": "curated_from_retained_report"
+    }
+  ],
+  "current_configuration": {
+    "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml",
+    "relationship": "reconstruction",
+    "note": "The current entry is not the executed configuration; the report records additional overrides and width values."
+  },
+  "limitations": [
+    "No reproduction is recorded.",
+    "The producer revision is unknown.",
+    "The report contains unresolved slicing-equivalence findings.",
+    "The retained HTML is a qualified legacy view and is not authoritative structured evidence."
+  ]
+}
