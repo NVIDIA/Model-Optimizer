@@ -367,43 +367,6 @@ def _mtq_candidate_formats(formats) -> list[dict]:
     return quantization_formats
 
 
-def _mtq_kv_candidate_formats(formats) -> list[tuple[dict, str]]:
-    """Translate format-agnostic KV candidates while preserving useful preset names."""
-    if not formats:
-        return []
-    format_type = type(formats[0])
-    normalized_presets = {
-        preset_name: format_type(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
-        for preset_name, preset in KV_QUANT_CFG_CHOICES.items()
-    }
-    fp8_quantizers = normalized_presets["fp8"]
-    if len(fp8_quantizers) != 1:
-        raise RuntimeError("The FP8 KV preset must contain exactly one quantizer entry.")
-    fp8_k_quantizer = copy.deepcopy(fp8_quantizers[0])
-    fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
-    # Ordered quantizer rules use last-match-wins semantics: start with NVFP4 K/V, then
-    # override K with FP8. Reversing these entries would produce uniform NVFP4.
-    asymmetric_quantizers = [*normalized_presets["nvfp4"], fp8_k_quantizer]
-
-    candidates = []
-    for idx, fmt in enumerate(formats):
-        quant_cfg = fmt.model_dump(exclude_none=True)
-        candidate_quantizers = quant_cfg.get("quant_cfg", [])
-        if candidate_quantizers == asymmetric_quantizers:
-            name = "fp8_k_nvfp4_v"
-        else:
-            name = next(
-                (
-                    preset_name
-                    for preset_name, preset_quantizers in normalized_presets.items()
-                    if preset_quantizers == candidate_quantizers
-                ),
-                None,
-            )
-        candidates.append((quant_cfg, name or f"KV_CACHE_FORMAT_{idx}"))
-    return candidates
-
-
 def _mtq_inputs_from_auto_quantize_config(
     aq_config, args: argparse.Namespace, fixed_quantize_config=None
 ) -> dict:
@@ -420,7 +383,9 @@ def _mtq_inputs_from_auto_quantize_config(
         return {
             "search_domain": "kv_cache",
             "constraints": constraints,
-            "quantization_formats": _mtq_kv_candidate_formats(aq_config.candidate_formats),
+            "quantization_formats": [
+                fmt.model_dump(exclude_none=True) for fmt in aq_config.candidate_formats
+            ],
             "disabled_layers": aq_config.disabled_layers,
             "method": aq_config.auto_quantize_method,
             "score_size": aq_config.score_size,

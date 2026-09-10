@@ -432,7 +432,7 @@ def test_kv_autoquant_replay_preserves_selected_calibration_algorithm():
 
 def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quant_stub):
     model = _ToyKVModel()
-    candidate = (_asymmetric_kv_config().model_dump(exclude_none=True), "fp8_k_nvfp4_v")
+    candidate = _asymmetric_kv_config().model_dump(exclude_none=True)
 
     model, state = mtq.auto_quantize(
         model,

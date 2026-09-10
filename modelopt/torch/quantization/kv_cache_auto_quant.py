@@ -212,7 +212,7 @@ def _validate_kv_only_config(config: QuantizeConfig) -> None:
 
 def _validate_search_inputs(
     constraints: dict[str, Any],
-    quantization_formats: list[tuple[dict[str, Any], str]],
+    quantization_formats: list[tuple[dict[str, Any], str | None]],
     num_calib_steps: int,
     num_score_steps: int,
 ) -> tuple[float, list[tuple[str, QuantizeConfig]]]:
@@ -237,11 +237,14 @@ def _validate_search_inputs(
 
     candidates = []
     seen_names = set()
-    for raw_config, name in quantization_formats:
-        if name in seen_names:
-            raise ValueError(f"Duplicate KV-cache AutoQuantize candidate name: {name!r}.")
+    for index, (raw_config, name) in enumerate(quantization_formats):
         config = QuantizeConfig(**raw_config)
         _validate_kv_only_config(config)
+        if name is None:
+            k_bits, v_bits = _candidate_kv_bits(config)
+            name = "fp8_k_nvfp4_v" if (k_bits, v_bits) == (8.0, 4.5) else f"KV_CACHE_FORMAT_{index}"
+        if name in seen_names:
+            raise ValueError(f"Duplicate KV-cache AutoQuantize candidate name: {name!r}.")
         candidates.append((name, config))
         seen_names.add(name)
     if not candidates:

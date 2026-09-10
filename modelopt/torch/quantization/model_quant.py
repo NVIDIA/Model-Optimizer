@@ -347,17 +347,19 @@ def _auto_quantize_kv_cache(
     if data_loader is None or forward_step is None:
         raise ValueError("data_loader and forward_step must be provided for KV-cache AutoQuantize.")
 
-    processed_kv_formats = []
-    for index, candidate in enumerate(quantization_formats):
+    processed_kv_formats: list[tuple[dict[str, Any], str | None]] = []
+    for candidate in quantization_formats:
         if isinstance(candidate, tuple):
             raw_config, name = candidate
+            if not isinstance(name, str) or not name:
+                raise ValueError("KV-cache AutoQuantize candidate names must be non-empty strings.")
         elif isinstance(candidate, str):
             if not hasattr(mtq, candidate):
                 raise ValueError(f"Unknown KV-cache quantization format: {candidate!r}.")
             raw_config, name = getattr(mtq, candidate), candidate
         elif isinstance(candidate, dict):
             raw_config = candidate
-            name = QuantRecipe.get_auto_name_for_config(candidate) or f"KV_CACHE_FORMAT_{index}"
+            name = QuantRecipe.get_auto_name_for_config(candidate)
         else:
             raise TypeError(
                 "KV-cache quantization formats must be config dictionaries, preset names, "
@@ -365,8 +367,6 @@ def _auto_quantize_kv_cache(
             )
         if not isinstance(raw_config, dict):
             raise TypeError("KV-cache AutoQuantize formats must resolve to config dictionaries.")
-        if not isinstance(name, str) or not name:
-            raise ValueError("KV-cache AutoQuantize candidate names must be non-empty strings.")
         processed_kv_formats.append((raw_config, name))
 
     _validate_kv_cache_search_inputs(

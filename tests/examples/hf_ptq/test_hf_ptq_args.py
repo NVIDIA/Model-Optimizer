@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import getpass
 import importlib
 import sys
@@ -110,10 +109,7 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
     assert inputs["search_domain"] == "kv_cache"
     assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "kv_cache"}
     assert inputs["method"] == "kl_div"
-    assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
-        8.0,
-        4.5,
-    ]
+    assert [config["effective_bits"] for config in inputs["quantization_formats"]] == [8.0, 4.5]
     assert aq.cost_excluded_layers == []
     assert "*mtp*" in inputs["disabled_layers"]
     assert "kv_cache_quant_cfg" not in inputs
@@ -146,20 +142,6 @@ def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     assert attention.v_bmm_quantizer.num_bits == (2, 1)
     assert attention.k_bmm_quantizer.amax == 448.0
     assert attention.v_bmm_quantizer.amax == 448.0
-
-
-def test_kv_autoquant_names_asymmetric_export_format(monkeypatch):
-    """The supported FP8-K/NVFP4-V candidate has a stable semantic name."""
-    hf_ptq = _import_hf_ptq(monkeypatch)
-    mixed_config = copy.deepcopy(hf_ptq.KV_QUANT_CFG_CHOICES["nvfp4"])
-    fp8_k_quantizer = copy.deepcopy(hf_ptq.KV_QUANT_CFG_CHOICES["fp8"]["quant_cfg"][0])
-    fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
-    mixed_config["quant_cfg"].append(fp8_k_quantizer)
-    mixed_config["effective_bits"] = 6.25
-
-    candidates = hf_ptq._mtq_kv_candidate_formats([QuantizeConfig(**mixed_config)])
-
-    assert candidates[0][1] == "fp8_k_nvfp4_v"
 
 
 def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):
