@@ -8,6 +8,8 @@ Changelog
 
 *Quantization*
 
+- Add ``modelopt_recipes/published_checkpoints.md``: every model in NVIDIA's `Inference Optimized Checkpoints <https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer>`_ collection paired with the recipe that reproduces its quantization layout, so a released checkpoint can be re-created from its source weights. Each pairing is checked against the release's own per-module quantization map by ``tools/recipe_backfill/``.
+- Add the recipes needed to complete that coverage: KV-unquantized variants of the general body schemes (``nvfp4_default-kv_fp16``, ``fp8_default-kv_fp16``, ``nvfp4_mlp_only-kv_fp16``, ``nvfp4_experts_only-kv_fp16``); architecture recipes for ``deepseek_v4``, ``qwen3_next`` and ``phi4mm`` plus a W4A4 ``qwen3_5`` variant; and checkpoint mirrors for K-EXAONE-2.0-750B-A37B, NVIDIA-Nemotron-3-Nano-30B-A3B, NVIDIA-Nemotron-3-Super-120B-A12B FP8, Nemotron-3-Nano-Omni-30B-A3B-Reasoning, Qwen3.5-397B-A17B V2 and Step-3.7-Flash.
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
 
 **Backward Breaking Changes**
@@ -16,6 +18,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``, which matched only ``*mlp.experts*``. The HF ``minimax_m3_vl`` classes name the MoE block ``block_sparse_moe``, so the routed experts fell through to MXFP8 instead of NVFP4 and the recipe did not reproduce ``nvidia/MiniMax-M3-NVFP4``.
+- Fix the NVIDIA-Nemotron-3 Super and Ultra NVFP4 recipes quantizing the MTP block, which their own descriptions say stays BF16 and which the published checkpoints ship unquantized.
 - Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
 - Fix a DDP hang in DFlash training at scale where a rank whose batch contained no valid anchor skipped the draft forward, leaving its rotary buffer list shorter than other ranks' and causing ``broadcast_buffers`` to hang. The buffer is now created during ``modify()`` before training begins.
 - Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
