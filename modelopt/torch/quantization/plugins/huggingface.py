@@ -17,6 +17,7 @@
 
 import inspect
 import logging
+import re
 import warnings
 from contextlib import contextmanager
 from functools import partial
@@ -1895,7 +1896,7 @@ LayerActivationCollector.register_decoder_layer_support(
 
 
 class _QuantMoELinear(QuantModule):
-    """Quantization wrapper for Step3p5 MoELinear modules (fused expert weights).
+    """Quantization wrapper for expert-indexed MoELinear modules (fused expert weights).
 
     MoELinear has weight shape [num_experts, out_features, in_features] with
     forward(x, expert_id). We expand it into per-expert nn.Linear modules so
@@ -1912,6 +1913,19 @@ class _QuantMoELinear(QuantModule):
 
     def _setup(self):
         from accelerate import init_empty_weights
+
+        # Accelerate's CPU/disk offload (`device_map="auto"`, `--offload_folder`) leaves
+        # `weight` as a meta tensor and keeps the real value in the module's offload hook,
+        # keyed on the original `weight` name. Expanding that would copy meta storage into
+        # every expert and then delete the key the hook restores into, silently producing a
+        # checkpoint of zeros. Refuse instead of corrupting.
+        if self.weight.is_meta or getattr(getattr(self, "_hf_hook", None), "offload", False):
+            raise NotImplementedError(
+                f"{type(self).__name__}: expert-indexed MoELinear weights cannot be quantized "
+                "while offloaded by Accelerate (the weight is a meta tensor whose value lives "
+                "in the offload hook). Load the model without CPU/disk offload — more GPUs, or "
+                "a device_map that keeps the MoE layers resident — and re-run."
+            )
 
         dtype, device = self.weight.dtype, self.weight.device
 
@@ -1932,38 +1946,143 @@ class _QuantMoELinear(QuantModule):
         self.experts = experts
 
     def forward(self, x, expert_id):
-        # experts[expert_id] is a _QuantLinear after quantization wrapping,
-        # providing per-expert input_quantizer and weight_quantizer.
-        # Cast input to match expert weight dtype before linear operation,
-        # then cast output to float32 to match original MoELinear forward behavior.
+        # experts[expert_id] is a _QuantLinear after quantization wrapping, providing
+        # per-expert input_quantizer and weight_quantizer.
+        #
+        # MoELinear.forward always promotes to fp32 for the matmul regardless of storage
+        # dtype (`F.linear(x.float(), self.weight[expert_id].float())`), so leaving the
+        # expert's weight at its native storage dtype (e.g. bf16) and downcasting x to
+        # match before the matmul would compute in bf16 and change the model's output even
+        # with every quantizer disabled -- the bf16 rounding this class exists to quantize
+        # *past*, not to reintroduce as a side effect of conversion.
+        #
+        # A prior version of this fix instead expanded every expert's weight in fp32
+        # permanently in `_setup`. That reproduces Step's fp32 compute but turns a per-call
+        # transient promotion into persistent model state: on Step-3.7's full routed-expert
+        # set (42 layers x 3 projections x 288 experts x 4096 x 1280), doubling from bf16 to
+        # fp32 adds roughly 354 GiB held throughout calibration, on top of device placement
+        # already sized for bf16 -- a model that loaded successfully can then OOM. It also
+        # left disabled/unquantized experts reconstructed at fp32 in the exported checkpoint.
+        #
+        # Instead, only the one expert actually being called is promoted, transiently, for
+        # the duration of this one call -- matching Step's own per-call `.float()` memory
+        # profile instead of Step-3.7's full expert set. `expert.weight` is read here
+        # outside any `quantize_weight()` context, so `_get_quantized_weight` passes it
+        # through unchanged and this is the real underlying nn.Parameter (the same pattern
+        # `_setup` above uses), not a value computed by the quantizer -- so reassigning its
+        # `.data` genuinely mutates the persisted storage, not a transient wrapper.
+        #
+        # This must keep calling `expert(x)` (`__call__`, not `.forward()`) rather than
+        # reimplementing the input/weight-quantize/output-quantize sequence inline: some
+        # calibration algorithms (e.g. `local_hessian_calibrate`) register a
+        # `forward_pre_hook` directly on the quantized Linear module, which only fires
+        # through standard `nn.Module.__call__` dispatch.
         expert = self.experts[expert_id]
-        x = x.to(expert.weight.dtype)
-        return expert(x).float()
+        original_weight = expert.weight.data
+        with torch.no_grad():
+            expert.weight.data = original_weight.float()
+        try:
+            out = expert(x.float())
+        finally:
+            with torch.no_grad():
+                expert.weight.data = original_weight
+        return out.float()
 
 
-def register_step3p5_moe_on_the_fly(model):
-    """Register Step3p5 MoELinear for quantization.
+def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
+    """Whether ``module`` packs one projection's experts into an expert-indexed 3-D weight.
 
-    Step3p5 uses a custom MoELinear class (loaded via trust_remote_code) with
-    weight shape [num_experts, out_features, in_features] and forward(x, expert_id).
-    We detect it by model class name, then grab the type from the first MoE layer.
+    The Step family (``stepfun-ai/Step-3.5-Flash``, ``stepfun-ai/Step-3.7-Flash``) ships a
+    custom ``MoELinear`` via ``trust_remote_code``: a plain ``nn.Module`` holding a single
+    ``weight`` of shape ``[num_experts, out_features, in_features]``, whose
+    ``forward(x, expert_id)`` runs ``F.linear`` against the selected expert's slice. The
+    weights therefore live on the projection submodule rather than on the expert container,
+    which is what :func:`_fused_experts_wrapper_class` looks for, and the module is not an
+    ``nn.Linear``, so neither the fused-experts path nor the plain linear path claims it.
+
+    Detection is structural rather than keyed on class names so new Step revisions are picked
+    up without another hardcoded name, but the shape alone is not a sufficient contract: the
+    replacement forward indexes ``self.experts[expert_id]``, so it only works for callers that
+    pass a **scalar expert index**. Grouped-GEMM MoE layers share the exact same 3-D weight and
+    attribute set while passing a per-expert token-count *tensor* instead (e.g. Moondream3's
+    ``MoeFusedLinear.forward(input, m_sizes)``, which would raise ``TypeError: only integer
+    tensors of a single element can be converted to an index`` on the first calibration
+    forward). The second parameter must therefore be named ``expert_id``, which is the
+    scalar-index contract both Step revisions declare.
     """
-    if type(model).__name__ not in ("Step3p5ForCausalLM", "Step3p5Model"):
+    weight = getattr(module, "weight", None)
+    if not isinstance(weight, (nn.Parameter, Tensor)) or weight.dim() != 3:
+        return False
+    if not all(hasattr(module, attr) for attr in ("num_experts", "in_features", "out_features")):
+        return False
+    # The wrapper rebuilds the weight as `num_experts` Linears of (out_features, in_features),
+    # so a 3-D weight laid out any other way would silently copy the wrong slices.
+    if tuple(weight.shape) != (module.num_experts, module.out_features, module.in_features):
+        return False
+    try:
+        params = list(inspect.signature(type(module).forward).parameters.values())[1:]
+    except (TypeError, ValueError):
+        return False
+    # The replacement forward is exactly `(x, expert_id)`, so anything the caller could pass
+    # beyond those two — a keyword-only `router_state`, *args, **kwargs — would raise once
+    # converted. Require the signature to match what the wrapper can honour.
+    return (
+        len(params) == 2
+        and all(p.kind is p.POSITIONAL_OR_KEYWORD and p.default is p.empty for p in params)
+        and params[1].name == "expert_id"
+    )
+
+
+_STEP_FAMILY_RE = re.compile(r"(?i)^step\d")
+
+
+def _is_step_family_model(model: nn.Module) -> bool:
+    """Whether ``model`` is a Step-family root model (Step-3.5, Step-3.7, or a future revision).
+
+    Matched against the ``step<digit>`` convention shared by ``model_type`` (``"step3p5"``,
+    ``"step3p7"``) and the remote-code class name (``Step3p5ForCausalLM``,
+    ``Step3p7ForConditionalGeneration``), not an exact revision, so a new Step release is
+    still picked up without another hardcoded name. This is deliberately narrower than the
+    shape/signature check in :func:`_is_expert_indexed_moe_linear` alone: that check accepts
+    any module with a matching 3-D weight and an ``(x, expert_id)`` forward, which is a
+    coincidence risk on its own -- an unrelated architecture happening to reuse the parameter
+    name ``expert_id`` with different semantics (a per-expert bias or post-scale, say) would
+    be claimed and have that behavior silently dropped by the replacement wrapper. Gating on
+    the model family keeps the shape check doing what it is actually good at: telling
+    Step revisions apart without a class-name allowlist, rather than distinguishing Step
+    from arbitrary third-party MoE code.
+    """
+    model_type = str(getattr(getattr(model, "config", None), "model_type", "") or "")
+    return bool(_STEP_FAMILY_RE.match(model_type) or _STEP_FAMILY_RE.match(type(model).__name__))
+
+
+def register_moe_linear_on_the_fly(model):
+    """Register expert-indexed ``MoELinear`` modules (Step-3.5 / Step-3.7) for quantization.
+
+    Without this the routed experts carry no quantizer at all: an experts-only recipe matches
+    nothing and the export writes a checkpoint with ``quant_algo: null``.
+    """
+    if not _is_step_family_model(model):
         return
-    for module in model.modules():
-        if type(module).__name__ == "Step3p5MoEMLP":
-            moe_linear_type = type(module.up_proj)
-            if QuantModuleRegistry.get(moe_linear_type) is None:
-                QuantModuleRegistry.register({moe_linear_type: f"hf.{moe_linear_type.__name__}"})(
-                    _QuantMoELinear
-                )
-            break
+    visited_types = set()
+    for name, module in model.named_modules():
+        mod_type = type(module)
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
+            continue
+        visited_types.add(mod_type)
+
+        if _is_expert_indexed_moe_linear(module):
+            print(
+                f"\033[1mDetected expert-indexed MoE linear '{name}' of type "
+                f"{mod_type.__name__}, registering with _QuantMoELinear.\033[0m"
+            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantMoELinear)
 
 
 def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
-    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
+    """Reconstruct :class:`_QuantMoELinear` per-expert weights back to the 3-D MoELinear format.
 
-    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
+    After _process_quantized_modules, each expert's nn.Linear inside the wrapper has:
       - weight: fp4-quantized tensor [out_features, in_features]
       - weight_scale, weight_scale_2: per-block / global scales
       - input_scale: activation scale (if calibrated)
@@ -1971,12 +2090,12 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
     This stacks them back into the original MoELinear layout so the exported state_dict
     uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
 
-    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
-    not _QuantMoELinear which is the implementation class.
+    Matched by wrapper type rather than by the dynamically generated class name (``Quant`` +
+    the model's own class name): a model whose class is not spelled ``MoELinear`` would
+    otherwise quantize normally but export unusable per-expert keys.
     """
     for _name, module in model.named_modules():
-        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
-        if type(module).__name__ != "QuantMoELinear":
+        if not isinstance(module, _QuantMoELinear):
             continue
 
         n = module.num_experts
@@ -2006,7 +2125,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
-        register_step3p5_moe_on_the_fly,
+        register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
         force_eager_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,
