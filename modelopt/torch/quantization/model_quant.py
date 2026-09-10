@@ -38,7 +38,9 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
-from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+# The _auto_quantize_shapley import registers the "aumann_shapley" method on load.
+from . import _auto_quantize_shapley  # noqa: F401
+from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -285,12 +287,14 @@ def auto_quantize(
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
+    method_options: dict[str, Any] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
     ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
-    for the best quantization formats per-layer. The sensitivity score can be computed using gradient-based
-    methods (default) or KL divergence loss, controlled by the ``method`` parameter.
+    for the best quantization formats per-layer. The sensitivity score can be computed with
+    gradient-based methods (default), KL divergence loss, or Aumann-Shapley path-integral
+    attributions, controlled by the ``method`` parameter.
 
     Internally this API runs two main phases:
 
@@ -442,9 +446,15 @@ def auto_quantize(
         verbose: If True, prints the search progress/intermediate results.
         method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
             to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
-            linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
+            linear programming search, and requires ``loss_func`` or ``forward_backward_step``),
             ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
-            threshold-based binary search, and only requires ``forward_step`` returning logits).
+            threshold-based binary search, and only requires ``forward_step`` returning logits), and
+            ``"aumann_shapley"`` (path-integral damage attributions, calibrated against a
+            directly measured reference point; label-free like ``"kl_div"``, and additionally
+            reports a ``predicted_damage`` estimate for the selected recipe. Scoring passes grow
+            with the number of candidate formats and path nodes, not with the number of
+            whole-model configurations the search considers -- see
+            :mod:`modelopt.torch.quantization._auto_quantize_shapley`).
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -462,6 +472,9 @@ def auto_quantize(
             active while searched modules are scored, is calibrated only with its own algorithm,
             and remains part of the effective-bits numerator and denominator. This is one
             integrated AutoQuantize operation, not staged PTQ followed by AutoQuantize.
+        method_options: Optional method-specific settings merged into the searcher config and
+            validated by the selected method (e.g. ``{"num_path_nodes": 2}`` or
+            ``{"max_predicted_damage": 1e-3}`` for ``method="aumann_shapley"``).
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -621,18 +634,12 @@ def auto_quantize(
             )
 
     # Select the appropriate searcher based on method
-    if method == "gradient":
-        searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
-    else:
-        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+    if method not in AUTO_QUANTIZE_SEARCHERS:
+        raise ValueError(
+            f"Invalid method: {method}. Valid options are {sorted(AUTO_QUANTIZE_SEARCHERS)}."
+        )
+    searcher = AUTO_QUANTIZE_SEARCHERS[method]()
 
-    model = apply_mode(
-        model,
-        mode="auto_quantize",
-        registry=QuantizeModeRegistry,
-    )
     search_config = {
         "quantization_formats": processed_quantization_formats,
         "fixed_quantization_config": processed_fixed_quantization_config,
@@ -647,13 +654,37 @@ def auto_quantize(
         "verbose": verbose,
         "checkpoint": checkpoint,
     }
+    if method_options is not None:
+        if not isinstance(method_options, dict):
+            raise TypeError(f"method_options must be a dict, got {type(method_options).__name__}")
+        # Only the selected method's declared options are accepted; core inputs (loaders,
+        # steps, checkpoint, ...) cannot be overridden here.
+        invalid = set(method_options) - searcher.method_options_keys
+        if invalid:
+            raise ValueError(
+                f"Invalid method_options {sorted(invalid)} for method={method!r}. "
+                f"Supported options: {sorted(searcher.method_options_keys)}."
+            )
+        search_config.update(method_options)
+    # Validate the full search config (including method-option values and cross-field
+    # consistency with the constraints) before the model is converted, so a rejected
+    # configuration leaves the model untouched. The searcher re-sanitizes the
+    # already-sanitized config inside search(), which is a no-op.
+    search_config = searcher.sanitize_search_config(search_config)
+    search_constraints = cast("ConstraintsDict", constraints or {})
+    searcher.validate_search_input(search_constraints, search_config)
+
+    model = apply_mode(
+        model,
+        mode="auto_quantize",
+        registry=QuantizeModeRegistry,
+    )
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     if processed_fixed_quantization_config is not None:
         fixed_cfg, fixed_name = processed_fixed_quantization_config
         fixed_recipe = QuantRecipe(fixed_cfg, name=fixed_name)
         set_quantizer_by_cfg(model, fixed_recipe.config.quant_cfg)
-    search_constraints = cast("ConstraintsDict", constraints or {})
     searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
