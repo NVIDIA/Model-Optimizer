@@ -491,10 +491,10 @@ companion vLLM implementation does not support that asymmetric per-layer format:
 
 ```bash
 python hf_ptq.py \
-  --pyt_ckpt_path Qwen/Qwen3-1.7B \
+  --pyt_ckpt_path Qwen/Qwen3.8-27B \
   --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
   --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
-  --export_path /path/to/qwen3-1.7b-mixed-kv
+  --export_path /path/to/qwen3.8-27b-mixed-kv
 ```
 
 Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
