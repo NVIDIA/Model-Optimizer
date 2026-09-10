@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for stepfun-ai/Step-3.7-Flash, mirroring stepfun-ai/Step-3.7-Flash-NVFP4.
+#
+# Step-3.7-Flash is a `step3p7` VLM MoE: 45 decoder layers under
+# `model.language_model.layers` (0-2 dense, 3-44 sparse), a `share_expert` alongside the
+# routed experts on every sparse layer, and a CLIP-style vision tower
+# (`model.vision_model.transformer.resblocks.*`) plus a `vit_large_projector`.
+#
+# Quantized: the routed experts only -- `moe.{gate,up,down}_proj` on layers 3-44, W4A4
+# NVFP4 on both the weight and the input quantizer. Everything else stays BF16: the
+# dense MLP of layers 0-2, the `share_expert`, the `moe.gate` router, all attention
+# (including Step's extra `self_attn.g_proj`), the vision tower, the projector and
+# `lm_head`. KV cache: FP8, calibrated (the published `k_scale` is 0.104, not the 1.0 a
+# constant amax would give).
+#
+# How this differs from the sibling `models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`:
+# that recipe enables `*mlp*` as well as `*moe*`, which on this release would also
+# quantize the dense MLP of layers 0-2. Step-3.7-Flash keeps those BF16, so the scope
+# here is `moe`-only.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Step-3.7-Flash: NVFP4 (W4A4) on the routed experts of sparse layers 3-44, plus a
+    calibrated FP8 KV cache; max calibration. The dense MLP of layers 0-2, the shared
+    expert, the router gate, all attention, the vision tower and lm_head stay BF16.
+quantize:
+  algorithm:
+    method: max
+    # Required for VLMs: the decoder layers nest under `model.language_model.layers`,
+    # where layerwise_calibrate cannot find them.
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*moe*weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*moe*input_quantizer'
+      cfg: {$import: nvfp4}
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers
+    # MUST stay after the broad `*moe*` enables: the shared expert and the router sit
+    # inside the same `moe` block, and neither matches a default exclusion here
+    # (`*mlp.gate.*` does not reach `moe.gate`).
+    - {quantizer_name: '*share_expert*', enable: false}
+    - {quantizer_name: '*moe.gate.*', enable: false}
+    - {quantizer_name: '*vision_model*', enable: false}
+    - {quantizer_name: '*vit_large_projector*', enable: false}

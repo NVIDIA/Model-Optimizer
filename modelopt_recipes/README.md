@@ -36,6 +36,12 @@ huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 >
 > This README is the **catalog** across all recipe families; `ptq.md` is the
 > how-to for PTQ.
+>
+> 🔎 **Reproducing a released checkpoint →
+> [`published_checkpoints.md`](published_checkpoints.md).** Every model in NVIDIA's
+> [Inference Optimized Checkpoints](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)
+> collection, paired with the recipe that reproduces it. Each pairing is verified
+> against the released checkpoint's own per-module quantization map.
 
 ## Layout
 

@@ -132,3 +132,9 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
+
+    # MTP head -> BF16. Must stay last: the broad `*mixer.experts*` /
+    # `*mixer.shared_experts*` patterns above also reach `mtp.layers.*.mixer.*`, and
+    # the published checkpoint ships the MTP block unquantized.
+    - quantizer_name: 'mtp.*'
+      enable: false

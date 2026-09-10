@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Composed PTQ recipe for expert-only dynamic NVFP4 quantization, KV cache left unquantized.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  experts_nvfp4: configs/ptq/units/experts_nvfp4
+  block_sparse_moe_nvfp4: configs/ptq/units/block_sparse_moe_nvfp4
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Applies dynamic NVFP4 only to expert-layer weight and input quantizers, with the KV
+    cache left in BF16/FP16; uses max calibration. The KV-quantized variants are
+    nvfp4_experts_only-kv_fp8_cast / -kv_fp8.
+quantize:
+  algorithm:
+    method: max
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
+    # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: experts_nvfp4
+    - $import: block_sparse_moe_nvfp4
+    - $import: default_disabled_quantizers

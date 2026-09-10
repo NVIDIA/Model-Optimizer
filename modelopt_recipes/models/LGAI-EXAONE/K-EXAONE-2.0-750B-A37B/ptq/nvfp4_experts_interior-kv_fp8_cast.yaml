@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for LGAI-EXAONE/K-EXAONE-2.0-750B-A37B, mirroring
+# LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4.
+#
+# K-EXAONE-2.0 is an `exaone_moe` MoE: 78 decoder layers (`mlp_layer_types` marks 0-1
+# `dense` and 2-77 `sparse`), 256 routed experts per sparse layer, a shared expert per
+# sparse layer, and a separate top-level `mtp` block.
+#
+# Quantized: the routed experts of the INTERIOR sparse layers only -- layers 5-74,
+# W4A4 NVFP4 on both the weight and the input quantizer. Everything else stays BF16:
+# the routed experts of the three leading sparse layers (2-4) and the three trailing
+# ones (75-77), the shared experts, the router gate, the dense MLP of layers 0-1, all
+# attention, `lm_head`, and the MTP block. KV cache: FP8.
+#
+# The edge-layer carve-out is the model-specific part, and it is what a portable
+# `nvfp4_experts_only` recipe cannot express: the first and last few MoE layers are
+# the most sensitive to 4-bit experts, so the release leaves 6 of the 76 sparse
+# layers' experts in BF16 -- 4608 of the 58 368 expert linears. The same idea appears
+# in `models/mistralai/Mistral-Medium-3.5-128B`, which keeps its edge MLP layers at
+# FP8 rather than NVFP4.
+#
+# The trailing per-layer disables must stay last: they undo the broad
+# `*.experts.*` enables above for exactly those six layers.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  experts_nvfp4: configs/ptq/units/experts_nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    K-EXAONE-2.0-750B-A37B: NVFP4 (W4A4) on the routed experts of the interior sparse
+    layers 5-74 only, plus an FP8 KV cache in cast mode using constant amax; max
+    calibration. The routed experts of sparse layers 2-4 and 75-77, the shared experts,
+    the router gate, the dense MLP of layers 0-1, attention, lm_head and the MTP block
+    all stay BF16.
+quantize:
+  algorithm:
+    method: max
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: experts_nvfp4
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # Edge sparse layers keep BF16 experts -- MUST stay last.
+    - {quantizer_name: '*layers.2.mlp.experts.*', enable: false}
+    - {quantizer_name: '*layers.3.mlp.experts.*', enable: false}
+    - {quantizer_name: '*layers.4.mlp.experts.*', enable: false}
+    - {quantizer_name: '*layers.75.mlp.experts.*', enable: false}
+    - {quantizer_name: '*layers.76.mlp.experts.*', enable: false}
+    - {quantizer_name: '*layers.77.mlp.experts.*', enable: false}
