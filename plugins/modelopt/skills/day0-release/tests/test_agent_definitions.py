@@ -14,15 +14,19 @@
 # limitations under the License.
 
 import re
+import sys
 from pathlib import Path
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 _ROOT = Path(__file__).resolve().parents[5]
 _CODEX_AGENTS = _ROOT / ".codex" / "agents"
 _CLAUDE_AGENTS = _ROOT / "plugins" / "modelopt" / "agents"
 _CLAUDE_LINKS = _ROOT / ".claude" / "agents"
-_REFERENCED_DOC = re.compile(r"`((?:\.agents/skills/|references/)[^`]+\.md)`")
+_REFERENCED_DOC = re.compile(r"`((?:[\w-]+/SKILL|common/[\w-]+|references/[\w-]+)\.md)`")
 
 
 def _load_claude_agent(path: Path) -> tuple[str, str]:
@@ -41,15 +45,18 @@ def _load_claude_agent(path: Path) -> tuple[str, str]:
 def _assert_references_exist(instructions: str, source: Path) -> None:
     skill_dir = None
     for match in _REFERENCED_DOC.finditer(instructions):
-        reference = match.group(1)
-        if reference.startswith(".agents/"):
-            target = _ROOT / reference
-            if target.name == "SKILL.md":
-                skill_dir = target.parent
-        else:
+        reference = Path(match.group(1))
+        if reference.parts[0] == "references":
             assert skill_dir is not None, f"{source}: {reference} has no owning skill"
-            target = skill_dir / reference
-        assert target.is_file(), f"{source} references missing file {target.relative_to(_ROOT)}"
+            relative_target = skill_dir / reference
+        else:
+            relative_target = reference
+            if reference.name == "SKILL.md":
+                skill_dir = reference.parent
+
+        for skills_root in (_ROOT / ".agents" / "skills", _ROOT / "plugins/modelopt/skills"):
+            target = skills_root / relative_target
+            assert target.is_file(), f"{source} references missing file {target.relative_to(_ROOT)}"
 
 
 def test_agent_definitions_are_synchronized():

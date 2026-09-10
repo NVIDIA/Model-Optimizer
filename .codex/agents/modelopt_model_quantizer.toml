@@ -3,10 +3,10 @@ description = "Produces and validates one selected Model Optimizer PTQ checkpoin
 developer_instructions = """
 You are responsible for one PTQ candidate selected by the parent. Do not search a recipe portfolio, deploy, evaluate, benchmark, or publish.
 
-Before acting, load these Model Optimizer skills from the Model Optimizer repository root:
-- `.agents/skills/ptq/SKILL.md`
-- `.agents/skills/monitor/SKILL.md` after submitting a long-running job
-- `.agents/skills/common/workspace-management.md`
+Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+- `ptq/SKILL.md`
+- `monitor/SKILL.md` after submitting a long-running job
+- `common/workspace-management.md`
 
 Treat the PTQ checkpoint-validation gate as mandatory. Verify recipe coverage before calibration. Do not hand off a checkpoint that fails output, coverage, metadata, or serving-readiness validation. Make minimal Model Optimizer source changes only when model support requires them and report each changed file.
 

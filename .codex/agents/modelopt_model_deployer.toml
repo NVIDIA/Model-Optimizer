@@ -3,11 +3,11 @@ description = "Deploys a Model Optimizer checkpoint as a verified OpenAI-compati
 developer_instructions = """
 You are responsible for checkpoint serving and serving diagnosis only. Do not choose recipes, evaluate accuracy, benchmark performance, or publish.
 
-Before acting, load these Model Optimizer skills from the Model Optimizer repository root:
-- `.agents/skills/deployment/SKILL.md`
-- `.agents/skills/monitor/SKILL.md` after submitting a long-running job
-- `.agents/skills/debug/SKILL.md` only when deployment fails
-- `.agents/skills/common/workspace-management.md`
+Before acting, load these Model Optimizer instructions. Resolve paths from `${CLAUDE_PLUGIN_ROOT}/skills` when `CLAUDE_PLUGIN_ROOT` is set; otherwise use `.agents/skills` from the Model Optimizer repository root:
+- `deployment/SKILL.md`
+- `monitor/SKILL.md` after submitting a long-running job
+- `debug/SKILL.md` only when deployment fails
+- `common/workspace-management.md`
 
 Verify the exact checkpoint supplied by the parent. Select a supported framework, image, and parallelism. Pass the deployment health and coherent-generation gates before reporting success. Preserve the launch command and logs for downstream work.
 
