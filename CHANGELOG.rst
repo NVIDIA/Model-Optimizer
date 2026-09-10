@@ -17,10 +17,13 @@ Changelog
 
 **Deprecations**
 
+- The TensorRT-LLM checkpoint export format is deprecated and will be removed in 0.49.0: ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning`` on use. Use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang. Its implementation moved to ``modelopt.torch.export.trtllm``, so import those two functions from there and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``; both functions remain importable from ``modelopt.torch.export`` for this release only.
 - Deprecate ``metadata.recipe_type`` in recipe YAML. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does; ``recipe_type`` is still read and still honoured, so no existing recipe needs changing, but new recipes should leave it out. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
 
 **Bug Fixes**
 
+- Fix ``--use_fsdp2`` HuggingFace checkpoint export gathering the whole model onto rank 0, which made export the dominant phase of a PTQ run and could exhaust host memory on large models. The model is now split into per-decoder-layer units dealt round-robin across ranks; each rank gathers every unit but keeps, packs, and writes only the ones it owns, so a rank buffers roughly ``model / world_size`` instead of the whole checkpoint, and rank 0 writes the combined index. Export configurations that cannot be split this way now raise instead of producing a mismatched checkpoint: FSDP2 combined with another DTensor parallelism (for example FSDP2 + tensor parallel on a 2-D mesh; HSDP is supported), models whose decoder layers cannot be discovered, a decoder layer object reused across layers, and a module that holds the decoder layers while owning parameters of its own.
+- Speed up ``mtq.quantize`` on FSDP2-sharded fused-MoE models. Promoting static-block weight quantizers gathered each expert's slice of the fused weight across ranks even though only quantizer state is read, adding a collective per expert to calibration.
 - Fix ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``, which matched only ``*mlp.experts*``. The HF ``minimax_m3_vl`` classes name the MoE block ``block_sparse_moe``, so the routed experts fell through to MXFP8 instead of NVFP4 and the recipe did not reproduce ``nvidia/MiniMax-M3-NVFP4``.
 - Fix the NVIDIA-Nemotron-3 Super and Ultra NVFP4 recipes quantizing the MTP block, which their own descriptions say stays BF16 and which the published checkpoints ship unquantized.
 - Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
@@ -50,6 +53,8 @@ Changelog
 - Add ``dflash_fp32_master_weights`` (default ``False``): keep the DFlash draft's parameters and Adam moments in fp32 while its matmuls run in bf16 (classic mixed precision). Requires a bf16 autocast around the forward, which HF ``Trainer`` supplies under ``TrainingArguments.bf16``. Yields 7–14% acceptance-length improvement over bf16-only training across all ``projector_type`` variants; both LiLiCorr recipes set it to ``true``. The cost is memory, plus a doubled gradient all-reduce under DDP.
 - Fix ``training.gradient_checkpointing`` to reach the DFlash draft. Previously the flag applied only to the frozen target model, saving no activations; the draft now honours it in its decoder-layer loop.
 - Add optional **grouped sublayer convolutions for LiLiCorr**, reusing DFlash2's ``DFlashGroupedConv``; enabled by ``conv_kernel_size`` and ``conv_group_size`` in ``dflash_architecture_config``. Requires the DFlash2 branch. Recipe at ``modelopt_recipes/general/speculative_decoding/lilicorr_conv.yaml``.
+
+- Add PTQ support for Step-3.7 (``stepfun-ai/Step-3.7-Flash``), whose routed experts were previously left unquantized. Quantize with the new ``huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast`` or ``huggingface/step3p7/ptq/nvfp4_mlp_only-kv_fp8`` recipes rather than the general ones, which select experts by module names Step does not use.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -88,6 +93,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX AutoCast failing on models with external initializers larger than 2 GiB.
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
 - Fix Megatron-Bridge Quantization Aware Distillation of a vision-language model silently discarding the ModelOpt state, so the distilled checkpoint restored no quantizers and exported as an unquantized model. Re-run QAD to regenerate any affected checkpoint.
