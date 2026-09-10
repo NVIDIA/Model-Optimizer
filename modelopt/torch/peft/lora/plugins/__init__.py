@@ -18,4 +18,14 @@
 from modelopt.torch.utils import import_plugin
 
 with import_plugin("megatron"):
+    # Import TE-grouped MoE plugin BEFORE the non-grouped Megatron plugin so its
+    # registrations land first in LoRAModuleRegistry. The registry's resolution rule
+    # (modelopt/torch/opt/dynamic.py:_get_registered_nn_class) picks the first
+    # registered class whose `forward` identity-matches the target's forward; both
+    # the TE-grouped and non-grouped Megatron quant classes inherit their forward
+    # from _QuantFunctionalMixin (modelopt/torch/quantization/plugins/custom.py),
+    # so they would otherwise tie and the earlier-registered one would win. The
+    # non-grouped lookup is unaffected because its `issubclass` check still excludes
+    # TE-grouped targets.
+    from .megatron_moe import *
     from .megatron import *
