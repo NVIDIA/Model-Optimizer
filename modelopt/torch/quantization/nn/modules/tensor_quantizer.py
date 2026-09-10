@@ -1092,10 +1092,9 @@ class TensorQuantizer(nn.Module):
         if self.amax is None:
             return None
 
-        if not hasattr(self, "_amax_shape_for_export"):
-            amax = self.amax
-        else:
-            amax = self.amax.reshape(self._amax_shape_for_export)
+        amax = self.amax.detach().clone()
+        if hasattr(self, "_amax_shape_for_export"):
+            amax = amax.reshape(self._amax_shape_for_export)
         amax[amax == 0] = self.maxbound
         amax = torch.nan_to_num(amax, nan=self.maxbound)
         clamp_min, clamp_max = torch.finfo(amax.dtype).tiny, torch.finfo(amax.dtype).max

@@ -40,7 +40,6 @@ from modelopt.torch.quantization.qtensor import (
     QTensorWrapper,
 )
 from modelopt.torch.quantization.utils import (
-    QuantizerAttrNames,
     quantizer_attr_names,
     representative_weight_quantizer,
     weight_attr_names,
@@ -485,116 +484,102 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
-def get_quantization_format(module) -> str | None:
-    """Gets the quantization string.
+def _get_quantization_from_quantizers(
+    layer: nn.Module,
+    weight_quantizer: TensorQuantizer | SequentialQuantizer | None,
+    input_quantizer: TensorQuantizer | SequentialQuantizer | None,
+) -> str | None:
+    if weight_quantizer is None or not weight_quantizer.is_enabled:
+        return QUANTIZATION_NONE
 
-    Gets the quantization string by iterating through the module and its children.
-    The first non-None quantization string is returned.
-    """
+    if isinstance(weight_quantizer, SequentialQuantizer):
+        assert (
+            len(weight_quantizer) == 2
+            and weight_quantizer[0].num_bits == 4
+            and weight_quantizer[1].num_bits == (4, 3)
+        ), "Unsupported SequentialQuantizer configuration"
+        assert (
+            weight_quantizer[0].block_sizes
+            and len(weight_quantizer[0].block_sizes) > 0
+            and weight_quantizer[0].block_sizes[-1] > 0
+        ), "Invalid block_sizes for SequentialQuantizer"
+        return QUANTIZATION_W4A8_AWQ
 
-    def _get_quantization_from_layer(layer, quantizer_attr_names: QuantizerAttrNames):
-        # Singular form first, plural ModuleList fallback (fused-experts).
-        # Strip the "_weight_quantizer" suffix to recover the weight attr name.
-        weight_attr = quantizer_attr_names.weight_quantizer
-        weight_name = weight_attr[: -len("_weight_quantizer")].rstrip("_") or "weight"
-        weight_quantizer = representative_weight_quantizer(layer, weight_name)
-        input_quantizer = getattr(layer, quantizer_attr_names.input_quantizer, None)
-
-        if weight_quantizer is None or not weight_quantizer.is_enabled:
-            return QUANTIZATION_NONE
-
-        # Handle SequentialQuantizer
-        if isinstance(weight_quantizer, SequentialQuantizer):
-            assert (
-                len(weight_quantizer) == 2
-                and weight_quantizer[0].num_bits == 4
-                and weight_quantizer[1].num_bits == (4, 3)
-            ), "Unsupported SequentialQuantizer configuration"
-            assert (
-                weight_quantizer[0].block_sizes
-                and len(weight_quantizer[0].block_sizes) > 0
-                and weight_quantizer[0].block_sizes[-1] > 0
-            ), "Invalid block_sizes for SequentialQuantizer"
-
-            return QUANTIZATION_W4A8_AWQ
-
-        # Handle individual num_bits cases
-        if weight_quantizer.num_bits == 4:
-            assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
-                "Invalid block_sizes for INT4 quantizer"
-            )
-            return QUANTIZATION_INT4_AWQ
-
-        if weight_quantizer.num_bits == 8:
-            if input_quantizer is not None and input_quantizer.is_enabled:
-                return QUANTIZATION_INT8_SQ
-            else:
-                return QUANTIZATION_INT8_WO
-
-        if weight_quantizer.num_bits == (4, 3):
-            if weight_quantizer.block_sizes:
-                assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
-                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
-                block_sizes = getattr(weight_quantizer, "block_sizes")
-                if (
-                    isinstance(block_sizes, dict)
-                    and block_sizes.get("type", "static") == "dynamic"
-                    and block_sizes.get("scale_bits") == (8, 0)
-                ):
-                    return QUANTIZATION_MXFP8
-                if weight_quantizer.fake_quant:
-                    return QUANTIZATION_FP8_PB_WO
-                else:
-                    return QUANTIZATION_FP8_PB_REAL
-            if weight_quantizer.axis == 0:
-                return QUANTIZATION_FP8_PC_PT
-            return QUANTIZATION_FP8
-
-        if weight_quantizer.num_bits == (2, 1):
-            # FP4 formats are all block quantization
-            block_sizes = getattr(weight_quantizer, "block_sizes")
-            scale_bits = block_sizes.get("scale_bits")
-
-            if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
-                return QUANTIZATION_NVFP4_SVDQUANT
-            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
-                return QUANTIZATION_NVFP4_AWQ
-            if getattr(layer, "fused_with_prequant", False):
-                return QUANTIZATION_NVFP4_AWQ
-            if input_quantizer is None or not input_quantizer.is_enabled:
-                if scale_bits == (4, 3):
-                    return QUANTIZATION_W4A16_NVFP4
-            assert input_quantizer is not None, (
-                f"input_quantizer is None for {quantizer_attr_names}"
-            )
-            if (
-                block_sizes.get("type", "static") == "dynamic"
-                and scale_bits == (8, 0)
-                and input_quantizer.is_enabled
-                and input_quantizer.num_bits == (4, 3)
-                and input_quantizer.block_sizes is None
-            ):
-                return QUANTIZATION_W4A8_MXFP4_FP8
-            if (
-                block_sizes.get("type", "static") == "dynamic"
-                and scale_bits == (4, 3)
-                and input_quantizer.is_enabled
-                and input_quantizer.num_bits == (4, 3)
-                and input_quantizer.block_sizes is None
-            ):
-                return QUANTIZATION_W4A8_NVFP4_FP8
-            if scale_bits == (4, 3):
-                return QUANTIZATION_NVFP4
-            elif scale_bits == (8, 0):
-                return QUANTIZATION_MXFP4
-
-        # Raise error for unsupported num_bits
-        raise NotImplementedError(
-            f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}"
+    if weight_quantizer.num_bits == 4:
+        assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
+            "Invalid block_sizes for INT4 quantizer"
         )
+        return QUANTIZATION_INT4_AWQ
 
+    if weight_quantizer.num_bits == 8:
+        if input_quantizer is not None and input_quantizer.is_enabled:
+            return QUANTIZATION_INT8_SQ
+        return QUANTIZATION_INT8_WO
+
+    if weight_quantizer.num_bits == (4, 3):
+        if weight_quantizer.block_sizes:
+            assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
+            block_sizes = getattr(weight_quantizer, "block_sizes")
+            if (
+                isinstance(block_sizes, dict)
+                and block_sizes.get("type", "static") == "dynamic"
+                and block_sizes.get("scale_bits") == (8, 0)
+            ):
+                return QUANTIZATION_MXFP8
+            if weight_quantizer.fake_quant:
+                return QUANTIZATION_FP8_PB_WO
+            return QUANTIZATION_FP8_PB_REAL
+        if weight_quantizer.axis == 0:
+            return QUANTIZATION_FP8_PC_PT
+        return QUANTIZATION_FP8
+
+    if weight_quantizer.num_bits == (2, 1):
+        block_sizes = getattr(weight_quantizer, "block_sizes")
+        scale_bits = block_sizes.get("scale_bits")
+
+        if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
+            return QUANTIZATION_NVFP4_SVDQUANT
+        if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+            return QUANTIZATION_NVFP4_AWQ
+        if getattr(layer, "fused_with_prequant", False):
+            return QUANTIZATION_NVFP4_AWQ
+        if input_quantizer is None or not input_quantizer.is_enabled:
+            if scale_bits == (4, 3):
+                return QUANTIZATION_W4A16_NVFP4
+        assert input_quantizer is not None, "input_quantizer is required for weight-activation FP4"
+        if (
+            block_sizes.get("type", "static") == "dynamic"
+            and scale_bits == (8, 0)
+            and input_quantizer.is_enabled
+            and input_quantizer.num_bits == (4, 3)
+            and input_quantizer.block_sizes is None
+        ):
+            return QUANTIZATION_W4A8_MXFP4_FP8
+        if (
+            block_sizes.get("type", "static") == "dynamic"
+            and scale_bits == (4, 3)
+            and input_quantizer.is_enabled
+            and input_quantizer.num_bits == (4, 3)
+            and input_quantizer.block_sizes is None
+        ):
+            return QUANTIZATION_W4A8_NVFP4_FP8
+        if scale_bits == (4, 3):
+            return QUANTIZATION_NVFP4
+        if scale_bits == (8, 0):
+            return QUANTIZATION_MXFP4
+
+    raise NotImplementedError(f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}")
+
+
+def get_quantization_format(module) -> str | None:
+    """Return the first enabled weight quantization format in a module tree."""
     for weight_name in weight_attr_names(module):
-        quantization = _get_quantization_from_layer(module, quantizer_attr_names(weight_name))
+        attr_names = quantizer_attr_names(weight_name)
+        quantization = _get_quantization_from_quantizers(
+            module,
+            representative_weight_quantizer(module, weight_name),
+            getattr(module, attr_names.input_quantizer, None),
+        )
         if quantization != QUANTIZATION_NONE:
             return quantization
 
@@ -708,6 +693,11 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {"quant_algo": "FP8"}
         elif v == "fp8_pc_pt":
             layer_config = {"quant_algo": "FP8_PER_CHANNEL_PER_TOKEN"}
+        elif v == "fp8_pb_wo":
+            layer_config = {
+                "quant_algo": "FP8_PB_WO",
+                "group_size": block_size_value,
+            }
         elif v == "int4_awq":
             layer_config = {
                 "quant_algo": "W4A16_AWQ",
@@ -767,6 +757,11 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
+        elif v == "mxfp4":
+            layer_config = {
+                "quant_algo": "MXFP4",
+                "group_size": block_size_value,
+            }
         else:
             layer_config = {"quant_algo": v}
 
@@ -780,6 +775,11 @@ def process_layer_quant_config(layer_config_dict):
     # If we have more than one quantization format, infer MIXED_PRECISION
     if len(quantization_formats) > 1:
         per_layer_config["quant_algo"] = "MIXED_PRECISION"
+        per_layer_config["exclude_modules"] = sorted(
+            _prefix_wildcard_summarize_exclude_modules(
+                exclude_modules, per_layer_config["quantized_layers"].keys()
+            )
+        )
     elif len(quantization_formats) == 1 and quantization_config is not None:
         per_layer_config.update(quantization_config)
         per_layer_config["exclude_modules"] = sorted(
