@@ -1,0 +1,40 @@
+# Wan2.2 TI2V-5B Distillation Config
+#
+# Usage:
+#   accelerate launch --config_file configs/accelerate/fsdp_wan.yaml \
+#       run.py --config configs/wan_distillation.yaml
+#
+# Layer-wise distillation example (pass via CLI):
+#   distillation.layer_distillation_modules=[blocks.9,blocks.19,blocks.29,blocks.39]
+#   distillation.layer_distillation_weight=0.5
+
+defaults: default.yaml
+
+model:
+  model_name: "wan"
+  model_variant: "ti2v-5B"             # ti2v-5B | t2v-A14B | i2v-A14B
+  model_path: "/path/to/Wan2.2/checkpoint"
+  dtype: "bfloat16"
+
+distillation:
+  calibration_guidance_scale: 5.0
+
+# Wan uses shifted logit-normal with shift=8 (matches original Wan training)
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  shift: 8.0
+
+validation:
+  video_dims: [832, 480, 81]
+  frame_rate: 24.0
+  inference_steps: 50
+  guidance_scale: 5.0
+
+wandb:
+  project: "wan-distillation"
+  tags:
+    - "distillation"
+    - "wan2.2"
+    - "modelopt"
+
+output_dir: "./outputs/wan_distillation"

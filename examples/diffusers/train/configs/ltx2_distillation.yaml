@@ -1,0 +1,40 @@
+# LTX-2 Distillation Config
+#
+# Usage:
+#   accelerate launch --config_file configs/accelerate/fsdp_ltx2.yaml \
+#       run.py --config configs/ltx2_distillation.yaml
+#
+# Layer-wise distillation example (pass via CLI):
+#   distillation.layer_distillation_modules=[transformer_blocks.5,transformer_blocks.15,transformer_blocks.25]
+#   distillation.layer_distillation_weight=0.5
+
+defaults: default.yaml
+
+distillation:
+  with_audio: true
+
+# LTX-2: mu is auto-computed from patchified seq_length each batch,
+# matching the official LTX-2 trainer (seq_len 1024->4096 maps to mu 0.95->2.05).
+flow_matching:
+  timestep_sampling_mode: "resolution_dependent"
+
+model:
+  model_name: "ltx2"
+  model_path: "/path/to/ltx2-checkpoint.safetensors"
+  text_encoder_path: "/path/to/gemma-model"
+  dtype: "bfloat16"
+
+validation:
+  video_dims: [960, 544, 97]
+  frame_rate: 25.0
+  inference_steps: 30
+  guidance_scale: 4.0
+
+wandb:
+  project: "ltx2-distillation"
+  tags:
+    - "distillation"
+    - "ltx2"
+    - "modelopt"
+
+output_dir: "./outputs/ltx2_distillation"

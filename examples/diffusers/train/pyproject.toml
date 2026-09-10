@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffusers-train"
+version = "0.1.0"
+description = "Unified distillation trainer for video generation models"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4.0",
+    "accelerate>=1.1.1",
+    "omegaconf",
+    "pydantic>=2.0",
+    "wandb",
+]
+
+[project.optional-dependencies]
+# Install ONE model backend -- do NOT mix, transitive deps may conflict.
+#   pip install -e ".[wan]"
+#   pip install -e ".[ltx2]"
+wan = [
+    "wan @ git+https://github.com/Wan-Video/Wan2.2.git",
+]
+# Third-Party License Notice: LTX-2 packages below are provided by Lightricks and are NOT
+# covered by the Apache 2.0 license governing NVIDIA Model Optimizer. You MUST comply with
+# the LTX Community License Agreement when installing and using LTX-2 with NVIDIA Model
+# Optimizer. Any derivative models or fine-tuned weights produced from LTX-2 (including
+# quantized or distilled checkpoints) remain subject to the LTX Community License Agreement,
+# not Apache 2.0. See: https://github.com/Lightricks/LTX-2/blob/main/LICENSE
+ltx2 = [
+    "ltx-core @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-core",
+    "ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-pipelines",
+    "ltx-trainer @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-trainer",
+]
+
+[tool.setuptools.packages.find]
+include = ["distill*"]
