@@ -68,6 +68,44 @@ def is_liger_available():
     return True
 
 
+def _fully_shard_tied_embeddings(model, accelerator):
+    """Put tied input/output embeddings in the same FSDP2 parameter group.
+
+    Accelerate otherwise visits the two owner modules independently. PyTorch rejects
+    the second ``fully_shard`` call because their shared weight is already managed by
+    the first group.
+    """
+    if not getattr(accelerator, "is_fsdp2", False):
+        return
+
+    input_embedding = getattr(model, "get_input_embeddings", lambda: None)()
+    output_embedding = getattr(model, "get_output_embeddings", lambda: None)()
+    if (
+        input_embedding is None
+        or output_embedding is None
+        or input_embedding is output_embedding
+        or getattr(input_embedding, "weight", None) is not getattr(output_embedding, "weight", None)
+    ):
+        return
+
+    from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
+
+    if isinstance(input_embedding, FSDPModule) or isinstance(output_embedding, FSDPModule):
+        return
+
+    fsdp_plugin = accelerator.state.fsdp_plugin
+    mesh = getattr(accelerator, "torch_device_mesh", None)
+    fully_shard(
+        [input_embedding, output_embedding],
+        reshard_after_forward=fsdp_plugin.reshard_after_forward,
+        offload_policy=fsdp_plugin.cpu_offload,
+        mp_policy=fsdp_plugin.mixed_precision_policy or MixedPrecisionPolicy(),
+        mesh=(
+            mesh[tuple(accelerator.parallelism_config.fsdp_dim_names)] if mesh is not None else None
+        ),
+    )
+
+
 @contextmanager
 def _undo_torch_init_override_by_transformers():
     if not hasattr(tf_modeling_utils, "TORCH_INIT_FUNCTIONS"):
@@ -579,11 +617,17 @@ class ModelOptHFTrainer(Trainer):
         trainable_param_groups; in that case the caller is responsible for gathering
         ``zero.Init``-partitioned params around forward passes.
         """
+        _fully_shard_tied_embeddings(model, self.accelerator)
         if self.is_deepspeed_enabled and not any(p.requires_grad for p in model.parameters()):
             return self.accelerator.prepare_model(model, evaluation_mode=True)
         dummy_optimizer = torch.optim.SGD([next(model.parameters())], lr=0.0)
         model, _ = self.accelerator.prepare(model, dummy_optimizer)
         return model
+
+    def train(self, *args, **kwargs):
+        """Prepare tied embeddings before Trainer applies FSDP2 auto wrapping."""
+        _fully_shard_tied_embeddings(self.model, self.accelerator)
+        return super().train(*args, **kwargs)
 
     def training_step(self, *args, **kwargs):
         """Run gc.collect() before the training step if manual_gc is enabled."""
