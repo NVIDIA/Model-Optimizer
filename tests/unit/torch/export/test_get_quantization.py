@@ -270,9 +270,7 @@ def test_legacy_single_sided_kv_detection_is_preserved(enabled_quantizer):
         ),
     ],
 )
-def test_uniform_kv_only_export_uses_loadable_mixed_precision_envelope(
-    quantizer_cfg, expected_format
-):
+def test_uniform_kv_only_export_preserves_bf16_weight_metadata(quantizer_cfg, expected_format):
     model = torch.nn.Module()
     model.attention = _FakeAttention()
     mtq.set_quantizer_by_cfg(
@@ -289,7 +287,7 @@ def test_uniform_kv_only_export_uses_loadable_mixed_precision_envelope(
 
     hf_quant_config = get_quant_config(model)
     quantization = hf_quant_config["quantization"]
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
     assert quantization["kv_cache_quant_algo"] == expected_format
     assert quantization["quantized_layers"] == {}
     assert quantization["kv_cache_quantized_layers"] == {
@@ -297,7 +295,8 @@ def test_uniform_kv_only_export_uses_loadable_mixed_precision_envelope(
     }
 
     converted = convert_hf_quant_config_format(hf_quant_config)
-    assert converted["quant_algo"] == "MIXED_PRECISION"
+    assert "quant_algo" not in converted
+    assert "config_groups" not in converted
     assert converted["kv_cache_scheme"] == (
         {"dynamic": False, "num_bits": 8, "type": "float"}
         if expected_format == "FP8"
@@ -322,14 +321,14 @@ def test_uniform_kv_export_retains_scheme_and_layer_map_without_search_marker():
     )
     quantization = get_quant_config(model)["quantization"]
 
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
     assert quantization["quantized_layers"] == {}
     assert quantization["kv_cache_quant_algo"] == "FP8"
     assert quantization["kv_cache_quantized_layers"] == {"attention": {"quant_algo": "FP8"}}
 
     converted = convert_hf_quant_config_format({"quantization": quantization})
-    assert converted["quant_algo"] == "MIXED_PRECISION"
-    assert converted["config_groups"] == {}
+    assert "quant_algo" not in converted
+    assert "config_groups" not in converted
     assert converted["kv_cache_scheme"] == {
         "dynamic": False,
         "num_bits": 8,
@@ -433,7 +432,7 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     )
 
     quantization = get_quant_config(model)["quantization"]
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
     assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
     assert quantization["quantized_layers"] == {}
     assert quantization["kv_cache_quantized_layers"] == {

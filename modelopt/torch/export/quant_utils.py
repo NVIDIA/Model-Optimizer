@@ -1808,11 +1808,8 @@ def get_quant_config(
                 "Mixed-precision KV-cache export with a uniform quantized-weight format is "
                 "not supported yet. Use BF16 weights or a mixed-weight AutoQuantize recipe."
             )
-        # A standalone KV-only checkpoint uses the mixed-precision envelope expected by
-        # consumers, including when every attention layer selected the same K/V format.
-        if weight_quant_algo is None:
-            quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
-            quant_config["quantization"].setdefault("quantized_layers", {})
+        # KV metadata is orthogonal to weight metadata. In particular, a KV-only search
+        # must preserve BF16 weights instead of synthesizing a weight quantization algorithm.
         quant_config["quantization"]["kv_cache_quant_algo"] = (
             next(iter(kv_cache_formats)) if len(kv_cache_formats) == 1 else "MIXED_PRECISION"
         )

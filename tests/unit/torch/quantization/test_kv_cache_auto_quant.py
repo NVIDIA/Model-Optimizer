@@ -452,7 +452,7 @@ def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quan
         assert layer.k_bmm_quantizer.num_bits == (4, 3)
         assert layer.v_bmm_quantizer.num_bits == (2, 1)
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] == "MIXED_PRECISION"
+    assert exported["quant_algo"] is None
     assert exported["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
     assert {layer["quant_algo"] for layer in exported["kv_cache_quantized_layers"].values()} == {
         "FP8_K_NVFP4_V"
@@ -588,6 +588,7 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_
         layer.self_attn.q_proj.weight_quantizer.num_bits == 8 for layer in model.model.layers
     )
     exported_quantization = get_quant_config(model)["quantization"]
+    assert exported_quantization["quant_algo"] is None
     assert exported_quantization["quantized_layers"] == {}
     assert exported_quantization["kv_cache_quantized_layers"]
     assert set(exported_quantization["kv_cache_quantized_layers"]) <= {
@@ -684,7 +685,7 @@ def test_public_kv_autoquant_selects_qwen_causal_attention_only(
     report = {key: value for key, value in state.items() if key != "quantizer_state"}
     assert json.loads(json.dumps(report))["layers"][expected_layer]["selected"] == "fp8"
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] == "MIXED_PRECISION"
+    assert exported["quant_algo"] is None
     assert exported["quantized_layers"] == {}
     assert exported["kv_cache_quant_algo"] == "FP8"
     assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
