@@ -1815,17 +1815,27 @@ def is_homogeneous_hf_model(model: nn.Module) -> bool:
     return len(layer_classes) == 1
 
 
+#: Tried in order, first match wins: a VLM has both ``model.layers`` and
+#: ``model.language_model.layers``, and the decoder is the inner one.
+_DECODER_LAYER_PATHS = (
+    "language_model.model.layers",
+    "model.language_model.layers",
+    "language_model.layers",
+    "model.layers",
+    "layers",
+)
+
+
 def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    decoder = model
-    if hasattr(decoder, "model"):
-        decoder = decoder.model
-    if hasattr(decoder, "language_model"):
-        decoder = decoder.language_model
-    if hasattr(decoder, "layers"):
-        return decoder.layers
+    for path in _DECODER_LAYER_PATHS:
+        node = model
+        for attr in path.split("."):
+            node = getattr(node, attr, None)
+        if isinstance(node, nn.ModuleList):
+            return node
 
     return None
 
