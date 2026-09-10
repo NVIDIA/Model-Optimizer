@@ -28,10 +28,25 @@ import pytest
 RECIPES_DIR = Path(str(files("modelopt_recipes")))
 GENERAL_PTQ_DIR = RECIPES_DIR / "general" / "ptq"
 PTQ_MD = RECIPES_DIR / "ptq.md"
+PUBLISHED_MD = RECIPES_DIR / "published_checkpoints.md"
 
 
 def _ptq_md_text() -> str:
     return PTQ_MD.read_text(encoding="utf-8")
+
+
+def _model_docs_text() -> str:
+    """The docs a model-specific recipe folder may be documented in.
+
+    ``ptq.md`` describes the folders that deviate from a portable scheme and explains
+    why. ``published_checkpoints.md`` is the generated checkpoint-to-recipe index, which
+    covers every folder including the aliases -- a checkpoint reproduced unchanged by a
+    general recipe has nothing to say in the PTQ guide, but must still be listed.
+    """
+    text = _ptq_md_text()
+    if PUBLISHED_MD.is_file():
+        text += PUBLISHED_MD.read_text(encoding="utf-8")
+    return text
 
 
 def _general_ptq_stems() -> list[str]:
@@ -94,8 +109,10 @@ def test_every_model_specific_ptq_dir_is_mentioned():
     full ``<org>/<model_id>`` hub path (e.g. ``nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16``), so
     the org — the whole point of the top-level tier — is verified too and an org
     re-key (e.g. ``step3p5`` → ``stepfun-ai``) can't silently drift from the doc.
+
+    Either ``ptq.md`` or ``published_checkpoints.md`` counts; see :func:`_model_docs_text`.
     """
-    doc = _ptq_md_text()
+    doc = _model_docs_text()
     # model_type recipes: huggingface/<model_type>/ptq/<recipe>.yaml -> <model_type>
     hf_ids = {p.parent.parent.name for p in (RECIPES_DIR / "huggingface").glob("**/ptq/*.yaml")}
     # checkpoint recipes: models/<org>/<model_id>/ptq/<recipe>.yaml -> <org>/<model_id>
@@ -107,9 +124,11 @@ def test_every_model_specific_ptq_dir_is_mentioned():
     assert identifiers, "No model-specific PTQ recipes found under huggingface/ or models/"
     missing = [name for name in identifiers if name not in doc]
     assert not missing, (
-        f"Model-specific PTQ recipe folders are missing from "
-        f"modelopt_recipes/ptq.md: {missing}. Add them to the model-specific "
-        "recipes section (kinds table and/or the matching subsection)."
+        f"Model-specific PTQ recipe folders are documented in neither "
+        f"modelopt_recipes/ptq.md nor modelopt_recipes/published_checkpoints.md: "
+        f"{missing}. A checkpoint alias is listed in the generated index — re-run "
+        "tools/recipe_backfill/render_index.py. A folder that deviates from a portable "
+        "scheme also belongs in the model-specific section of ptq.md."
     )
 
 

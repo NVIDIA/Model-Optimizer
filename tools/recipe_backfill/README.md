@@ -20,6 +20,7 @@ seconds with no GPU, no Hub access and no weights.
 | `checkpoint_scan.py` | Shared helpers: module-map construction and the compact packed form both of the above use. |
 | `verify_recipes.py` | **Offline.** Replays a recipe's `quant_cfg` over the snapshot's module names and diffs the result. |
 | `render_index.py` | Regenerates `modelopt_recipes/published_checkpoints.md` from `recipe_map.json`. |
+| `render_aliases.py` | Regenerates the thin checkpoint **alias** recipes under `modelopt_recipes/models/`. |
 
 ## Usage
 
@@ -36,9 +37,23 @@ python tools/recipe_backfill/scan_collection.py \
     --out tools/recipe_backfill/published_checkpoints.json \
     --cache-dir ~/.cache/modelopt-recipe-backfill
 
-# Refresh the generated index doc.
+# Refresh the generated index doc and the checkpoint aliases.
 python tools/recipe_backfill/render_index.py
+python tools/recipe_backfill/render_aliases.py
 ```
+
+## Aliases
+
+Every published checkpoint gets an entry under
+`modelopt_recipes/models/<source org>/<source model>/ptq/`, so a release is findable at
+its own hub path. When a portable recipe reproduces it unchanged — which is true of most
+of them — that entry is a generated **alias**: a top-level `$import` of the recipe that
+reproduces it, overriding only `metadata`. Nothing is duplicated, and editing the base
+recipe changes every alias pointing at it.
+
+The alias folder is keyed by the checkpoint's **source** model, read from the release's
+`base_model` card field. When a release does not declare one, put a `source_model` on its
+`recipe_map.json` entry.
 
 ## Adding a checkpoint
 
@@ -48,7 +63,9 @@ python tools/recipe_backfill/render_index.py
    a new file under `models/` is only warranted when the checkpoint genuinely deviates
    (see the "What belongs here" section of `modelopt_recipes/models/README.md`).
 4. Add the mapping to `recipe_map.json` and re-run the verifier until it passes.
-5. Re-run `render_index.py` and mention any new recipe folder in `modelopt_recipes/ptq.md`.
+5. Re-run `render_index.py` and `render_aliases.py`. A checkpoint that needed a recipe of
+   its own also wants a mention in `modelopt_recipes/ptq.md`, next to the other
+   deviations; an aliased one is covered by the generated index.
 
 ## How a checkpoint's module map is derived
 

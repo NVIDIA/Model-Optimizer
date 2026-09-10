@@ -15,6 +15,7 @@
 
 # Composed PTQ recipe for expert-only NVFP4 quantization with MSE weight calibration and FP8 KV-cache cast mode.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

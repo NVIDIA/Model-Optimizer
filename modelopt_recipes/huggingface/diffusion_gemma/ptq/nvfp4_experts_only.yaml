@@ -21,6 +21,7 @@
 # ``*self_conditioning*``. Matches the ``--qformat nvfp4_experts_only``
 # behavior in ``hf_ptq.py``, which defaults ``--kv_cache_qformat=fp8_cast``.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   experts_nvfp4: configs/ptq/units/experts_nvfp4

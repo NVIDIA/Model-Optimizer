@@ -21,6 +21,7 @@
 # the snippet lives under
 # `huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg.yaml`.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   shared_quant_cfg: huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg
 

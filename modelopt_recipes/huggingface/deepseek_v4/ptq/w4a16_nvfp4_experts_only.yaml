@@ -21,6 +21,7 @@
 # activation calibration at all, and it is the variant to reach for in low-concurrency
 # deployments where decode is memory-bandwidth-bound rather than compute-bound.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   nvfp4: configs/numerics/nvfp4

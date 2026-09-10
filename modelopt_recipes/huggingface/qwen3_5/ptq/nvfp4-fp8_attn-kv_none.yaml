@@ -17,6 +17,7 @@
 # `qwen3_5` models. This is the layout `nvidia/Qwen3.8-27B-NVFP4` publishes, and the
 # W4A4 twin of `w4a16_nvfp4-fp8_attn-kv_fp8_cast` in this folder.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   shared_quant_cfg: huggingface/qwen3_5/ptq/nvfp4-fp8_attn-kv_none.quant_cfg
 

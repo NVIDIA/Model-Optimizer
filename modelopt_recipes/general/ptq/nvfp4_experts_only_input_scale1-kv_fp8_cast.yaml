@@ -22,6 +22,7 @@
 # ``amax / (E2M1_MAX * E4M3_MAX) = 1.0``; the per-block E4M3 activation scales remain dynamic.
 # No activation statistics are collected for these quantizers.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers

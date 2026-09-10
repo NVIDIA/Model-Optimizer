@@ -20,6 +20,7 @@
 # Output quantizers must stay scoped to GEMM outputs: a DynamicQuantize on
 # non-GEMM outputs (embeddings, pooling) fails to compile in TensorRT.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4

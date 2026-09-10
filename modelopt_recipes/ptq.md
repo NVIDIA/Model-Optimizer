@@ -249,7 +249,7 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
-earns a place under `huggingface/<model_type>/` or
+earns a **body** under `huggingface/<model_type>/` or
 `models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
@@ -263,6 +263,16 @@ that baseline. The deviations come in four kinds:
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
+
+> **Most `models/<org>/<checkpoint>/` folders are aliases, not deviations.** A
+> published checkpoint that a general (or `huggingface/<model_type>`) recipe
+> reproduces unchanged still gets a folder at its own hub path, holding a thin
+> file that imports that recipe wholesale and overrides only `metadata` — no
+> duplicated `quant_cfg`. The sections below describe only the folders that
+> genuinely deviate; [`published_checkpoints.md`](published_checkpoints.md) lists
+> every checkpoint and says which of the two it is. See
+> [`models/README.md`](models/README.md) for the alias format and when to write
+> one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_next`, `deepseek_v4`, `vit`, `nemotron_llama`
 

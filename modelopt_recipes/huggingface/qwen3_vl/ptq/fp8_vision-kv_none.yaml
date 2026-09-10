@@ -15,6 +15,7 @@
 
 # Qwen3-VL Vision Encoder FP8 with a high-precision language model and KV cache.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   vision_fp8: huggingface/qwen3_vl/ptq/vision_fp8.quant_cfg

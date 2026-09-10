@@ -92,6 +92,27 @@ def load_recipe(
       ``eagle`` (EAGLE speculative decoding), ``dflash`` (DFlash speculative
       decoding) or ``medusa`` (Medusa speculative decoding) sections. The suffix
       may be omitted and will be probed automatically.
+
+      .. _recipe-alias:
+
+      A recipe may instead **delegate its whole body to another recipe** with a
+      top-level ``$import``, keeping only its own ``metadata``::
+
+          imports:
+            base: general/ptq/nvfp4_default-kv_fp8_cast
+
+          $import: base
+          metadata:
+            recipe_type: ptq
+            description: What this checkpoint uses the base recipe for.
+
+      Top-level keys given alongside the ``$import`` override the imported ones, so
+      the alias supplies its own ``metadata`` while inheriting ``quantize``
+      unchanged. The imported recipe must declare
+      ``# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`` (or the
+      matching recipe schema), like any other importable snippet. This is how the
+      checkpoint aliases under ``models/<org>/<model_id>/`` record that a released
+      checkpoint is reproduced by a general recipe without duplicating it.
     * A directory containing ``metadata.yml`` and ``quantize.yml`` —
       **PTQ recipes only**. Speculative-decoding recipes are always single YAML files.
 
@@ -180,7 +201,13 @@ def _load_recipe_from_file(
         import yaml
 
         raw = yaml.safe_load(recipe_file.read_text()) or {}
-        if not isinstance(raw, dict) or required_section not in raw:
+        # A recipe may delegate its whole body to another recipe with a top-level
+        # ``$import`` and override only ``metadata`` -- see :ref:`recipe-alias`. The
+        # body section then arrives during import resolution, so it cannot be required
+        # in the raw YAML; pydantic still rejects the result if the import does not
+        # supply one.
+        delegates = isinstance(raw, dict) and "$import" in raw
+        if not delegates and (not isinstance(raw, dict) or required_section not in raw):
             # Strip only the ``speculative_`` prefix so multi-word non-speculative types
             # (e.g. ``auto_quantize``) keep their full name: AUTO_QUANTIZE, not QUANTIZE.
             kind = rtype.value.removeprefix("speculative_").upper()

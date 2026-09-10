@@ -135,6 +135,54 @@ def test_published_checkpoint_index_is_up_to_date():
     )
 
 
+def _alias_specs() -> list[tuple[str, str]]:
+    """``(alias recipe path, base recipe path)`` for every generated alias."""
+    from render_aliases import RECIPES_ROOT, planned_aliases
+
+    out = []
+    for path, content in sorted(planned_aliases().items()):
+        base = content.split("  base: ", 1)[1].split("\n", 1)[0].strip()
+        out.append((str(path.relative_to(RECIPES_ROOT).with_suffix("")), base))
+    return out
+
+
+def test_alias_recipes_are_up_to_date():
+    """The generated checkpoint aliases under ``models/`` match ``recipe_map.json``."""
+    from render_aliases import REPO_ROOT, existing_aliases, planned_aliases
+
+    planned = planned_aliases()
+    outdated = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path, content in planned.items()
+        if not path.is_file() or path.read_text(encoding="utf-8") != content
+    )
+    stale = sorted(str(p.relative_to(REPO_ROOT)) for p in existing_aliases() - set(planned))
+    assert not (outdated or stale), (
+        f"alias recipes are out of date (missing/changed: {outdated}; no longer mapped: "
+        f"{stale}). Re-run `python tools/recipe_backfill/render_aliases.py`."
+    )
+
+
+@pytest.mark.parametrize(("alias", "base"), _alias_specs())
+def test_alias_recipe_delegates_to_its_base(alias: str, base: str):
+    """An alias must produce its base's ``quantize`` verbatim, with its own metadata.
+
+    This is what makes the ``models/`` tier complete without duplicating anything: the
+    alias is a record of *which* recipe reproduces the checkpoint, not a second copy of
+    it. If the top-level ``$import`` delegation ever stopped working, these would drift
+    silently instead of failing.
+    """
+    from modelopt.recipe import load_recipe
+
+    aliased, original = load_recipe(alias), load_recipe(base)
+    assert aliased.quantize.model_dump() == original.quantize.model_dump(), (
+        f"{alias} does not reproduce {base}'s quantize section."
+    )
+    assert aliased.description != original.description, (
+        f"{alias} did not override the base recipe's metadata."
+    )
+
+
 def test_approximate_mirrors_are_still_approximate():
     """A recipe marked ``approximate`` that now matches exactly should lose the marker."""
     from verify_recipes import verify

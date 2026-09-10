@@ -5,8 +5,15 @@ This folder holds model-optimization recipes (e.g. PTQ recipes) tuned for a
 such as the [Hugging Face Hub](https://huggingface.co/),
 [ModelScope](https://modelscope.cn/), or similar. Unlike
 [`../huggingface/`](../huggingface/), which keys recipes by a transformers
-`model_type` (an architecture shared by many checkpoints), a recipe here mirrors
-**one checkpoint's** quantization scheme verbatim.
+`model_type` (an architecture shared by many checkpoints), an entry here is keyed
+to **one checkpoint**.
+
+Every checkpoint NVIDIA has published is listed here, in one of two forms: a
+**mirror**, whose body reproduces a per-layer scheme no portable recipe can
+express, or an **alias**, which records that a `general/` or
+`huggingface/<model_type>/` recipe reproduces the release unchanged and imports
+it wholesale. See [What belongs here](#what-belongs-here) for which to write, and
+[`../published_checkpoints.md`](../published_checkpoints.md) for the full index.
 
 ## Folder structure
 
@@ -46,8 +53,9 @@ applies to its mirrors, key it by that base model's id.
 Prefer the most specific entry that applies to your model:
 
 1. **`models/<org>/<model_id>/`** — if there is an entry for your **exact**
-   checkpoint. It reproduces a validated, often per-component mixed-precision
-   scheme for that release; use it to match a published quantized checkpoint.
+   checkpoint. Use it to match a published quantized checkpoint: it either
+   reproduces a validated, often per-component mixed-precision scheme for that
+   release, or aliases the portable recipe that does.
 2. **[`huggingface/<model_type>/`](../huggingface/)** — an architecture-level
    recipe that applies to every checkpoint of that `model_type`.
 3. **[`general/`](../general/)** — model-agnostic recipes; a good starting point
@@ -71,7 +79,11 @@ recipe = load_recipe("models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a
 
 ## What belongs here
 
-A recipe earns a place here only when it mirrors **one specific released (or
+Two kinds of entry, and the difference matters when you add one.
+
+### 1. Checkpoint mirrors — the recipe lives here
+
+A recipe earns a **body** here only when it mirrors **one specific released (or
 planned) checkpoint** — a hand-mapped, usually per-layer or per-component
 precision scheme tuned to match that exact release. If the tuning generalizes to
 every checkpoint of an architecture, it belongs under
@@ -79,6 +91,51 @@ every checkpoint of an architecture, it belongs under
 model-agnostic, it belongs under [`../general/`](../general/). See
 [`../ptq.md`](../ptq.md) for what each checkpoint mirror does and how it compares
 to its general baseline.
+
+### 2. Aliases — the recipe lives elsewhere, the *record* lives here
+
+Most released checkpoints are reproduced by a portable recipe with no
+checkpoint-specific changes at all. Those still get an entry here, so every
+published checkpoint is findable at its own hub path — but the entry is a thin
+**alias** that delegates its whole body to the recipe that reproduces it:
+
+```yaml
+imports:
+  base: general/ptq/nvfp4_default-kv_fp8_cast
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: >-
+    meta-llama/Llama-3.1-8B-Instruct as published in nvidia/Llama-3.1-8B-Instruct-NVFP4.
+    Alias for `general/ptq/nvfp4_default-kv_fp8_cast`, which reproduces this
+    checkpoint unchanged.
+```
+
+A top-level `$import` brings in the whole imported recipe; the keys given
+alongside it override the imported ones, so the alias supplies its own
+`metadata` and inherits `quantize` — algorithm and every `quant_cfg` entry —
+unchanged. Nothing is duplicated: editing the base recipe changes every alias
+that points at it. (The imported recipe must declare
+`# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`, as every
+importable file does; all `general/`, `huggingface/` and `timm/` recipes do.)
+
+Aliases are **generated**, not hand-written, from the checkpoint-to-recipe map:
+
+```bash
+python tools/recipe_backfill/render_aliases.py          # rewrite them
+python tools/recipe_backfill/render_aliases.py --check   # verify they are current
+```
+
+so add the mapping to `tools/recipe_backfill/recipe_map.json` and re-render
+rather than editing an alias file by hand. `tests/unit/recipe/test_published_checkpoint_recipes.py`
+fails if a checked-in alias has drifted, and
+[`../published_checkpoints.md`](../published_checkpoints.md) is the full index.
+
+**Which one to write.** Start by assuming an alias: run
+`tools/recipe_backfill/verify_recipes.py` against the candidate portable recipe.
+Only when no portable recipe reproduces the release does it warrant a body of its
+own here.
 
 ## Sharing content across recipes
 

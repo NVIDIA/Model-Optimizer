@@ -16,6 +16,7 @@
 # PTQ recipe wrapping the shipped nvfp4_mlp_weight_only preset (the config behind
 # mtq.NVFP4_MLP_WEIGHT_ONLY_CFG), so the two cannot drift apart.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   preset: configs/ptq/presets/model/nvfp4_mlp_weight_only
 

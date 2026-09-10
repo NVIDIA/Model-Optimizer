@@ -24,6 +24,7 @@
 # The KV cache is left unquantized, matching the published checkpoints
 # (`kv_cache_quant_algo: null`).
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   disabled_quantizers: huggingface/phi4mm/ptq/disabled_quantizers

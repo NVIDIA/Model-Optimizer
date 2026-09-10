@@ -32,6 +32,10 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from render_aliases import alias_recipe, source_model
+
 HERE = Path(__file__).parent
 REPO_ROOT = HERE.parents[1]
 OUTPUT = REPO_ROOT / "modelopt_recipes" / "published_checkpoints.md"
@@ -89,16 +93,26 @@ def render() -> str:
     entries = {e["id"]: e for e in snapshot["checkpoints"]}
 
     lines = [_HEADER]
-    for checkpoint_id, spec in sorted(mapping["recipes"].items(), key=lambda kv: kv[0].lower()):
-        spec = {"recipe": spec} if isinstance(spec, str) else spec
-        base = (entries.get(checkpoint_id) or {}).get("base_model")
-        source = _hub_link(base) if base else "—"
-        recipe = f"`{spec['recipe']}`"
-        notes = [spec[key] for key in ("approximate", "note") if spec.get(key)]
+    for checkpoint_id, raw in sorted(mapping["recipes"].items(), key=lambda kv: kv[0].lower()):
+        spec = {"recipe": raw} if isinstance(raw, str) else raw
+        base = spec["recipe"]
+        source = source_model(checkpoint_id, spec, entries)
+
+        if base.startswith("models/"):
+            recipe_cell = f"`{base}`"
+        else:
+            # Aliased: the checkpoint's own path is what a user should pass.
+            recipe_cell = f"`{alias_recipe(source, base)}`<br>alias for `{base}`"
         if spec.get("approximate"):
-            recipe += " *(approximate)*"
-        cell = recipe + ("<br>" + "<br>".join(notes) if notes else "")
-        lines.append(f"| {_hub_link(checkpoint_id)} | {source} | {cell} |\n")
+            recipe_cell += " *(approximate)*"
+        notes = [spec[key] for key in ("approximate", "note") if spec.get(key)]
+        if notes:
+            recipe_cell += "<br>" + "<br>".join(notes)
+
+        lines.append(
+            f"| {_hub_link(checkpoint_id)} | {_hub_link(source) if source else '—'} "
+            f"| {recipe_cell} |\n"
+        )
 
     lines.append(_UNMAPPED_HEADER)
     for checkpoint_id, reason in sorted(mapping["unmapped"].items(), key=lambda kv: kv[0].lower()):

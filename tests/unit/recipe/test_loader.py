@@ -355,6 +355,111 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# load_recipe — whole-recipe delegation (checkpoint aliases)
+# ---------------------------------------------------------------------------
+
+
+_BASE_RECIPE_FOR_ALIAS = """\
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+metadata:
+  recipe_type: ptq
+  description: the base recipe
+quantize:
+  algorithm: max
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*weight_quantizer'
+      cfg: {num_bits: 8, axis: 0}
+"""
+
+
+def _write_alias_pair(tmp_path, alias_body: str):
+    """Write a base recipe plus an alias that delegates to it; return the alias path."""
+    (tmp_path / "base.yaml").write_text(_BASE_RECIPE_FOR_ALIAS)
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(alias_body.format(base=tmp_path / "base.yaml"))
+    return alias
+
+
+def test_load_recipe_delegates_whole_body_to_import(tmp_path):
+    """A top-level ``$import`` supplies the body; local keys override the imported ones.
+
+    This is what the checkpoint aliases under ``modelopt_recipes/models/`` rely on: they
+    record which recipe reproduces a published checkpoint without copying its body.
+    """
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: the alias
+""",
+    )
+    recipe = load_recipe(alias)
+    assert recipe.description == "the alias"
+    assert recipe.quantize.model_dump() == load_recipe(tmp_path / "base.yaml").quantize.model_dump()
+
+
+def test_load_recipe_delegating_alias_can_override_the_body(tmp_path):
+    """A delegating recipe may also replace an imported section outright."""
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: overridden body
+quantize:
+  algorithm: max
+  quant_cfg:
+    - quantizer_name: '*input_quantizer'
+      enable: false
+""",
+    )
+    quant_cfg = load_recipe(alias).quantize.model_dump()["quant_cfg"]
+    assert [entry["quantizer_name"] for entry in quant_cfg] == ["*input_quantizer"]
+
+
+def test_load_recipe_delegating_alias_still_needs_a_body(tmp_path):
+    """Delegation relaxes the raw-YAML check, it does not remove the requirement."""
+    (tmp_path / "empty.yaml").write_text(
+        "# modelopt-schema: modelopt.recipe.config.RecipeMetadataConfig\n"
+        "recipe_type: ptq\ndescription: not a full recipe\n"
+    )
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(
+        f"imports:\n  base: {tmp_path / 'empty.yaml'}\n\n"
+        "$import: base\nmetadata:\n  recipe_type: ptq\n  description: alias\n"
+    )
+    with pytest.raises(ValueError, match="quantize"):
+        load_recipe(alias)
+
+
+def test_load_recipe_import_of_recipe_without_schema_raises(tmp_path):
+    """An imported recipe must declare its ``modelopt-schema``, like any snippet."""
+    (tmp_path / "base.yaml").write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace(
+            "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", ""
+        )
+    )
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(
+        f"imports:\n  base: {tmp_path / 'base.yaml'}\n\n"
+        "$import: base\nmetadata:\n  recipe_type: ptq\n  description: alias\n"
+    )
+    with pytest.raises(ValueError, match="modelopt-schema"):
+        load_recipe(alias)
+
+
+# ---------------------------------------------------------------------------
 # load_recipe — directory format
 # ---------------------------------------------------------------------------
 

@@ -17,6 +17,7 @@
 # the SmoothQuant alpha from the default 1.0 to 0.5 to recover accuracy on
 # Gemma 7B (default alpha causes a regression).
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
