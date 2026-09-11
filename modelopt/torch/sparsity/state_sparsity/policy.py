@@ -297,14 +297,13 @@ def _storage_rounding_radius(tensor: torch.Tensor, storage_dtype: torch.dtype) -
     """Compose inverse error bounds for storage and live-dtype materialization casts."""
     values = tensor.detach().to(device="cpu", dtype=torch.float64).abs()
     upper = values
-    cast_dtypes = tuple(dict.fromkeys((storage_dtype, tensor.dtype)))
-    cast_dtypes = tuple(
-        dtype
-        for dtype in cast_dtypes
-        if not any(
-            dtype != other and _dtype_exactly_contains(other, dtype) for other in cast_dtypes
-        )
-    )
+    live_dtype = tensor.dtype
+    if _dtype_exactly_contains(live_dtype, storage_dtype):
+        cast_dtypes = (live_dtype,)
+    elif _dtype_exactly_contains(storage_dtype, live_dtype):
+        cast_dtypes = (storage_dtype,)
+    else:
+        cast_dtypes = (storage_dtype, live_dtype)
     for dtype in reversed(cast_dtypes):
         dtype_info = torch.finfo(dtype)
         unit_roundoff = dtype_info.eps / 2.0
