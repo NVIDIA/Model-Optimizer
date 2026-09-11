@@ -152,7 +152,7 @@ for model_path in "${model_paths[@]}"; do
         python -m modelopt.onnx.quantization \
             --onnx_path=$model_dir/fp16/model.onnx \
             --quantize_mode=$quant_mode \
-            --calibration_data=$calib_data_path \
+            --calibration_data_path=$calib_data_path \
             --output_path=$model_dir/$quant_mode/model.quant.onnx \
             --calibration_eps=cuda
     done
