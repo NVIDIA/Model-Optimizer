@@ -122,7 +122,7 @@ def compute_gdn_decay_horizons(
     dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
 
     decay = -torch.exp(a_log_cpu) * F.softplus(dt_bias_cpu + static_gate_input)
-    horizons = torch.log(torch.as_tensor(epsilon, device="cpu", dtype=torch.float64)) / decay
+    horizons = torch.log(torch.tensor(epsilon, dtype=torch.float64)) / decay
     if not torch.isfinite(horizons).all() or not torch.all(horizons > 0):
         raise ValueError("GDN decay parameters produced non-finite or non-positive horizons")
     return horizons

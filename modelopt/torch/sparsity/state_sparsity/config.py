@@ -16,7 +16,8 @@
 """Configuration and result schemas for DASC state sparsity."""
 
 import math
-from typing import Any, Literal
+from numbers import Real
+from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -36,19 +37,23 @@ _DEFAULT_STATIC_GATE_INPUT = -0.3
 
 
 def _validate_analysis_arguments(
-    epsilon: Any = _DEFAULT_EPSILON,
-    static_gate_input: Any = _DEFAULT_STATIC_GATE_INPUT,
+    epsilon: object = _DEFAULT_EPSILON,
+    static_gate_input: object = _DEFAULT_STATIC_GATE_INPUT,
 ) -> None:
     """Reject decay-analysis arguments that cannot produce well-defined horizons."""
     try:
-        epsilon_is_valid = math.isfinite(epsilon) and 0.0 < epsilon < 1.0
+        epsilon_is_valid = (
+            isinstance(epsilon, Real) and math.isfinite(epsilon) and 0.0 < epsilon < 1.0
+        )
     except (TypeError, ValueError, OverflowError):
         epsilon_is_valid = False
     if not epsilon_is_valid:
         raise ValueError("epsilon must be finite and in (0, 1)")
 
     try:
-        static_gate_input_is_valid = math.isfinite(static_gate_input)
+        static_gate_input_is_valid = isinstance(static_gate_input, Real) and math.isfinite(
+            static_gate_input
+        )
     except (TypeError, ValueError, OverflowError):
         static_gate_input_is_valid = False
     if not static_gate_input_is_valid:
