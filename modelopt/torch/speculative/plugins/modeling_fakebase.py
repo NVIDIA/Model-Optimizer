@@ -18,6 +18,8 @@
 import json
 import os
 
+import types
+import warnings
 import torch
 import torch.nn as nn
 import transformers
@@ -169,7 +171,6 @@ def _select_base_transforms(model_type: str | None, base_cfg) -> dict:
             raise ValueError(f"Unknown metap mode {mode!r} for {model_type}")
 
     soft_cap = getattr(base_cfg, "output_soft_cap_temp", None)
-    eps = getattr(base_cfg, "rms_norm_eps", 1e-6)
 
     return {
         "embed_norm_type": (
@@ -184,8 +185,46 @@ def _select_base_transforms(model_type: str | None, base_cfg) -> dict:
         ),
         "logits_multiplier": multiplier if multiplier != 1.0 else None,
         "logits_soft_cap": soft_cap,
-        "rms_norm_eps": eps,
     }
+
+
+class _RawConfig(types.SimpleNamespace):
+    """Attribute view over a raw ``config.json`` for checkpoints transformers cannot parse.
+
+    FakeBaseModel only reads scalars (hidden_size, vocab_size, rms_norm_eps, the metap
+    block, ...) via ``getattr(..., default)``, so a namespace is a faithful stand-in. Nested
+    dicts are left as dicts -- ``_select_base_transforms`` expects ``metap`` that way.
+    """
+
+
+def _load_config(source: str, trust_remote_code: bool):
+    """Return the checkpoint's config, falling back to raw JSON for unknown architectures."""
+    try:
+        return transformers.AutoConfig.from_pretrained(
+            source, trust_remote_code=trust_remote_code
+        )
+    except ValueError as exc:
+        # transformers phrases the unknown-model_type case as a ValueError naming the type.
+        if "does not recognize this architecture" not in str(exc):
+            raise
+        if os.path.isdir(source):
+            cfg_path = os.path.join(source, "config.json")
+        else:
+            from huggingface_hub import hf_hub_download
+
+            cfg_path = hf_hub_download(repo_id=source, filename="config.json")
+        with open(cfg_path) as f:
+            raw = json.load(f)
+        warnings.warn(
+            f"transformers does not know model_type "
+            f"{raw.get('model_type')!r}; reading {cfg_path} directly for the fields "
+            "FakeBaseModel needs. Anything this base does outside embed_tokens/lm_head "
+            "must be declared in _select_base_transforms and _FINAL_NORM_TYPE_BY_MODEL_TYPE, "
+            "or the distillation target will be silently wrong.",
+            stacklevel=2,
+        )
+        return _RawConfig(**raw)
+
 
 
 class FakeBaseConfig(PretrainedConfig):
@@ -322,9 +361,7 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
-        orig_config = transformers.AutoConfig.from_pretrained(
-            source, trust_remote_code=trust_remote_code
-        )
+        orig_config = _load_config(source, trust_remote_code)
         # For vlms, detect language model config based on _VLM_CONFIG_ATTRS
         base_cfg = next(
             (

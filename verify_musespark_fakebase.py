@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Verify the MuseSpark FakeBase transforms against the real PineDrift checkpoint."""
-import math
-
 import torch
-from transformers import AutoConfig
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import (
     FakeBaseModel,
+    _load_config,
     _select_base_transforms,
 )
 
 SRC = "/home/haoguo/lustre/hf-local/pinedrift-820b-a42b-nvfp4_vv3"
 
-cfg = AutoConfig.from_pretrained(SRC, trust_remote_code=False)
+# transformers has no musespark1x_omni entry; _load_config falls back to raw config.json
+cfg = _load_config(SRC, trust_remote_code=False)
 print("model_type:", cfg.model_type)
 
 t = _select_base_transforms(cfg.model_type, cfg)
@@ -54,10 +53,18 @@ print(f"  capped logits min/max: {capped.min():.3f} / {capped.max():.3f}  (|.| <
 assert capped.abs().max() < 20.0, "soft cap not applied"
 assert abs(rms.mean().item() - 1.0) < 0.05, f"embed norm not applied (rms={rms.mean()})"
 
-# the cap must be the exact vLLM formula, not merely "something smaller"
+# The cap must be the exact vLLM formula, not merely "something smaller".
+# _SoftCappedLMHead computes in fp32 and casts back to the head dtype, so the
+# right comparison is against the reference ALSO rounded to that dtype -- comparing
+# against the fp32 reference only measures the documented cast, not the formula.
 ref = 20.0 * torch.tanh(raw.float() * expected_mult / 20.0)
-err = (capped.float() - ref).abs().max().item()
-print(f"  max |ours - vLLM formula|: {err:.3e}")
-assert err < 1e-2, err
+err_fp32 = (capped.float() - ref).abs().max().item()
+err_cast = (capped - ref.to(capped.dtype)).abs().max().item()
+ulp = torch.tensor(capped.abs().max().item(), dtype=capped.dtype)
+ulp = (torch.nextafter(ulp, ulp + 1) - ulp).item()
+print(f"  vs fp32 reference:            {err_fp32:.3e}  (bf16 ulp here = {ulp:.3e})")
+print(f"  vs reference cast to {str(capped.dtype).split('.')[-1]}:   {err_cast:.3e}")
+assert err_fp32 <= ulp, f"{err_fp32} exceeds one ulp -- not just the cast"
+assert err_cast <= ulp, f"{err_cast} differs from the rounded reference by >1 ulp"
 
 print("\nALL CHECKS PASSED")

@@ -142,6 +142,7 @@ class HFDFlash2Model(HFDFlashModel):
         loss_mask,
         base_logits=None,
         draft_hidden=None,
+        base_outputs=None,
     ):
         """Backbone DFlash loss plus the candidate-selector cross-entropy.
 
