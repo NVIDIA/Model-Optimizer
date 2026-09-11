@@ -36,6 +36,69 @@ def _create_new_data_cls(data_cls, **kwargs):
     return data_cls(**filtered_kwargs)
 
 
+def _allocate_calibration_blocks(
+    self: Any, sequence_lengths: list[int]
+) -> tuple[list[tuple[list[int], ...]], list[int] | None]:
+    """Allocate scheduler-compatible scratch blocks for calibration requests.
+
+    vLLM 0.28 treats block 0 as the null block. Its GPU runner expects real block
+    tables for hybrid attention/Mamba models, even for one-shot prefill requests.
+    Use vLLM's warmup reservation policy so this stays aligned with each cache
+    group's KVCacheSpec.
+    """
+    kv_cache_config = self.model_runner.kv_cache_config
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    empty_block_ids = tuple([] for _ in kv_cache_groups)
+
+    try:
+        from vllm.v1.worker.gpu.warmup import _reserved_block_count
+    except ImportError:
+        # Older vLLM versions do not expose the V2 warmup allocator and used
+        # empty block tables for this calibration path.
+        return [empty_block_ids for _ in sequence_lengths], None
+
+    model_runner = self.model_runner
+    vllm_config = model_runner.vllm_config
+
+    def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
+        # Calibration runs before model_state is initialized, so call the
+        # underlying reservation policy rather than _warmup_block_counter.
+        return _reserved_block_count(
+            num_tokens,
+            kv_cache_spec,
+            num_lookahead_tokens=vllm_config.num_lookahead_tokens,
+            max_model_len=model_runner.max_model_len,
+            max_encoder_len=0,
+        )
+    next_block_id = 1  # Block 0 is reserved as the null block.
+    block_ids_batch: list[tuple[list[int], ...]] = []
+    allocated_block_ids: list[int] = []
+
+    for sequence_length in sequence_lengths:
+        request_block_ids = []
+        for group in kv_cache_groups:
+            num_blocks = block_count(sequence_length, group.kv_cache_spec)
+            block_ids = list(range(next_block_id, next_block_id + num_blocks))
+            next_block_id += num_blocks
+            allocated_block_ids.extend(block_ids)
+            request_block_ids.append(block_ids)
+        block_ids_batch.append(tuple(request_block_ids))
+
+    if next_block_id > kv_cache_config.num_blocks:
+        raise RuntimeError(
+            "Calibration batch requires "
+            f"{next_block_id - 1} KV cache blocks, but only "
+            f"{kv_cache_config.num_blocks - 1} non-null blocks are available. "
+            "Reduce CALIB_BATCH_SIZE or calibration sequence length."
+        )
+
+    scheduler_fields = {field.name for field in dataclasses.fields(SchedulerOutput)}
+    blocks_to_zero = (
+        allocated_block_ids if "new_block_ids_to_zero" in scheduler_fields else None
+    )
+    return block_ids_batch, blocks_to_zero
+
+
 def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], None]:
     def calibrate_loop(model: Any) -> None:
         for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
@@ -56,7 +119,9 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     input_ids_list_batch = [input_ids_list_batch]
 
             num_groups = len(self.model_runner.kv_cache_config.kv_cache_groups)
-            empty_block_ids = tuple([] for _ in range(num_groups))
+            block_ids_batch, new_block_ids_to_zero = _allocate_calibration_blocks(
+                self, [len(input_ids) for input_ids in input_ids_list_batch]
+            )
 
             scheduled_new_reqs = []
             num_scheduled_tokens = {}
@@ -74,7 +139,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     mm_features=[],
                     sampling_params=SamplingParams(max_tokens=1),
                     pooling_params=None,
-                    block_ids=empty_block_ids,
+                    block_ids=block_ids_batch[seq_idx],
                     num_computed_tokens=0,
                     lora_request=None,
                 )
@@ -96,6 +161,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                 kv_connector_metadata=None,
                 structured_output_request_ids={},
                 grammar_bitmask=None,
+                new_block_ids_to_zero=new_block_ids_to_zero,
             )
             try:
                 output = self.execute_model(scheduler_output)
@@ -103,33 +169,36 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                         self.sample_tokens(None)
             finally:
-                # finish_requests runs before add_requests inside execute_model, so
-                # req IDs aren't registered yet at that point — call it directly after.
-                # Wrap in try/except so a cleanup error never masks the original exception.
+                # Submit a zero-token scheduler step after the request has been
+                # registered. This is the vLLM 0.28 cleanup path and removes
+                # request-scoped attention/Mamba state from the persistent batch.
+                cleanup_output = _create_new_data_cls(
+                    type(scheduler_output),
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    num_common_prefix_blocks=[0] * num_groups,
+                    finished_req_ids=set(num_scheduled_tokens),
+                    free_encoder_mm_hashes=[],
+                    kv_connector_metadata=None,
+                    structured_output_request_ids={},
+                    grammar_bitmask=None,
+                )
                 try:
-                    if hasattr(self.model_runner, "finish_requests"):
-                        cleanup_output = _create_new_data_cls(
-                            type(scheduler_output),
-                            scheduled_new_reqs=[],
-                            scheduled_cached_reqs=scheduler_output.scheduled_cached_reqs,
-                            num_scheduled_tokens={},
-                            total_num_scheduled_tokens=0,
-                            scheduled_spec_decode_tokens={},
-                            scheduled_encoder_inputs={},
-                            num_common_prefix_blocks=scheduler_output.num_common_prefix_blocks,
-                            finished_req_ids=set(num_scheduled_tokens.keys()),
-                            free_encoder_mm_hashes=[],
-                            kv_connector_metadata=None,
-                            structured_output_request_ids={},
-                            grammar_bitmask=None,
-                        )
-                        self.model_runner.finish_requests(cleanup_output)
-                    else:
-                        warnings.warn(
-                            "model_runner.finish_requests not found; request state may leak during calibration."
-                        )
+                    self.execute_model(cleanup_output)
                 except Exception:
-                    warnings.warn("Failed to clean up request state after calibration batch.")
+                    # Older runners expose cleanup directly instead of accepting
+                    # an empty execute_model step.
+                    try:
+                        self.model_runner.finish_requests(cleanup_output)
+                    except Exception:
+                        warnings.warn(
+                            "Failed to clean up request state after calibration batch.",
+                            stacklevel=2,
+                        )
 
     return calibrate_loop
 
