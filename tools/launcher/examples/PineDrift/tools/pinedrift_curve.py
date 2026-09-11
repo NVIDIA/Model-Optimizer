@@ -43,9 +43,17 @@ ckpts = sorted(
     glob.glob(f"{JOBDIR}/{cicd}/dflash2/checkpoint-*"),
     key=lambda p: int(p.rsplit("-", 1)[1]),
 )
-if ckpts:
-    st = json.load(open(f"{ckpts[-1]}/trainer_state.json"))
-    total, n_ep = st.get("max_steps"), st.get("num_train_epochs")
+# Walk back from the newest: the newest dir can exist with trainer_state.json not
+# yet written (a save in progress), and the babysitter may prune an old one mid-read.
+newest = None
+for c in reversed(ckpts):
+    try:
+        st = json.load(open(f"{c}/trainer_state.json"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        continue
+    total, n_ep, newest = st.get("max_steps"), st.get("num_train_epochs"), c
+    break
+ckpts = [newest] if newest else []
 
 logs = sorted(glob.glob(f"{JOBDIR}/{cicd}/*/log-*.out"), key=os.path.getmtime)
 by_step = {}
