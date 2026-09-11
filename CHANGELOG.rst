@@ -9,6 +9,7 @@ Changelog
 *Quantization*
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
+- Add a reusable local-Hessian NVFP4 PTQ recipe and a Qwen3.8-27B checkpoint recipe that reproduces its 5.5-bit AutoQuantize NVFP4/FP8 assignment.
 
 **Backward Breaking Changes**
 
