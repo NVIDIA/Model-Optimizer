@@ -45,7 +45,7 @@ template <typename scalar_t> __device__ __forceinline__ float load_float(const s
 }
 
 __device__ __forceinline__ float quant_error(float xnorm, float xsum, const float *x,
-                                              const float *q, float scale, float delta) {
+                                             const float *q, float scale, float delta) {
   float dot = 0.0f;
   float qnorm = 0.0f;
   float qsum = 0.0f;
@@ -57,8 +57,7 @@ __device__ __forceinline__ float quant_error(float xnorm, float xsum, const floa
   }
   const float shifted_dot = dot + delta * xsum;
   const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
-  return fmaxf(fmaf(scale * scale, shifted_norm, fmaf(-2.0f * scale, shifted_dot, xnorm)),
-               0.0f);
+  return fmaxf(fmaf(scale * scale, shifted_norm, fmaf(-2.0f * scale, shifted_dot, xnorm)), 0.0f);
 }
 
 template <typename scalar_t>
@@ -201,8 +200,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
       }
       unsigned long long key = ~0ULL;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
-        const float error = quant_error(xnorm, xsum, x, grid + entry * kVectorSize,
-                                        selected_scale, selected_delta);
+        const float error =
+            quant_error(xnorm, xsum, x, grid + entry * kVectorSize, selected_scale, selected_delta);
         const unsigned long long candidate =
             (static_cast<unsigned long long>(__float_as_uint(error)) << 32) |
             static_cast<unsigned long long>(entry);
