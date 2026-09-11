@@ -52,7 +52,7 @@ import onnx
 import onnxruntime as ort
 import pynvml
 from onnx import onnx_pb
-from onnxruntime.quantization import calibrate
+from onnxruntime.quantization import calibrate, qdq_quantizer
 from onnxruntime.quantization.base_quantizer import BaseQuantizer
 from onnxruntime.quantization.calibrate import (
     CalibraterBase,
@@ -74,6 +74,7 @@ from onnxruntime.quantization.quant_utils import (
     QuantType,
     add_infer_metadata,
 )
+from onnxruntime.quantization.quant_utils import compute_scale_zp as _ort_compute_scale_zp
 from onnxruntime.quantization.quantize import check_static_quant_arguments
 from onnxruntime.quantization.registry import QDQRegistry, QLinearOpsRegistry
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
@@ -92,6 +93,28 @@ def load_model_with_shape_infer(model_path: Path) -> onnx.ModelProto:
     except Exception as e:
         logger.info(f"Failed to infer shapes for model {model_path}: {e}")
     return model
+
+
+def _compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=None):
+    """Retry FP16 scale calculation in FP32 when range subtraction overflows."""
+    range_dtype = np.asarray(rmax).dtype
+    if range_dtype != np.float16:
+        return _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        zero_point, scale = _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+        if np.all(np.isfinite(scale)):
+            return zero_point, scale
+
+        zero_point, scale = _ort_compute_scale_zp(
+            np.asarray(rmin, dtype=np.float32),
+            np.asarray(rmax, dtype=np.float32),
+            qmin,
+            qmax,
+            symmetric,
+            min_real_range,
+        )
+        return zero_point, np.asarray(scale, dtype=range_dtype)
 
 
 def _prepare_histogram_data(histogram_collector, tensor, data_arr):
@@ -1818,4 +1841,5 @@ def patch_ort_modules(calibrate_per_node: bool = False):
     CalibraterBase.select_tensors_to_calibrate = _select_tensors_to_calibrate
     QDQQuantizer.check_opset_version = _check_opset_version
     BaseQuantizer.adjust_tensor_ranges = _adjust_tensor_ranges
+    qdq_quantizer.compute_scale_zp = _compute_scale_zp
     CalibraterBase.__init__ = _init_calibrater_base

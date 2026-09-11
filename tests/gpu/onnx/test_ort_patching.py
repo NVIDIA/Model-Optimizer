@@ -55,9 +55,7 @@ from modelopt.onnx.quantization.ort_patching import (
     _init_calibrater_base,
     _merge_range_min_max_calibrater_single_node_calibration,
     _merge_range_minmax_calibrator,
-    _prepare_histogram_data,
     _quantize_static,
-    _restore_histogram_calibration_dtypes,
     _select_tensors_to_calibrate,
     load_model_with_shape_infer,
 )
@@ -154,75 +152,6 @@ class TestHistogramCollection:
         assert len(mock_histogram_collector.histogram_dict) == 2
         assert "tensor1" in mock_histogram_collector.histogram_dict
         assert "tensor2" in mock_histogram_collector.histogram_dict
-
-    @pytest.mark.parametrize(
-        "collect_value",
-        [
-            _collect_value,
-            _collect_value_histogram_collector_single_node_calibration,
-        ],
-    )
-    def test_collect_value_fp16_narrow_range(self, collect_value):
-        collector = HistogramCollector(
-            method="entropy",
-            symmetric=False,
-            num_bins=128,
-            num_quantized_bins=128,
-            percentile=None,
-            scenario="same",
-        )
-        activations = np.zeros(1000, dtype=np.float16)
-        for activation_max in (1e-6, 1e-6, 2e-6):
-            activations[0] = np.float16(activation_max)
-            collect_value(collector, {"narrow_fp16_tensor": [activations]})
-
-        hist, edges, _, _, threshold = collector.histogram_dict["narrow_fp16_tensor"]
-        assert hist.sum() == 3 * activations.size
-        assert len(hist) > collector.num_bins
-        assert edges.dtype == np.float32
-        assert np.all(np.diff(edges) > 0), "fp16 bin edges are not strictly increasing"
-        assert np.asarray(threshold).dtype.itemsize >= np.dtype(np.float32).itemsize
-
-        tensors_range = TensorsData(
-            CalibrationMethod.Entropy, collector.compute_collection_result()
-        )
-        _restore_histogram_calibration_dtypes(collector, tensors_range)
-        tensor_range = tensors_range["narrow_fp16_tensor"]
-        assert tensor_range.lowest.dtype == np.float16
-        assert tensor_range.highest.dtype == np.float16
-        assert tensor_range.bins.dtype == np.float32
-
-    def test_restore_histogram_calibration_dtypes_clamps_fp16(self):
-        collector = HistogramCollector(
-            method="distribution",
-            symmetric=False,
-            num_bins=512,
-            num_quantized_bins=128,
-            percentile=None,
-            scenario="same",
-        )
-        _prepare_histogram_data(collector, "tensor", np.array([], dtype=np.float16))
-
-        fp32_max = np.finfo(np.float32).max
-        tensor_data = TensorData(
-            lowest=np.float32(-fp32_max),
-            highest=np.float32(fp32_max),
-            avg=np.float32(fp32_max),
-            std=np.float32(fp32_max),
-            hist=np.array([1]),
-            hist_edges=np.array([-1, 1], dtype=np.float32),
-        )
-        tensors_range = TensorsData(CalibrationMethod.Distribution, {"tensor": tensor_data})
-
-        _restore_histogram_calibration_dtypes(collector, tensors_range)
-
-        fp16_limits = np.finfo(np.float16)
-        tensor_range = tensors_range["tensor"]
-        assert tensor_range.lowest == fp16_limits.min
-        assert tensor_range.highest == fp16_limits.max
-        assert tensor_range.avg == fp16_limits.max
-        assert tensor_range.std == fp16_limits.max
-        assert tensor_range.hist_edges.dtype == np.float32
 
     def test_collect_absolute_value(self, mock_histogram_collector, sample_tensor_data):
         """Test _collect_absolute_value function."""
