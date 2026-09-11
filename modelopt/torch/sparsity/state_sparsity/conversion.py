@@ -27,7 +27,12 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig, DASCPolicy
-from .policy import build_dasc_policy, validate_dasc_decay_parameters, validate_dasc_model_structure
+from .policy import (
+    _DASCRecoverableStalenessError,
+    build_dasc_policy,
+    validate_dasc_decay_parameters,
+    validate_dasc_model_structure,
+)
 
 __all__ = []
 
@@ -93,7 +98,7 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
 
     try:
         validate_dasc_model_structure(model, policy)
-    except ApplyModeError as error:
+    except _DASCRecoverableStalenessError as error:
         warnings.warn(
             f"{error}. The restored DASC policy is stale; re-run calibrate() before deployment",
             stacklevel=2,
@@ -103,16 +108,23 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
 
 
 def update_dasc_metadata(model: nn.Module, config: DASCConfig, metadata: MetadataDict) -> None:
-    """Refresh metadata without making unrelated ModelOpt save or compose paths unusable."""
+    """Refresh metadata while allowing recoverable policy staleness to remain serializable."""
     policy = get_attached_dasc_policy(model)
     try:
         validate_dasc_model_structure(model, policy)
-        validate_dasc_decay_parameters(model, policy)
-    except ApplyModeError as error:
+    except _DASCRecoverableStalenessError as error:
         warnings.warn(
             f"{error}. The saved DASC policy is stale; re-run calibrate() before deployment",
             stacklevel=2,
         )
+    else:
+        try:
+            validate_dasc_decay_parameters(model, policy)
+        except ApplyModeError as error:
+            warnings.warn(
+                f"{error}. The saved DASC policy is stale; re-run calibrate() before deployment",
+                stacklevel=2,
+            )
     metadata.clear()
     metadata["policy"] = copy.deepcopy(policy.model_dump(mode="json"))
 

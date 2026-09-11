@@ -138,6 +138,8 @@ ordinary dense recurrent state before continuation.
 
     config = {
         "variant": "dasc_wr",  # "dasc_nr" uses zero recovery instead
+        "epsilon": 1e-3,
+        "static_gate_input": -0.3,
         "wmax_candidates": [32],
         # Set this to the dtype used to store A_log and dt_bias in the checkpoint.
         "decay_parameter_storage_dtype": "bfloat16",
@@ -146,6 +148,14 @@ ordinary dense recurrent state before continuation.
         "model_config_id": "sha256:<config-digest>",
         "calibration_data_id": "sha256:<dataset-and-protocol-digest>",
     }
+    # Use these storage-canonical horizons to derive the evaluated mask and the
+    # retained_heads/total_heads measurement geometry for every Wmax candidate.
+    horizons = mtss.analyze_gdn_decay(
+        model,
+        epsilon=config["epsilon"],
+        static_gate_input=config["static_gate_input"],
+        decay_parameter_storage_dtype=config["decay_parameter_storage_dtype"],
+    )
     measurements = [
         {
             "variant": "dasc_wr",
@@ -178,12 +188,19 @@ The initial GDN adapter accepts the ``GatedDeltaNet`` and ``Qwen3NextGatedDeltaN
 including ModelOpt-generated dynamic subclasses, and fails closed for unrelated implementations
 even when they expose similarly named decay tensors.
 Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` replaces the existing DASC
-mode-state entry and supersedes its stale policy without growing the checkpoint history. A stale
-policy remains serializable so it cannot block saving or composing other ModelOpt modes, but
+mode-state entry and supersedes its stale policy without growing the checkpoint history. A policy
+with recoverable GDN geometry drift, decay drift, or temporarily unavailable decay tensors remains
+serializable, but removing or replacing the supported GDN architecture fails closed on both save
+and restore. In every stale-policy case,
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and ``dt_bias`` before
-calibration. Policy validation allows only the rounding introduced by that declared storage dtype
-and the live tensor dtype; the default ``float32`` keeps unconfigured policies strict.
+calibration. Derive the evaluated head masks and reported ``retained_heads``/``total_heads`` from
+:func:`~modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay` using the same ``epsilon``,
+``static_gate_input``, and storage dtype passed to calibration. Policy validation allows only the
+rounding introduced by the declared storage dtype and the live tensor dtype. When they differ,
+distinct lossy inverse rounding bounds are composed in sequence; a duplicate dtype or an exact
+widening cast contributes no additional slack. Decay tensors that are live in BF16 or FP16 are
+still validated against that live dtype's rounding.
 
 .. _sparsity-concepts:
 
