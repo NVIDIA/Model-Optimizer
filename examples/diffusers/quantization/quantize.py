@@ -56,6 +56,7 @@ from utils import check_conv_and_mha, check_lora
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 _SDXL_MODEL_TYPES = (ModelType.SDXL_BASE, ModelType.SDXL_TURBO)
 
@@ -440,7 +441,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
             %(prog)s --model ltx-video-dev --format fp8 --batch-size 1 --calib-size 32 --ltx-skip-upsampler
 
             # Restore and export a previously quantized model
-            %(prog)s --model flux-schnell --restore-from checkpoint.pt --onnx-dir ./exports/
+            %(prog)s --model flux-schnell --restore-from ./checkpoints/ --onnx-dir ./exports/
         """,
     )
     model_group = parser.add_argument_group("Model Configuration")
@@ -569,7 +570,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Directory for HuggingFace checkpoint export",
     )
     export_group.add_argument(
-        "--restore-from", type=str, help="Path to restore from previous checkpoint"
+        "--restore-from",
+        type=str,
+        help="Checkpoint directory; quantization format and MHA policy are restored automatically",
     )
     export_group.add_argument(
         "--trt-high-precision-dtype",
@@ -597,6 +600,43 @@ def _apply_quantization_policy(
         quant_config.format == QuantFormat.FP4 and model_type not in _SDXL_MODEL_TYPES,
         quant_config.quantize_mha,
     )
+
+
+def _restore_quantization_policy(
+    backbones: list[tuple[str, torch.nn.Module]],
+) -> QuantFormat:
+    has_nvfp4 = False
+    has_fp8 = False
+
+    for backbone_name, backbone in backbones:
+        for module in backbone.modules():
+            if isinstance(module, TensorQuantizer):
+                has_nvfp4 |= module.is_nvfp4_dynamic or module.is_nvfp4_static
+                has_fp8 |= module.is_fp8
+
+        if backbone_name in ("video_decoder", "vae"):
+            continue
+
+        for module in backbone.modules():
+            q_quantizer = getattr(module, "q_bmm_quantizer", None)
+            k_quantizer = getattr(module, "k_bmm_quantizer", None)
+            v_quantizer = getattr(module, "v_bmm_quantizer", None)
+            if not (
+                isinstance(q_quantizer, TensorQuantizer)
+                and isinstance(k_quantizer, TensorQuantizer)
+                and isinstance(v_quantizer, TensorQuantizer)
+            ):
+                continue
+            module._disable_fp8_mha = not all(
+                quantizer.is_enabled and quantizer.is_fp8
+                for quantizer in (q_quantizer, k_quantizer, v_quantizer)
+            )
+
+    if has_nvfp4:
+        return QuantFormat.FP4
+    if has_fp8:
+        return QuantFormat.FP8
+    return QuantFormat.INT8
 
 
 def main() -> None:
@@ -673,9 +713,9 @@ def main() -> None:
         )
 
         logger.info("Validating configurations...")
-        quant_config.validate()
         export_config.validate()
         if not export_config.restore_from:
+            quant_config.validate()
             calib_config.validate()
 
         pipeline_manager = PipelineManager(model_config, logger)
@@ -686,10 +726,10 @@ def main() -> None:
 
         if export_config.restore_from and export_config.restore_from.exists():
             export_manager.restore_checkpoint()
-            for backbone_name, backbone in pipeline_manager.iter_backbones():
-                _apply_quantization_policy(
-                    backbone, backbone_name, quant_config, model_config.model_type
-                )
+            quant_config.format = _restore_quantization_policy(
+                list(pipeline_manager.iter_backbones())
+            )
+            logger.info(f"Detected restored quantization format: {quant_config.format.value}")
 
         else:
             logger.info("Initializing calibration...")

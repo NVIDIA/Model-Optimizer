@@ -17,6 +17,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -76,6 +77,7 @@ QuantFormat = _quantize.QuantFormat
 QuantizationConfig = _quantize.QuantizationConfig
 Quantizer = _quantize.Quantizer
 _apply_quantization_policy = _quantize._apply_quantization_policy
+_restore_quantization_policy = _quantize._restore_quantization_policy
 
 
 class _RecipeBackbone(nn.Module):
@@ -113,8 +115,10 @@ def test_sdxl_fp4_recipe(model_type):
         assert quantizer.is_fp8
 
 
-def _quantizer(*, num_bits=(4, 3), enabled=True, calibrated=True):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None))
+def _quantizer(*, num_bits=(4, 3), enabled=True, calibrated=True, block_sizes=None):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, axis=None, block_sizes=block_sizes)
+    )
     if calibrated:
         quantizer.amax = torch.tensor(448.0)
     if not enabled:
@@ -122,9 +126,119 @@ def _quantizer(*, num_bits=(4, 3), enabled=True, calibrated=True):
     return quantizer
 
 
-def _add_quantizers(module, *, num_bits=(4, 3), enabled=True, calibrated=True):
-    module.input_quantizer = _quantizer(num_bits=num_bits, enabled=enabled, calibrated=calibrated)
-    module.weight_quantizer = _quantizer(num_bits=num_bits, enabled=enabled, calibrated=calibrated)
+def _add_quantizers(module, *, num_bits=(4, 3), enabled=True, calibrated=True, block_sizes=None):
+    module.input_quantizer = _quantizer(
+        num_bits=num_bits,
+        enabled=enabled,
+        calibrated=calibrated,
+        block_sizes=block_sizes,
+    )
+    module.weight_quantizer = _quantizer(
+        num_bits=num_bits,
+        enabled=enabled,
+        calibrated=calibrated,
+        block_sizes=block_sizes,
+    )
+
+
+@pytest.mark.parametrize("mha_enabled", [True, False])
+def test_restore_policy_preserves_mha_state(mha_enabled):
+    backbone = nn.Module()
+    backbone.attention = Attention(query_dim=16, heads=1, dim_head=16)
+    quantizers = []
+    for name in (
+        "q_bmm_quantizer",
+        "k_bmm_quantizer",
+        "v_bmm_quantizer",
+        "softmax_quantizer",
+        "bmm2_output_quantizer",
+    ):
+        quantizer = _quantizer(enabled=mha_enabled)
+        setattr(backbone.attention, name, quantizer)
+        quantizers.append(quantizer)
+
+    restored_format = _restore_quantization_policy([("transformer", backbone)])
+
+    assert restored_format == QuantFormat.FP8
+    assert all(quantizer.is_enabled is mha_enabled for quantizer in quantizers)
+    assert backbone.attention._disable_fp8_mha is not mha_enabled
+
+
+@pytest.mark.parametrize("expected_format", list(QuantFormat))
+def test_restore_policy_infers_quantization_format(expected_format):
+    backbone = nn.Module()
+
+    if expected_format == QuantFormat.FP4:
+        backbone.conv = nn.Conv2d(1, 1, 1)
+        _add_quantizers(backbone.conv)
+        backbone.linear = nn.Linear(16, 16)
+        _add_quantizers(
+            backbone.linear,
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        )
+    else:
+        backbone.linear = nn.Linear(16, 16)
+        _add_quantizers(
+            backbone.linear,
+            num_bits=(4, 3) if expected_format == QuantFormat.FP8 else 8,
+        )
+
+    assert _restore_quantization_policy([("transformer", backbone)]) == expected_format
+
+
+def test_restore_defaults_reach_exports_with_checkpoint_policy(monkeypatch, tmp_path):
+    backbone = nn.Module()
+    backbone.conv = nn.Conv2d(1, 1, 1)
+    _add_quantizers(backbone.conv)
+    backbone.linear = nn.Linear(16, 16)
+    _add_quantizers(
+        backbone.linear,
+        num_bits=(2, 1),
+        block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    )
+    backbone.attention = Attention(query_dim=16, heads=1, dim_head=16)
+    mha_quantizers = []
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = _quantizer()
+        setattr(backbone.attention, name, quantizer)
+        mha_quantizers.append(quantizer)
+
+    pipeline_manager = Mock()
+    pipeline_manager.create_pipeline.return_value = object()
+    pipeline_manager.iter_backbones.side_effect = lambda: iter([("transformer", backbone)])
+    export_manager = Mock()
+
+    monkeypatch.setattr(_quantize, "PipelineManager", lambda *args: pipeline_manager)
+    monkeypatch.setattr(_quantize, "ExportManager", lambda *args: export_manager)
+    monkeypatch.setattr(torch.nn, "RMSNorm", torch.nn.RMSNorm)
+    monkeypatch.setattr(
+        torch.nn.modules.normalization,
+        "RMSNorm",
+        torch.nn.modules.normalization.RMSNorm,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "quantize.py",
+            "--model",
+            "flux-schnell",
+            "--restore-from",
+            str(tmp_path),
+            "--onnx-dir",
+            str(tmp_path / "onnx"),
+            "--hf-ckpt-dir",
+            str(tmp_path / "hf"),
+        ],
+    )
+
+    _quantize.main()
+
+    assert export_manager.export_onnx.call_args.args[-1] == QuantFormat.FP4
+    export_manager.export_hf_ckpt.assert_called_once()
+    assert all(quantizer.is_enabled for quantizer in mha_quantizers)
+    assert backbone.attention._disable_fp8_mha is False
 
 
 @pytest.mark.parametrize(
