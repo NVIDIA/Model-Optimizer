@@ -69,17 +69,6 @@ def _validate_gdn_decay_tensors(a_log: torch.Tensor, dt_bias: torch.Tensor) -> N
         raise ValueError("GDN decay parameters must be finite")
 
 
-def _validated_gdn_decay_tensors(
-    a_log: torch.Tensor, dt_bias: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Validate decay tensors and return deterministic CPU float64 values."""
-    _validate_gdn_decay_tensors(a_log, dt_bias)
-    return (
-        a_log.detach().to(device="cpu", dtype=torch.float64),
-        dt_bias.detach().to(device="cpu", dtype=torch.float64),
-    )
-
-
 @lru_cache(maxsize=1)
 def _supported_gdn_classes() -> tuple[type[nn.Module], ...]:
     """Resolve installed GDN implementations without making either framework mandatory."""
@@ -121,7 +110,9 @@ def compute_gdn_decay_horizons(
     if not 0.0 < epsilon < 1.0:
         raise ValueError("epsilon must be in (0, 1)")
 
-    a_log_cpu, dt_bias_cpu = _validated_gdn_decay_tensors(a_log, dt_bias)
+    _validate_gdn_decay_tensors(a_log, dt_bias)
+    a_log_cpu = a_log.detach().to(device="cpu", dtype=torch.float64)
+    dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
 
     decay = -torch.exp(a_log_cpu) * F.softplus(dt_bias_cpu + static_gate_input)
     horizons = torch.log(torch.tensor(epsilon, dtype=torch.float64)) / decay
@@ -291,11 +282,29 @@ def _decay_parameters(
     ]
 
 
+def _dtype_exactly_contains(source: torch.dtype, target: torch.dtype) -> bool:
+    """Return whether every finite source value is exactly representable in the target dtype."""
+    source_info = torch.finfo(source)
+    target_info = torch.finfo(target)
+    return (
+        target_info.max >= source_info.max
+        and target_info.eps <= source_info.eps
+        and target_info.tiny * target_info.eps <= source_info.tiny * source_info.eps
+    )
+
+
 def _storage_rounding_radius(tensor: torch.Tensor, storage_dtype: torch.dtype) -> torch.Tensor:
     """Compose inverse error bounds for storage and live-dtype materialization casts."""
     values = tensor.detach().to(device="cpu", dtype=torch.float64).abs()
     upper = values
     cast_dtypes = tuple(dict.fromkeys((storage_dtype, tensor.dtype)))
+    cast_dtypes = tuple(
+        dtype
+        for dtype in cast_dtypes
+        if not any(
+            dtype != other and _dtype_exactly_contains(other, dtype) for other in cast_dtypes
+        )
+    )
     for dtype in reversed(cast_dtypes):
         dtype_info = torch.finfo(dtype)
         unit_roundoff = dtype_info.eps / 2.0
