@@ -27,7 +27,12 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig, DASCPolicy
-from .policy import build_dasc_policy, validate_dasc_decay_parameters, validate_dasc_model_structure
+from .policy import (
+    _DASCModelStructureMismatchError,
+    build_dasc_policy,
+    validate_dasc_decay_parameters,
+    validate_dasc_model_structure,
+)
 
 __all__ = []
 
@@ -93,7 +98,7 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
 
     try:
         validate_dasc_model_structure(model, policy)
-    except ApplyModeError as error:
+    except _DASCModelStructureMismatchError as error:
         warnings.warn(
             f"{error}. The restored DASC policy is stale; re-run calibrate() before deployment",
             stacklevel=2,

@@ -17,6 +17,7 @@
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import math
 import warnings
@@ -44,6 +45,10 @@ _STORAGE_DTYPES = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+
+
+class _DASCModelStructureMismatchError(ApplyModeError):
+    """Identify recoverable policy-versus-GDN-geometry drift during restore."""
 
 
 @lru_cache(maxsize=1)
@@ -174,15 +179,26 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
 
 
 def _analyze_gdn_modules(
-    modules: dict[str, nn.Module], *, epsilon: float, static_gate_input: float
+    modules: dict[str, nn.Module],
+    *,
+    epsilon: float,
+    static_gate_input: float,
+    storage_dtype: torch.dtype | None = None,
 ) -> dict[str, list[float]]:
-    """Compute deterministic per-head horizons for already-resolved GDN modules."""
+    """Compute horizons, optionally from checkpoint-storage-canonical parameters."""
     horizons = {}
     for name, module in modules.items():
+        a_log = module.A_log
+        dt_bias = module.dt_bias
         try:
+            if not a_log.dtype.is_floating_point or not dt_bias.dtype.is_floating_point:
+                raise ValueError("GDN A_log and dt_bias must use floating-point dtypes")
+            if storage_dtype is not None:
+                a_log = a_log.detach().to(device="cpu", dtype=storage_dtype)
+                dt_bias = dt_bias.detach().to(device="cpu", dtype=storage_dtype)
             layer_horizons = compute_gdn_decay_horizons(
-                module.A_log,
-                module.dt_bias,
+                a_log,
+                dt_bias,
                 epsilon=epsilon,
                 static_gate_input=static_gate_input,
             )
@@ -348,7 +364,10 @@ def build_dasc_policy(
 
     modules = _get_gdn_modules(model)
     horizons = _analyze_gdn_modules(
-        modules, epsilon=config.epsilon, static_gate_input=config.static_gate_input
+        modules,
+        epsilon=config.epsilon,
+        static_gate_input=config.static_gate_input,
+        storage_dtype=_STORAGE_DTYPES[config.decay_parameter_storage_dtype],
     )
     _validate_measurement_geometry(horizons, validated_measurements)
 
@@ -413,34 +432,42 @@ def validate_dasc_model_structure(model: nn.Module, policy: DASCPolicy) -> None:
         actual_structure != policy_structure
         or _canonical_sha256(actual_structure) != policy.model_structure_sha256
     ):
-        raise ApplyModeError("DASC policy does not match the model's GDN module structure")
+        raise _DASCModelStructureMismatchError(
+            "DASC policy does not match the model's GDN module structure"
+        )
 
 
 def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None:
     """Reject deployment when current decay parameters no longer derive the stored policy.
 
-    Numerical validation deliberately uses re-derived horizons and the exact selected mask rather
-    than the provenance digest because an FP16 or BF16 storage cast is lossy.
+    Numerical validation uses inverse cast bounds rather than the provenance digest because an
+    FP16 or BF16 storage cast is lossy. A stored mask is rejected only when its head's complete
+    admissible horizon interval lies on the opposite side of the strict ``horizon > Wmax`` rule.
     """
     modules = _get_gdn_modules(model)
-    current_horizons = _analyze_gdn_modules(
-        modules,
-        epsilon=policy.epsilon,
-        static_gate_input=policy.static_gate_input,
-    )
-    for name, values in current_horizons.items():
+    for name, module in modules.items():
         layer = policy.layers[name]
-        retained = [head for head, horizon in enumerate(values) if horizon > policy.selected_wmax]
-        if retained != layer.retained_heads:
-            raise ApplyModeError(
-                f"DASC policy head mask does not match current decay parameters in layer {name!r}"
-            )
+        if not module.A_log.dtype.is_floating_point or not module.dt_bias.dtype.is_floating_point:
+            raise ApplyModeError("GDN A_log and dt_bias must use floating-point dtypes")
         lower, upper = _storage_cast_horizon_bounds(
-            modules[name],
+            module,
             epsilon=policy.epsilon,
             static_gate_input=policy.static_gate_input,
             storage_dtype=_STORAGE_DTYPES[policy.decay_parameter_storage_dtype],
         )
+        declared_retained = set(layer.retained_heads)
+        for head, (head_lower, head_upper) in enumerate(zip(lower, upper)):
+            retained_is_impossible = (
+                head in declared_retained and head_upper <= policy.selected_wmax
+            )
+            omitted_is_impossible = (
+                head not in declared_retained and head_lower > policy.selected_wmax
+            )
+            if retained_is_impossible or omitted_is_impossible:
+                raise ApplyModeError(
+                    "DASC policy head mask does not match current decay parameters in layer "
+                    f"{name!r}"
+                )
         stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
         numerical_slack = 32.0 * torch.finfo(torch.float64).eps
         if torch.any(stored < lower * (1.0 - numerical_slack)) or torch.any(

@@ -413,6 +413,36 @@ def test_dtype_cast_preserves_policy_when_the_selected_mask_is_unchanged(dtype):
     assert mtss.export_policy(model) == policy
 
 
+def test_calibration_uses_storage_canonical_mask_at_wmax_boundary():
+    """Derive the mask from stored decay values and accept their explained boundary flip."""
+    model = TinyGatedDeltaNetForCausalLM()
+    with torch.no_grad():
+        model.linear_attn.A_log[0] = 0.0
+        model.linear_attn.dt_bias[0] = 0.520263671875
+    live_horizon = mtss.compute_gdn_decay_horizons(
+        model.linear_attn.A_log, model.linear_attn.dt_bias, static_gate_input=0.0
+    )[0]
+    stored_horizon = mtss.compute_gdn_decay_horizons(
+        model.linear_attn.A_log.to(torch.float16),
+        model.linear_attn.dt_bias.to(torch.float16),
+        static_gate_input=0.0,
+    )[0]
+    assert live_horizon > 7
+    assert stored_horizon < 7
+
+    measurement = _candidate(7)
+    measurement["retained_heads"] = 0
+    model = mtss.calibrate(
+        model,
+        _config(wmax_candidates=[7], decay_parameter_storage_dtype="float16"),
+        [measurement],
+    )
+    policy = mtss.export_policy(model)
+
+    assert policy["layers"]["linear_attn"]["retained_heads"] == []
+    assert policy["layers"]["linear_attn"]["static_horizons"][0] < 7
+
+
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     """Accept BF16-rounded values after a checkpoint loader materializes FP32 tensors."""
     model = mtss.calibrate(
@@ -507,6 +537,9 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
         )
     with pytest.raises(ApplyModeError, match="module structure"):
         mtss.export_policy(mismatched)
+
+    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+        mto.restore_from_modelopt_state(nn.Linear(2, 2), state)
 
     tampered_state = copy.deepcopy(state)
     tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["quality_gates"][

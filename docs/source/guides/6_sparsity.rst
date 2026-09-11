@@ -183,7 +183,9 @@ policy remains serializable so it cannot block saving or composing other ModelOp
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and ``dt_bias`` before
 calibration. Policy validation allows only the rounding introduced by that declared storage dtype
-and the live tensor dtype; the default ``float32`` keeps unconfigured policies strict.
+and the live tensor dtype, so the effective tolerance is the wider of the two. The default
+``float32`` adds no storage slack of its own; decay tensors that are live in BF16 or FP16 are still
+validated against that live dtype's rounding.
 
 .. _sparsity-concepts:
 
