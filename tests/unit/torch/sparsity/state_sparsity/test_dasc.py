@@ -121,6 +121,7 @@ def test_calibrate_selects_largest_passing_candidate_and_round_trips():
     assert policy["granularity"] == "gdn_head"
     assert policy["preserve_convolution_state"] is True
     assert policy["active_runtime_state"] == "dense"
+    assert policy["decay_parameter_storage_dtype"] == "float32"
     assert policy["layers"]["linear_attn"]["retained_heads"] == [0]
     assert policy["layers"]["linear_attn"]["omitted_heads"] == [1]
     assert [measurement["wmax"] for measurement in policy["measurements"]] == [7, 11]
@@ -129,10 +130,17 @@ def test_calibrate_selects_largest_passing_candidate_and_round_trips():
     )
     json.dumps(policy)
 
-    restored = mto.restore_from_modelopt_state(
-        TinyGatedDeltaNetForCausalLM(), mto.modelopt_state(model)
-    )
+    state = mto.modelopt_state(model)
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNetForCausalLM(), state)
     assert mtss.export_policy(restored) == policy
+
+    legacy_state = copy.deepcopy(state)
+    del legacy_state["modelopt_state_dict"][0][1]["config"]["decay_parameter_storage_dtype"]
+    del legacy_state["modelopt_state_dict"][0][1]["metadata"]["policy"][
+        "decay_parameter_storage_dtype"
+    ]
+    legacy_restored = mto.restore_from_modelopt_state(TinyGatedDeltaNetForCausalLM(), legacy_state)
+    assert mtss.export_policy(legacy_restored)["decay_parameter_storage_dtype"] == "float32"
 
     policy["selected_wmax"] = 999
     assert mtss.export_policy(model)["selected_wmax"] == 7
@@ -161,6 +169,7 @@ def test_variant_is_explicit_in_exported_policy(variant, recovery):
         {"wmax_candidates": [7, 7]},
         {"model_revision": ""},
         {"preserve_convolution_state": False},
+        {"decay_parameter_storage_dtype": "float8"},
     ],
 )
 def test_config_fails_closed(override):
@@ -251,6 +260,11 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     with pytest.raises(ApplyModeError, match="no supported GDN modules"):
         mtss.calibrate(same_name_lookalike(), _config(wmax_candidates=[7]), [_candidate(7)])
 
+    missing_decay = TinyGatedDeltaNetForCausalLM()
+    del missing_decay.linear_attn.A_log
+    with pytest.raises(ApplyModeError, match="without A_log and dt_bias tensors"):
+        mtss.calibrate(missing_decay, _config(wmax_candidates=[7]), [_candidate(7)])
+
     invalid_decay = TinyGatedDeltaNetForCausalLM()
     invalid_decay.linear_attn.dt_bias = nn.Parameter(torch.zeros(3))
     with pytest.raises(ApplyModeError, match="Invalid GDN decay parameters"):
@@ -295,8 +309,7 @@ def test_supported_class_resolution_uses_imported_module_identities(monkeypatch)
 def test_declared_gdn_paths_resolve_when_framework_is_installed(module_name, class_name):
     """Guard supported identities against upstream dependency path drift."""
     root_module = module_name.partition(".")[0]
-    if dasc_policy.importlib.util.find_spec(root_module) is None:
-        pytest.skip(f"optional framework {root_module!r} is not installed")
+    pytest.importorskip(root_module)
     module = dasc_policy.importlib.import_module(module_name)
     assert issubclass(getattr(module, class_name), nn.Module)
 
@@ -361,8 +374,11 @@ def test_public_exports_and_wrapped_model_export():
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_dtype_cast_preserves_policy_when_the_selected_mask_is_unchanged(dtype):
     """Treat ordinary low-precision casts as equivalent when they preserve the policy mask."""
+    storage_dtype = "bfloat16" if dtype == torch.bfloat16 else "float16"
     model = mtss.calibrate(
-        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+        TinyGatedDeltaNetForCausalLM(),
+        _config(wmax_candidates=[7], decay_parameter_storage_dtype=storage_dtype),
+        [_candidate(7)],
     )
     policy = mtss.export_policy(model)
     original_decay = torch.cat(
@@ -381,7 +397,9 @@ def test_dtype_cast_preserves_policy_when_the_selected_mask_is_unchanged(dtype):
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     """Accept BF16-rounded values after a checkpoint loader materializes FP32 tensors."""
     model = mtss.calibrate(
-        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+        TinyGatedDeltaNetForCausalLM(),
+        _config(wmax_candidates=[7], decay_parameter_storage_dtype="bfloat16"),
+        [_candidate(7)],
     )
     policy = mtss.export_policy(model)
     original_decay = torch.cat(
@@ -404,6 +422,29 @@ def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     )
     with pytest.raises(ApplyModeError, match="floating-point dtype"):
         mtss.export_policy(model)
+
+
+@pytest.mark.parametrize(
+    ("storage_name", "storage_dtype", "live_dtype"),
+    [
+        ("float16", torch.float16, torch.bfloat16),
+        ("bfloat16", torch.bfloat16, torch.float16),
+    ],
+)
+def test_cross_dtype_reload_accumulates_both_rounding_bounds(
+    storage_name, storage_dtype, live_dtype
+):
+    """Accept two distinct declared-storage and live-materialization rounding steps."""
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(),
+        _config(wmax_candidates=[7], decay_parameter_storage_dtype=storage_name),
+        [_candidate(7)],
+    )
+    policy = mtss.export_policy(model)
+
+    model.to(storage_dtype).to(live_dtype)
+
+    assert mtss.export_policy(model) == policy
 
 
 def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure():
@@ -469,7 +510,7 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
     layer = tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["layers"][
         "linear_attn"
     ]
-    layer["static_horizons"][0] *= 1.01
+    layer["static_horizons"][0] *= 1.0001
     restored = mto.restore_from_modelopt_state(TinyGatedDeltaNetForCausalLM(), tampered_state)
     with pytest.raises(ApplyModeError, match="horizons do not match"):
         mtss.export_policy(restored)

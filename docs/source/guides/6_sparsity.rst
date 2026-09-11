@@ -139,6 +139,8 @@ ordinary dense recurrent state before continuation.
     config = {
         "variant": "dasc_wr",  # "dasc_nr" uses zero recovery instead
         "wmax_candidates": [32],
+        # Set this to the dtype used to store A_log and dt_bias in the checkpoint.
+        "decay_parameter_storage_dtype": "bfloat16",
         "model_id": "org/model",
         "model_revision": "immutable-model-revision",
         "model_config_id": "sha256:<config-digest>",
@@ -179,6 +181,9 @@ Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` replaces th
 mode-state entry and supersedes its stale policy without growing the checkpoint history. A stale
 policy remains serializable so it cannot block saving or composing other ModelOpt modes, but
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
+Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and ``dt_bias`` before
+calibration. Policy validation allows only the rounding introduced by that declared storage dtype
+and the live tensor dtype; the default ``float32`` keeps unconfigured policies strict.
 
 .. _sparsity-concepts:
 

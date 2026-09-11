@@ -69,6 +69,7 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
         "variant": config.variant,
         "epsilon": config.epsilon,
         "static_gate_input": config.static_gate_input,
+        "decay_parameter_storage_dtype": config.decay_parameter_storage_dtype,
         "wmax_candidates": config.wmax_candidates,
         "quality_gates": {
             "min_perplexity_retention": config.min_perplexity_retention,

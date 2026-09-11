@@ -39,7 +39,11 @@ _SUPPORTED_GDN_CLASS_PATHS = (
     ("megatron.core.ssm.gated_delta_net", "GatedDeltaNet"),
     ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextGatedDeltaNet"),
 )
-_SUPPORTED_STORAGE_DTYPES = (torch.float16, torch.bfloat16)
+_STORAGE_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
 
 
 @lru_cache(maxsize=1)
@@ -84,6 +88,8 @@ def compute_gdn_decay_horizons(
         raise ValueError(
             "GDN A_log and dt_bias must be non-empty one-dimensional tensors of equal shape"
         )
+    if not a_log.dtype.is_floating_point or not dt_bias.dtype.is_floating_point:
+        raise ValueError("GDN A_log and dt_bias must use floating-point dtypes")
     if not 0.0 < epsilon < 1.0:
         raise ValueError("epsilon must be in (0, 1)")
 
@@ -101,15 +107,19 @@ def compute_gdn_decay_horizons(
 
 def _is_gdn_module(module: nn.Module, supported_classes: tuple[type[nn.Module], ...]) -> bool:
     """Accept supported GDN implementations and their ModelOpt dynamic subclasses."""
+    return _has_supported_gdn_identity(module, supported_classes) and all(
+        isinstance(getattr(module, name, None), torch.Tensor) for name in ("A_log", "dt_bias")
+    )
+
+
+def _has_supported_gdn_identity(
+    module: nn.Module, supported_classes: tuple[type[nn.Module], ...]
+) -> bool:
+    """Return whether a module has an exact or ModelOpt-generated supported GDN identity."""
     module_class = type(module)
-    is_supported_class = module_class in supported_classes or (
+    return module_class in supported_classes or (
         isinstance(module, DynamicModule)
         and any(base in supported_classes for base in module_class.__mro__)
-    )
-    return (
-        is_supported_class
-        and isinstance(getattr(module, "A_log", None), torch.Tensor)
-        and isinstance(getattr(module, "dt_bias", None), torch.Tensor)
     )
 
 
@@ -122,6 +132,20 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
         name: module for name, module in named_modules if _is_gdn_module(module, supported_classes)
     }
     if not modules:
+        missing_decay_parameters = [
+            name or "<root>"
+            for name, module in named_modules
+            if _has_supported_gdn_identity(module, supported_classes)
+            and not all(
+                isinstance(getattr(module, parameter, None), torch.Tensor)
+                for parameter in ("A_log", "dt_bias")
+            )
+        ]
+        if missing_decay_parameters:
+            raise ApplyModeError(
+                "DASC found supported GDN modules without A_log and dt_bias tensors at: "
+                f"{', '.join(missing_decay_parameters)}"
+            )
         unsupported_subclasses = [
             name or "<root>"
             for name, module in named_modules
@@ -132,7 +156,8 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
         if unsupported_subclasses:
             raise ApplyModeError(
                 "DASC found GDN subclasses that are not ModelOpt dynamic modules at: "
-                f"{', '.join(unsupported_subclasses)}; use an exact supported class"
+                f"{', '.join(unsupported_subclasses)}; convert the module with ModelOpt or use a "
+                "supported class directly"
             )
         supported = ", ".join(
             f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS
@@ -191,17 +216,19 @@ def _model_structure(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
     ]
 
 
-def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
-    """Serialize a compact BF16-canonicalized calibration snapshot for provenance."""
+def _decay_parameters(
+    modules: dict[str, nn.Module], storage_dtype: torch.dtype
+) -> list[dict[str, object]]:
+    """Serialize a storage-dtype-canonicalized calibration snapshot for provenance."""
     return [
         {
             "name": name,
             "A_log": module.A_log.detach()
-            .to(device="cpu", dtype=torch.bfloat16)
+            .to(device="cpu", dtype=storage_dtype)
             .to(dtype=torch.float32)
             .tolist(),
             "dt_bias": module.dt_bias.detach()
-            .to(device="cpu", dtype=torch.bfloat16)
+            .to(device="cpu", dtype=storage_dtype)
             .to(dtype=torch.float32)
             .tolist(),
         }
@@ -209,30 +236,31 @@ def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
     ]
 
 
-def _storage_rounding_radius(tensor: torch.Tensor) -> torch.Tensor:
-    """Bound one FP16/BF16 storage cast even after values are reloaded in a wider dtype."""
-    if not tensor.dtype.is_floating_point:
-        raise ApplyModeError("DASC decay parameters must use a floating-point dtype")
+def _storage_rounding_radius(tensor: torch.Tensor, storage_dtype: torch.dtype) -> torch.Tensor:
+    """Compose inverse error bounds for storage and live-dtype materialization casts."""
     values = tensor.detach().to(device="cpu", dtype=torch.float64).abs()
-    radius = torch.zeros_like(values)
-    for dtype in (tensor.dtype, *_SUPPORTED_STORAGE_DTYPES):
+    upper = values
+    cast_dtypes = tuple(dict.fromkeys((storage_dtype, tensor.dtype)))
+    for dtype in reversed(cast_dtypes):
         dtype_info = torch.finfo(dtype)
         unit_roundoff = dtype_info.eps / 2.0
-        candidate = (
-            values * (unit_roundoff / (1.0 - unit_roundoff)) + dtype_info.tiny * dtype_info.eps
-        )
-        radius = torch.maximum(radius, candidate)
-    return radius
+        smallest_subnormal = dtype_info.tiny * dtype_info.eps
+        upper = (upper + smallest_subnormal) / (1.0 - unit_roundoff)
+    return upper - values
 
 
 def _storage_cast_horizon_bounds(
-    module: nn.Module, *, epsilon: float, static_gate_input: float
+    module: nn.Module,
+    *,
+    epsilon: float,
+    static_gate_input: float,
+    storage_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Bound horizons compatible with the current parameters before one storage cast."""
     a_log = module.A_log.detach().to(device="cpu", dtype=torch.float64)
     dt_bias = module.dt_bias.detach().to(device="cpu", dtype=torch.float64)
-    a_radius = _storage_rounding_radius(module.A_log)
-    dt_radius = _storage_rounding_radius(module.dt_bias)
+    a_radius = _storage_rounding_radius(module.A_log, storage_dtype)
+    dt_radius = _storage_rounding_radius(module.dt_bias, storage_dtype)
     scale = -math.log(epsilon)
     lower = scale / (
         torch.exp(a_log + a_radius) * F.softplus(dt_bias + dt_radius + static_gate_input)
@@ -343,6 +371,7 @@ def build_dasc_policy(
         recovery="zero" if config.variant == "dasc_nr" else "suffix_replay",
         epsilon=config.epsilon,
         static_gate_input=config.static_gate_input,
+        decay_parameter_storage_dtype=config.decay_parameter_storage_dtype,
         selected_wmax=selected_wmax,
         wmax_candidates=config.wmax_candidates,
         quality_gates={
@@ -357,7 +386,9 @@ def build_dasc_policy(
         granularity=config.granularity,
         preserve_convolution_state=config.preserve_convolution_state,
         model_structure_sha256=_canonical_sha256(_model_structure(modules)),
-        decay_parameters_sha256=_canonical_sha256(_decay_parameters(modules)),
+        decay_parameters_sha256=_canonical_sha256(
+            _decay_parameters(modules, _STORAGE_DTYPES[config.decay_parameter_storage_dtype])
+        ),
         layers=layers,
         measurements=validated_measurements,
     )
@@ -401,6 +432,7 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
             modules[name],
             epsilon=policy.epsilon,
             static_gate_input=policy.static_gate_input,
+            storage_dtype=_STORAGE_DTYPES[policy.decay_parameter_storage_dtype],
         )
         stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
         numerical_slack = 32.0 * torch.finfo(torch.float64).eps
