@@ -16,7 +16,7 @@
 import pytest
 import torch
 
-from modelopt.torch.quantization.iq2_xs import (
+from modelopt.torch.quantization.ggml.iq2_xs import (
     IQ2_XS_BLOCK_BYTES,
     dequantize_iq2_xs,
     iq2_xs_fake_quant,

@@ -59,8 +59,7 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.iq1_s import quantize_iq1_s
-from modelopt.torch.quantization.iq2_xs import quantize_iq2_xs
+from modelopt.torch.quantization.ggml import quantize_iq1_s, quantize_iq2_xs
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper

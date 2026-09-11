@@ -60,6 +60,8 @@ from functools import cache
 
 import torch
 
+from .common import GGML_BLOCK_SIZE, validate_packed_weights, validate_weight
+
 __all__ = [
     "IQ1_S_BLOCK_BYTES",
     "IQ1_S_BLOCK_SIZE",
@@ -70,7 +72,7 @@ __all__ = [
     "quantize_iq1_s",
 ]
 
-IQ1_S_BLOCK_SIZE = 256
+IQ1_S_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ1_S_BLOCK_BYTES = 50
 IQ1_S_EFFECTIVE_BITS = IQ1_S_BLOCK_BYTES * 8 / IQ1_S_BLOCK_SIZE
 _IQ1_S_DELTA = 0.125
@@ -148,20 +150,6 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
             device=resolved_device, dtype=torch.float32
         )
     return _GRID_CACHE[resolved_device]
-
-
-def _validate_weight(weight: torch.Tensor) -> None:
-    if weight.numel() == 0:
-        raise ValueError("IQ1_S requires a non-empty weight")
-    if weight.dim() == 0 or weight.shape[-1] % IQ1_S_BLOCK_SIZE:
-        raise ValueError(
-            "IQ1_S requires the last weight dimension to be divisible by "
-            f"{IQ1_S_BLOCK_SIZE}, got shape {tuple(weight.shape)}"
-        )
-    if not weight.is_floating_point():
-        raise TypeError(f"IQ1_S requires a floating-point weight, got {weight.dtype}")
-    if not torch.isfinite(weight).all():
-        raise ValueError("IQ1_S requires finite weight values")
 
 
 def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
@@ -243,7 +231,7 @@ def quantize_iq1_s(
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 50]``
     and ``[weight.ndim]``. Both tensors remain on the weight's device.
     """
-    _validate_weight(weight)
+    validate_weight(weight, "IQ1_S")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
@@ -251,7 +239,7 @@ def quantize_iq1_s(
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
     grid = iq1_s_grid(weight.device)
     if weight.is_cuda:
-        from .extensions import get_cuda_ext_iq1_s
+        from ..extensions import get_cuda_ext_iq1_s
 
         extension = get_cuda_ext_iq1_s()
         if extension is not None:
@@ -283,19 +271,9 @@ def dequantize_iq1_s(
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Decode GGML-compatible IQ1_S payload bytes."""
-    if packed_weights.dtype != torch.uint8 or packed_weights.shape[-1] != IQ1_S_BLOCK_BYTES:
-        raise ValueError(
-            f"packed_weights must be uint8 with last dimension {IQ1_S_BLOCK_BYTES}, "
-            f"got {packed_weights.dtype} {tuple(packed_weights.shape)}"
-        )
-    shape = tuple(int(v) for v in weight_shape.detach().cpu().tolist())
-    if not shape or shape[-1] % IQ1_S_BLOCK_SIZE:
-        raise ValueError(f"invalid IQ1_S logical weight shape: {shape}")
-    expected = 1
-    for dim in shape:
-        expected *= dim
-    if packed_weights.numel() != expected // IQ1_S_BLOCK_SIZE * IQ1_S_BLOCK_BYTES:
-        raise ValueError("packed_weights size does not match weight_shape")
+    shape = validate_packed_weights(
+        packed_weights, weight_shape, block_bytes=IQ1_S_BLOCK_BYTES, format_name="IQ1_S"
+    )
 
     blocks = packed_weights.contiguous().reshape(-1, IQ1_S_BLOCK_BYTES)
     d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()

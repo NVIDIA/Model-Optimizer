@@ -15,7 +15,7 @@
 
 import torch
 
-from modelopt.torch.quantization.iq2_xs import dequantize_iq2_xs, quantize_iq2_xs
+from modelopt.torch.quantization.ggml.iq2_xs import dequantize_iq2_xs, quantize_iq2_xs
 
 
 def test_iq2_xs_cuda_pack_is_deterministic_and_decodable():
