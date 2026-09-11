@@ -114,6 +114,10 @@ def flatten_tree(pytree: Any, prefix: str = "") -> tuple[list[Any], TreeSpec]:
     Returns: A tuple (values, pytree) where
         values is a list of values flattened from the provided pytree, and
         tree_spec is the pytree spec describing the structure of the pytree.
+
+    Raises:
+        ValueError: If two leaves map to the same flattened key (nested keys
+            are joined with ".", so ``{"a": {"b": 1}, "a.b": 2}`` collides).
     """
 
     def collect_spec(pytree, prefix):
@@ -128,6 +132,16 @@ def flatten_tree(pytree: Any, prefix: str = "") -> tuple[list[Any], TreeSpec]:
             yield prefix, pytree
 
     # retrieve flattened values and names. Then initialize tree_spec with the flattened names.
-    flattened = dict(collect_spec(pytree, prefix))
+    seen_names: set[str] = set()
+    names: list[str] = []
+    values: list[Any] = []
+    for name, value in collect_spec(pytree, prefix):
+        if name in seen_names:
+            raise ValueError(
+                f"Cannot flatten pytree: multiple leaves map to the flattened key {name!r}!"
+            )
+        seen_names.add(name)
+        names.append(name)
+        values.append(value)
 
-    return list(flattened.values()), TreeSpec(pytree, list(flattened.keys()))
+    return values, TreeSpec(pytree, names)
