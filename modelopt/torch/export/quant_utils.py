@@ -48,7 +48,8 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils import clear_cuda_cache
 
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
-from .model_config import (
+from .model_utils import TiedWeightMap
+from .quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
     KV_CACHE_NVFP4,
@@ -71,35 +72,8 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedWeightMap
 
 logger = logging.getLogger(__name__)
-
-
-def get_scaling_factor_from_weight(weight, group_size) -> torch.tensor:
-    """Calculate the weight scaling factor for a given group size."""
-    [n, k] = weight.shape
-
-    if group_size != 0:
-        # int4_awq
-        if k % group_size != 0:
-            raise NotImplementedError(
-                "Weight shape is not divisible for block size for block quantization."
-            )
-        weight = weight.reshape(n, k // group_size, group_size)
-        maxbound = 7.0
-    else:
-        # int8_sq
-        maxbound = 127.0
-    amax = weight.abs().max(dim=-1)[0].float()
-
-    weights_scaling_factor = amax / maxbound
-
-    # Let's filter the zeros in the scaling factor if the weights are zero
-    # to avoid the divided-by-zero error..
-    weights_scaling_factor[weights_scaling_factor == 0] = 1.0
-
-    return weights_scaling_factor
 
 
 def maybe_transpose_expert_weight_dimensions(
@@ -132,65 +106,6 @@ def maybe_transpose_expert_weight_dimensions(
     transposed_weight_scale = weight_scale.transpose(-2, -1) if weight_scale is not None else None
 
     return transposed_weight, transposed_weight_scale
-
-
-def resmooth_and_get_scale(
-    merged_weights: torch.Tensor,
-    pre_quant_scales: list[torch.Tensor],
-    ranks: int,
-    group_size: int,
-    new_pre_quant_scale: torch.Tensor | None = None,
-    quantization: str | None = QUANTIZATION_NONE,
-):
-    """Resmooths weights from a single or multiple ranks and get scaling factors and amax.
-
-    Args:
-        merged_weights: Merged weights from ranks.
-        pre_quant_scales: List of pre-quantization scales for each rank.
-        ranks: Number of ranks.
-        group_size: Group size of the quantization block.
-        new_pre_quant_scale (optional): If not provided, weights will be resmoothed using
-            the average of pre_quant_scales.
-
-    Returns:
-        weights: Resmoothed weights.
-        weight_scaling_factors: Resmoothed scaling factors.
-        avg_pre_quant_scale: Calculated average of the quantization scale.
-    """
-    if new_pre_quant_scale is None:
-        new_pre_quant_scale = torch.stack(pre_quant_scales).mean(dim=0)
-
-    assert len(pre_quant_scales) > 0 and new_pre_quant_scale.numel() == merged_weights.shape[1], (
-        "Shape of pre_quant_scales and weights do not match."
-    )
-    weights = torch.chunk(merged_weights, ranks, dim=0)
-
-    scales = []
-    new_weights = []
-    for i, p_scaling_factor in enumerate(pre_quant_scales):
-        # De smooth & Re smooth
-        weight = (
-            weights[i]
-            * p_scaling_factor.type(weights[i].dtype)
-            / new_pre_quant_scale.type(weights[i].dtype)
-        )
-        new_weights.append(weight)
-        # If NVFP4_AWQ then we view the scales as uint8 to allow for cat later
-        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]:
-            scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, group_size).view(torch.uint8)
-        else:
-            scale = get_scaling_factor_from_weight(weight, group_size)
-        scales.append(scale)
-
-    resmoothed_scales = torch.cat(scales, dim=0)
-
-    return (
-        torch.cat(new_weights, dim=0),
-        resmoothed_scales.view(torch.float8_e4m3fn)
-        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]
-        else resmoothed_scales,  # if NVFP4_AWQ we view the scales back as float8_e4m3fn after cat
-        new_pre_quant_scale,
-    )
 
 
 def adjust_attn_amax_values(module):
