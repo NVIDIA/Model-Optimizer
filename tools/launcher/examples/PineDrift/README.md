@@ -174,16 +174,34 @@ activation memory.
    then fell through to the Hub and died in `validate_repo_id` on a local path
    (job 406717). Any yaml here that sets `container_mounts` must list `/hf-local`
    itself.
-7. **`report_to=none`** — the trainer runs in the serve container, which has no
+7. **The hidden-state KV cache view changed shape in this vLLM.** `create_kv_cache_views`
+   now hands out one 4D **`[B, H, N, C]`** view per layer unconditionally — the
+   `KVCacheLayout` permutes strides, not axes. `RdmaHiddenStatesConnector` was written
+   against the older `[B, N, H, C]`, so it read `shape[1]` as the block size (really the
+   plane count) and `shape[2:]` as the per-token feature (really `(N, C)`).
+
+   With our hidden group at `block_size=1` that yields `feat=(1, 8192)`: the trainer
+   receives **one** plane, `_format` peels it off as the base hidden, and the draft gets
+   an empty aux tensor — `mat1 and mat2 shapes cannot be multiplied (3072x0 and
+   40960x8192)` (job 406838). Nothing upstream of that errors.
+
+   Fixed in `rdma_hidden_states_connector.py` by locating the plane axis by its length
+   rather than by position, and refusing to guess when both candidates match. The serve
+   now logs the view it found; `tools/test_hidden_cache_gather.py` checks both layouts
+   by value, since a transposed gather would train silently.
+
+   Watch for `RdmaHiddenStatesConnector: hidden-state cache view (..., 6, 1, 8192) ->
+   6 planes x 8192 hidden` in the serve log.
+8. **`report_to=none`** — the trainer runs in the serve container, which has no
    tensorboard.
-8. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
+9. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
    bare Slurm TIMEOUT with no traceback.
-9. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
+10. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
    a custom key is rejected at argument-parse time.
-10. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
+11. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
    is pip-installed, disabling DeepEP v2. Harmless for the trainer; do not reuse that
    env for a standalone serve.
-11. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
+12. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
    `~/.bashrc` activates conda and shadows the container's python.
 
 ## BLOCKER — KV-cache page sizing (root-caused; fix = block_size >= 32*N)

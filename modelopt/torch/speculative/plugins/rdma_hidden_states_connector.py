@@ -63,10 +63,52 @@ from .hf_streaming_dataset import nixl_backends_from_env
 logger = init_logger(__name__)
 
 
-def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens):
-    """Gather the first ``num_tokens`` rows of ``kv_cache`` addressed by ``slot_mapping``."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+def planes_dim(kv_cache, n_planes: int) -> int:
+    """Which axis of a per-layer KV cache view holds the captured planes.
+
+    vLLM changed the logical axis order of the per-layer view. Newer builds hand
+    out ``[B, H, N, C]`` unconditionally -- `create_kv_cache_views` documents
+    "one 4D [B, H, N, C] view per layer", and the KVCacheLayout only permutes
+    strides, not axes. Older builds used ``[B, N, H, C]`` (block, token, head,
+    content), which is what this connector was written against.
+
+    For the hidden-state pseudo-layer H is the number of captured planes and C is
+    hidden_size, so the two orders are distinguishable by looking for ``n_planes``.
+    Getting it wrong is not an error, just wrong data: on a new vLLM the old
+    reading returns ``feat=(N, C)``, the trainer sees ONE plane instead of six,
+    peels it off as the base hidden and hands the draft an empty aux tensor
+    ("mat1 and mat2 shapes cannot be multiplied (3072x0 and 40960x8192)").
+    """
+    if kv_cache.ndim != 4:
+        raise RuntimeError(
+            f"hidden-state cache view has {kv_cache.ndim} dims, expected 4; "
+            f"shape={tuple(kv_cache.shape)}"
+        )
+    if kv_cache.shape[1] == n_planes and kv_cache.shape[2] != n_planes:
+        return 1
+    if kv_cache.shape[2] == n_planes and kv_cache.shape[1] != n_planes:
+        return 2
+    raise RuntimeError(
+        f"cannot tell which axis of the hidden-state cache view {tuple(kv_cache.shape)} "
+        f"holds the {n_planes} captured planes; both or neither of dims 1 and 2 match. "
+        "Set a block size that differs from the capture count to disambiguate."
+    )
+
+
+def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, pdim: int = 2):
+    """Gather the first ``num_tokens`` tokens of ``kv_cache`` addressed by ``slot_mapping``.
+
+    Returns ``[num_tokens, n_planes, hidden]``. ``pdim`` is :func:`planes_dim`.
+    """
+    if pdim == 1:  # [B, H, N, C]
+        block_size = kv_cache.shape[2]
+        # Advanced indices separated by a slice, so the gathered dim comes first:
+        # result is [n, H, C].
+        out = kv_cache[slot_mapping // block_size, :, slot_mapping % block_size, :]
+    else:  # [B, N, H, C]
+        block_size = kv_cache.shape[1]
+        out = kv_cache[slot_mapping // block_size, slot_mapping % block_size]
+    return out[:num_tokens]
 
 
 @dataclass
@@ -229,9 +271,30 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
         kv = kv_caches[self.cache_layers[0]]
-        # per-token feature = everything past [num_blocks, block_size]
-        self._per_token_elems = int(prod(kv.shape[2:]))
-        self._feat_shape = tuple(kv.shape[2:])
+        # per-token feature = (n_captured_planes, hidden). Which axes those are
+        # depends on the vLLM build; see planes_dim().
+        spec_cfg = self._vllm_config.speculative_config
+        n_planes = len(
+            getattr(spec_cfg.draft_model_config.hf_config, "eagle_aux_hidden_state_layer_ids", [])
+        )
+        if not n_planes:
+            raise RuntimeError(
+                "RdmaHiddenStatesConnector: eagle_aux_hidden_state_layer_ids is empty; "
+                "cannot interpret the hidden-state cache layout."
+            )
+        self._planes_dim = planes_dim(kv, n_planes)
+        self._feat_shape = (
+            (kv.shape[1], kv.shape[3]) if self._planes_dim == 1 else tuple(kv.shape[2:])
+        )
+        self._per_token_elems = int(prod(self._feat_shape))
+        logger.info(
+            "RdmaHiddenStatesConnector: hidden-state cache view %s -> %d planes x %d "
+            "hidden (planes on dim %d)",
+            tuple(kv.shape),
+            self._feat_shape[0],
+            self._feat_shape[1],
+            self._planes_dim,
+        )
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
 
@@ -342,7 +405,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             with torch.cuda.stream(cs):
                 rsm = slot_mapping[offset : offset + n]
                 offset += n
-                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n)  # [n, *feat]
+                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n, self._planes_dim)  # [n, *feat]
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
             ev = torch.cuda.Event()
