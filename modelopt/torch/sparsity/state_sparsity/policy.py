@@ -116,16 +116,8 @@ def _has_supported_gdn_identity(
     )
 
 
-def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
-    """Find supported GDN layers after removing a recognized model wrapper."""
-    model = unwrap_model(model, force_unwrap=True)
-    supported_classes = _supported_gdn_classes()
-    named_modules = list(model.named_modules())
-    identity_modules = [
-        (name, module)
-        for name, module in named_modules
-        if _has_supported_gdn_identity(module, supported_classes)
-    ]
+def _reject_incomplete_gdn_modules(identity_modules: list[tuple[str, nn.Module]]) -> None:
+    """Reject supported identities that do not expose both required decay tensors."""
     missing_decay_parameters = [
         name or "<root>"
         for name, module in identity_modules
@@ -139,6 +131,13 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
             "DASC found supported GDN modules without A_log and dt_bias tensors at: "
             f"{', '.join(missing_decay_parameters)}"
         )
+
+
+def _reject_unconverted_gdn_subclasses(
+    named_modules: list[tuple[str, nn.Module]],
+    supported_classes: tuple[type[nn.Module], ...],
+) -> None:
+    """Reject ordinary subclasses that would otherwise be silently omitted from the policy."""
     unsupported_subclasses = [
         name or "<root>"
         for name, module in named_modules
@@ -152,13 +151,26 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
             f"{', '.join(unsupported_subclasses)}; convert the module with ModelOpt or use a "
             "supported class directly"
         )
-    modules = dict(identity_modules)
-    if not modules:
+
+
+def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
+    """Find supported GDN layers after removing a recognized model wrapper."""
+    model = unwrap_model(model, force_unwrap=True)
+    supported_classes = _supported_gdn_classes()
+    named_modules = list(model.named_modules())
+    identity_modules = [
+        (name, module)
+        for name, module in named_modules
+        if _has_supported_gdn_identity(module, supported_classes)
+    ]
+    _reject_incomplete_gdn_modules(identity_modules)
+    _reject_unconverted_gdn_subclasses(named_modules, supported_classes)
+    if not identity_modules:
         supported = ", ".join(
             f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS
         )
         raise ApplyModeError(f"DASC found no supported GDN modules; expected one of: {supported}")
-    return dict(sorted(modules.items()))
+    return dict(sorted(identity_modules))
 
 
 def _analyze_gdn_modules(

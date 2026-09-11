@@ -269,8 +269,20 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     partially_valid.good = GatedDeltaNet()
     partially_valid.bad = GatedDeltaNet()
     del partially_valid.bad.dt_bias
-    with pytest.raises(ApplyModeError, match="bad"):
+    with pytest.raises(ApplyModeError, match=r"without A_log and dt_bias tensors at: bad$"):
         mtss.analyze_gdn_decay(partially_valid)
+
+    mixed_subclass = nn.Module()
+    mixed_subclass.good = GatedDeltaNet()
+    mixed_subclass.stale = UnsupportedSubclass()
+    with pytest.raises(
+        ApplyModeError,
+        match=(
+            r"not ModelOpt dynamic modules at: stale; convert the module with ModelOpt or use a "
+            r"supported class directly$"
+        ),
+    ):
+        mtss.analyze_gdn_decay(mixed_subclass)
 
     invalid_decay = TinyGatedDeltaNetForCausalLM()
     invalid_decay.linear_attn.dt_bias = nn.Parameter(torch.zeros(3))
