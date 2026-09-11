@@ -72,6 +72,122 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
+class _WeightlessRMSNorm(nn.Module):
+    """RMS normalization with no learnable gain.
+
+    MuseSpark1x builds its ``tok_embeddings_norm`` as ``RMSNorm(..., has_weight=False)``,
+    so there is nothing to load from the checkpoint -- but the normalization itself is
+    load-bearing: the draft consumes these embeddings and trains off-distribution without it.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        dtype = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x.to(dtype)
+
+
+class _TransformedEmbedding(nn.Embedding):
+    """``nn.Embedding`` that reproduces the base's post-embedding transform.
+
+    Callers resolve ``embed_tokens`` and call it as a plain module, so the transform has
+    to live inside the module rather than at the call sites.
+    """
+
+    def __init__(self, *args, embed_norm=None, embed_multiplier=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embed_norm = embed_norm
+        self.embed_multiplier = embed_multiplier
+
+    def forward(self, input_ids):
+        h = super().forward(input_ids)
+        if self.embed_norm is not None:
+            h = self.embed_norm(h)
+        if self.embed_multiplier is not None and self.embed_multiplier != 1.0:
+            h = h * self.embed_multiplier
+        return h
+
+
+class _SoftCappedLMHead(nn.Linear):
+    """``lm_head`` that reproduces the base's logit multiplier and tanh soft cap.
+
+    MuseSpark1x computes ``soft_cap * tanh(logits * metap_mult / soft_cap)`` in fp32.
+    The scaling is done in fp32 here too, but the result is cast back to the head's dtype:
+    the rest of this pipeline already carries bf16 logits, and a [seq, 202048] fp32 tensor
+    would dominate activation memory for no accuracy the KD softmax can use.
+    """
+
+    def __init__(self, *args, logits_multiplier=None, logits_soft_cap=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.logits_multiplier = logits_multiplier
+        self.logits_soft_cap = logits_soft_cap
+
+    def forward(self, x):
+        logits = super().forward(x)
+        if self.logits_multiplier is None and self.logits_soft_cap is None:
+            return logits
+        dtype = logits.dtype
+        out = logits.float()
+        if self.logits_multiplier is not None:
+            out = out * self.logits_multiplier
+        if self.logits_soft_cap is not None:
+            out = self.logits_soft_cap * torch.tanh(out / self.logits_soft_cap)
+        return out.to(dtype)
+
+
+def _select_base_transforms(model_type: str | None, base_cfg) -> dict:
+    """Return the embed/logit transforms a base applies outside embed_tokens and lm_head.
+
+    Empty for every model that does nothing unusual, which is all of them except MuseSpark1x.
+    Hardcoded per model_type for the same reason as the final-norm table: guessing from
+    config keys would silently apply the wrong transform.
+    """
+    if model_type != "musespark1x_omni":
+        return {}
+
+    metap = getattr(base_cfg, "metap", None) or {}
+    if not isinstance(metap, dict):
+        metap = metap.__dict__
+    hidden = getattr(base_cfg, "hidden_size", None)
+    base_width = metap.get("base_width")
+    mode = metap.get("metap_mode")
+
+    # Mirrors MuseSpark1xForCausalLM.__init__: the multiplier only exists when metap is on
+    # AND the router has one inf dim; otherwise it is exactly 1.0.
+    multiplier = 1.0
+    if metap.get("use_metap") and metap.get("router_has_one_inf_dim") and base_width:
+        width_mult = hidden / base_width
+        if mode == "mup":
+            multiplier = width_mult**-1
+        elif mode == "sp":
+            multiplier = width_mult**-0.5
+        else:
+            raise ValueError(f"Unknown metap mode {mode!r} for {model_type}")
+
+    soft_cap = getattr(base_cfg, "output_soft_cap_temp", None)
+    eps = getattr(base_cfg, "rms_norm_eps", 1e-6)
+
+    return {
+        "embed_norm_type": (
+            "rmsnorm_no_weight"
+            if getattr(base_cfg, "normalize_tok_embeddings", False)
+            else None
+        ),
+        "embed_multiplier": (
+            metap.get("m_emb")
+            if (metap.get("use_metap") or metap.get("use_metap_output_multiplier_without_metap"))
+            else None
+        ),
+        "logits_multiplier": multiplier if multiplier != 1.0 else None,
+        "logits_soft_cap": soft_cap,
+        "rms_norm_eps": eps,
+    }
+
+
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -92,6 +208,10 @@ class FakeBaseConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         rope_theta=None,
         final_norm_type=None,
+        embed_norm_type=None,
+        embed_multiplier=None,
+        logits_multiplier=None,
+        logits_soft_cap=None,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
@@ -101,6 +221,13 @@ class FakeBaseConfig(PretrainedConfig):
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
         self.final_norm_type = final_norm_type
+        # Transforms the base applies OUTSIDE embed_tokens / lm_head (see
+        # _select_base_transforms). None everywhere except MuseSpark1x. Persisted so a
+        # reloaded config rebuilds the same modules.
+        self.embed_norm_type = embed_norm_type
+        self.embed_multiplier = embed_multiplier
+        self.logits_multiplier = logits_multiplier
+        self.logits_soft_cap = logits_soft_cap
         self.num_hidden_layers = num_hidden_layers
         # Mirror the original base layer count. The non-fake offline path loads with
         # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
@@ -153,9 +280,25 @@ class FakeBaseModel(PreTrainedModel):
         self.model = nn.Module()
         self.model.layers = nn.ModuleList()
         self.model.dtype = config.dtype
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
-        self.lm_head = nn.Linear(
-            config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
+        embed_norm = (
+            _WeightlessRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if getattr(config, "embed_norm_type", None) == "rmsnorm_no_weight"
+            else None
+        )
+        self.embed_tokens = _TransformedEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            dtype=config.dtype,
+            embed_norm=embed_norm,
+            embed_multiplier=getattr(config, "embed_multiplier", None),
+        )
+        self.lm_head = _SoftCappedLMHead(
+            config.hidden_size,
+            config.vocab_size,
+            bias=False,
+            dtype=config.dtype,
+            logits_multiplier=getattr(config, "logits_multiplier", None),
+            logits_soft_cap=getattr(config, "logits_soft_cap", None),
         )
         # Final pre-lm_head norm, applied before lm_head when reconstructing base logits for
         # self-logit-distillation (vLLM-captured final hidden states are un-normed). Built ONLY
@@ -207,6 +350,7 @@ class FakeBaseModel(PreTrainedModel):
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
+            **_select_base_transforms(getattr(base_cfg, "model_type", None), base_cfg),
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.
