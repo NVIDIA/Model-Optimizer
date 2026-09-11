@@ -13,8 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# W4A4 NVFP4 for Qwen/Qwen3.6-35B-A3B under Megatron-Core (examples/megatron_bridge/quantize.py).
+# W4A4 NVFP4 for Qwen3.6-MoE under **Megatron-Core** (examples/megatron_bridge/quantize.py).
 # Used as the QAD student in examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B.
+#
+# This is architecture-level, not a mirror of a released checkpoint, so it lives under
+# huggingface/<model_type>/ rather than models/<org>/<checkpoint>/. It is the W4A4 counterpart of
+# huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast, which covers the same family for
+# the HuggingFace flow.
+#
+# `_mcore` in the filename is load-bearing: the selectors below are **Megatron-Core leaf names**,
+# so this recipe does nothing under hf_ptq.py. Use the qwen3_5_moe w4a16 recipe for that flow.
 #
 # Qwen3.6-35B-A3B is a VLM whose language model is a 40-layer hybrid: 30 GatedDeltaNet
 # (linear-attention) layers interleaved with 10 full-attention layers (indices 3, 7, ... 39),
@@ -63,15 +71,17 @@ quantize:
     - $import: base_disable_all
 
     # ---- W4A4 NVFP4 (weights AND activations) ------------------------------
-    # TEGroupedLinear may expose one quantizer per expert (`weight_quantizer_<N>`), so wildcard
-    # both sides of the leaf name.
-    - quantizer_name: '*mlp.experts.linear_fc1*weight_quantizer*'
+    # Two expert layouts must both match: TEGroupedMLP (`mlp.experts.linear_fc1.weight_quantizer_<N>`)
+    # and SequentialMLP (`mlp.experts.local_experts.<N>.linear_fc1.weight_quantizer`). The wildcard
+    # between `experts.` and `linear_fc` covers the `local_experts.<N>.` segment; without it the
+    # SequentialMLP layout silently matches nothing.
+    - quantizer_name: '*mlp.experts.*linear_fc1*weight_quantizer*'
       cfg: {$import: nvfp4}
-    - quantizer_name: '*mlp.experts.linear_fc1*input_quantizer*'
+    - quantizer_name: '*mlp.experts.*linear_fc1*input_quantizer*'
       cfg: {$import: nvfp4}
-    - quantizer_name: '*mlp.experts.linear_fc2*weight_quantizer*'
+    - quantizer_name: '*mlp.experts.*linear_fc2*weight_quantizer*'
       cfg: {$import: nvfp4}
-    - quantizer_name: '*mlp.experts.linear_fc2*input_quantizer*'
+    - quantizer_name: '*mlp.experts.*linear_fc2*input_quantizer*'
       cfg: {$import: nvfp4}
     - quantizer_name: '*mlp.shared_experts.linear_fc1*weight_quantizer*'
       cfg: {$import: nvfp4}
@@ -118,9 +128,6 @@ quantize:
     # Disables routers, conv1d, output_layer, embeddings and vision-tower patterns.
     # output_layer is re-enabled below.
     - $import: default_disabled_quantizers
-
-    # Megatron-Bridge names the Qwen3-VL vision tower `vision_model`.
-    - {quantizer_name: 'vision_model*', enable: false}
 
     # Keep the whole MTP subtree in BF16. Must follow the expert / attention selectors above,
     # which would otherwise match its inner layers.

@@ -27,7 +27,7 @@ execution:
   ntasks_per_node: 1
   gpus_per_node: 4
   gres: "gpu:4"
-  walltime: 01:00:00
+  walltime: 02:00:00
   output_dir: ${oc.env:SLURM_JOB_DIR}
   mode: sequential
   mounts:
