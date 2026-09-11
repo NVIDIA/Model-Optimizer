@@ -183,6 +183,11 @@ cat "$CHECKPOINT_PATH"/.experiment.json   # absent (or an HF handle) → nothing
 
 Carry what it says into `export.mlflow` per **Step 4**.
 
+It is a tracking pointer, not a quantization signal — read it independently of the
+quantization detection below, and never infer deploy flags from it either way. A checkpoint
+can carry one and be quantized by something other than ModelOpt, and a ModelOpt checkpoint
+quantized without `--mlflow` carries none.
+
 > **NEVER point `checkpoint_path` at a HuggingFace *cache snapshot* dir.** Entries under
 > `snapshots/<sha>/` are relative symlinks into `../../blobs/`. NEL mounts only the snapshot dir at
 > `/checkpoint`, so every link dangles in-container and vLLM dies with
