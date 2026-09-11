@@ -382,6 +382,84 @@ def test_transposed_experts_calib_mixin_yields_transposed_views():
     assert down_q is experts.down_proj_weight_quantizer
 
 
+@pytest.mark.parametrize("model_type", ["gpt_oss", "llama4"])
+@pytest.mark.parametrize("keep_attrs", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("offload", [None, "cpu", "disk"])
+def test_fold_transposed_expert_weights_preserves_forward(
+    model_type, keep_attrs, dtype, offload, tmp_path
+):
+    set_seed()
+    if model_type == "gpt_oss":
+        model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
+    else:
+        model = AutoModelForCausalLM.from_config(
+            transformers.Llama4TextConfig(
+                num_hidden_layers=1,
+                num_local_experts=4,
+                hidden_size=32,
+                intermediate_size=48,
+                intermediate_size_mlp=48,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                head_dim=16,
+                vocab_size=32,
+                pad_token_id=0,
+                bos_token_id=1,
+                eos_token_id=2,
+                no_rope_layers=[0],
+            )
+        )
+    model = model.to(dtype=dtype).eval()
+    input_ids = torch.randint(0, 32, (2, 7))
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.experts.*weight_quantizer",
+                "cfg": {"num_bits": 8, "axis": (0, 1)},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(input_ids))
+    experts = next(
+        module for module in model.modules() if isinstance(module, _TransposedExpertsCalibMixin)
+    )
+    pairs = list(experts.iter_weights_for_calibration())
+    for weight, quantizer in pairs:
+        quantizer.pre_quant_scale = torch.linspace(0.75, 1.25, weight.shape[-1], dtype=dtype)
+    pointers = [weight.data_ptr() for weight, _ in pairs]
+
+    with torch.no_grad():
+        expected = model(input_ids).logits
+        if offload is not None:
+            # Accelerate is optional; only offload cases require it.
+            accelerate = pytest.importorskip("accelerate")
+            if offload == "cpu":
+                accelerate.cpu_offload(experts, execution_device=torch.device("cpu"))
+            else:
+                accelerate.disk_offload(
+                    experts, tmp_path / "offload", execution_device=torch.device("cpu")
+                )
+            assert experts.gate_up_proj.is_meta
+            torch.testing.assert_close(model(input_ids).logits, expected)
+        mtq.fold_weight(model, keep_attrs=keep_attrs)
+        torch.testing.assert_close(model(input_ids).logits, expected)
+        for (weight, quantizer), pointer in zip(pairs, pointers):
+            if offload is None:
+                assert weight.data_ptr() == pointer
+            assert not quantizer.is_enabled
+            assert quantizer.pre_quant_scale is None
+            assert hasattr(quantizer, "_amax") == keep_attrs
+            assert hasattr(quantizer, "_pre_quant_scale") == keep_attrs
+        mtq.fold_weight(model, keep_attrs=keep_attrs)
+        torch.testing.assert_close(model(input_ids).logits, expected)
+        if offload is not None:
+            assert experts.gate_up_proj.is_meta
+            assert experts.down_proj.is_meta
+
+
 def test_hf_decoder_discoverer_registration_path():
     model = get_tiny_llama()
     assert any(
