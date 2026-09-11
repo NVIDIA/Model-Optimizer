@@ -65,6 +65,14 @@ class _DASCDecayParametersUnavailableError(_DASCRecoverableStalenessError):
     """Identify supported GDN modules whose decay tensors are temporarily unavailable."""
 
 
+def _validate_analysis_arguments(epsilon: float, static_gate_input: float) -> None:
+    """Normalize invalid public analysis arguments to the ValueError contract."""
+    if not isinstance(epsilon, float | int) or not (math.isfinite(epsilon) and 0.0 < epsilon < 1.0):
+        raise ValueError("epsilon must be finite and in (0, 1)")
+    if not isinstance(static_gate_input, float | int) or not math.isfinite(static_gate_input):
+        raise ValueError("static_gate_input must be finite")
+
+
 def _validate_gdn_decay_tensors(a_log: torch.Tensor, dt_bias: torch.Tensor) -> None:
     """Reject decay tensors that cannot produce well-defined horizons."""
     if a_log.ndim != 1 or dt_bias.ndim != 1 or a_log.shape != dt_bias.shape or not a_log.numel():
@@ -115,9 +123,7 @@ def compute_gdn_decay_horizons(
     static_gate_input: float = -0.3,
 ) -> torch.Tensor:
     """Compute one static retention horizon per GDN head in CPU float64."""
-    if not 0.0 < epsilon < 1.0:
-        raise ValueError("epsilon must be in (0, 1)")
-
+    _validate_analysis_arguments(epsilon, static_gate_input)
     _validate_gdn_decay_tensors(a_log, dt_bias)
     a_log_cpu = a_log.detach().to(device="cpu", dtype=torch.float64)
     dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
@@ -210,9 +216,8 @@ def _analyze_gdn_modules(
         a_log = module.A_log
         dt_bias = module.dt_bias
         try:
-            # Check the original tensors before a storage cast can hide an invalid integer dtype.
-            _validate_gdn_decay_tensors(a_log, dt_bias)
             if storage_dtype is not None:
+                _validate_gdn_decay_tensors(a_log, dt_bias)
                 a_log = a_log.detach().to(device="cpu", dtype=storage_dtype)
                 dt_bias = dt_bias.detach().to(device="cpu", dtype=storage_dtype)
             layer_horizons = compute_gdn_decay_horizons(
@@ -237,18 +242,7 @@ def analyze_gdn_decay(
     decay_parameter_storage_dtype: _DecayParameterStorageDtype | None = None,
 ) -> dict[str, list[float]]:
     """Return per-head horizons, optionally canonicalized to a checkpoint storage dtype."""
-    try:
-        epsilon_is_valid = math.isfinite(epsilon) and 0.0 < epsilon < 1.0
-    except TypeError:
-        epsilon_is_valid = False
-    if not epsilon_is_valid:
-        raise ValueError("epsilon must be finite and in (0, 1)")
-    try:
-        static_gate_input_is_valid = math.isfinite(static_gate_input)
-    except TypeError:
-        static_gate_input_is_valid = False
-    if not static_gate_input_is_valid:
-        raise ValueError("static_gate_input must be finite")
+    _validate_analysis_arguments(epsilon, static_gate_input)
     storage_dtype = None
     if decay_parameter_storage_dtype is not None:
         if (

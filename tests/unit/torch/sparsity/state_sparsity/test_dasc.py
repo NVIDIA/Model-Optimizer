@@ -471,6 +471,24 @@ def test_analysis_rejects_invalid_static_gate_input_at_the_public_boundary(stati
         )
 
 
+@pytest.mark.parametrize(
+    ("argument", "value", "message"),
+    [
+        ("epsilon", [], r"epsilon must be finite and in \(0, 1\)"),
+        ("static_gate_input", [], "static_gate_input must be finite"),
+    ],
+)
+def test_horizon_computation_rejects_invalid_public_arguments(argument, value, message):
+    """Use the same public argument contract for direct horizon computation."""
+    kwargs = {argument: value}
+    with pytest.raises(ValueError, match=message):
+        mtss.compute_gdn_decay_horizons(
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     """Accept BF16-rounded values after a checkpoint loader materializes FP32 tensors."""
     model = mtss.calibrate(
