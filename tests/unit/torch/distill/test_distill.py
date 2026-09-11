@@ -13,17 +13,66 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import gc
 import inspect
 import warnings
+import weakref
 
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input
 from torchvision.models import alexnet
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        [("", ""), ("net", "net"), ("net", "linear1")],
+        [("", ""), ("net", "net"), ("linear1", "net")],
+    ],
+)
+def test_export_releases_captured_activations(pairs):
+    student = SimpleLinear(add_linear=True)
+    reference = copy.deepcopy(student)
+    teacher = SimpleLinear(add_linear=True)
+    hook_calls = []
+    handle = student.net.register_forward_hook(lambda *_: hook_calls.append(True))
+    model = mtd.convert(
+        student,
+        mode=[
+            (
+                "kd_loss",
+                {
+                    "teacher_model": teacher,
+                    "criterion": {pair: nn.MSELoss() for pair in pairs},
+                    "loss_balancer": mtd.StaticLossBalancer([1 / len(pairs)] * len(pairs)),
+                },
+            )
+        ],
+    )
+    inputs = student.get_input()
+    model(inputs)
+    layers = {layer for pair in model._layers_to_loss for layer in pair}
+    captures = [weakref.ref(layer._intermediate_output) for layer in layers]
+    assert all(capture() is not None for capture in captures)
+    assert model._intermediate_output.grad_fn is not None
+
+    exported = mtd.export(model)
+    gc.collect()
+
+    assert exported is student
+    assert type(exported) is SimpleLinear
+    assert all(capture() is None for capture in captures)
+    assert all(not hasattr(layer, "_intermediate_output") for layer in layers)
+    torch.testing.assert_close(exported(inputs), reference(inputs))
+    assert len(hook_calls) == 2
+    handle.remove()
 
 
 def get_input_tensor():

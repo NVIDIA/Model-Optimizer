@@ -67,8 +67,10 @@ class LayerwiseDistillationModel(DistillationModel):
 
     def export(self):
         """Export the distillation model."""
-        for student_layer, _ in self._layers_to_loss:
+        for student_layer in {student for student, _ in self._layers_to_loss}:
             delattr(student_layer, "_teacher_layer")
+        for teacher_layer in {teacher for _, teacher in self._layers_to_loss}:
+            delattr(teacher_layer, "_intermediate_input")
 
         if hasattr(self, "_lm_head"):
             self.lm_head = self._lm_head
