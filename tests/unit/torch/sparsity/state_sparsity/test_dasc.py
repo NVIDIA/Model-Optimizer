@@ -160,11 +160,19 @@ def test_config_fails_closed(override):
 
 
 def test_perplexity_retention_accepts_parity_improvements():
-    """Allow an observed DASC perplexity improvement instead of requiring clamping."""
-    measurement = mtss.DASCCalibrationMeasurement(**_candidate(7))
-    measurement.quality[0].perplexity_retention = 1.0004
+    """Allow improvement measurements and thresholds instead of requiring clamping."""
+    candidate = _candidate(7)
+    candidate["quality"][0]["perplexity_retention"] = 1.0004
+    measurement = mtss.DASCCalibrationMeasurement(**candidate)
 
     assert measurement.quality[0].perplexity_retention == 1.0004
+
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(),
+        _config(wmax_candidates=[7], min_perplexity_retention=1.0002),
+        [candidate],
+    )
+    assert mtss.export_policy(model)["selected_wmax"] == 7
 
 
 def test_calibration_fails_closed_on_measurements_and_model_mismatch():

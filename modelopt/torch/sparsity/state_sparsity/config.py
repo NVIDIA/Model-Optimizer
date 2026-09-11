@@ -142,9 +142,9 @@ class DASCConfig(ModeloptBaseConfig):
     @field_validator("min_perplexity_retention")
     @classmethod
     def validate_perplexity_gate(cls, value: float) -> float:
-        """Require a finite retention gate in (0, 1]."""
-        if not math.isfinite(value) or not 0.0 < value <= 1.0:
-            raise ValueError("min_perplexity_retention must be finite and in (0, 1]")
+        """Require a finite positive retention gate."""
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("min_perplexity_retention must be finite and positive")
         return value
 
     @field_validator("min_top1_agreement")
