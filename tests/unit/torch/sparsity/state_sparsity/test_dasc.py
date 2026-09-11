@@ -514,7 +514,9 @@ def test_policy_lifecycle_ignores_the_default_device():
     with torch.device("meta"):
         calibrated = mtss.calibrate(model, _config(wmax_candidates=[7]), [_candidate(7)])
         state = mto.modelopt_state(calibrated)
+        policy = mtss.export_policy(calibrated)
     assert state["modelopt_state_dict"][0][0] == "dasc"
+    assert policy["layers"]["linear_attn"]["static_horizons"]
 
 
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
