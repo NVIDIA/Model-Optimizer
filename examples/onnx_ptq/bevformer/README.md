@@ -72,7 +72,7 @@ The source repositories, patches, checkpoint, and dataset retain their upstream 
 Download and verify the BEVFormer-tiny checkpoint, then export the original ONNX model:
 
 ```bash
-wget --continue -O ${ARTIFACTS}/bevformer_tiny_epoch_24.pth \
+wget --continue --directory-prefix="${ARTIFACTS}" \
   https://github.com/zhiqi-li/storage/releases/download/v1.0/bevformer_tiny_epoch_24.pth
 echo "7305046dbaa4fe8b1fa6d6acb9e0e3d605a70a3c473f763e936103428d2b2f12  ${ARTIFACTS}/bevformer_tiny_epoch_24.pth" \
   | sha256sum --check
