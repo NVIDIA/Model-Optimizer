@@ -808,3 +808,49 @@ def test_public_kv_autoquant_preserves_preceding_weight_quantization():
         layer.self_attn.k_bmm_quantizer.is_enabled and layer.self_attn.v_bmm_quantizer.is_enabled
         for layer in model.model.layers
     )
+
+
+def test_kv_autoquant_checkpoint_rejects_changed_preceding_quantization(
+    tmp_path, nvfp4_fake_quant_stub
+):
+    def quantized_model(bits):
+        return mtq.quantize(
+            get_tiny_llama(num_hidden_layers=1),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "*.weight_quantizer",
+                        "cfg": _quantizer_cfg(bits, constant_amax=1.0),
+                    },
+                ],
+                "algorithm": None,
+            },
+        )
+
+    candidate = _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump()
+    data = [{"input_ids": torch.randint(0, 16, (1, 8))}]
+    checkpoint = str(tmp_path / "kv_search.pth")
+
+    mtq.auto_quantize(
+        quantized_model((4, 3)),
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda model, batch: model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="preceding non-K/V quantizer"):
+        mtq.auto_quantize(
+            quantized_model((2, 1)),
+            {"effective_bits": 8.0, "cost_model": "kv_cache"},
+            [candidate],
+            data,
+            lambda *_: pytest.fail("A stale checkpoint must be rejected before scoring."),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint,
+        )
