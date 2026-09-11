@@ -31,21 +31,32 @@ Audit PRs merged into `main` since the latest release candidate. Exclude PRs tha
 git fetch origin main "release/$VERSION" --tags
 RC_TAG=$(git tag --merged "origin/release/$VERSION" \
   --list "${VERSION}rc*" --sort=-version:refname | head -1)
-test -n "$RC_TAG"
+test -n "$RC_TAG" || {
+  echo "No ${VERSION}rc* tag found on origin/release/$VERSION" >&2
+  exit 1
+}
 SINCE=$(git for-each-ref --format='%(creatordate:iso-strict)' \
   "refs/tags/$RC_TAG")
 
 PATCH_STATUS=$(git cherry "origin/release/$VERSION" origin/main)
 
-gh search prs \
-  --repo NVIDIA/Model-Optimizer \
-  --merged \
-  --base main \
-  --merged-at ">=$SINCE" \
-  --limit 1000 \
-  --json number,title,author,labels,url \
-  -- "-label:cherry-pick-$VERSION" \
-  | jq -r '.[].number' \
+SEARCH_RESULTS=$(
+  gh search prs \
+    --repo NVIDIA/Model-Optimizer \
+    --merged \
+    --base main \
+    --merged-at ">=$SINCE" \
+    --limit 1000 \
+    --json number,title,author,labels,url \
+    -- "-label:cherry-pick-$VERSION"
+)
+
+if test "$(jq 'length' <<<"$SEARCH_RESULTS")" -ge 1000; then
+  echo "Recent-PR audit reached the 1,000-result limit" >&2
+  exit 1
+fi
+
+jq -r '.[].number' <<<"$SEARCH_RESULTS" \
   | while read -r pr; do
       sha=$(gh pr view "$pr" --repo NVIDIA/Model-Optimizer \
         --json mergeCommit --jq '.mergeCommit.oid')
@@ -56,7 +67,7 @@ gh search prs \
     done
 ```
 
-Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
+A release is not normally expected to reach the 1,000-PR limit.
 
 Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
 
@@ -83,7 +94,7 @@ Use `—` when no NVBug is known. Also list NVBugs with no linked PR. Ask the us
 
 ```bash
 for pr in <APPROVED_NUMBERS>; do
-  gh pr edit "$pr" --repo NVIDIA/Model-Optimizer --add-label "cherry-pick-<VERSION>"
+  gh pr edit "$pr" --repo NVIDIA/Model-Optimizer --add-label "cherry-pick-$VERSION"
 done
 ```
 
