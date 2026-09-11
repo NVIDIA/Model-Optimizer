@@ -21,19 +21,21 @@ Before fetching the labeled queue, audit release NVBugs and recent merged PRs so
 
 Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned.
 
-Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Verify each linked PR is merged into `main` and is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
+Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Keep only PRs that are merged into `main`, lack `cherry-pick-<VERSION>`, and are not already included in the release branch. Verify each remaining PR is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
 
 ### Audit recent merged PRs
 
 Treat PRs merged into `main` since the latest release candidate as "recent":
 
 ```bash
-git fetch origin main release/<VERSION> --tags
-RC_TAG=$(git tag --merged origin/release/<VERSION> \
-  --list '<VERSION>rc*' --sort=-version:refname | head -1)
+git fetch origin main "release/$VERSION" --tags
+RC_TAG=$(git tag --merged "origin/release/$VERSION" \
+  --list "${VERSION}rc*" --sort=-version:refname | head -1)
 test -n "$RC_TAG"
 SINCE=$(git for-each-ref --format='%(creatordate:iso-strict)' \
   "refs/tags/$RC_TAG")
+
+PATCH_STATUS=$(git cherry "origin/release/$VERSION" origin/main)
 
 gh search prs \
   --repo NVIDIA/Model-Optimizer \
@@ -41,10 +43,20 @@ gh search prs \
   --base main \
   --merged-at ">=$SINCE" \
   --limit 1000 \
-  --json number,title,author,labels,url
+  --json number,title,author,labels,url \
+  -- "-label:cherry-pick-$VERSION" \
+  | jq -r '.[].number' \
+  | while read -r pr; do
+      sha=$(gh pr view "$pr" --repo NVIDIA/Model-Optimizer \
+        --json mergeCommit --jq '.mergeCommit.oid')
+      if grep -q "^+ $sha$" <<<"$PATCH_STATUS"; then
+        gh pr view "$pr" --repo NVIDIA/Model-Optimizer \
+          --json number,title,author,labels,url
+      fi
+    done
 ```
 
-Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
+`git cherry` marks patches absent from the release branch with `+`. It omits directly inherited commits and marks patch-equivalent cherry-picks with `-`, so only `+` candidates proceed. Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
 
 Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
 
