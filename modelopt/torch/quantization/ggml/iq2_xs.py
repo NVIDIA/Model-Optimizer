@@ -218,8 +218,8 @@ def quantize_iq2_xs(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XS blocks.
 
-    Returned shapes are [*weight.shape[:-1], weight.shape[-1] // 256, 74]
-    and [weight.ndim]. Both tensors remain on the weight's device.
+    Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 74]``
+    and ``[weight.ndim]``. Both tensors remain on the weight's device.
     """
     validate_weight(weight, "IQ2_XS")
     if block_chunk_size <= 0:
