@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import dataclasses
-import sys
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -48,8 +48,6 @@ def _allocate_calibration_blocks(
     """
     kv_cache_config = self.model_runner.kv_cache_config
     kv_cache_groups = kv_cache_config.kv_cache_groups
-    empty_block_ids = tuple([] for _ in kv_cache_groups)
-
     model_runner = self.model_runner
     vllm_config = model_runner.vllm_config
 
@@ -60,8 +58,12 @@ def _allocate_calibration_blocks(
             from vllm.utils.math_utils import cdiv
             from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
         except ImportError:
-            # Older vLLM versions used empty block tables for this path.
-            return [empty_block_ids for _ in sequence_lengths], None
+            warnings.warn(
+                "vLLM warmup block reservation helpers were not found; falling back to "
+                "empty block tables. Hybrid attention/Mamba models may produce NaNs.",
+                stacklevel=2,
+            )
+            return [tuple([] for _ in kv_cache_groups) for _ in sequence_lengths], None
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
             """Calculate the vLLM 0.26 warmup block reservation."""
@@ -120,10 +122,17 @@ def _cleanup_calibration_requests(
 ) -> None:
     """Clean request state without hiding an active calibration error."""
     try:
+        # Zero-token steps return before forward/sampling, so no sample_tokens call is needed.
         self.execute_model(cleanup_output)
     except Exception as execute_error:
+        finish_requests = getattr(self.model_runner, "finish_requests", None)
+        if finish_requests is None:
+            if calibration_error is not None:
+                raise calibration_error from execute_error
+            raise
+
         try:
-            self.model_runner.finish_requests(cleanup_output)
+            finish_requests(cleanup_output)
         except Exception as finish_error:
             if calibration_error is not None:
                 finish_error.__cause__ = execute_error
@@ -198,35 +207,34 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                 grammar_bitmask=None,
                 new_block_ids_to_zero=new_block_ids_to_zero,
             )
+            # Submit a zero-token scheduler step after the request has been
+            # registered. This is the vLLM 0.28 cleanup path and removes
+            # request-scoped attention/Mamba state from the persistent batch.
+            cleanup_output = _create_new_data_cls(
+                type(scheduler_output),
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=CachedRequestData.make_empty(),
+                num_scheduled_tokens={},
+                total_num_scheduled_tokens=0,
+                scheduled_spec_decode_tokens={},
+                scheduled_encoder_inputs={},
+                num_common_prefix_blocks=[0] * num_groups,
+                finished_req_ids=set(num_scheduled_tokens),
+                free_encoder_mm_hashes=[],
+                kv_connector_metadata=None,
+                structured_output_request_ids={},
+                grammar_bitmask=None,
+            )
             try:
                 output = self.execute_model(scheduler_output)
                 if hasattr(self, "sample_tokens"):
                     if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                         self.sample_tokens(None)
-            finally:
-                # Submit a zero-token scheduler step after the request has been
-                # registered. This is the vLLM 0.28 cleanup path and removes
-                # request-scoped attention/Mamba state from the persistent batch.
-                cleanup_output = _create_new_data_cls(
-                    type(scheduler_output),
-                    scheduled_new_reqs=[],
-                    scheduled_cached_reqs=CachedRequestData.make_empty(),
-                    num_scheduled_tokens={},
-                    total_num_scheduled_tokens=0,
-                    scheduled_spec_decode_tokens={},
-                    scheduled_encoder_inputs={},
-                    num_common_prefix_blocks=[0] * num_groups,
-                    finished_req_ids=set(num_scheduled_tokens),
-                    free_encoder_mm_hashes=[],
-                    kv_connector_metadata=None,
-                    structured_output_request_ids={},
-                    grammar_bitmask=None,
-                )
-                _cleanup_calibration_requests(
-                    self,
-                    cleanup_output,
-                    calibration_error=sys.exc_info()[1],
-                )
+            except BaseException as calibration_error:
+                _cleanup_calibration_requests(self, cleanup_output, calibration_error)
+                raise
+
+            _cleanup_calibration_requests(self, cleanup_output, calibration_error=None)
 
     return calibrate_loop
 

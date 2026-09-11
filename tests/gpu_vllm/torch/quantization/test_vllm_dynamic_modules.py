@@ -91,6 +91,26 @@ def test_cleanup_failure_preserves_calibration_error(has_calibration_error):
     assert finish_error.__cause__ is execute_error
 
 
+@pytest.mark.parametrize("has_calibration_error", [False, True])
+def test_cleanup_without_legacy_fallback_preserves_primary_error(has_calibration_error):
+    """Missing legacy cleanup must preserve the most useful primary error."""
+    module = _load_example_module("vllm_ptq_utils")
+    execute_error = RuntimeError("scheduler cleanup failed")
+    calibration_error = ValueError("calibration failed") if has_calibration_error else None
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=execute_error),
+        model_runner=SimpleNamespace(),
+    )
+
+    expected_error = calibration_error or execute_error
+    with pytest.raises(type(expected_error)) as raised:
+        module._cleanup_calibration_requests(worker, object(), calibration_error)
+
+    assert raised.value is expected_error
+    if calibration_error is not None:
+        assert calibration_error.__cause__ is execute_error
+
+
 def test_cleanup_uses_legacy_fallback():
     """A successful legacy cleanup may recover from an unsupported scheduler step."""
     module = _load_example_module("vllm_ptq_utils")
