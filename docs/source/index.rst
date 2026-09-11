@@ -13,6 +13,9 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
+         <button class="announcement-tag" type="button" data-tag="quantization" aria-pressed="false">Quantization</button>
+         <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
+         <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -24,6 +27,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-11" data-title="Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation" data-summary="Weight-only NVFP4 is slower than BF16 on Blackwell; W4A4 unlocks the FP4 kernels, and QAD recovers the accuracy it costs." data-tags="quantization nvfp4 w4a4 qad distillation megatron-bridge">
+       <div class="announcement-card-meta">September 11, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
+       <p>Weight-only NVFP4 is <em>slower</em> than BF16 on Blackwell. W4A4 beats it in 9 of 12 shapes, and QAD recovers the accuracy W4A4 costs on Qwen3.6-35B-A3B.</p>
+       <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>w4a4</span><span>qad</span><span>distillation</span><span>megatron-bridge</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>

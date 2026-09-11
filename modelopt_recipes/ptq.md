@@ -243,7 +243,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -252,7 +252,7 @@ The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -322,6 +322,16 @@ on the routed experts — the general recipe would quantize *nothing* and export
 checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
 router (`moe.gate`) and `share_expert` on top. Use them, not the general
 recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
+
+- **`qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore`** is the **Megatron-Core** W4A4
+  counterpart of `qwen3_5_moe`'s W4A16 recipe, used as the QAD student in the
+  [Qwen3.6-35B-A3B tutorial](../examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md).
+  MoE routed + shared experts and `lm_head` → NVFP4 W4A4 (block 16); softmax attention and the
+  GatedDeltaNet `in_proj`/`out_proj` → FP8 W8A8; KV cache → FP8 cast; MTP block, routers, `conv1d`,
+  the vision tower and embeddings stay BF16. W4A4 rather than W4A16 because a BF16 activation keeps
+  vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
+  load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
+  `self_attention.linear_qkv`), so it does nothing under `hf_ptq.py`.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
