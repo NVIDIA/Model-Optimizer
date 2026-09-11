@@ -105,8 +105,7 @@ def _allocate_calibration_blocks(
         raise RuntimeError(
             "Calibration batch requires "
             f"{next_block_id - 1} KV cache blocks, but only "
-            f"{kv_cache_config.num_blocks - 1} non-null blocks are available. "
-            "Reduce CALIB_BATCH_SIZE or calibration sequence length."
+            f"{kv_cache_config.num_blocks - 1} non-null blocks are available."
         )
 
     scheduler_fields = {field.name for field in dataclasses.fields(SchedulerOutput)}
