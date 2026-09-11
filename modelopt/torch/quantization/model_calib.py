@@ -76,6 +76,7 @@ __all__ = [
     "local_hessian_calibrate",
     "lsq",
     "max_calibrate",
+    "mse_calibrate",
     "nvfp4_act_headroom_calibrate",
     "smoothquant",
     "svdquant",
