@@ -23,7 +23,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Composes dynamic NVFP4 W4A4 model quantization with FP8 KV-cache cast mode using constant amax;
     uses max calibration.

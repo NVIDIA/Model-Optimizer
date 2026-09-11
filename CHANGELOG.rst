@@ -18,7 +18,7 @@ Changelog
 **Deprecations**
 
 - The TensorRT-LLM checkpoint export format is deprecated and will be removed in 0.49.0: ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning`` on use. Use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang. Its implementation moved to ``modelopt.torch.export.trtllm``, so import those two functions from there and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``; both functions remain importable from ``modelopt.torch.export`` for this release only.
-- Deprecate ``metadata.recipe_type`` in recipe YAML. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does; ``recipe_type`` is still read and still honoured, so no existing recipe needs changing, but new recipes should leave it out. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
+- Deprecate ``metadata.recipe_type`` in recipe YAML. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does; ``recipe_type`` is still read and still honoured, so a recipe outside this repo keeps working unchanged, but new recipes should leave it out and every recipe shipped here has been converted. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
 
 **Bug Fixes**
 

@@ -23,7 +23,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies dynamic NVFP4 only to expert-layer weight and input quantizers, plus FP8 KV-cache cast
     mode using constant amax; uses max calibration.

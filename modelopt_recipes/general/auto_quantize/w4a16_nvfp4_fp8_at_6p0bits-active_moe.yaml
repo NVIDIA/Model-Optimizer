@@ -24,7 +24,6 @@ imports:
   w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
 metadata:
-  recipe_type: auto_quantize
   description: >-
     Mixed FP8 + NVFP4-weight-only per-layer search at 6.0 effective bits with the
     active-MoE cost model (expert ratio 0.03125).

@@ -11,13 +11,13 @@
 # Weights: 4/6 NVFP4, per-block M=6 vs M=4 selected by MSE. Activations: dynamic NVFP4 (NOT MSE).
 # Shared experts + mamba in/out_proj + KV cache: FP8. Everything else: BF16.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
   nvfp4: configs/numerics/nvfp4
   fp8: configs/numerics/fp8
 
 metadata:
-  recipe_type: ptq
   description: Ultra NVFP4 with Four-Over-Six (4/6) MSE-selected weights on routed experts (W4A4, block 16); dynamic NVFP4 activations (not MSE); shared
     experts + mamba in/out_proj + KV cache FP8; everything else BF16.
 quantize:

@@ -25,12 +25,12 @@
 # are model.layers.<i>.ffn.experts.<j>.w{1,2,3}. The shared expert is the same
 # Expert class under a different MoE attribute, so it is disabled explicitly.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     DeepSeek-V4-Pro-0813 recipe quantizing only the routed-expert linears to
     NVFP4 (weights and activations). Shared experts, attention, router gates,

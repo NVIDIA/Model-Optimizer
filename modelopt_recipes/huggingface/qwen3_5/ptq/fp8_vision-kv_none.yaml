@@ -15,12 +15,12 @@
 
 # Dense Qwen3.5 Vision Encoder FP8 with a high-precision language model and KV cache.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   vision_fp8: huggingface/qwen3_vl/ptq/vision_fp8.quant_cfg
 
 metadata:
-  recipe_type: ptq
   description: >-
     FP8 quantization of dense Qwen3.5 Vision Encoder Linear layers, including any merger Linears;
     the language model, KV cache, patch embedding, and vision-attention operands remain in high

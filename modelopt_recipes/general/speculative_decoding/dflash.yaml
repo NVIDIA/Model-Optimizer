@@ -1,7 +1,7 @@
 # DFlash speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
 metadata:
-  recipe_type: speculative_dflash
   description: DFlash training recipe (model/data/training/dflash bundled).
 
 # maps to ModelArguments (main.py)

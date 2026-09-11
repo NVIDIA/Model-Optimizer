@@ -22,7 +22,6 @@ imports:
   nvfp4_static: configs/numerics/nvfp4_static
 
 metadata:
-  recipe_type: ptq
   description: >-
     MiniMax-M3 mixed MXFP8 and NVFP4 PTQ. Routed experts use MSE-calibrated
     NVFP4 weights and dynamic NVFP4 activations with input_scale fixed to 1.0;

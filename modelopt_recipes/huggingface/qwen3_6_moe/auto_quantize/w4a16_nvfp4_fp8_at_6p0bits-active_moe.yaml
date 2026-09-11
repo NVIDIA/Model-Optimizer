@@ -25,7 +25,6 @@ imports:
   w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
 metadata:
-  recipe_type: auto_quantize
   description: >-
     Qwen3.6 MoE: FP8 + NVFP4-weight-only per-layer search at 6.0 effective bits, active-MoE
     cost model (expert ratio 0.03125), with architecture-specific disabled layers.

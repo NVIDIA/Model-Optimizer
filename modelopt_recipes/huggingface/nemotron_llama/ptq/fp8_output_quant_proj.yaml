@@ -20,6 +20,7 @@
 # top of the FP16 activations, so the engine uses MORE activation memory than
 # an unquantized FP16 engine. [5726458]
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
@@ -27,7 +28,6 @@ imports:
   fp8: configs/numerics/fp8
 
 metadata:
-  recipe_type: ptq
   description: 'Llama-Nemotron embedding/reranking PTQ recipe (fp8 + projection output quantizers): same numerics as the general fp8 preset, plus per-tensor
     FP8 output quantizers on the projection Linears so TensorRT engines carry FP8 activations between layers.'
 quantize:
