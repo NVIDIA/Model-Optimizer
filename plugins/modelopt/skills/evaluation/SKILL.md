@@ -144,7 +144,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link.
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link. Before filling `experiment_name`/`tags`, read the checkpoint's `.experiment.json` (Step 3) and carry the PTQ run's experiment name plus its `modelopt_*` tags across (Step 4).
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
@@ -172,6 +172,16 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 ### Step 3 — Configure deployment
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
+
+**With the path in hand, read its ModelOpt provenance** — a PTQ run tracked with
+`hf_ptq.py --mlflow` leaves `.experiment.json` in the checkpoint it wrote. Do it now rather
+than at Step 4, so the values are already on hand when you name the experiment:
+
+```bash
+cat "$CHECKPOINT_PATH"/.experiment.json   # absent (or an HF handle) → nothing to carry, name the experiment as usual
+```
+
+Carry what it says into `export.mlflow` per **Step 4**.
 
 > **NEVER point `checkpoint_path` at a HuggingFace *cache snapshot* dir.** Entries under
 > `snapshots/<sha>/` are relative symlinks into `../../blobs/`. NEL mounts only the snapshot dir at
@@ -363,6 +373,37 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, the `cpu_partition` for auto-export, etc.). Don't propose defaults; let them give plain text. (`tracking_uri` is **not** one of these — it's `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config`.)
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
+- **ModelOpt provenance — carry the PTQ run forward.** When Step 3 found a
+  `.experiment.json`, group this eval under the quantization that produced the checkpoint:
+
+  | `.experiment.json` field | goes to |
+  | --- | --- |
+  | `experiment_name` | `export.mlflow.experiment_name`, verbatim — replaces `${oc.env:USER}/CHANGEME-served-model-name` |
+  | `run_name` | tag `modelopt_run_name` |
+  | `run_id` | tag `modelopt_run_id` |
+  | `run_url` | tag `modelopt_run_url` |
+  | `tracking_uri` | nothing — see below |
+  | `experiment_id` | nothing; an experiment ID is server-local and means nothing on the eval server |
+
+  **Quote all three tag values** like the neighbouring tags: an unquoted all-digit `run_id`
+  or a `run_name` such as `20260910` is coerced to an int or a date and reaches MLflow
+  wrong. Copy them literally — `${deployment.*}` does not resolve in the export block. The
+  `modelopt_` prefix is required: untagged `run_id` / `run_name` read as this eval's own run.
+  Leave `description` identifying the *eval* — once `experiment_name` is the PTQ's, the
+  description is the only run-level place the served model still appears.
+
+  **`tracking_uri` stays `${oc.env:MLFLOW_TRACKING_URI}`** — never the file's. What that
+  buys depends on whether the two match, so know which case you are in:
+
+  - **Same server** (file's `tracking_uri` == `$MLFLOW_TRACKING_URI`): the eval genuinely
+    lands in the PTQ run's experiment, next to it.
+  - **Different servers** (the usual case — `modelopttools:eval-config` points evals at
+    `mlflow.frontier-evals`, while `hf_ptq --mlflow` typically writes to
+    `mlflow-modelopt`): the export **creates a new, empty experiment of the same name** on
+    the eval server. Evals of one checkpoint still group together under a stable name, but
+    the PTQ run is *not* there — it is reachable only through `modelopt_run_url`. Say so
+    when you report the run, so nobody goes looking for the PTQ beside the eval.
+
 - **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
 **Walltime cap: 4 hours.** Always `execution.walltime: "04:00:00"`. The cluster does not schedule jobs longer than 4h — this is a hard limit, not a preference.

@@ -193,6 +193,13 @@ with its own `run_id`, copying the shared `services:` block.
   alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
   the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back
   to the canonical host.
+- **ModelOpt provenance.** Same rule as SKILL.md Step 4: if the served checkpoint holds a
+  `.experiment.json` (left by `hf_ptq.py --mlflow`), use its `experiment_name` verbatim
+  instead of `<user>/<model>` and add its quoted `run_name`/`run_id`/`run_url` as the
+  `modelopt_run_name`/`modelopt_run_id`/`modelopt_run_url` tags. Keep `tracking_uri` as
+  `${MLFLOW_TRACKING_URI}` — when the PTQ tracked elsewhere, the inherited name creates a
+  same-named experiment here and `modelopt_run_url` is the only route back. Absent → name
+  it as usual.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
