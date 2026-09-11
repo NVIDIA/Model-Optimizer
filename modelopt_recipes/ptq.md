@@ -258,15 +258,15 @@ The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
 
-> **Most `models/<org>/<checkpoint>/` folders are aliases, not deviations.** A
-> published checkpoint that a general (or `huggingface/<model_type>`) recipe
-> reproduces unchanged still gets a folder at its own hub path, holding a thin
-> file that imports that recipe wholesale and overrides only `metadata` — no
-> duplicated `quant_cfg`. The sections below describe only the folders that
-> genuinely deviate; [`published_checkpoints.md`](published_checkpoints.md) lists
-> every checkpoint and says which of the two it is. See
-> [`models/README.md`](models/README.md) for the alias format and when to write
-> one.
+> **Not every `models/<org>/<checkpoint>/` folder holds a deviation.** When a
+> general (or `huggingface/<model_type>`) recipe already produces a released
+> checkpoint's scheme, the folder holds a thin **alias** that imports that recipe
+> wholesale and overrides only `metadata` — no duplicated `quant_cfg` — so the
+> recipe is reachable from the checkpoint's own hub path. [Checkpoint
+> mirrors](#checkpoint-mirrors--modelsorgcheckpoint) covers the folders that
+> genuinely deviate and [Aliases](#aliases--a-general-recipe-under-a-checkpoints-hub-path)
+> the ones that don't; see [`models/README.md`](models/README.md) for the alias
+> format and when to write one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
@@ -491,21 +491,23 @@ plus a load-bearing vision-tower exclusion and the VLM-required
 
 ---
 
-## Reproducing a released checkpoint
+## Aliases — a general recipe under a checkpoint's hub path
 
-[`published_checkpoints.md`](published_checkpoints.md) lists every model in NVIDIA's
-[Inference Optimized Checkpoints][collection] collection next to the recipe that
-reproduces it — general, `huggingface/<model_type>` or `models/<org>/<model_id>`,
-whichever applies. Most releases are reproduced by a **general** recipe; the
-model-specific tiers exist only for the ones that deviate.
+These folders carry no scheme of their own. Each is a one-line delegation to the
+general recipe named next to it, so `--recipe models/<org>/<model_id>/ptq/<name>`
+resolves from a released checkpoint's hub path and edits to the general recipe flow
+through automatically:
 
-The pairings are not asserted by hand. `tools/recipe_backfill/` records each released
-checkpoint's per-module quantization map (from its `hf_quant_config.json`, its exported
-scale tensors and its safetensors headers) and replays each recipe's `quant_cfg` over
-those module names, so a recipe edit that stops reproducing a release fails in
-`tests/unit/recipe/test_published_checkpoint_recipes.py`.
+- **`models/nvidia/Llama-3_1-Nemotron-Ultra-253B-v1/ptq/fp8_default-kv_fp8_cast`**,
+  **`models/nvidia/Llama-3_3-Nemotron-Super-49B-v1/ptq/fp8_default-kv_fp8_cast`** and
+  **`models/nvidia/Llama-3_3-Nemotron-Super-49B-v1_5/ptq/fp8_default-kv_fp8_cast`**
+  all alias `general/ptq/fp8_default-kv_fp8_cast`. Their FP8 releases are uniform W8A8
+  with an FP8 KV cache and exclude only `lm_head`, which the general recipe's standard
+  exclusions already leave out.
 
-[collection]: https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer
+Add one the same way: point `$import` at the general recipe and write a `metadata`
+description saying which release it corresponds to. A checkpoint earns a body of its
+own only when no portable recipe expresses its scheme.
 
 ---
 

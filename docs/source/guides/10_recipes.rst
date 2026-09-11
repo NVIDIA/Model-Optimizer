@@ -539,15 +539,12 @@ and
 `modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
 for the layout conventions and recipe-lookup order.
 
-Every checkpoint NVIDIA has published in the `Inference Optimized Checkpoints
-<https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer>`_
-collection has an entry under ``models/``, so you can go from a released checkpoint
-straight to the recipe that reproduces it. Most are **aliases**: the release is
-reproduced unchanged by a general or architecture recipe, and the entry imports that
-recipe wholesale rather than copying it. The rest are **mirrors**, whose body captures a
-per-layer scheme no portable recipe can express.
-`modelopt_recipes/published_checkpoints.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/published_checkpoints.md>`_
-is the full index.
+A checkpoint entry comes in two forms. A **mirror** carries its own body, because the
+release uses a per-layer scheme no portable recipe expresses. An **alias** has no body of
+its own: a general or architecture recipe already produces that scheme, so the entry
+imports that recipe wholesale and exists to make it findable from the checkpoint's hub
+path. See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for what each checkpoint entry does.
 
 .. list-table::
    :header-rows: 1
@@ -594,7 +591,7 @@ mismatch rather than left to fail on whatever the spliced sections do to the sch
 What *is* required: a recipe that another file imports must carry the schema comment,
 since ``$import`` resolution needs it to validate the imported payload.  A recipe nothing
 imports needs no comment at all.  This is how the checkpoint aliases under ``models/``
-record which recipe reproduces a release without duplicating it.
+name the recipe behind a release without duplicating its body.
 
 Loading recipes
 ===============

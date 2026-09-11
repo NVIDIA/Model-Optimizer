@@ -408,7 +408,7 @@ def test_load_recipe_delegates_whole_body_to_import(tmp_path):
     """A top-level ``$import`` supplies the body; local keys override the imported ones.
 
     This is what the checkpoint aliases under ``modelopt_recipes/models/`` rely on: they
-    record which recipe reproduces a published checkpoint without copying its body.
+    name the recipe behind a published checkpoint without copying its body.
     """
     alias = _write_alias_pair(
         tmp_path,

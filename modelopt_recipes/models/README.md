@@ -8,12 +8,11 @@ such as the [Hugging Face Hub](https://huggingface.co/),
 `model_type` (an architecture shared by many checkpoints), an entry here is keyed
 to **one checkpoint**.
 
-Every checkpoint NVIDIA has published is listed here, in one of two forms: a
-**mirror**, whose body reproduces a per-layer scheme no portable recipe can
-express, or an **alias**, which records that a `general/` or
-`huggingface/<model_type>/` recipe reproduces the release unchanged and imports
-it wholesale. See [What belongs here](#what-belongs-here) for which to write, and
-[`../published_checkpoints.md`](../published_checkpoints.md) for the full index.
+An entry takes one of two forms: a **mirror**, whose body reproduces a per-layer
+scheme no portable recipe can express, or an **alias**, which records that a
+`general/` or `huggingface/<model_type>/` recipe already produces that
+checkpoint's scheme and imports it wholesale. See
+[What belongs here](#what-belongs-here) for which to write.
 
 ## Folder structure
 
@@ -94,10 +93,10 @@ to its general baseline.
 
 ### 2. Aliases — the recipe lives elsewhere, the *record* lives here
 
-Most released checkpoints are reproduced by a portable recipe with no
-checkpoint-specific changes at all. Those still get an entry here, so every
-published checkpoint is findable at its own hub path — but the entry is a thin
-**alias** that delegates its whole body to the recipe that reproduces it:
+Many released checkpoints use a scheme a portable recipe already produces, with no
+checkpoint-specific changes at all. Those can still get an entry here, so the recipe
+is findable at the checkpoint's own hub path — but the entry is a thin **alias**
+that delegates its whole body to that recipe:
 
 ```yaml
 imports:
@@ -106,9 +105,8 @@ imports:
 $import: base
 metadata:
   description: >-
-    meta-llama/Llama-3.1-8B-Instruct as published in nvidia/Llama-3.1-8B-Instruct-NVFP4.
-    Alias for `general/ptq/nvfp4_default-kv_fp8_cast`, which reproduces this
-    checkpoint unchanged.
+    meta-llama/Llama-3.1-8B-Instruct quantized with the general NVFP4 scheme and an
+    FP8 KV cache in cast mode, as published in nvidia/Llama-3.1-8B-Instruct-NVFP4.
 ```
 
 A top-level `$import` brings in the whole imported recipe; the keys given
@@ -136,22 +134,12 @@ schema comment**, because that is what `$import` resolution needs to validate th
 imported payload. A recipe nothing imports needs nothing — so aliasing a recipe
 for the first time means adding the comment to it in the same change.
 
-Aliases are **generated**, not hand-written, from the checkpoint-to-recipe map:
-
-```bash
-python tools/recipe_backfill/render_aliases.py          # rewrite them
-python tools/recipe_backfill/render_aliases.py --check   # verify they are current
-```
-
-so add the mapping to `tools/recipe_backfill/recipe_map.json` and re-render
-rather than editing an alias file by hand. `tests/unit/recipe/test_published_checkpoint_recipes.py`
-fails if a checked-in alias has drifted, and
-[`../published_checkpoints.md`](../published_checkpoints.md) is the full index.
-
-**Which one to write.** Start by assuming an alias: run
-`tools/recipe_backfill/verify_recipes.py` against the candidate portable recipe.
-Only when no portable recipe reproduces the release does it warrant a body of its
-own here.
+**Which one to write.** Start by assuming an alias, and reach for a body here only
+once you have established that no portable recipe expresses the release's scheme —
+compare the release's own `hf_quant_config.json` (and, where the distinction matters,
+its exported scale tensors) against what the candidate recipe's `quant_cfg` would
+produce. A body duplicated from a general recipe is a maintenance liability: it stops
+tracking edits to the recipe it was copied from.
 
 ## Sharing content across recipes
 
