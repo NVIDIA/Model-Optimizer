@@ -422,13 +422,15 @@ def test_calibration_uses_storage_canonical_mask_at_wmax_boundary():
     live_horizon = mtss.compute_gdn_decay_horizons(
         model.linear_attn.A_log, model.linear_attn.dt_bias, static_gate_input=0.0
     )[0]
-    stored_horizon = mtss.compute_gdn_decay_horizons(
-        model.linear_attn.A_log.to(torch.float16),
-        model.linear_attn.dt_bias.to(torch.float16),
+    stored_horizon = mtss.analyze_gdn_decay(
+        model,
         static_gate_input=0.0,
-    )[0]
+        decay_parameter_storage_dtype="float16",
+    )["linear_attn"][0]
     assert live_horizon > 7
     assert stored_horizon < 7
+    with pytest.raises(ValueError, match="decay_parameter_storage_dtype must be one of"):
+        mtss.analyze_gdn_decay(model, decay_parameter_storage_dtype="float8")
 
     measurement = _candidate(7)
     measurement["retained_heads"] = 0
@@ -540,6 +542,13 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
 
     with pytest.raises(ApplyModeError, match="no supported GDN modules"):
         mto.restore_from_modelopt_state(nn.Linear(2, 2), state)
+
+    unsupported = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    unsupported.linear_attn = nn.Linear(2, 2)
+    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+        mto.modelopt_state(unsupported)
 
     tampered_state = copy.deepcopy(state)
     tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["quality_gates"][

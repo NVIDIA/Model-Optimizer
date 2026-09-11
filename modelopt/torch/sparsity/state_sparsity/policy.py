@@ -23,6 +23,7 @@ import math
 import warnings
 from collections.abc import Iterable
 from functools import lru_cache
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -215,10 +216,23 @@ def analyze_gdn_decay(
     *,
     epsilon: float = 1e-3,
     static_gate_input: float = -0.3,
+    decay_parameter_storage_dtype: Literal["float16", "bfloat16", "float32"] | None = None,
 ) -> dict[str, list[float]]:
-    """Return deterministic per-head horizons for every GDN module in a model."""
+    """Return per-head horizons, optionally canonicalized to a checkpoint storage dtype."""
+    storage_dtype = None
+    if decay_parameter_storage_dtype is not None:
+        try:
+            storage_dtype = _STORAGE_DTYPES[decay_parameter_storage_dtype]
+        except KeyError as error:
+            supported = ", ".join(_STORAGE_DTYPES)
+            raise ValueError(
+                f"decay_parameter_storage_dtype must be one of: {supported}"
+            ) from error
     return _analyze_gdn_modules(
-        _get_gdn_modules(model), epsilon=epsilon, static_gate_input=static_gate_input
+        _get_gdn_modules(model),
+        epsilon=epsilon,
+        static_gate_input=static_gate_input,
+        storage_dtype=storage_dtype,
     )
 
 
