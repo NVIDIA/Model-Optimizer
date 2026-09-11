@@ -22,7 +22,8 @@
 # the HuggingFace flow.
 #
 # `_mcore` in the filename is load-bearing: the selectors below are **Megatron-Core leaf names**,
-# so this recipe does nothing under hf_ptq.py. Use the qwen3_5_moe w4a16 recipe for that flow.
+# so nothing matches under hf_ptq.py, where `mtq.quantize` then raises because no weight-quantizer
+# pattern matched. Use the qwen3_5_moe w4a16 recipe for that flow.
 #
 # Qwen3.6-35B-A3B is a VLM whose language model is a 40-layer hybrid: 30 GatedDeltaNet
 # (linear-attention) layers interleaved with 10 full-attention layers (indices 3, 7, ... 39),
