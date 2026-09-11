@@ -508,6 +508,17 @@ def test_horizon_computation_ignores_the_default_device():
     assert horizons.device.type == "cpu"
 
 
+def test_policy_lifecycle_ignores_the_default_device():
+    """Keep calibration and checkpoint metadata validation on their declared CPU path."""
+    model = TinyGatedDeltaNetForCausalLM()
+    with torch.device("meta"):
+        calibrated = mtss.calibrate(model, _config(wmax_candidates=[7]), [_candidate(7)])
+        state = mto.modelopt_state(calibrated)
+        policy = mtss.export_policy(calibrated)
+    assert state["modelopt_state_dict"][0][0] == "dasc"
+    assert policy["layers"]["linear_attn"]["static_horizons"]
+
+
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     """Accept BF16-rounded values after a checkpoint loader materializes FP32 tensors."""
     model = mtss.calibrate(
