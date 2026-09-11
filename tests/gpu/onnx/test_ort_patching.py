@@ -153,20 +153,33 @@ class TestHistogramCollection:
         assert "tensor1" in mock_histogram_collector.histogram_dict
         assert "tensor2" in mock_histogram_collector.histogram_dict
 
-    def test_collect_value_fp16_narrow_range(self, mock_histogram_collector):
-        # fp16 activations with a small range (threshold ~1e-5) used to raise
-        # "Too many bins for data range" on numpy >= 2.0, because the fp16 range
-        # produced a fp16 linspace where consecutive bin edges rounded together.
+    @pytest.mark.parametrize(
+        ("collect_value", "batched_input"),
+        [
+            (_collect_value, True),
+            (_collect_value_histogram_collector_single_node_calibration, False),
+        ],
+    )
+    def test_collect_value_fp16_narrow_range(self, collect_value, batched_input):
+        collector = HistogramCollector(
+            method="entropy",
+            symmetric=False,
+            num_bins=128,
+            num_quantized_bins=128,
+            percentile=None,
+            scenario="same",
+        )
         activations = np.zeros(1000, dtype=np.float16)
-        activations[0] = np.float16(1e-5)
-        name_to_arr = {"narrow_fp16_tensor": [activations]}
+        for activation_max in (1e-6, 1e-6, 2e-6):
+            activations[0] = np.float16(activation_max)
+            name_to_arr = {"narrow_fp16_tensor": [activations] if batched_input else activations}
+            collect_value(collector, name_to_arr)
 
-        _collect_value(mock_histogram_collector, name_to_arr)
-
-        hist, edges, _, _, _ = mock_histogram_collector.histogram_dict["narrow_fp16_tensor"]
-        assert hist.sum() == activations.size
-        assert len(edges) == mock_histogram_collector.num_bins + 1
-        assert not np.any(np.diff(edges) == 0), "fp16 bin edges collapsed"
+        hist, edges, _, _, threshold = collector.histogram_dict["narrow_fp16_tensor"]
+        assert hist.sum() == 3 * activations.size
+        assert len(edges) == len(hist) + 1
+        assert np.all(np.diff(edges) > 0), "fp16 bin edges are not strictly increasing"
+        assert np.asarray(threshold).dtype.itemsize >= np.dtype(np.float32).itemsize
 
     def test_collect_absolute_value(self, mock_histogram_collector, sample_tensor_data):
         """Test _collect_absolute_value function."""

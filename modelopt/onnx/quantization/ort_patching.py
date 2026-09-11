@@ -105,6 +105,9 @@ def _collect_value(histogram_collector, name_to_arr):
             curr_data_arr = curr_data_arr.flatten()
             concat_data_arr = np.concatenate((concat_data_arr, curr_data_arr))
 
+        # NumPy may otherwise compute histogram edges in FP16 and collapse narrow ranges.
+        if concat_data_arr.dtype == np.float16:
+            concat_data_arr = concat_data_arr.astype(np.float32)
         data_arr = concat_data_arr
         # ==========================================================
         if data_arr.size > 0:
@@ -130,9 +133,6 @@ def _collect_value(histogram_collector, name_to_arr):
                 old_histogram, data_arr, min_value, max_value, threshold
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
@@ -1126,6 +1126,9 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
     """Collect histogram on real value."""
     for tensor, data_arr in name_to_arr.items():
         data_arr = np.asarray(data_arr).flatten()
+        # NumPy may otherwise compute histogram edges in FP16 and collapse narrow ranges.
+        if data_arr.dtype == np.float16:
+            data_arr = data_arr.astype(np.float32)
         min_value, max_value = (np.min(data_arr), np.max(data_arr)) if data_arr.size > 0 else (0, 0)
 
         # Replace inf/nan with float32 min/max
@@ -1147,9 +1150,6 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
                 threshold,
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
