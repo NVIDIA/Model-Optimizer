@@ -144,6 +144,85 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
     return model
 
 
+_SKIP_WEIGHT_QUANT_CHECK_ENV = "MODELOPT_SKIP_WEIGHT_QUANT_CHECK"
+
+
+def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config asks for weight quantization but no weight quantizer is enabled.
+
+    A config whose module patterns do not match the model is not an error to
+    :func:`set_quantizer_by_cfg` — every pattern simply matches nothing — so the run
+    proceeds through calibration and export and produces a checkpoint that is silently
+    unquantized (``"quant_algo": null`` with an empty ``quantized_layers``). That has
+    bitten several MoE architectures whose module naming differs from the wildcards in
+    the general recipes, and it is only noticed when someone reads the exported config.
+
+    By the time this runs, :func:`set_quantizer_by_cfg` (or the ``apply_mode`` conversion
+    that calls it) has already applied ``config`` to ``model``, so each quantizer's
+    ``is_enabled`` *is* the true outcome of that application — checking it directly cannot
+    diverge from what the config actually did. An earlier version of this check instead
+    re-derived "did this pattern match anything?" via a separate matcher call, which missed
+    the case of two *different* overlapping patterns (e.g. ``*weight_quantizer`` enabling
+    something a later, broader ``*`` then disables): the narrower pattern registered as
+    "matched" even though the quantizer it matched ended up disabled.
+
+    A config that never asks for weight quantization (activation-only or KV-cache-only)
+    must not raise, so the check first looks at the config's own intent — via each
+    pattern's *final* entry, since entries apply in order and the last one for a pattern
+    wins — before looking at the model at all.
+    """
+    if os.environ.get(_SKIP_WEIGHT_QUANT_CHECK_ENV) == "1":
+        return
+
+    # Later entries override earlier ones, so only each pattern's final state states intent.
+    # A pattern naming ``weight_quantizer`` explicitly (the common case, e.g.
+    # ``*weight_quantizer``, ``*.experts.*weight_quantizer``) is caught by the substring
+    # check. A broad wildcard that never mentions "weight" -- a bare ``"*"`` catch-all, or
+    # ``"*_quantizer"`` -- can still match weight quantizers at runtime, so it must count
+    # too, or a config built only from patterns like that would never trip the guard
+    # regardless of what the model contains. ``fnmatch`` against the literal probe string
+    # ``"weight_quantizer"`` catches those (a pattern matching that bare name is, by
+    # construction, asking for one) without replacing the substring check: the probe alone
+    # would miss ``*.experts.*weight_quantizer`` (there is no ``.experts.`` in the probe
+    # string), which is what recognizes model-scoped patterns like the Step / MoE recipes use.
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    weight_patterns = [
+        pattern
+        for pattern, entry in last_entry_per_pattern.items()
+        if entry.enable
+        and ("weight_quantizer" in pattern or fnmatch.fnmatch("weight_quantizer", pattern))
+    ]
+    if not weight_patterns:
+        return
+
+    # `SequentialQuantizer.is_enabled` delegates to its first member, so a list-valued `cfg`'s
+    # quantizers are already covered here without naming `SequentialQuantizer` explicitly:
+    # `named_modules()` recurses into the container and yields those children too, individually,
+    # named `...weight_quantizer.0` / `.1` (the substring match below still applies to them).
+    if any(
+        module.is_enabled
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and "weight_quantizer" in name
+    ):
+        return
+
+    patterns = "\n  ".join(sorted(weight_patterns))
+    raise RuntimeError(
+        "The quantization config asks for weight quantization but no weight quantizer is "
+        f"enabled, so nothing would be quantized. These patterns asked for it:\n  {patterns}\n"
+        "Either the patterns do not match this architecture's module names (check the "
+        "model-specific recipes under modelopt_recipes/huggingface/<model_type>/), or the "
+        "modules holding the weights were never converted to quantized modules (an "
+        "unsupported custom module, e.g. a trust_remote_code MoE layout).\n"
+        "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
+        "targeted modules (e.g. a pure-attention stage under an experts-only recipe) hits "
+        "this too, while other ranks proceed into calibration -- a collective hang, not "
+        f"just a wrong per-rank verdict. Set {_SKIP_WEIGHT_QUANT_CHECK_ENV}=1 to bypass this "
+        "check in that situation -- note this is process-global, so it silences the check "
+        "on every rank, not only the one with the legitimately empty stage."
+    )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -241,12 +320,14 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
+    quantize_config = QuantizeConfig(**dict(config))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
         # Already quantized, so lets apply the quant_cfg from the config
-        quant_cfg = QuantizeConfig(**dict(config)).quant_cfg
-        set_quantizer_by_cfg(model, quant_cfg)
+        set_quantizer_by_cfg(model, quantize_config.quant_cfg)
+    # Fail before calibration rather than after exporting an unquantized checkpoint.
+    _check_weight_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
