@@ -19,7 +19,7 @@ Before fetching the labeled queue, audit release NVBugs and recent merged PRs so
 
 ### Audit release NVBugs
 
-Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned; do not ask the user for a list.
+Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned.
 
 Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Verify each linked PR is merged into `main` and is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
 
