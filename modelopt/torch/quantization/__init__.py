@@ -22,6 +22,8 @@ from . import mode, plugins, utils
 from .compress import *
 from .config import *
 from .conversion import *
+from .iq1_s import *
+from .iq2_xs import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
 from .utils import update_quant_cfg_with_kv_cache_quant

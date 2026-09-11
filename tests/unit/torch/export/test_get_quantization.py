@@ -26,8 +26,11 @@ from _test_utils.torch.export.utils import (
 
 import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.quant_format import (
     QUANTIZATION_FP8,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
@@ -37,6 +40,45 @@ from modelopt.torch.export.quant_utils import (
     get_quantization_format,
 )
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "quantization_format", "payload_bytes", "effective_bits"),
+    [
+        ("iq1_s", QUANTIZATION_IQ1_S, 50, 1.5625),
+        ("iq2_xs", QUANTIZATION_IQ2_XS, 74, 2.3125),
+    ],
+)
+def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, effective_bits):
+    model = torch.nn.Sequential(torch.nn.Linear(256, 256, bias=False))
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": num_bits,
+                        "block_sizes": {-1: 256},
+                        "backend": "psx_luts",
+                        "backend_extra_args": {"search_impl": "auto"},
+                    },
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    assert get_quantization_format(model) == quantization_format
+    config = get_quant_config(model)
+    assert config["quantization"]["quant_algo"] == num_bits.upper()
+    assert config["quantization"]["block_payload_bytes"] == payload_bytes
+    hf_config = convert_hf_quant_config_format(config)
+    weights = hf_config["config_groups"]["group_0"]["weights"]
+    assert weights["group_size"] == 256
+    assert weights["effective_bits"] == effective_bits
+    assert weights["packing"] == "ggml"
 
 
 class _FakeKVCacheQuantizer(torch.nn.Module):

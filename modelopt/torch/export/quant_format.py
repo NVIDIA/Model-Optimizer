@@ -36,11 +36,21 @@ QUANTIZATION_NVFP4_AWQ = "nvfp4_awq"
 QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
 QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
 QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
+QUANTIZATION_IQ1_S = "iq1_s"
+QUANTIZATION_IQ2_XS = "iq2_xs"
 
 # Formats whose scales are purely per-module, so export never merges them across the q/k/v
 # and gate/up groups that share an input. Every other format unifies input_amax (and, for
 # NVFP4, weight_scale_2) across such a group, which only a whole-model forward can discover.
-FUSION_FREE_FORMATS = frozenset({QUANTIZATION_FP8, QUANTIZATION_NONE, QUANTIZATION_FP8_PB_REAL})
+FUSION_FREE_FORMATS = frozenset(
+    {
+        QUANTIZATION_FP8,
+        QUANTIZATION_IQ1_S,
+        QUANTIZATION_IQ2_XS,
+        QUANTIZATION_NONE,
+        QUANTIZATION_FP8_PB_REAL,
+    }
+)
 
 KV_CACHE_FP8 = "FP8"
 KV_CACHE_INT8 = "INT8"

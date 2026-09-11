@@ -61,6 +61,8 @@ from .quant_format import (
     QUANTIZATION_INT4_AWQ,
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_MXFP4,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -434,6 +436,11 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
+        if weight_quantizer.num_bits in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            if weight_quantizer.backend != "psx_luts":
+                raise ValueError("IQ formats require the built-in 'psx_luts' quantization backend")
+            return weight_quantizer.num_bits
+
         if weight_quantizer.num_bits == 4:
             assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
                 "Invalid block_sizes for INT4 quantizer"
@@ -682,6 +689,14 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
+        elif v in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            payload_bytes = 50 if v == QUANTIZATION_IQ1_S else 74
+            layer_config = {
+                "quant_algo": v.upper(),
+                "group_size": 256,
+                "block_payload_bytes": payload_bytes,
+                "packing": "ggml",
+            }
         else:
             layer_config = {"quant_algo": v}
 
@@ -897,6 +912,7 @@ _KV_CACHE_REPLACEMENTS: dict[str, str] = {
     "k_bmm_quantizer._bias_value": "k_proj.k_bias",
     "v_bmm_quantizer._bias_value": "v_proj.v_bias",
     "input_quantizer._pre_quant_scale": "pre_quant_scale",
+    "_iq_weight_shape": "weight_shape",
 }
 _BASE_SKIP_KEYS: tuple[str, ...] = (
     "output_quantizer",
@@ -1075,6 +1091,8 @@ def postprocess_state_dict(
         # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
         weight_suffixes = (
             "weight",
+            "packed_weights",
+            "weight_shape",
             "weight_scale",
             "weight_scale_2",
             "input_scale",

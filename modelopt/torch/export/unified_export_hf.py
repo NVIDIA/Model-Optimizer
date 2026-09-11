@@ -59,6 +59,8 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
+from modelopt.torch.quantization.iq1_s import quantize_iq1_s
+from modelopt.torch.quantization.iq2_xs import quantize_iq2_xs
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
@@ -100,6 +102,8 @@ from .quant_format import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
@@ -621,6 +625,24 @@ def _export_quantized_weight(
             "export. If the model was loaded with disk/CPU offload, use export_hf_checkpoint() "
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
+
+    if quantization_format in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if weight_name != "weight":
+            raise NotImplementedError(
+                "IQ unified export currently supports modules with a standard 'weight' "
+                f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
+            )
+        quantize_iq = (
+            quantize_iq1_s if quantization_format == QUANTIZATION_IQ1_S else quantize_iq2_xs
+        )
+        packed_weights, weight_shape = quantize_iq(weight.to(dtype))
+        delattr(sub_module, weight_name)
+        sub_module.register_buffer("packed_weights", packed_weights)
+        # The internal prefix distinguishes this from compressed-tensors metadata,
+        # which export intentionally drops. postprocess_state_dict renames it.
+        sub_module.register_buffer("_iq_weight_shape", weight_shape)
+        maybe_clear_cuda_cache()
+        return
 
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer

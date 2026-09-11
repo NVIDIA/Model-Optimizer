@@ -103,6 +103,8 @@ repos:
         exclude: >
           (?x)^(
               modelopt/torch/quantization/utils/calib_utils.py|
+              modelopt/torch/quantization/iq1_s.py|
+              modelopt/torch/quantization/iq2_xs.py|
               modelopt/onnx/quantization/operators.py|
               modelopt/onnx/quantization/ort_patching.py|
               modelopt/torch/_deploy/utils/onnx_utils.py|
