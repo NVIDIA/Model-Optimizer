@@ -324,7 +324,14 @@ class HFDSparkModel(HFDFlashModel):
         flat_teacher = flat_teacher.detach()
 
         if valid_count <= 1.0:
-            loss = flat_final.sum() * 0.0
+            # Every draft parameter must receive a gradient, not just the ones behind
+            # final_logits: the confidence head hangs off compute_confidence_logits, which
+            # this branch skips, so `flat_final.sum() * 0` alone leaves it unused and DDP
+            # with find_unused_parameters=False aborts the run on the first such batch.
+            # Mirrors the same guard in forward()'s no-valid-anchor early return.
+            loss = flat_final.sum() * 0.0 + sum(
+                p.sum() for p in self.dflash_module.parameters()
+            ) * 0.0
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
             return loss, 0.0, metrics
 
