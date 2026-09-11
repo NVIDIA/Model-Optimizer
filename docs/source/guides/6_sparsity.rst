@@ -197,10 +197,9 @@ calibration. Derive the evaluated head masks and reported ``retained_heads``/``t
 :func:`~modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay` using the same ``epsilon``,
 ``static_gate_input``, and storage dtype passed to calibration. Policy validation allows only the
 rounding introduced by the declared storage dtype and the live tensor dtype. When they differ,
-their inverse rounding bounds are composed in sequence; when they match, the duplicate cast is
-counted once. Decay tensors that are live in BF16 or FP16 are still validated against that live
-dtype's rounding, so the default ``float32`` storage dtype contributes only a negligible float32
-step beyond it.
+distinct lossy inverse rounding bounds are composed in sequence; a duplicate dtype or an exact
+widening cast contributes no additional slack. Decay tensors that are live in BF16 or FP16 are
+still validated against that live dtype's rounding.
 
 .. _sparsity-concepts:
 

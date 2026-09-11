@@ -498,6 +498,17 @@ def test_cross_dtype_reload_accumulates_both_rounding_bounds(
     assert mtss.export_policy(model) == policy
 
 
+@pytest.mark.parametrize("live_dtype", [torch.float16, torch.bfloat16])
+def test_storage_rounding_excludes_exact_fp32_widening(live_dtype):
+    """Do not add FP32 slack when only the low-precision cast can round values."""
+    tensor = torch.tensor([1.25], dtype=live_dtype)
+
+    assert torch.equal(
+        dasc_policy._storage_rounding_radius(tensor, torch.float32),
+        dasc_policy._storage_rounding_radius(tensor, live_dtype),
+    )
+
+
 def test_non_finite_decay_parameters_are_rejected_on_export():
     """Reject NaNs before interval comparisons can silently accept them."""
     model = mtss.calibrate(
