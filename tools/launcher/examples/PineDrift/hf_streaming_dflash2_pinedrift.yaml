@@ -93,12 +93,12 @@ pipeline:
       # headroom the 496 GiB of weights leaves (62 GiB/GPU used of 269).
       - SERVE_MAX_MODEL_LEN: "4096"
       - SERVE_MAX_NUM_SEQS: "32"
-      # Candidate fix for the KV-page assert (README, OPEN BLOCKER): the aux
-      # hidden-state pseudo-layer wants 6 x 8192 x 2 B = 98 KB/token against the
-      # attention layers' 4 KB/token, and hybrid KV-group unification hands it a
-      # smaller padded page. --block-size 32 is what fixed the same assert for
-      # gpt-oss DFlash. UNVERIFIED here.
-      - SERVE_BLOCK_SIZE: "32"
+      # Required, not optional: vLLM pads the hidden-state pseudo-page up to the
+      # attention page, and asserts if it does not fit. The constraint works out
+      # to block_size >= 32 * len(EAGLE_CAPTURE_IDS) for this model -- see the
+      # derivation in README. 6 capture ids -> >= 192 -> take the next power of 2.
+      # Measured failures: 16 (job 405516) and 32 (job 405733) both assert.
+      - SERVE_BLOCK_SIZE: "256"
       # Job 405564 died with OSError 98 on the script default 8765: another user's
       # vllm held it on the node we drew. 8765/18999 are the modelopt streaming
       # defaults, so everyone on PDX collides on them. Use a private pair.

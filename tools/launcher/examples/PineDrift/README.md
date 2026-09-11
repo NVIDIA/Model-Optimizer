@@ -100,7 +100,7 @@ activation memory.
 9. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
    `~/.bashrc` activates conda and shadows the container's python.
 
-## BLOCKER (diagnosed, fix applied, not yet observed to pass) — KV-cache sizing
+## BLOCKER — KV-cache page sizing (root-caused; fix = block_size >= 32*N)
 
 Job 405516 (first smoke) failed at engine init:
 
@@ -111,30 +111,50 @@ Job 405516 (first smoke) failed at engine init:
 Same class as the gpt-oss DFlash serve crash (ModelOpt PR #1692), which was fixed
 with `--block-size=32`.
 
-Root cause (this is the same one as gpt-oss, and it is *not* the hybrid attention —
-that was a red herring there too). vLLM's `extract_hidden_states` packs **all** captured
-layers into a single `HiddenStateCacheSpec` with `num_kv_heads = len(capture_ids)` and
-`head_size = hidden_size`, then re-adds it to the KV groups. Its per-token cost is
-therefore **independent of block size**, while the attention page scales with it:
+Root cause. vLLM's `extract_hidden_states` packs **all** captured layers into a single
+`HiddenStateCacheSpec` with `num_kv_heads = len(capture_ids)` and `head_size =
+hidden_size`, neither of which is TP-sharded. `HiddenStateCacheSpec` subclasses
+`MLAAttentionSpec`, so `head_size_v = 0` — there is no K/V doubling. That spec is then
+re-added to the KV groups with its page **padded up to the attention page**
+(`kv_cache_utils.py:2244-2262`):
 
-    hidden-state spec : N x hidden x 2 B            = 6 x 8192 x 2   =  98304 B/token
-    attention page    : 2 x B x kv_heads x head_dim x 2 B
-                        = 2 x B x 16 x 64 x 2       = 4096 x B       B=16 ->  65536
-                                                                     B=32 -> 131072
+    per_token      = num_kv_heads * head_size * dtype_size
+    max_block_size = max(common_page // per_token, 1)        # <-- clamps to 1
+    new_bs         = _largest_divisor_at_most(group_block_size, max_block_size)
+    aligned        = replace(spec, block_size=new_bs, page_size_padded=common_page)
 
-`page_size_padded` is the max over specs, so the assert fires exactly when the
-hidden-state spec exceeds the attention page. At the default block size 16 it does, by
-1.5x. **`--block-size 32` clears it** with 33 % headroom; that is the whole fix, and it
-is safe because this is a throwaway producer serve where block size only changes KV
-paging granularity. Encoded as `SERVE_BLOCK_SIZE: "32"` in the pipeline yaml.
+When `common_page < per_token` the floor division gives 0, the `max(..., 1)` clamps it
+to 1, and the resulting spec has `unpadded_page_size_bytes = per_token > common_page =
+page_size_padded`. That is the assert.
 
-The crossover in capture count at B=16 is N=4 (65536 fits exactly); at B=32 it is N=8.
-So the alternative lever — fewer capture ids — would also work but costs drafter depth,
-and is not needed.
+For PineDrift at TP8 — and the TP sharding is the part that is easy to get wrong, since
+only the attention side is sharded:
 
-(An earlier version of this section guessed that both pages scale with block size and
-that `--block-size` might not move the ratio. That was wrong: only the attention page
-scales.)
+    hidden-state page : N * hidden_size * 2 B          = N * 16384       (no /TP, no K+V)
+    attention page    : block * (kv_heads/TP) * (head_dim + head_dim) * 2 B
+                        = block * (16/8) * 128 * 2     = block * 512
+
+so the requirement is simply
+
+    block_size >= 32 * N_capture
+
+N = 6 needs block_size >= 192; 256 is the next power of two. **Measured**: block 16
+(job 405516) and block 32 (job 405733) both assert, which is what this predicts.
+
+The other lever is N. At block 128 the ceiling is N = 4, i.e. 3 aux planes + final,
+which costs drafter depth; we would rather pay block size. Block size on a throwaway
+producer serve only changes KV paging granularity.
+
+The cost of a large block is *not* wasted KV memory but coarse paging: the hidden-state
+group ends up at `new_bs = 1`, one block per token, while the attention groups page at
+256. All groups share one block pool, so the hidden group is what bounds concurrency.
+With ~180 GB of KV headroom and ~2 pages per group-block this still leaves several
+hundred thousand blocks, far past what `max_num_seqs 32` x `max_model_len 4096` needs.
+
+(Two earlier versions of this section were wrong: the first guessed that both pages
+scale with block size, the second used the *unsharded* 16 kv heads and so predicted
+block 32 would be enough. Only the attention page scales, and it scales off the
+per-rank head count.)
 
 ## Serve port
 
