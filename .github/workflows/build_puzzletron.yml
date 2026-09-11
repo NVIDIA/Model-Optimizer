@@ -1,4 +1,4 @@
-name: Build and push Docker images for Puzzletron
+name: Puzzletron Docker
 
 on:
   pull_request:
