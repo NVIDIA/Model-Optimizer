@@ -590,9 +590,14 @@ def get_onnx_bytes_and_metadata(
         )
         return onnx_model.to_bytes(), model_metadata
 
-    if weights_dtype == "fp16" and uses_fp8 and torch.bfloat16 in source_parameter_dtypes:
+    if (
+        weights_dtype == "fp16"
+        and (uses_fp4 or uses_fp8)
+        and torch.bfloat16 in source_parameter_dtypes
+    ):
+        quantization_format = "NVFP4" if uses_fp4 else "FP8"
         raise ValueError(
-            "Converting a BF16 FP8 ONNX graph to FP16 is not supported yet "
+            f"Converting a BF16 {quantization_format} ONNX graph to FP16 is not supported yet "
             f"(source parameter dtypes: {source_parameter_dtype_names})"
         )
 
@@ -662,7 +667,7 @@ def get_onnx_bytes_and_metadata(
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
     if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
-        if uses_other_unsupported_quantizer or uses_fp8:
+        if weights_dtype == "fp16" and (uses_fp4 or uses_other_unsupported_quantizer or uses_fp8):
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
                 keep_io_types=False,
