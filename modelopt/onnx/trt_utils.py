@@ -23,6 +23,7 @@ import tempfile
 
 import lief
 import onnx
+import onnx.onnx_cpp2py_export.checker as C
 import onnx_graphsurgeon as gs
 
 from modelopt.onnx.logging_config import logger
@@ -41,6 +42,30 @@ except ImportError:
     TRT_PYTHON_AVAILABLE = False
 
 MAX_IR_VERSION = 10
+_ORT_LEGACY_ONNX_DOMAIN_OPS = {"SimplifiedLayerNormalization"}
+
+
+def _check_onnx_model(model: onnx.ModelProto, model_path: str | None = None) -> None:
+    """Validate a model while tolerating legacy ONNX Runtime operators."""
+    try:
+        onnx.checker.check_model(model_path or model)
+    except C.ValidationError as e:
+        error = str(e)
+        unsupported_legacy_ops = {
+            node.op_type
+            for node in model.graph.node
+            if not node.domain
+            and node.op_type in _ORT_LEGACY_ONNX_DOMAIN_OPS
+            and f"No Op registered for {node.op_type} with domain_version" in error
+        }
+        if not unsupported_legacy_ops:
+            raise
+
+        logger.warning(
+            "ONNX checker does not recognize ONNX Runtime legacy operator(s) in the default "
+            "domain: %s. Continuing because ONNX Runtime supports these operators.",
+            sorted(unsupported_legacy_ops),
+        )
 
 
 def _is_static_plugin(plugin_path: str) -> bool:
@@ -453,10 +478,10 @@ def load_onnx_model(
     if use_external_data_format:
         # For large models, use the file path to avoid protobuf size limitation
         model_path_to_check = ir_version_onnx_path or static_shaped_onnx_path or onnx_path
-        onnx.checker.check_model(model_path_to_check)
+        _check_onnx_model(onnx_model, model_path_to_check)
     else:
         # For smaller models, checking the model object is fine
-        onnx.checker.check_model(onnx_model)
+        _check_onnx_model(onnx_model)
 
     return (
         onnx_model,

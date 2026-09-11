@@ -333,6 +333,34 @@ def test_ir_version_support(tmp_path):
     )
 
 
+@pytest.mark.parametrize("use_external_data_format", [False, True])
+def test_load_onnx_model_with_ort_legacy_op(tmp_path, caplog, use_external_data_format):
+    node = make_node(
+        "SimplifiedLayerNormalization",
+        ["X", "scale"],
+        ["Y"],
+        name="simplified_layer_norm",
+    )
+    graph = make_graph(
+        [node],
+        "ort_legacy_op_graph",
+        [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])],
+        [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])],
+        [make_tensor("scale", onnx.TensorProto.FLOAT, [4], [1.0] * 4)],
+    )
+    model = make_model(graph, opset_imports=[make_opsetid("", 21)], ir_version=10)
+    model_path = os.path.join(tmp_path, "ort_legacy_op.onnx")
+    onnx.save(model, model_path)
+
+    loaded_model, _, _, _, _ = load_onnx_model(
+        model_path, use_external_data_format=use_external_data_format
+    )
+
+    assert loaded_model.graph.node[0].op_type == "SimplifiedLayerNormalization"
+    assert loaded_model.graph.node[0].domain == ""
+    assert "ONNX Runtime legacy operator(s)" in caplog.text
+
+
 def _make_cast_model(cast_to, output_elem_type, with_value_info=False):
     """Build a tiny X -> Cast(to=cast_to) -> Y model."""
     nodes = [make_node("Cast", ["X"], ["Y"], to=cast_to, name="cast")]
