@@ -43,6 +43,7 @@ from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4ActHeadroomCalibrator, NVFP4MSECalibrator, _Calibrator
+from .config import _validate_fp8_scale_sweep
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import (
     AnyQuantizer,
@@ -68,6 +69,7 @@ from .utils import (
     promote_static_block_weight_quantizers,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
+from .utils.numeric_utils import fp8_max_for_normalization
 
 __all__ = [
     "CalibratorFactory",
@@ -670,7 +672,7 @@ def _make_weight_mse_calibrator(
     step_size: float,
     start_multiplier: float,
     stop_multiplier: float,
-    fp8_scale_sweep: bool,
+    fp8_scale_sweep: bool | tuple[int, int] | None,
     error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     hessian: torch.Tensor | None = None,
 ) -> _Calibrator | None:
@@ -699,7 +701,7 @@ def _make_weight_mse_calibrator(
         backend_factory = (
             _FP8_SWEEP_CALIBRATOR_REGISTRY.get(backend) if backend is not None else None
         )
-        if backend is not None and backend_factory is not None:
+        if fp8_scale_sweep is True and backend is not None and backend_factory is not None:
             if error_func is not None:
                 # Registered backend factories don't accept a custom error_func.
                 warnings.warn(
@@ -716,6 +718,8 @@ def _make_weight_mse_calibrator(
                 quant_func=quant_func,
                 error_func=error_func,
                 hessian=hessian,
+                fp8_scale_sweep=fp8_scale_sweep,
+                fp8_max_for_normalization=fp8_max_for_normalization(weight_quantizer),
             )
         # fp8_scale_sweep applies only to registered backends and static NVFP4; skip others.
         return None
@@ -740,7 +744,7 @@ def mse_calibrate(
     step_size: float = 0.1,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
-    fp8_scale_sweep: bool = False,
+    fp8_scale_sweep: bool | tuple[int, int] | list[int] | None = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
 ):
     """Calibrate weight quantizers using MSE-based amax search.
@@ -760,12 +764,14 @@ def mse_calibrate(
         fp8_scale_sweep: If True, only ModelOpt static NVFP4 weights and registered
             custom backends are MSE-calibrated (via FP8 E4M3 scale-value sweep); all
             other weight quantizers (INT8, plain FP8, unregistered backends, etc.) are
-            skipped and left at their max-calibrated amax. If False, all weight
-            quantizers use the multiplier search.
+            skipped and left at their max-calibrated amax. A two-integer tuple selects
+            an inclusive per-block E4M3 code-offset range for ModelOpt static NVFP4
+            weights only. If False, all weight quantizers use the multiplier search.
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
     """
+    fp8_scale_sweep = _validate_fp8_scale_sweep(fp8_scale_sweep)
     # max_calibrate initializes activations and weights; MSE only refines weights below.
     max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
     names = module_name_maps(model)
@@ -786,7 +792,7 @@ def _mse_calibrate_weights(
     step_size: float,
     start_multiplier: float,
     stop_multiplier: float,
-    fp8_scale_sweep: bool,
+    fp8_scale_sweep: bool | tuple[int, int] | None,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
     hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
 ):
@@ -1012,7 +1018,7 @@ def local_hessian_calibrate(
     step_size: float = 0.1,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
-    fp8_scale_sweep: bool = True,
+    fp8_scale_sweep: bool | tuple[int, int] | list[int] | None = True,
     block_size: int = 16,
     debug: bool = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
@@ -1036,8 +1042,9 @@ def local_hessian_calibrate(
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
-        fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
-            for NVFP4 per-block quantization (default: True).
+        fp8_scale_sweep: If True, sweep all 126 finite positive FP8 E4M3 scale values.
+            A two-integer tuple selects an inclusive per-block E4M3 code-offset range.
+            If False, use the multiplier search (default: True).
         block_size: Block size for local Hessian computation (default: 16).
         debug: If True, retain the per-quantizer Hessian accumulators on the model
             (``model._local_hessian_accumulators``) for inspection.
@@ -1045,6 +1052,7 @@ def local_hessian_calibrate(
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
     """
+    fp8_scale_sweep = _validate_fp8_scale_sweep(fp8_scale_sweep)
     if forward_loop is None:
         warnings.warn("forward_loop must be provided for local_hessian; skipping local_hessian")
         return

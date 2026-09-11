@@ -15,13 +15,14 @@
 
 """Fused Triton kernel for the NVFP4 weight-MSE FP8 scale sweep.
 
-Replaces the 126-iteration Python sweep in :class:`NVFP4MSECalibrator` with a single
-kernel that, for each NVFP4 block, evaluates all 126 valid FP8 E4M3 scale candidates
-and emits the per-block ``best_amax`` directly.
+Replaces the Python sweep in :class:`NVFP4MSECalibrator` with a single kernel that,
+for each NVFP4 block, evaluates either all 126 valid FP8 E4M3 scale candidates or a
+bounded range of code offsets and emits the per-block ``best_amax`` directly.
 
-The 126 candidates are constructed as ``valid_fp8_e4m3_value / 448`` (see
-:func:`fp8_scale_candidates`). For these specific candidates, the FP8 round-trip on
-the per-block scale is the identity, so the kernel can use
+Exhaustive candidates retain ``valid_fp8_e4m3_value / 448``; bounded candidates use
+``valid_fp8_e4m3_value / normalization_max`` (see :func:`fp8_scale_candidates`),
+where the normalization max is 448 normally and 256 in 4/6 mode. Their FP8 round-trip
+is the identity, so the kernel can use
 ``scale = candidate * global_amax / 6.0`` without an explicit FP8 cast — making it
 runnable on any CUDA GPU with Triton (no ``tl.float8e4nv`` requirement).
 
@@ -33,7 +34,7 @@ import triton
 import triton.language as tl
 
 from ..common.nvfp4_quant import fp4_round_magnitude
-from ._fp8_scale_candidates import fp8_scale_candidates
+from ._fp8_scale_candidates import fp8_scale_candidates, fp8_scale_codes
 from .fp4_kernel import compute_fp4_scales
 
 __all__ = [
@@ -59,11 +60,14 @@ _FP8_SWEEP_AUTOTUNE_CONFIGS = [
 def _fp8_scale_sweep_kernel(
     x_ptr,  # [N_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
     candidates_ptr,  # [NUM_CANDIDATES] fp32
+    base_codes_ptr,  # [N_BLOCKS] uint8; used only for bounded search
     global_amax_ptr,  # scalar fp32
     best_amax_ptr,  # [N_BLOCKS] fp32 output
     N_BLOCKS,
     BLOCK_SIZE: tl.constexpr,
     NUM_CANDIDATES: tl.constexpr,
+    MIN_OFFSET: tl.constexpr,
+    BOUNDED: tl.constexpr,
     BLOCKS_PER_PROGRAM: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -84,13 +88,19 @@ def _fp8_scale_sweep_kernel(
     best_loss = tl.full([BLOCKS_PER_PROGRAM], float("inf"), dtype=tl.float32)
     best_idx = tl.zeros([BLOCKS_PER_PROGRAM], dtype=tl.int32)
 
-    # Loop over the 126 FP8 candidates (compile-time unrolled).
+    # Loop over the exhaustive or bounded FP8 candidates (compile-time unrolled).
     # Scales are guaranteed positive and finite (constructed from a positive candidate
     # times nonneg global_amax), so the degenerate-scale guard from nvfp4_scalar_quant is
     # unnecessary apart from the global_amax == 0 case handled below.
     for k in tl.static_range(NUM_CANDIDATES):
-        c = tl.load(candidates_ptr + k).to(tl.float32)
-        scale = c * global_amax / 6.0
+        if BOUNDED:
+            code = tl.load(base_codes_ptr + block_idx, mask=block_mask, other=1).to(tl.int32)
+            code = tl.maximum(1, tl.minimum(126, code + MIN_OFFSET + k))
+            c = tl.load(candidates_ptr + code - 1).to(tl.float32)
+            scale = (c * global_amax / 6.0)[:, None]
+        else:
+            c = tl.load(candidates_ptr + k).to(tl.float32)
+            scale = c * global_amax / 6.0
         # Avoid divide-by-zero when global_amax == 0; in that case w_abs is also zero
         # (global_amax = max|w|), so the loss is zero for every candidate either way.
         scale_safe = tl.where(scale == 0.0, 1.0, scale)
@@ -102,7 +112,12 @@ def _fp8_scale_sweep_kernel(
         best_idx = tl.where(is_better, k, best_idx)
 
     # Map each block's winning candidate index back to its amax = global_amax * c[best].
-    best_c = tl.load(candidates_ptr + best_idx, mask=block_mask, other=0.0).to(tl.float32)
+    if BOUNDED:
+        code = tl.load(base_codes_ptr + block_idx, mask=block_mask, other=1).to(tl.int32)
+        code = tl.maximum(1, tl.minimum(126, code + MIN_OFFSET + best_idx))
+        best_c = tl.load(candidates_ptr + code - 1, mask=block_mask, other=0.0).to(tl.float32)
+    else:
+        best_c = tl.load(candidates_ptr + best_idx, mask=block_mask, other=0.0).to(tl.float32)
     best_amax = global_amax * best_c
     tl.store(best_amax_ptr + block_idx, best_amax, mask=block_mask)
 
@@ -128,11 +143,14 @@ def nvfp4_fp8_scale_sweep(
     x: torch.Tensor,
     global_amax: torch.Tensor,
     block_size: int = 16,
+    offset_range: tuple[int, int] | None = None,
+    initial_amax: torch.Tensor | None = None,
+    fp8_max_for_normalization: float = 448.0,
 ) -> torch.Tensor:
     """Find the per-block FP8 scale that minimizes NVFP4 quantization MSE.
 
-    Equivalent to the 126-step sweep in :class:`NVFP4MSECalibrator`, but fused into
-    a single Triton kernel: every block's weight elements are loaded once, all 126
+    Equivalent to :class:`NVFP4MSECalibrator`'s exhaustive or bounded sweep, but fused
+    into a single Triton kernel: every block's weight elements are loaded once, all
     candidates are evaluated in registers, and the running argmin is kept inline.
 
     Args:
@@ -140,24 +158,49 @@ def nvfp4_fp8_scale_sweep(
             ``block_size``; layout is treated as a flat ``[N_BLOCKS, BLOCK_SIZE]``.
         global_amax: Scalar FP32 global amax (``= reduce_amax(per_block_amax)``).
         block_size: NVFP4 block size (typically 16).
+        offset_range: Inclusive E4M3 code-offset range, or None for exhaustive search.
+        initial_amax: Max-calibrated per-block amax used to derive the starting codes.
+            Computed from ``x`` when omitted in bounded mode.
+        fp8_max_for_normalization: FP8 normalization max (448, or 256 for 4/6 mode).
 
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
     """
     n_blocks, x_flat, best_amax = _prepare_block_sweep(x, block_size)
-    candidates = fp8_scale_candidates(x.device).to(dtype=torch.float32)
+    candidates = fp8_scale_candidates(
+        x.device, fp8_max_for_normalization if offset_range is not None else 448.0
+    ).to(dtype=torch.float32)
     global_amax_f32 = global_amax.detach().to(device=x.device, dtype=torch.float32).reshape(1)
+    if offset_range is None:
+        base_codes = torch.empty(1, dtype=torch.uint8, device=x.device)
+        min_offset = 0
+        num_candidates = int(candidates.numel())
+    else:
+        if initial_amax is None:
+            initial_amax = x_flat.view(n_blocks, block_size).float().abs().amax(dim=-1)
+        if initial_amax.numel() != n_blocks:
+            raise ValueError(
+                f"initial_amax.numel() ({initial_amax.numel()}) must equal n_blocks ({n_blocks})."
+            )
+        base_codes = fp8_scale_codes(
+            initial_amax.reshape(-1), global_amax_f32, fp8_max_for_normalization
+        )
+        min_offset, max_offset = offset_range
+        num_candidates = max_offset - min_offset + 1
 
     grid = lambda meta: (triton.cdiv(n_blocks, meta["BLOCKS_PER_PROGRAM"]),)
     with torch.cuda.device(x.device):
         _fp8_scale_sweep_kernel[grid](
             x_flat,
             candidates,
+            base_codes,
             global_amax_f32,
             best_amax,
             n_blocks,
             BLOCK_SIZE=block_size,
-            NUM_CANDIDATES=int(candidates.numel()),
+            NUM_CANDIDATES=num_candidates,
+            MIN_OFFSET=min_offset,
+            BOUNDED=offset_range is not None,
         )
     return best_amax
 
@@ -176,11 +219,16 @@ def _fp8_scale_sweep_hessian_kernel(
     hessian_ptr,  # [N_CIN_BLOCKS * BLOCK_SIZE * BLOCK_SIZE] fp32
     candidate_scales_ptr,  # [NUM_CANDIDATES] fp32: per-candidate FP8-quantized block scale
     candidate_amaxes_ptr,  # [NUM_CANDIDATES] fp32: per-candidate block amax (kernel output value)
+    candidates_ptr,  # [126] normalized finite positive E4M3 values; bounded search only
+    base_codes_ptr,  # [COUT * N_CIN_BLOCKS] uint8; bounded search only
+    global_amax_ptr,  # scalar fp32; bounded search only
     best_amax_ptr,  # [COUT * N_CIN_BLOCKS] fp32 output
     COUT,
     N_CIN_BLOCKS,
     BLOCK_SIZE: tl.constexpr,
     NUM_CANDIDATES: tl.constexpr,
+    MIN_OFFSET: tl.constexpr,
+    BOUNDED: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -208,10 +256,17 @@ def _fp8_scale_sweep_hessian_kernel(
 
     best_loss = tl.full([ROWS_PER_PROGRAM], float("inf"), dtype=tl.float32)
     best_idx = tl.zeros([ROWS_PER_PROGRAM], dtype=tl.int32)
+    global_amax = tl.load(global_amax_ptr).to(tl.float32)
 
     # Non-unrolled loop: unrolling 126 tl.dot bodies explodes compile time for no runtime gain.
     for k in tl.range(NUM_CANDIDATES):
-        scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
+        if BOUNDED:
+            code = tl.load(base_codes_ptr + block_idx, mask=row_mask, other=1).to(tl.int32)
+            code = tl.maximum(1, tl.minimum(126, code + MIN_OFFSET + k))
+            candidate = tl.load(candidates_ptr + code - 1).to(tl.float32)
+            scale = (candidate * global_amax / 6.0)[:, None]
+        else:
+            scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
         scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
         q_mag = fp4_round_magnitude(w_abs / scale_safe)
         dw = w_sign * (w_abs - q_mag * scale_safe)  # = w - quant(w), [ROWS, BS]
@@ -222,7 +277,17 @@ def _fp8_scale_sweep_hessian_kernel(
         best_loss = tl.where(is_better, loss, best_loss)
         best_idx = tl.where(is_better, k, best_idx)
 
-    best_amax = tl.load(candidate_amaxes_ptr + best_idx, mask=row_mask, other=0.0).to(tl.float32)
+    if BOUNDED:
+        code = tl.load(base_codes_ptr + block_idx, mask=row_mask, other=1).to(tl.int32)
+        code = tl.maximum(1, tl.minimum(126, code + MIN_OFFSET + best_idx))
+        best_amax = (
+            tl.load(candidates_ptr + code - 1, mask=row_mask, other=0.0).to(tl.float32)
+            * global_amax
+        )
+    else:
+        best_amax = tl.load(candidate_amaxes_ptr + best_idx, mask=row_mask, other=0.0).to(
+            tl.float32
+        )
     tl.store(best_amax_ptr + block_idx, best_amax, mask=row_mask)
 
 
@@ -231,13 +296,16 @@ def nvfp4_fp8_scale_sweep_hessian(
     global_amax: torch.Tensor,
     hessian: torch.Tensor,
     block_size: int = 16,
+    offset_range: tuple[int, int] | None = None,
+    initial_amax: torch.Tensor | None = None,
+    fp8_max_for_normalization: float = 448.0,
 ) -> torch.Tensor:
     """Find the per-block FP8 scale minimizing the Hessian-weighted NVFP4 quant error.
 
     Hessian-weighted counterpart of :func:`nvfp4_fp8_scale_sweep`: for each NVFP4 block
-    it minimizes ``dwᵀ H dw`` (``dw = w - quant(w)``) over the 126 FP8 E4M3 candidates,
-    where ``H`` is the per-cin-block local Hessian shared across all output rows. Used by
-    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration.
+    it minimizes ``dwᵀ H dw`` (``dw = w - quant(w)``) over the exhaustive or bounded
+    FP8 E4M3 candidates, where ``H`` is the per-cin-block local Hessian shared across all
+    output rows. Used by :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration.
 
     Args:
         x: Weight tensor on CUDA in the blocked ``[N_BLOCKS, block_size]`` layout, row-major
@@ -247,6 +315,10 @@ def nvfp4_fp8_scale_sweep_hessian(
         hessian: Per-cin-block Hessian of shape ``[cin // block_size, block_size, block_size]``,
             fp32 (typically normalized by sample count).
         block_size: NVFP4 block size (typically 16).
+        offset_range: Inclusive E4M3 code-offset range, or None for exhaustive search.
+        initial_amax: Max-calibrated per-block amax used to derive the starting codes.
+            Computed from ``x`` when omitted in bounded mode.
+        fp8_max_for_normalization: FP8 normalization max (448, or 256 for 4/6 mode).
 
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
@@ -273,17 +345,41 @@ def nvfp4_fp8_scale_sweep_hessian(
         candidate_scales = compute_fp4_scales(
             candidate_amaxes, global_amax_f32, quantize_block_scales=True
         ).to(dtype=torch.float32)
+        if offset_range is None:
+            base_codes = torch.empty(1, dtype=torch.uint8, device=x.device)
+            min_offset = 0
+            num_candidates = int(candidate_amaxes.numel())
+        else:
+            if initial_amax is None:
+                initial_amax = x_flat.view(n_blocks, block_size).float().abs().amax(dim=-1)
+            if initial_amax.numel() != n_blocks:
+                raise ValueError(
+                    f"initial_amax.numel() ({initial_amax.numel()}) must equal "
+                    f"n_blocks ({n_blocks})."
+                )
+            base_codes = fp8_scale_codes(
+                initial_amax.reshape(-1), global_amax_f32, fp8_max_for_normalization
+            )
+            min_offset, max_offset = offset_range
+            num_candidates = max_offset - min_offset + 1
         hessian_flat = hessian.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
         _fp8_scale_sweep_hessian_kernel[grid](
             x_flat,
             hessian_flat,
             candidate_scales,
             candidate_amaxes,
+            fp8_scale_candidates(
+                x.device, fp8_max_for_normalization if offset_range is not None else 448.0
+            ).to(dtype=torch.float32),
+            base_codes,
+            global_amax_f32,
             best_amax,
             cout,
             n_cin_blocks,
             BLOCK_SIZE=block_size,
-            NUM_CANDIDATES=int(candidate_amaxes.numel()),
+            NUM_CANDIDATES=num_candidates,
+            MIN_OFFSET=min_offset,
+            BOUNDED=offset_range is not None,
             ROWS_PER_PROGRAM=_HESSIAN_ROWS_PER_PROGRAM,
             num_warps=_HESSIAN_NUM_WARPS,
         )
