@@ -100,6 +100,39 @@ pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
 # vllm ships no nixl at all -- the serve dies at connector init with
 # ModuleNotFoundError: No module named 'nixl'.
 [ -n "${PIP_EXTRA_PACKAGES:-}" ] && pip install --no-cache-dir ${PIP_EXTRA_PACKAGES}
+
+# EFA/RDMA: graft the AWS rdma-core set so NIXL's LIBFABRIC plugin can load.
+#
+# Stock container rdma-core is too old for the plugin -- libefa lacks EFA_1.2,
+# there is no libfabric.so.1 exporting FABRIC_1.7, and libhwloc.so.15 is absent --
+# so createBackend("LIBFABRIC") returns NIXL_ERR_NOT_FOUND and the run silently
+# falls back to TCP. Ubuntu/apt libfabric (1.14/1.20) and the host's own do not
+# work either: wrong symbol version and/or a glibc mismatch. Only the AWS
+# /opt/amazon/efa set does. Graft the WHOLE set together; mixing versions breaks
+# in ways that look like network flakiness.
+#
+# Must run AFTER nixl is installed: NIXL_PLUGIN_DIR points into its wheel.
+# Runs on every node -- the trainer's dataloader workers create NIXL agents too,
+# not just the serve.
+if [ -n "${EFA_GRAFT_DIR:-}" ] && [ -d "${EFA_GRAFT_DIR}" ]; then
+    cp -f "${EFA_GRAFT_DIR}"/lib*.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+    mkdir -p /usr/lib/x86_64-linux-gnu/libibverbs /etc/libibverbs.d
+    cp -f "${EFA_GRAFT_DIR}"/ibverbs/*.so /usr/lib/x86_64-linux-gnu/libibverbs/ 2>/dev/null || true
+    cp -f "${EFA_GRAFT_DIR}"/libibverbs.d/*.driver /etc/libibverbs.d/ 2>/dev/null || true
+    ldconfig 2>/dev/null || true
+    _MESON=/usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs
+    export LD_LIBRARY_PATH="${_MESON}:${LD_LIBRARY_PATH:-}"
+    export NIXL_PLUGIN_DIR="${_MESON}/plugins"
+    echo "EFA rdma-core grafted from ${EFA_GRAFT_DIR}; NIXL_PLUGIN_DIR=${NIXL_PLUGIN_DIR}"
+    # Fail loudly rather than fall back to TCP without anyone noticing.
+    if [ "${NIXL_BACKENDS:-}" = "LIBFABRIC" ]; then
+        /usr/bin/python3 - <<'PYCHK' || { echo "ERROR: LIBFABRIC backend unusable after the graft" >&2; exit 1; }
+from nixl._api import nixl_agent, nixl_agent_config
+nixl_agent("graftcheck", nixl_agent_config(backends=["LIBFABRIC"]))
+print("LIBFABRIC backend OK")
+PYCHK
+    fi
+fi
 export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################

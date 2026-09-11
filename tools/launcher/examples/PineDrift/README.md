@@ -136,24 +136,38 @@ activation memory.
    `nixl`**, not `nixl-cu13` — the latter installs the module as `nixl_cu13` and the
    connector imports `nixl`. Plain `nixl` pulls both cu12 and cu13 builds. It also
    downgrades `nvidia-nccl-cu13` (see trap 9).
-5. **NIXL transport: UCX with `UCX_TLS=tcp,sm,self,cuda_copy`.** All of this was
-   measured in this image (probe job 405849):
-   - `cuda_copy` is load-bearing. Without it UCX logs `8 NVIDIA GPU(s) were detected,
-     but UCX CUDA support was not found` and `registerMem` fails on the VRAM
-     hidden-state buffers with `NIXL_ERR_BACKEND`. `libuct_cuda.so` is on disk the
-     whole time; restricting `UCX_TLS` is what hides it.
-   - The rest of `UCX_TLS` is not optional either: left to probe, UCX finds the node's
-     16 EFA NICs, which segfaults the trainer's forked dataloader workers at agent init.
-   - **Fallback, also measured working here**: `NIXL_BACKENDS=LIBFABRIC` +
-     `FI_PROVIDER=efa`, but only after grafting the AWS rdma-core set from
-     `~/lustre/k3work/efa701` into `/usr/lib/x86_64-linux-gnu` (+ `libibverbs/`
-     providers, `/etc/libibverbs.d/`, `ldconfig`) and pointing `NIXL_PLUGIN_DIR` at
-     `.nixl_cu13.mesonpy.libs/plugins`. Without the graft `createBackend` returns
-     `NIXL_ERR_NOT_FOUND`. Not used, because when it was A/B'd on K3 it measured
-     24 s/step against TCP's 15 s — the bottleneck is serve prefill, not transfer,
-     and that is only more true for an 820 B base. The `libionic-rdmav59.so` load
-     warning under the graft is benign.
-   `NCCL_IB_DISABLE=1` for the trainer's DDP for the same EFA reason.
+5. **NIXL transport: LIBFABRIC over EFA, which needs an rdma-core graft.**
+   The stock container's rdma-core is too old for the plugin — `libefa` lacks
+   `EFA_1.2`, there is no `libfabric.so.1` exporting `FABRIC_1.7`, no
+   `libhwloc.so.15` — so `createBackend("LIBFABRIC")` returns `NIXL_ERR_NOT_FOUND`.
+   Ubuntu/apt libfabric (1.14/1.20) and the host's own do not substitute: wrong
+   symbol version and/or a glibc mismatch. Only the AWS `/opt/amazon/efa` set works,
+   and the whole set has to be grafted together. `EFA_GRAFT_DIR=/efa-rdma-core`
+   (copied from the K3 experiment's `efa701`, ~4 MB, now owned by this harness)
+   turns on the graft block in `train_eagle_streaming.sh`, which also asserts the
+   backend actually instantiates rather than letting the run fall back silently.
+   Measured working in *this* image by probe job 405849: `Backend LIBFABRIC was
+   instantiated` plus a successful VRAM `registerMem`. The `libionic-rdmav59.so`
+   load warning under the graft is benign.
+
+   The alternative is UCX, and it works, but only over plain TCP:
+   `UCX_TLS=tcp,sm,self,cuda_copy`. `cuda_copy` is load-bearing — without it UCX
+   logs `8 NVIDIA GPU(s) were detected, but UCX CUDA support was not found` and
+   `registerMem` fails on the VRAM buffers with `NIXL_ERR_BACKEND`, even though
+   `libuct_cuda.so` is on disk the whole time. And `UCX_TLS` cannot be left to
+   probe: UCX then finds the node's 16 EFA NICs and segfaults the trainer's forked
+   dataloader workers at agent init.
+
+   **This harness briefly shipped the UCX/TCP path.** The reason given was a K3
+   A/B measuring LIBFABRIC at 24 s/step against TCP's 15 s — but that measurement
+   is recorded with an explicit "do not treat as final, re-measure clean" caveat
+   (it was taken during warmup, and the two arms captured different numbers of
+   layers), and every K3 and M3 production run since uses LIBFABRIC. Citing a
+   number its own author flagged as unreliable was the error.
+
+   `NCCL_IB_DISABLE=1` is separate and still set: it is about NCCL's own ibverbs
+   path for the trainer's DDP, not about NIXL.
+
 6. **`report_to=none`** — the trainer runs in the serve container, which has no
    tensorboard.
 7. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a

@@ -28,12 +28,11 @@
 #     dflash_use_flex_attention, which compiles Triton templates on the first
 #     backward. Ranks sharing a lustre cache die with "OSError: [Errno 14] Bad
 #     address". /raid/scratch is the only user-writable node-local NVMe on PDX.
-#   * NIXL: this image ships no nixl at all, so it is pip-installed per job.
-#     Transport is UCX pinned to tcp+cuda_copy -- leaving UCX_TLS to probe makes
-#     UCX find the node's 16 EFA NICs and segfault the forked dataloader workers,
-#     and dropping cuda_copy makes VRAM registration fail outright. See README
-#     traps 4-5 for the measurements and for the LIBFABRIC fallback.
-#     NCCL_IB_DISABLE=1 for the trainer's DDP for the same EFA reason.
+#   * NIXL: this image ships no nixl at all, so it is pip-installed per job, and
+#     the AWS rdma-core set is grafted in so the LIBFABRIC plugin can load. That
+#     gives EFA RDMA for the hidden-state transfer, which is what every other
+#     production streaming run on PDX uses. NCCL still gets NCCL_IB_DISABLE=1:
+#     that is about NCCL's own ibverbs path for DDP, not about NIXL.
 #   * report_to=none: the serve container has no tensorboard, and the trainer
 #     runs in that same container.
 #   * The corpus is the xhigh self-synthesis, split into reasoning/content by
@@ -133,18 +132,16 @@ pipeline:
       # NOTE: the package to install is plain `nixl`, not `nixl-cu13`. nixl-cu13
       # installs the module as `nixl_cu13`, and the connector imports `nixl`.
       - PIP_EXTRA_PACKAGES: "nixl==1.3.0"
-      # Transport. The LIBFABRIC/EFA path needs the whole AWS rdma-core set
-      # grafted into the image (validated for K3 in ~/lustre/k3work/efa701, but
-      # against a different image), and when it was A/B'd it came out SLOWER
-      # than TCP -- the bottleneck is serve prefill, not transfer, and that is
-      # only more true for an 820 B base. So: UCX, pinned to tcp.
-      # UCX_TLS is not optional. Left to probe, UCX finds the node's 18 EFA
-      # NICs and segfaults the dataloader workers at agent init.
-      - NIXL_BACKENDS: "UCX"
-      # cuda_copy is load-bearing, not decoration: without it UCX reports
-      # "UCX CUDA support was not found" and registerMem fails on the VRAM
-      # hidden-state buffers. tcp/sm/self keep the EFA NICs out.
-      - UCX_TLS: "tcp,sm,self,cuda_copy"
+      # Transport: EFA RDMA via NIXL's LIBFABRIC plugin. This is what every
+      # production streaming run on PDX uses (all the M3 yamls, and every K3
+      # k3_causal_*/k3_cmhcfg_*/k3_nativevllm_* run). It needs EFA_GRAFT_DIR
+      # below -- without the graft createBackend returns NIXL_ERR_NOT_FOUND and
+      # the only working alternative is UCX over plain TCP.
+      - NIXL_BACKENDS: "LIBFABRIC"
+      - FI_PROVIDER: "efa"
+      # Where the AWS rdma-core set lives; the wrapper copies it into the image
+      # and re-runs ldconfig. See the graft block in train_eagle_streaming.sh.
+      - EFA_GRAFT_DIR: "/efa-rdma-core"
       - NCCL_IB_DISABLE: "1"
       # Node-local, per the FlexAttention note in the header.
       - TRITON_CACHE_DIR: "/raid/scratch/haoguo-triton"
@@ -165,3 +162,5 @@ pipeline:
       # long run dies as a bare Slurm TIMEOUT with no traceback.
       time: "23:50:00"
       container: /home/haoguo/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
+      container_mounts:
+        - /home/haoguo/lustre/efa-rdma-core:/efa-rdma-core
