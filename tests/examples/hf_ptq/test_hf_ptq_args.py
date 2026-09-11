@@ -270,6 +270,34 @@ def test_fixed_ptq_kv_precheck_does_not_widen_scoped_gemm_rule(monkeypatch):
     assert not hf_ptq._quantize_config_explicitly_enables_kv(fixed.model_dump())
 
 
+@pytest.mark.parametrize(
+    "kv_pattern",
+    [
+        "model.layers.*.self_attn.*[kv]_bmm_quantizer",
+        "*self_attn*k_bmm_quantizer",
+    ],
+)
+def test_fixed_ptq_kv_precheck_ignores_unrelated_parent_scoped_rules(monkeypatch, kv_pattern):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": kv_pattern,
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            },
+            {
+                "parent_class": "nn.Embedding",
+                "quantizer_name": "*",
+                "enable": False,
+            },
+        ],
+        algorithm="max",
+    )
+
+    assert hf_ptq._quantize_config_explicitly_enables_kv(fixed.model_dump())
+
+
 def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     fixed = QuantizeConfig(

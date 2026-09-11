@@ -443,18 +443,20 @@ def _quantize_config_explicitly_enables_kv(quant_cfg: dict[str, Any]) -> bool:
     """Detect explicit K/V rules while preserving their ordered override semantics."""
     enabled = dict.fromkeys(("k_bmm_quantizer", "v_bmm_quantizer"), False)
     for entry in quant_cfg["quant_cfg"]:
+        if entry.get("parent_class") is not None:
+            continue
         pattern = entry["quantizer_name"]
         if pattern != "*" and "bmm_quantizer" not in pattern:
             continue
-        suffix = pattern.rsplit(".", 1)[-1]
         for name in enabled:
-            if fnmatch(name, suffix):
+            qualified_name = f"model.layers.0.self_attn.{name}"
+            if fnmatch(name, pattern) or fnmatch(qualified_name, pattern) or pattern.endswith(name):
                 enabled[name] = entry["enable"]
     return any(enabled.values())
 
 
 def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
-    """Resolve the dedicated KV checkpoint flag with a one-release legacy fallback."""
+    """Resolve a KV-primary checkpoint with a one-release legacy fallback."""
     if args.kv_auto_quantize_checkpoint is not None:
         return args.kv_auto_quantize_checkpoint
     if args.auto_quantize_checkpoint is not None:
@@ -996,6 +998,8 @@ def _run_auto_quantize_recipe(
             aq_config=followup_kv,
             full_model=full_model,
             allow_uniform_kv=False,
+            # The weight search owns --auto_quantize_checkpoint, so a follow-up KV search must
+            # never use the KV-primary legacy fallback and collide with the weight state.
             checkpoint=args.kv_auto_quantize_checkpoint,
         )
 
