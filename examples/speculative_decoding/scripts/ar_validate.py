@@ -28,7 +28,11 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.speculative.plugins.hf_eagle import HFARValidation
-from modelopt.torch.speculative.utils import load_vlm_or_llm
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 mto.enable_huggingface_checkpointing()
 
@@ -176,11 +180,22 @@ def main():
         default=None,
         help="Error if AR is below this threshold.",
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=CONFIG_OVERRIDES_HELP,
+    )
     args = parser.parse_args()
+
+    config_overrides = parse_config_overrides(args.config_overrides)
 
     accelerator = Accelerator()
     model = load_vlm_or_llm(
-        args.model_path, device_map="auto", trust_remote_code=args.trust_remote_code
+        args.model_path,
+        device_map="auto",
+        trust_remote_code=args.trust_remote_code,
+        config_overrides=config_overrides,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
@@ -199,7 +214,24 @@ def main():
         accelerator.device,
     )
 
-    if results and accelerator.is_main_process:
+    # validate_ar() clamps to len(ds), so report what was actually attempted rather than the
+    # requested --num_samples, which can be larger than the dataset. A non-positive count means
+    # nothing ran at all -- distinct from "everything ran and failed", so say so separately.
+    attempted = min(args.num_samples, len(ds))
+    if attempted <= 0:
+        raise ValueError(
+            f"No samples to validate: --num_samples={args.num_samples} with a dataset of "
+            f"{len(ds)} prompts. Pass a positive --num_samples."
+        )
+
+    if not results:
+        raise RuntimeError(
+            f"AR validation produced no results: all {attempted} samples failed. "
+            "See the per-sample WARNING lines above for the underlying error. "
+            "Exiting non-zero so this is not mistaken for a successful validation."
+        )
+
+    if accelerator.is_main_process:
         all_ars = [ar for _, ar in results]
         avg_ar = sum(all_ars) / len(all_ars)
         print(f"\n==== AR Validation Results (osl={args.osl}, steps={args.steps}) ====")

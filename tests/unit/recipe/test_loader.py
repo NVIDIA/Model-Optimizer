@@ -28,6 +28,9 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
+    AutoQuantizeCost,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -1799,6 +1802,22 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.module_search_spaces == []
 
 
+def test_autoquantize_constraints_use_effective_bits_for_kv_cost_model():
+    assert AutoQuantizeConstraints.model_fields["effective_bits"].default == 4.8
+    assert AutoQuantizeConstraints().effective_bits == 4.8
+
+    constraints = AutoQuantizeConstraints(effective_bits=5.4, cost_model="kv_cache")
+    assert constraints.effective_bits == 5.4
+    assert constraints.cost_model == "kv_cache"
+
+    with pytest.raises(ValueError, match="does not accept weight cost settings"):
+        AutoQuantizeConstraints(
+            effective_bits=5.4,
+            cost_model="kv_cache",
+            cost=AutoQuantizeCost(active_moe_expert_ratio=0.5),
+        )
+
+
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
     """cost_model + cost.active_moe_expert_ratio parse and dump to the mtq constraints dict shape."""
     recipe_file = tmp_path / "aq.yml"
@@ -1938,6 +1957,7 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
     [
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
         "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe",
@@ -1949,11 +1969,45 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
-    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
-    # them unconditionally, so a general recipe is the migration target and must match it. Without
-    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
     assert "*output_layer*" in recipe.auto_quantize.disabled_layers
-    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+    if recipe.auto_quantize.constraints.cost_model == "kv_cache":
+        assert "*mtp*" in recipe.auto_quantize.disabled_layers
+        assert recipe.auto_quantize.cost_excluded_layers == []
+    else:
+        assert recipe.auto_quantize.cost_excluded_layers == [
+            "*visual*",
+            "*mtp*",
+            "*vision_tower*",
+        ]
+
+
+def test_load_recipe_kv_autoquantize_contract():
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    aq = recipe.auto_quantize
+
+    assert aq.constraints.effective_bits == 5.4
+    assert aq.constraints.cost_model == "kv_cache"
+    assert aq.auto_quantize_method == "kl_div"
+    assert "*mtp*" in aq.disabled_layers
+    assert aq.cost_excluded_layers == []
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
+    for fmt in aq.candidate_formats:
+        for entry in fmt.quant_cfg:
+            assert entry.quantizer_name == "*[kv]_bmm_quantizer"
+            assert not entry.cfg.use_constant_amax
+            assert entry.cfg.constant_amax == 448.0
+        assert fmt.algorithm is None
+
+
+def test_kv_autoquantize_rejects_cost_excluded_layers():
+    with pytest.raises(ValueError, match=r"cost_excluded_layers.*disabled_layers"):
+        AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(effective_bits=8.0, cost_model="kv_cache"),
+            candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], effective_bits=8.0)],
+            auto_quantize_method="kl_div",
+            cost_excluded_layers=["*mtp*"],
+        )
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
