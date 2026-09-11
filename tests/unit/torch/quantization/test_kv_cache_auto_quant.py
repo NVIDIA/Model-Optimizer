@@ -761,7 +761,7 @@ def test_public_kv_autoquant_rejects_distributed_execution_before_mutation(monke
     assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
+def test_public_kv_autoquant_preserves_preceding_weight_quantization():
     model = get_tiny_llama(num_hidden_layers=2)
     model = mtq.quantize(
         model,
@@ -770,7 +770,7 @@ def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
                 {"quantizer_name": "*", "enable": False},
                 {
                     "quantizer_name": "*.weight_quantizer",
-                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "cfg": {"num_bits": (4, 3), "axis": None, "constant_amax": 1.0},
                     "enable": True,
                 },
             ],
@@ -788,13 +788,23 @@ def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
         "effective_bits": 8.0,
     }
 
-    with pytest.raises(NotImplementedError, match="requires an unquantized model"):
-        mtq.auto_quantize(
-            model,
-            {"effective_bits": 8.0, "cost_model": "kv_cache"},
-            [candidate],
-            [],
-            lambda *_: pytest.fail("Validation must fail before search."),
-            num_calib_steps=1,
-            num_score_steps=1,
-        )
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+    weight_quantizer = model.model.layers[0].self_attn.q_proj.weight_quantizer
+
+    model, _ = mtq.auto_quantize(
+        model,
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda search_model, batch: search_model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    assert weight_quantizer.is_enabled
+    assert weight_quantizer.num_bits == (4, 3)
+    assert weight_quantizer.amax == 1.0
+    assert all(
+        layer.self_attn.k_bmm_quantizer.is_enabled and layer.self_attn.v_bmm_quantizer.is_enabled
+        for layer in model.model.layers
+    )
