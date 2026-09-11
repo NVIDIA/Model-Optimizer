@@ -463,12 +463,14 @@ checkpoint's** quant config verbatim:
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
   the dense-MLP scope plus the vision-tower exclusion.)
 
-- **`models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/{nvfp4,fp8}_moe_mamba-kv_fp8_cast`**
-  mirror `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-{NVFP4,FP8}`: MoE routed and shared
-  experts plus the Mamba `mixer.in_proj` / `mixer.out_proj` quantized, **except on layers
-  4, 11, 18, 25, 32 and 41** — the Mamba layer immediately preceding each of the six
-  attention layers, which the release leaves BF16. Attention, `conv1d`, routers and
-  `lm_head` stay BF16; KV cache FP8 cast.
+- **`models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
+  mirrors `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`: MoE routed and shared experts plus
+  the Mamba `mixer.in_proj` / `mixer.out_proj` quantized, **except on layers 4, 11, 18,
+  25, 32 and 41** — the Mamba layer immediately preceding each of the six attention
+  layers, which the release leaves BF16. Attention, `conv1d`, routers and `lm_head` stay
+  BF16; KV cache FP8 cast. There is deliberately no NVFP4 sibling: that release's model
+  card says quantization-aware distillation was applied after PTQ, so no PTQ recipe
+  reproduces it.
 - **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
   mirrors `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`, the FP8 sibling of the NVFP4
   release above: FP8 W8A8 on the routed experts, shared experts and Mamba in/out
