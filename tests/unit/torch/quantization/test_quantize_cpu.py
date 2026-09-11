@@ -33,7 +33,10 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
+from modelopt.torch.quantization.conversion import (
+    set_quantizer_attributes_full,
+    set_quantizer_attributes_partial,
+)
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
     TensorQuantizer,
@@ -400,6 +403,72 @@ class TestSetQuantizerAttributesFull:
             if name.endswith("weight_quantizer"):
                 assert isinstance(module, SequentialQuantizer)
                 assert len(module) == 2
+
+    def test_list_attributes_double_application_is_idempotent(self):
+        """Applying the same list config twice must not nest SequentialQuantizers.
+
+        Regression test: the fused-experts name normalization used to collapse a
+        SequentialQuantizer child name like ``...weight_quantizer.0`` down to
+        ``...weight_quantizer``, so on a second pass each sub-quantizer matched the
+        singular wildcard on its own and was replaced with a nested
+        SequentialQuantizer.
+        """
+        model = self._quantize(SimpleLinear())
+        attrs = [
+            QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 128}),
+            QuantizerAttributeConfig(num_bits=8, axis=0),
+        ]
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        seen = 0
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                seen += 1
+                assert isinstance(module, SequentialQuantizer)
+                assert len(module) == 2
+                for sub in module:
+                    assert isinstance(sub, TensorQuantizer)
+                    assert not isinstance(sub, SequentialQuantizer), (
+                        f"{name} has a nested SequentialQuantizer sub-quantizer"
+                    )
+                assert module[0].num_bits == 4
+                assert module[1].num_bits == 8
+        assert seen > 0
+
+
+def test_partial_list_on_existing_sequential_quantizer():
+    """A list partial config applies per-position to an existing SequentialQuantizer.
+
+    This is the documented contract of set_quantizer_attributes_partial. Regression
+    test: the fused-experts name normalization made the SequentialQuantizer's child
+    TensorQuantizers (``...weight_quantizer.0``) match ``*weight_quantizer`` too, and
+    the list-on-TensorQuantizer check then raised ValueError mid-iteration.
+    """
+    model = mtq.quantize(SimpleLinear(), mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+    set_quantizer_attributes_full(
+        model,
+        "*weight_quantizer",
+        [
+            QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 128}),
+            QuantizerAttributeConfig(num_bits=8, axis=0),
+        ],
+    )
+    # Must not raise: only the SequentialQuantizer containers should match, never
+    # their child TensorQuantizers.
+    set_quantizer_attributes_partial(
+        model, "*weight_quantizer", [{"enable": False}, {"num_bits": 4}]
+    )
+    seen = 0
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            seen += 1
+            assert isinstance(module, SequentialQuantizer)
+            assert not module[0].is_enabled, f"{name}[0] should be disabled"
+            assert module[0].num_bits == 4, "unspecified attribute should be preserved"
+            assert module[1].is_enabled, f"{name}[1] should stay enabled"
+            assert module[1].num_bits == 4, "per-position update should apply to slot 1"
+            assert module[1].axis == 0, "unspecified attribute should be preserved"
+    assert seen > 0
 
 
 def test_ordering_later_entry_overrides_earlier():
