@@ -45,6 +45,11 @@ training:
   training_seq_len: 3072
   logging_steps: 20
   save_steps: 500
+  # A DFlash2 checkpoint here is 56 GB: ~4 G draft params (vocab 202048 x 8192 for
+  # embed and lm_head alone) at fp32 weights + fp32 Adam moments, per
+  # dflash_fp32_master_weights. At 0.82 s/step that is 480 GB/h, and PDX lustre is
+  # shared and sits near 97% full -- unbounded checkpointing fills it in under 7 h.
+  save_total_limit: 3
   cp_size: 1
   dp_shard_size: 1
   disable_tqdm: true
