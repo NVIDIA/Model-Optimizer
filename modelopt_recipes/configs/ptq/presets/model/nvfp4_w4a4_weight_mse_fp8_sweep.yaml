@@ -25,6 +25,7 @@ imports:
 algorithm:
   method: mse
   fp8_scale_sweep: true
+effective_bits: 4.5
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'
