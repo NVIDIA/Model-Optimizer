@@ -42,6 +42,13 @@ DSparkDMRegistry = _DMRegistryCls(prefix="DSpark")
 # registry so its wrapper (HFLiLiCorrModel) does not overwrite HFDFlashModel.
 LiLiCorrDMRegistry = _DMRegistryCls(prefix="LiLiCorr")
 
+# DFlash2 also reuses the dflash mode/config/recipe, converting the base model to a
+# DFlash backbone whose sublayers are wrapped in grouped dynamic convolutions, plus a
+# low-rank candidate selector. Selected via
+# ``dflash_architecture_config.projector_type == "dflash2"`` and kept in its own
+# registry so its wrapper (HFDFlash2Model) does not overwrite HFDFlashModel.
+DFlash2DMRegistry = _DMRegistryCls(prefix="DFlash2")
+
 
 def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertReturnType:
     """Convert the model to a DFlash (or Domino) model as per `config`."""
@@ -61,12 +68,15 @@ def convert_to_dflash_model(model: nn.Module, config: DFlashConfig) -> ConvertRe
         registry = DSparkDMRegistry
     elif projector_type == "lilicorr":
         registry = LiLiCorrDMRegistry
+
+    elif projector_type == "dflash2":
+        registry = DFlash2DMRegistry
     elif projector_type in (None, "dflash"):
         registry = DFlashDMRegistry
     else:
         raise ValueError(
             f"Unsupported dflash_architecture_config.projector_type: {projector_type!r}. "
-            "Expected 'dflash' (default), 'domino', 'dspark' or 'lilicorr'."
+            "Expected 'dflash' (default), 'domino', 'dspark', 'lilicorr' or 'dflash2'."
         )
 
     original_cls = type(model)
