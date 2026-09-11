@@ -331,7 +331,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         initializer_indices = {
             initializer.name: idx for idx, initializer in enumerate(graph.initializer)
         }
-        value_info_map = {vi.name: vi for vi in graph.value_info}
+        value_info_map = {vi.name: vi for vi in [*graph.value_info, *graph.output]}
         graph_inputs = {inp.name for inp in graph.input}
         cast_output_cache: dict[tuple[str, str], str] = {}
 
@@ -372,6 +372,12 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
+
+            for output_name in node.output:
+                if output_name in value_info_map:
+                    value_info_map[output_name].type.tensor_type.elem_type = onnx_dtype_map[
+                        precision_dtype
+                    ]
 
         precision_dtype = _get_precision_dtype()
         logger.debug(f"Using precision dtype: {precision_dtype}")

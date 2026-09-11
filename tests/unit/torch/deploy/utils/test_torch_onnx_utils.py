@@ -300,28 +300,41 @@ def test_fp8_export_rejects_unsupported_dtype_conversion(
     assert not any(tmp_path.iterdir())
 
 
-def test_nvfp4_export_rejects_bf16_to_fp16(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("source_dtype", "weights_dtype"),
+    [(torch.bfloat16, "fp16"), (torch.float32, "bf16")],
+    ids=["bf16-to-fp16", "fp32-to-bf16"],
+)
+def test_nvfp4_export_rejects_unsupported_dtype_conversion(
+    source_dtype, weights_dtype, monkeypatch, tmp_path
+):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(torch_onnx, "is_fp4_quantized", lambda _: True)
-    model = nn.Linear(4, 4).eval().bfloat16()
+    model = nn.Linear(4, 4).eval().to(source_dtype)
 
     with pytest.raises(
         ValueError,
-        match=r"Converting a BF16 NVFP4 ONNX graph to FP16.*torch.bfloat16",
+        match=rf"Converting .* to {weights_dtype.upper()}.*source parameter dtypes: {source_dtype}",
     ):
         get_onnx_bytes_and_metadata(
             model,
-            (torch.ones(1, 4, dtype=torch.bfloat16),),
-            weights_dtype="fp16",
+            (torch.ones(1, 4, dtype=source_dtype),),
+            weights_dtype=weights_dtype,
         )
     assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
-    ("weights_dtype", "expected_converter"),
-    [("fp16", "onnxconverter"), ("bf16", "autocast")],
+    ("source_dtype", "weights_dtype", "expected_calls"),
+    [
+        (torch.float32, "fp16", ["onnxconverter"]),
+        (torch.bfloat16, "bf16", []),
+    ],
+    ids=["fp32-to-fp16", "bf16-noop"],
 )
-def test_nvfp4_export_selects_precision_converter(weights_dtype, expected_converter, monkeypatch):
+def test_nvfp4_export_selects_precision_converter(
+    source_dtype, weights_dtype, expected_calls, monkeypatch
+):
     calls = []
 
     def record_onnxconverter(model, **kwargs):
@@ -340,15 +353,15 @@ def test_nvfp4_export_selects_precision_converter(weights_dtype, expected_conver
     monkeypatch.setattr(torch_onnx, "convert_float_to_float16", record_onnxconverter)
     monkeypatch.setattr(torch_onnx, "convert_to_f16", record_autocast)
 
-    model = nn.Linear(4, 4).eval()
+    model = nn.Linear(4, 4).eval().to(source_dtype)
     get_onnx_bytes_and_metadata(
         model,
-        (torch.ones(1, 4),),
+        (torch.ones(1, 4, dtype=source_dtype),),
         weights_dtype=weights_dtype,
         onnx_opset=23,
     )
 
-    assert calls == [expected_converter]
+    assert calls == expected_calls
 
 
 class SingleArgModel(nn.Module):
