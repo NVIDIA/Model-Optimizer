@@ -56,6 +56,7 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
@@ -217,7 +218,10 @@ def train():
         assert checkpoint is not None  # guaranteed by checkpoint_is_hf
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
-                checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
+                checkpoint,
+                dtype="auto",
+                trust_remote_code=recipe.model.trust_remote_code,
+                config_overrides=recipe.model.config_overrides,
             )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
@@ -242,6 +246,7 @@ def train():
             dtype="auto",
             device_map="cpu",
             trust_remote_code=recipe.model.trust_remote_code,
+            config_overrides=recipe.model.config_overrides,
         )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_name_or_path,
@@ -269,6 +274,15 @@ def train():
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
+
+    # On the HF-format restore path above, DFlash's modify() ran with the base model still on
+    # meta, so the draft has no device, dtype or rotary buffer yet. Re-apply them here, before
+    # the Trainer is built: create_optimizer freezes the Adam moment dtype off the parameters,
+    # so a draft still sitting at the checkpoint's loaded dtype would silently spend the rest
+    # of the run without fp32 master weights. Passing the checkpoint also restores the
+    # precision `dtype="auto"` dropped on load. A no-op on a fresh convert.
+    if isinstance(model, HFDFlashModel):
+        model.restore_draft_precision(checkpoint if checkpoint_is_hf else None)
 
     if dry_run:
         # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,

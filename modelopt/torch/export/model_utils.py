@@ -18,6 +18,8 @@ import warnings
 
 import torch.nn as nn
 
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
 MODEL_NAME_TO_TYPE = {
     "GPT2": "gpt",
     "Mllama": "mllama",
@@ -107,8 +109,9 @@ def is_multimodal_model(model):
     """
     config = model.config
 
-    # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
+    # Check for Nemotron-Parse encoder-decoder architecture. `or []` because a model built with
+    # from_config has the attribute set to None rather than absent, so the default never applies.
+    architectures = getattr(config, "architectures", None) or []
     is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
     return (
@@ -118,7 +121,7 @@ def is_multimodal_model(model):
     )
 
 
-def get_language_model_from_vl(model) -> list[nn.Module] | None:
+def get_language_model_from_vl(model, *, strict: bool = False) -> list[nn.Module] | None:
     """Extract the language model lineage from a Vision-Language Model (VLM).
 
     This function handles the common patterns for accessing the language model component
@@ -127,6 +130,12 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     Args:
         model: The VLM model instance to extract the language model from
+        strict: Raise if distinct direct and nested language-model roots are present. Generic
+            export callers retain the historical nested-root preference by default; search
+            boundaries can opt in to fail-closed ambiguity handling.
+
+    Raises:
+        ValueError: If ``strict`` is True and the model exposes competing language-model roots.
 
     Returns:
         list: the lineage path towards the language model
@@ -137,12 +146,22 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
         >>> # lineage[0] is vlm_model
         >>> # lineage[1] is vlm_model.language_model
     """
-    # always prioritize model.model.langauge_model
-    if hasattr(model, "model") and hasattr(model.model, "language_model"):
-        return [model, model.model, model.model.language_model]
-
-    if hasattr(model, "language_model"):
-        return [model, model.language_model]
+    nested_parent = getattr(model, "model", None)
+    nested_language_model = getattr(nested_parent, "language_model", None)
+    direct_language_model = getattr(model, "language_model", None)
+    if (
+        strict
+        and nested_language_model is not None
+        and direct_language_model is not None
+        and nested_language_model is not direct_language_model
+    ):
+        raise ValueError(
+            "Found multiple language-model roots; refusing to select one by traversal order."
+        )
+    if nested_language_model is not None:
+        return [model, nested_parent, nested_language_model]
+    if direct_language_model is not None:
+        return [model, direct_language_model]
 
     # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model.
     # Only match if the model is detected as multimodal to avoid matching non-VLM encoder-decoder
@@ -152,6 +171,66 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     # Pattern 4: No language_model found
     return None
+
+
+def _owns_exported_state(module: nn.Module) -> bool:
+    """Whether the module has parameters or persistent buffers of its own to export."""
+    if next(module.parameters(recurse=False), None) is not None:
+        return True
+    non_persistent = getattr(module, "_non_persistent_buffers_set", frozenset())
+    return any(name not in non_persistent for name, _ in module.named_buffers(recurse=False))
+
+
+def get_export_units(model):
+    """Split the model into groups that can be exported independently.
+
+    One per decoder layer, plus one for everything else holding state. Every rank builds the same
+    list.
+    """
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if not decoder_layers:
+        # Without layers everything lands in one unit, so a single rank would own the whole model
+        # -- the host-RAM blow-up this split exists to avoid. The offloaded exporter refuses the
+        # same case; do not silently degrade into it.
+        raise RuntimeError(
+            "Export requires discoverable decoder layers. The model architecture is not supported "
+            "by LayerActivationCollector."
+        )
+    # A module object reused across layers (ALBERT-style sharing) would land in two units under one
+    # name, so two ranks would emit the same keys and the merged index would reference only one of
+    # the copies. Refuse rather than write a checkpoint whose index does not match its shards.
+    if len({id(layer) for layer in decoder_layers}) != len(decoder_layers):
+        raise NotImplementedError(
+            "Export does not support models that reuse the same decoder layer object more than "
+            "once: the shared layer has a single name, so its weights cannot be assigned to one "
+            "owner. Export without FSDP2, which builds the state dict in one process."
+        )
+    in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
+    owning = [m for m in model.modules() if id(m) not in in_layer and _owns_exported_state(m)]
+    # Drop any module that another owning module already contains: its state_dict covers the
+    # descendant, so keeping both would run the descendant's export handler twice.
+    owning_ids = {id(m) for m in owning}
+    covered = {
+        id(descendant)
+        for m in owning
+        for descendant in m.modules()
+        if descendant is not m and id(descendant) in owning_ids
+    }
+    root_leaves = [m for m in owning if id(m) not in covered]
+    # `covered` only drops modules held by another *owning* module. A container that holds the
+    # decoder layers and owns direct state of its own is not covered by anything, so it would land
+    # here and its state_dict() would re-emit every layers.N.* key that the layer units already
+    # own -- two ranks writing one key, and a merged index that references only one copy. No
+    # supported architecture does this (causal-mask style buffers are non-persistent), so refuse
+    # rather than guess how to split such a container's own state from its layers'.
+    if any(id(sub) in in_layer for m in root_leaves for sub in m.modules()):
+        raise NotImplementedError(
+            "Export does not support models where a module holding the decoder layers also owns "
+            "parameters or persistent buffers of its own: its state dict would duplicate every "
+            "decoder-layer tensor. Export without FSDP2, which builds the state dict in one "
+            "process."
+        )
+    return [[layer] for layer in decoder_layers] + [root_leaves]
 
 
 class TiedWeightMap:

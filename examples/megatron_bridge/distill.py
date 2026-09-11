@@ -175,6 +175,19 @@ def get_args():
         "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
     )
     parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
+    parser.add_argument(
+        "--no_async_save",
+        action="store_true",
+        help="Save checkpoints synchronously. Async saving spawns a worker that needs its own "
+        "CUDA context, which fails when the training process already fills the GPU.",
+    )
+    parser.add_argument(
+        "--logit_kl_topk",
+        type=int,
+        default=None,
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
+        "replacing the full-vocab temporaries with [seq, k] ones.",
+    )
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
@@ -360,6 +373,10 @@ def main(args: argparse.Namespace):
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
+    # A response-only loss mask and context parallel both need per-token loss reduction,
+    # which must not then be pre-averaged in the DDP collective below.
+    per_token_loss = args.sft or args.cp_size > 1
+
     def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
@@ -374,9 +391,7 @@ def main(args: argparse.Namespace):
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         set_moe_expert_layout(provider, moe_grouped_gemm)
-        if args.sft:
-            # A response-only loss mask needs per-token reduction to combine across CP ranks.
-            # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.
+        if per_token_loss:
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -420,7 +435,9 @@ def main(args: argparse.Namespace):
         )
 
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
+        skip_lm_loss=not args.no_skip_lm_loss,
+        kd_loss_scale=args.kd_loss_scale,
+        logit_kl_topk=args.logit_kl_topk,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
@@ -542,7 +559,7 @@ def main(args: argparse.Namespace):
             grad_reduce_in_fp32=True,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
-            average_in_collective=not args.sft,  # per-token loss must not be pre-averaged
+            average_in_collective=not per_token_loss,
             use_distributed_optimizer=True,
         ),
         dataset=dataset_config,
@@ -582,7 +599,7 @@ def main(args: argparse.Namespace):
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=args.checkpoint_keep_last,  # Keeps most recent checkpoints (-1 keeps all)
             ckpt_format="torch_dist",
-            async_save=True,
+            async_save=not args.no_async_save,
             fully_parallel_save=True,
         ),
         rng=RNGConfig(seed=args.seed),
