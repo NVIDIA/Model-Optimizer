@@ -16,25 +16,64 @@
 """Configuration and result schemas for DASC state sparsity."""
 
 import math
+from numbers import Real
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 __all__ = [
     "DASCCalibrationMeasurement",
     "DASCConfig",
+    "DASCLayerPolicy",
     "DASCPolicy",
     "DASCQualityMeasurement",
 ]
+
+_DecayParameterStorageDtype = Literal["float16", "bfloat16", "float32"]
+_DEFAULT_EPSILON = 1e-3
+_DEFAULT_STATIC_GATE_INPUT = -0.3
+
+
+def _validate_analysis_arguments(
+    epsilon: object = _DEFAULT_EPSILON,
+    static_gate_input: object = _DEFAULT_STATIC_GATE_INPUT,
+) -> None:
+    """Reject decay-analysis arguments that cannot produce well-defined horizons."""
+    try:
+        epsilon_is_valid = (
+            isinstance(epsilon, Real)
+            and not isinstance(epsilon, bool)
+            and math.isfinite(epsilon)
+            and 0.0 < epsilon < 1.0
+        )
+    except OverflowError:
+        epsilon_is_valid = False
+    if not epsilon_is_valid:
+        raise ValueError("epsilon must be finite and in (0, 1)")
+
+    try:
+        static_gate_input_is_valid = (
+            isinstance(static_gate_input, Real)
+            and not isinstance(static_gate_input, bool)
+            and math.isfinite(static_gate_input)
+        )
+    except OverflowError:
+        static_gate_input_is_valid = False
+    if not static_gate_input_is_valid:
+        raise ValueError("static_gate_input must be finite")
 
 
 class DASCQualityMeasurement(ModeloptBaseConfig):
     """Quality and lifecycle measurements for one calibration slice."""
 
     slice_id: str = Field(min_length=1)
-    perplexity_retention: float = Field(gt=0.0, le=1.0, allow_inf_nan=False)
+    perplexity_retention: float = Field(
+        gt=0.0,
+        allow_inf_nan=False,
+        description="Dense perplexity divided by DASC perplexity; values above one are valid.",
+    )
     top1_agreement: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     finite_continuation_logits: bool = Field(strict=True)
     retained_state_exact: bool = Field(strict=True)
@@ -67,17 +106,23 @@ class DASCCalibrationMeasurement(ModeloptBaseConfig):
 class DASCConfig(ModeloptBaseConfig):
     """Configuration for GDN decay-aware state checkpoint sparsity."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     variant: Literal["dasc_nr", "dasc_wr"] = ModeloptField(
         default="dasc_wr",
         description="Use zero recovery (DASC-NR) or suffix replay recovery (DASC-WR).",
     )
     epsilon: float = ModeloptField(
-        default=1e-3,
+        default=_DEFAULT_EPSILON,
         description="Retained contribution threshold used to derive static decay horizons.",
     )
     static_gate_input: float = ModeloptField(
-        default=-0.3,
+        default=_DEFAULT_STATIC_GATE_INPUT,
         description="Static gate input added to each GDN head's dt_bias.",
+    )
+    decay_parameter_storage_dtype: _DecayParameterStorageDtype = ModeloptField(
+        default="float32",
+        description="Expected checkpoint storage dtype for GDN A_log and dt_bias.",
     )
     wmax_candidates: list[int] = ModeloptField(
         default=[8, 16, 32, 64, 128, 256],
@@ -105,16 +150,14 @@ class DASCConfig(ModeloptBaseConfig):
     @classmethod
     def validate_epsilon(cls, epsilon: float) -> float:
         """Require a finite decay threshold strictly between zero and one."""
-        if not math.isfinite(epsilon) or not 0.0 < epsilon < 1.0:
-            raise ValueError("epsilon must be finite and in (0, 1)")
+        _validate_analysis_arguments(epsilon=epsilon)
         return epsilon
 
     @field_validator("static_gate_input")
     @classmethod
     def validate_static_gate_input(cls, value: float) -> float:
         """Require a finite representative gate input."""
-        if not math.isfinite(value):
-            raise ValueError("static_gate_input must be finite")
+        _validate_analysis_arguments(static_gate_input=value)
         return value
 
     @field_validator("wmax_candidates", mode="before")
@@ -135,9 +178,9 @@ class DASCConfig(ModeloptBaseConfig):
     @field_validator("min_perplexity_retention")
     @classmethod
     def validate_perplexity_gate(cls, value: float) -> float:
-        """Require a finite retention gate in (0, 1]."""
-        if not math.isfinite(value) or not 0.0 < value <= 1.0:
-            raise ValueError("min_perplexity_retention must be finite and in (0, 1]")
+        """Require a finite positive retention gate."""
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("min_perplexity_retention must be finite and positive")
         return value
 
     @field_validator("min_top1_agreement")
@@ -188,11 +231,14 @@ class DASCLayerPolicy(ModeloptBaseConfig):
 class DASCPolicy(ModeloptBaseConfig):
     """Standalone JSON-safe DASC deployment policy."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     format_version: Literal[1] = 1
     variant: Literal["dasc_nr", "dasc_wr"]
     recovery: Literal["zero", "suffix_replay"]
     epsilon: float
     static_gate_input: float
+    decay_parameter_storage_dtype: _DecayParameterStorageDtype = "float32"
     selected_wmax: int = Field(strict=True, gt=0)
     wmax_candidates: list[int] = Field(min_length=1)
     quality_gates: dict[str, float]
@@ -204,7 +250,10 @@ class DASCPolicy(ModeloptBaseConfig):
     preserve_convolution_state: Literal[True]
     active_runtime_state: Literal["dense"] = "dense"
     model_structure_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    decay_parameters_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decay_parameters_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Storage-dtype-canonicalized calibration snapshot retained for provenance.",
+    )
     layers: dict[str, DASCLayerPolicy] = Field(min_length=1)
     measurements: list[DASCCalibrationMeasurement] = Field(min_length=1)
 
