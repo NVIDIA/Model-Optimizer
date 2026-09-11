@@ -72,12 +72,25 @@ activation memory.
 
 ## Traps this harness already encodes
 
-1. **Corpus.** The published `default.jsonl` is **gzip despite the name** and stores
-   the reply under `conversations`. `hf_streaming_dataset` prefers `messages`, so an
-   unconverted file gives an empty answer span and a **silent hang**. `convert_specdec.py`
-   rebuilds a `messages`-only file and refuses to emit one without assistant turns.
-   Failure signature to watch for anyway: `train_acc` → exactly 1.0 within ~20 steps
+1. **Corpus.** Three separate things about the published `default.jsonl`:
+   - it is **gzip despite the name**;
+   - it stores the reply under `conversations`, and `hf_streaming_dataset` prefers
+     `messages`, so an unconverted file can give an empty answer span and a silent hang;
+   - it has **no id field at all**, and `_tokenize_entry` opens with
+     `cid = entry.get("conversation_id") or entry.get("uuid")` and drops the entry when
+     that is None. It drops it *as an unfit entry* — the same path as a bad sample, not
+     an error — so every record is skipped and the run dies ~25 min in with
+     `no fetchable sample found in the entire corpus (20000 entries)` and no hint that
+     an id was what was missing (job 405859).
+
+   `tools/convert_specdec.py` handles all three and gates on what `_tokenize_entry`
+   actually requires. The id is the **output** index (`v1-<n>`), so any prefix of the
+   full file is itself a valid corpus — that is what the smoke shard is.
+
+   Failure signature to watch for separately: `train_acc` → exactly 1.0 within ~20 steps
    plus an impossibly high step rate = the loss mask is empty, not convergence.
+   (Checked offline for this corpus + PineDrift's template + `answer_only_loss`: 200/200
+   records tokenize with a non-empty mask, median 605 supervised tokens.)
 2. **`SERVE_EXTRA_ARGS` is exported unquoted** by nemo_run, so its value must be
    space-free. Only `--language-model-only` is passed; `--enable-expert-parallel` and
    `--tokenizer-mode hf` are dropped (neither is needed for correctness). Add a
