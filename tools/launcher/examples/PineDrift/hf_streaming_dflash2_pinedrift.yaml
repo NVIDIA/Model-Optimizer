@@ -28,10 +28,11 @@
 #     NCCL_IB_DISABLE=1 for the trainer's DDP for the same EFA reason.
 #   * report_to=none: the serve container has no tensorboard, and the trainer
 #     runs in that same container.
-#   * The corpus is the messages-only rebuild. The published default.jsonl is
-#     gzip (despite the name) and stores the reply under `conversations`;
-#     hf_streaming_dataset prefers `messages`, so an unconverted file gives an
-#     empty answer span and a silent hang.
+#   * The corpus is the xhigh self-synthesis, split into reasoning/content by
+#     tools/pinedrift_split_harmony.py. It must NOT be fed raw: its assistant
+#     `content` is a whole Harmony stream, and the stock template both re-wraps it
+#     in its own to=user header AND runs it through esc(), which shatters every
+#     control token into ordinary BPE pieces. See README "Corpus".
 #
 # The MuseSpark base needs no serve-side patch: MuseSpark1xOmniForCausalLM is
 # native in this container's vLLM and carries the aux-capture mixin. The
@@ -63,16 +64,21 @@ pipeline:
       - model.model_name_or_path=<<global_vars.hf_model>>
       - model.use_fake_base_for_offline=true
       - model.trust_remote_code=false
-      # SMOKE: a 20k-record head of the corpus. The full default-msgs.jsonl is 1.96M
-      # records / 31.65 GB; tokenizing it before step 1 would sit well past the 30 min
-      # the PDX GPU-idle reaper allows. (Inlined rather than a global_vars entry --
-      # global_vars keys must name real launch() parameters, and only hf_model does.)
-      - data.data_path=/hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs-smoke20k.jsonl
-      # PineDrift's own template already has {% generation %}/{% endgeneration %}
-      # (lines 192/222), so no tagged copy is needed -- unlike M3.
-      - data.chat_template=<<global_vars.hf_model>>/chat_template.jinja
+      # The xhigh SELF-synthesis (PineDrift generating with its own weights), split
+      # into reasoning/content by tools/pinedrift_split_harmony.py. It must NOT be
+      # fed raw -- see README "Corpus". A directory: eagle_utils expands it to its
+      # sorted *.jsonl. (Inlined rather than a global_vars entry -- global_vars keys
+      # must name real launch() parameters, and only hf_model does.)
+      - data.data_path=/hf-local/pinedrift-xhigh-split
+      # A copy of the model's own template whose ONLY change is reasoning_effort
+      # default 'medium' -> 'xhigh'. The synthesis ran at xhigh ("Reasoning
+      # strength: 512" in the system turn) and the trainer does not pass
+      # reasoning_effort, so the stock template would condition the drafter on a
+      # system prompt that never produced these replies.
+      # {% generation %}/{% endgeneration %} are already in the stock template.
+      - data.chat_template=/hf-local/pinedrift-templates/chat_template_train_xhigh.jinja
       - training.output_dir=/scratchspace/dflash2
-      - training.num_train_epochs=1
+      - training.num_train_epochs=5
       - training.per_device_train_batch_size=1
       - training.training_seq_len=3072
       - training.save_steps=500
@@ -134,6 +140,12 @@ pipeline:
       - NCCL_IB_DISABLE: "1"
       # Node-local, per the FlexAttention note in the header.
       - TRITON_CACHE_DIR: "/raid/scratch/haoguo-triton"
+      # 583 shards go through load_dataset -> Arrow before step 1. The default
+      # cache is the container's /root (node-local overlay, unknown size);
+      # /raid is the 28 TB node-local NVMe. Deliberately not lustre: it is 94%
+      # full and is already streaming the 496 GiB of weights.
+      - HF_DATASETS_CACHE: "/raid/scratch/haoguo-hfds"
+      - HF_HOME: "/raid/scratch/haoguo-hf"
       # Editable install of modelopt happens per job; keep its cache off $HOME.
       - PIP_CACHE_DIR: "/home/haoguo/lustre/.cache/pip-pinedrift"
     slurm_config:

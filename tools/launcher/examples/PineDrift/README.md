@@ -9,9 +9,10 @@ Training harness for a DFlash2 draft head on PineDrift (`musespark1x_omni`), by
     recipe    modelopt_recipes/general/speculative_decoding/dflash2_pinedrift.yaml
     pipeline  tools/launcher/examples/PineDrift/hf_streaming_dflash2_pinedrift.yaml
     base      ~/lustre/hf-local/pinedrift-820b-a42b-nvfp4_vv3          (496 GiB)
-    corpus    ~/lustre/hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/
-                default-msgs.jsonl            1.96 M records, 31.65 GB  (full)
-                default-msgs-smoke20k.jsonl   20 k records,  327 MB     (smoke)
+    corpus    ~/lustre/hf-local/pinedrift-xhigh-split/        583 shards
+                (split from ~/lustre/pinedrift_xhigh_snapshot_583shards_20260911_0908)
+              ~/lustre/hf-local/pinedrift-xhigh-split-smoke8/  8 shards (smoke)
+    template  ~/lustre/hf-local/pinedrift-templates/chat_template_train_xhigh.jinja
     container ~/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
 
 ## Why streaming and not online
@@ -72,25 +73,55 @@ activation memory.
 
 ## Traps this harness already encodes
 
-1. **Corpus.** Three separate things about the published `default.jsonl`:
-   - it is **gzip despite the name**;
-   - it stores the reply under `conversations`, and `hf_streaming_dataset` prefers
-     `messages`, so an unconverted file can give an empty answer span and a silent hang;
-   - it has **no id field at all**, and `_tokenize_entry` opens with
-     `cid = entry.get("conversation_id") or entry.get("uuid")` and drops the entry when
-     that is None. It drops it *as an unfit entry* — the same path as a bad sample, not
-     an error — so every record is skipped and the run dies ~25 min in with
-     `no fetchable sample found in the entire corpus (20000 entries)` and no hint that
-     an id was what was missing (job 405859).
+1. **Corpus — the assistant content is a raw Harmony stream and must be split.**
+   The corpus is PineDrift's own xhigh self-synthesis (see the snapshot's README for
+   provenance). Each reply is stored as one raw stream in `content`:
 
-   `tools/convert_specdec.py` handles all three and gates on what `_tokenize_entry`
-   actually requires. The id is the **output** index (`v1-<n>`), so any prefix of the
-   full file is itself a valid corpus — that is what the smoke shard is.
+       " to=self<|message|>{CoT}<|eom|><|start|>assistant to=user<|message|>{answer}"
 
-   Failure signature to watch for separately: `train_acc` → exactly 1.0 within ~20 steps
-   plus an impossibly high step rate = the loss mask is empty, not convergence.
-   (Checked offline for this corpus + PineDrift's template + `answer_only_loss`: 200/200
-   records tokenize with a non-empty mask, median 605 supervised tokens.)
+   Fed to the stock chat template that renders as
+
+       <|start|>assistant to=user<|message|> to=self< |message|>{CoT}< |eom|>...
+
+   — two independent corruptions, neither of which errors:
+   - the template adds **its own** `<|start|>assistant to=user<|message|>` header, so
+     the reply is double-wrapped and the channel header is wrong;
+   - the template runs content through `esc()`, a deliberate injection defence that
+     **inserts a space into every control token**, so `<|message|>` (id 200023)
+     becomes ordinary BPE pieces. Same family as the K3 split-tag bug.
+
+   The result is a target sequence that cannot occur at inference. The template
+   already knows the right rendering — its assistant branch reads `reasoning` and
+   `content` separately and emits `to=self … <|eom|>` then `to=user … <|eot|>` — so
+   `tools/pinedrift_split_harmony.py` splits the stream into those two fields.
+   `--verify` renders a converted row back and requires
+   `"<|start|>assistant" + original_content + "<|eot|>"` to appear **verbatim**, and
+   checks the four control ids survive as single tokens. Measured: exact rebuild.
+
+   Drop rules (both on): rows with no `to=user` (hit the 8192 cap mid-CoT, 15.6%) and
+   degenerate tail loops (6.0%, detector from `pinedrift_filter.py`). Truncated rows
+   are dropped *here* although the snapshot README argues they are valid next-token
+   data — that argument holds for the verbatim stream, but once the template
+   synthesises a terminator, a cut CoT teaches a false `<|eom|>`.
+
+   **`reasoning_effort` must be `xhigh`.** The synthesis ran at xhigh, which the
+   system turn carries as `Reasoning strength: 512`; the stock template defaults to
+   `medium` (64) and the trainer does not pass the parameter. So the pipeline uses a
+   one-line copy of the template with the default changed. Training against the
+   medium system prompt would condition the drafter on a prompt that never produced
+   these replies.
+
+   Also still true of any corpus here: `_tokenize_entry` starts with
+   `cid = entry.get("conversation_id") or entry.get("uuid")` and drops the entry when
+   that is None — silently, as an "unfit entry" — so a corpus with no id field dies
+   ~25 min in with `no fetchable sample found in the entire corpus` and no hint about
+   why (job 405859). This corpus has `uuid`.
+
+   Failure signature to watch for separately: `train_acc` → exactly 1.0 within ~20
+   steps plus an impossibly high step rate = the loss mask is empty, not convergence.
+   Measured on 300 rows of this corpus: 299 tokenize with a non-empty mask (median
+   2246 supervised tokens of 3072), 1 had no assistant turn.
+
 2. **`SERVE_EXTRA_ARGS` is exported unquoted** by nemo_run, so its value must be
    space-free. Only `--language-model-only` is passed; `--enable-expert-parallel` and
    `--tokenizer-mode hf` are dropped (neither is needed for correctness). Add a
