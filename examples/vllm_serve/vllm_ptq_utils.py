@@ -50,26 +50,43 @@ def _allocate_calibration_blocks(
     kv_cache_groups = kv_cache_config.kv_cache_groups
     empty_block_ids = tuple([] for _ in kv_cache_groups)
 
-    try:
-        from vllm.v1.worker.gpu.warmup import _reserved_block_count
-    except ImportError:
-        # Older vLLM versions do not expose the V2 warmup allocator and used
-        # empty block tables for this calibration path.
-        return [empty_block_ids for _ in sequence_lengths], None
-
     model_runner = self.model_runner
     vllm_config = model_runner.vllm_config
 
-    def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
-        # Calibration runs before model_state is initialized, so call the
-        # underlying reservation policy rather than _warmup_block_counter.
-        return _reserved_block_count(
-            num_tokens,
-            kv_cache_spec,
-            num_lookahead_tokens=vllm_config.num_lookahead_tokens,
-            max_model_len=model_runner.max_model_len,
-            max_encoder_len=0,
-        )
+    try:
+        from vllm.v1.worker.gpu.warmup import _reserved_block_count
+    except ImportError:
+        try:
+            from vllm.utils.math_utils import cdiv
+            from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+        except ImportError:
+            # Older vLLM versions used empty block tables for this path.
+            return [empty_block_ids for _ in sequence_lengths], None
+
+        def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
+            # vLLM 0.26's warmup reservation policy.
+            if isinstance(kv_cache_spec, CrossAttentionSpec):
+                num_tokens = 0
+            num_blocks = cdiv(num_tokens, kv_cache_spec.block_size)
+            if (
+                isinstance(kv_cache_spec, MambaSpec)
+                and kv_cache_spec.mamba_cache_mode == "align"
+            ):
+                num_blocks += kv_cache_spec.num_speculative_blocks
+            return num_blocks
+
+    else:
+
+        def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
+            # Calibration runs before model_state is initialized, so call the
+            # underlying reservation policy rather than _warmup_block_counter.
+            return _reserved_block_count(
+                num_tokens,
+                kv_cache_spec,
+                num_lookahead_tokens=vllm_config.num_lookahead_tokens,
+                max_model_len=model_runner.max_model_len,
+                max_encoder_len=0,
+            )
     next_block_id = 1  # Block 0 is reserved as the null block.
     block_ids_batch: list[tuple[list[int], ...]] = []
     allocated_block_ids: list[int] = []
