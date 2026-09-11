@@ -21,6 +21,8 @@ import tempfile
 import onnx
 import onnx_graphsurgeon as gs
 
+from modelopt.onnx.utils import is_model_too_large_for_protobuf
+
 
 class Optimizer:
     """Optimizer for onnx graphs."""
@@ -62,7 +64,7 @@ class Optimizer:
     def infer_shapes(self, return_onnx=False):
         """Infers shapes of the onnx graph."""
         onnx_graph = gs.export_onnx(self.graph)
-        if onnx_graph.ByteSize() > (2 * (1024**3)):  # 2GB limit
+        if is_model_too_large_for_protobuf(onnx_graph):  # 2GB limit
             temp_dir = tempfile.TemporaryDirectory().name
             os.makedirs(temp_dir, exist_ok=True)
             onnx_orig_path = os.path.join(temp_dir, "model.onnx")
