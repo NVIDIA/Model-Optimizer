@@ -105,13 +105,6 @@ def compute_gdn_decay_horizons(
     return horizons
 
 
-def _is_gdn_module(module: nn.Module, supported_classes: tuple[type[nn.Module], ...]) -> bool:
-    """Accept supported GDN implementations and their ModelOpt dynamic subclasses."""
-    return _has_supported_gdn_identity(module, supported_classes) and all(
-        isinstance(getattr(module, name, None), torch.Tensor) for name in ("A_log", "dt_bias")
-    )
-
-
 def _has_supported_gdn_identity(
     module: nn.Module, supported_classes: tuple[type[nn.Module], ...]
 ) -> bool:
@@ -128,37 +121,39 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
     model = unwrap_model(model, force_unwrap=True)
     supported_classes = _supported_gdn_classes()
     named_modules = list(model.named_modules())
-    modules = {
-        name: module for name, module in named_modules if _is_gdn_module(module, supported_classes)
-    }
+    identity_modules = [
+        (name, module)
+        for name, module in named_modules
+        if _has_supported_gdn_identity(module, supported_classes)
+    ]
+    missing_decay_parameters = [
+        name or "<root>"
+        for name, module in identity_modules
+        if not all(
+            isinstance(getattr(module, parameter, None), torch.Tensor)
+            for parameter in ("A_log", "dt_bias")
+        )
+    ]
+    if missing_decay_parameters:
+        raise ApplyModeError(
+            "DASC found supported GDN modules without A_log and dt_bias tensors at: "
+            f"{', '.join(missing_decay_parameters)}"
+        )
+    unsupported_subclasses = [
+        name or "<root>"
+        for name, module in named_modules
+        if not isinstance(module, DynamicModule)
+        and type(module) not in supported_classes
+        and any(base in supported_classes for base in type(module).__mro__[1:])
+    ]
+    if unsupported_subclasses:
+        raise ApplyModeError(
+            "DASC found GDN subclasses that are not ModelOpt dynamic modules at: "
+            f"{', '.join(unsupported_subclasses)}; convert the module with ModelOpt or use a "
+            "supported class directly"
+        )
+    modules = dict(identity_modules)
     if not modules:
-        missing_decay_parameters = [
-            name or "<root>"
-            for name, module in named_modules
-            if _has_supported_gdn_identity(module, supported_classes)
-            and not all(
-                isinstance(getattr(module, parameter, None), torch.Tensor)
-                for parameter in ("A_log", "dt_bias")
-            )
-        ]
-        if missing_decay_parameters:
-            raise ApplyModeError(
-                "DASC found supported GDN modules without A_log and dt_bias tensors at: "
-                f"{', '.join(missing_decay_parameters)}"
-            )
-        unsupported_subclasses = [
-            name or "<root>"
-            for name, module in named_modules
-            if not isinstance(module, DynamicModule)
-            and type(module) not in supported_classes
-            and any(base in supported_classes for base in type(module).__mro__[1:])
-        ]
-        if unsupported_subclasses:
-            raise ApplyModeError(
-                "DASC found GDN subclasses that are not ModelOpt dynamic modules at: "
-                f"{', '.join(unsupported_subclasses)}; convert the module with ModelOpt or use a "
-                "supported class directly"
-            )
         supported = ", ".join(
             f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS
         )

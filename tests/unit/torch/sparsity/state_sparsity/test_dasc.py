@@ -265,6 +265,13 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     with pytest.raises(ApplyModeError, match="without A_log and dt_bias tensors"):
         mtss.calibrate(missing_decay, _config(wmax_candidates=[7]), [_candidate(7)])
 
+    partially_valid = nn.Module()
+    partially_valid.good = GatedDeltaNet()
+    partially_valid.bad = GatedDeltaNet()
+    del partially_valid.bad.dt_bias
+    with pytest.raises(ApplyModeError, match="bad"):
+        mtss.analyze_gdn_decay(partially_valid)
+
     invalid_decay = TinyGatedDeltaNetForCausalLM()
     invalid_decay.linear_attn.dt_bias = nn.Parameter(torch.zeros(3))
     with pytest.raises(ApplyModeError, match="Invalid GDN decay parameters"):
