@@ -25,7 +25,7 @@ Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR li
 
 ### Audit recent merged PRs
 
-Treat PRs merged into `main` since the latest release candidate as "recent":
+Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
 
 ```bash
 git fetch origin main "release/$VERSION" --tags
