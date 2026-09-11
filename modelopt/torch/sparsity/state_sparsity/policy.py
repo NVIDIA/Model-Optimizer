@@ -43,8 +43,9 @@ from .config import (
 
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
 
+_MEGATRON_GDN_CLASS_PATH = ("megatron.core.ssm.gated_delta_net", "GatedDeltaNet")
 _SUPPORTED_GDN_CLASS_PATHS = (
-    ("megatron.core.ssm.gated_delta_net", "GatedDeltaNet"),
+    _MEGATRON_GDN_CLASS_PATH,
     ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextGatedDeltaNet"),
 )
 _STORAGE_DTYPES: dict[_DecayParameterStorageDtype, torch.dtype] = {
@@ -171,8 +172,54 @@ def _reject_unconverted_gdn_subclasses(
     if unsupported_subclasses:
         raise ApplyModeError(
             "DASC found GDN subclasses that are not ModelOpt dynamic modules at: "
-            f"{', '.join(unsupported_subclasses)}; convert the module with ModelOpt or use a "
-            "supported class directly"
+            f"{', '.join(unsupported_subclasses)}; Megatron subclasses require a ModelOpt "
+            "NAS/prune dynamic conversion, while Transformers subclasses must currently use the "
+            "supported base class directly"
+        )
+
+
+def _reject_distributed_megatron_gdn(
+    identity_modules: list[tuple[str, nn.Module]],
+    supported_classes: tuple[type[nn.Module], ...],
+) -> None:
+    """Fail closed when a Megatron policy would contain rank-local head or layer geometry."""
+    module_name, class_name = _MEGATRON_GDN_CLASS_PATH
+    megatron_class = next(
+        (
+            candidate
+            for candidate in supported_classes
+            if candidate.__module__ == module_name and candidate.__name__ == class_name
+        ),
+        None,
+    )
+    if megatron_class is None:
+        return
+
+    megatron_modules = [
+        (name, module)
+        for name, module in identity_modules
+        if _has_supported_gdn_identity(module, (megatron_class,))
+    ]
+    if not megatron_modules:
+        return
+
+    parallel_sizes = set()
+    for name, module in megatron_modules:
+        config = getattr(module, "config", None)
+        tp_size = getattr(config, "tensor_model_parallel_size", None)
+        pp_size = getattr(config, "pipeline_model_parallel_size", None)
+        if not isinstance(tp_size, int) or not isinstance(pp_size, int):
+            raise ApplyModeError(
+                "DASC could not verify single-process Megatron parallelism for GDN module "
+                f"{name or '<root>'!r}"
+            )
+        parallel_sizes.add((tp_size, pp_size))
+
+    if parallel_sizes != {(1, 1)}:
+        raise ApplyModeError(
+            "DASC policy export supports Megatron GDN only with tensor_model_parallel_size=1 "
+            "and pipeline_model_parallel_size=1 because distributed policies would contain "
+            f"rank-local head or layer indices; found {sorted(parallel_sizes)}"
         )
 
 
@@ -188,6 +235,7 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
     ]
     _reject_incomplete_gdn_modules(identity_modules)
     _reject_unconverted_gdn_subclasses(named_modules, supported_classes)
+    _reject_distributed_megatron_gdn(identity_modules, supported_classes)
     if not identity_modules:
         supported = ", ".join(
             f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS

@@ -18,6 +18,7 @@
 import copy
 import io
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,7 +30,7 @@ import modelopt.torch.sparsity.state_sparsity as mtss
 import modelopt.torch.sparsity.state_sparsity.policy as dasc_policy
 from modelopt.torch.opt.conversion import ApplyModeError, ModeloptStateManager
 from modelopt.torch.opt.dynamic import DynamicModule
-from modelopt.torch.sparsity.state_sparsity.conversion import replace_dasc_mode
+from modelopt.torch.sparsity.state_sparsity.conversion import replace_dasc_mode, restore_dasc_model
 from modelopt.torch.sparsity.state_sparsity.mode import DASCModeRegistry
 
 _resolve_supported_gdn_classes = dasc_policy._supported_gdn_classes.__wrapped__
@@ -180,6 +181,30 @@ def test_config_fails_closed(override):
     assert mtss.DASCConfig(**_config(wmax_candidates=[7])).wmax_candidates == [7]
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("epsilon", 0.0, r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", float("nan"), r"epsilon must be finite and in \(0, 1\)"),
+        ("static_gate_input", float("inf"), "static_gate_input must be finite"),
+    ],
+)
+def test_policy_fails_closed_on_invalid_decay_analysis_arguments(field, value, message):
+    """Reject malformed attached-policy analysis inputs at the schema boundary."""
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    policy = mtss.export_policy(model)
+    policy[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        mtss.DASCPolicy(**policy)
+
+    setattr(model, "_modelopt_dasc_policy", policy)
+    with pytest.raises(ApplyModeError, match="no valid attached DASC policy"):
+        mtss.export_policy(model)
+
+
 def test_perplexity_retention_accepts_parity_improvements():
     """Allow improvement measurements and thresholds instead of requiring clamping."""
     candidate = _candidate(7)
@@ -278,8 +303,9 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     with pytest.raises(
         ApplyModeError,
         match=(
-            r"not ModelOpt dynamic modules at: stale; convert the module with ModelOpt or use a "
-            r"supported class directly$"
+            r"not ModelOpt dynamic modules at: stale; Megatron subclasses require a ModelOpt "
+            r"NAS/prune dynamic conversion, while Transformers subclasses must currently use the "
+            r"supported base class directly$"
         ),
     ):
         mtss.analyze_gdn_decay(mixed_subclass)
@@ -333,7 +359,7 @@ def test_declared_gdn_paths_resolve_when_framework_is_installed(module_name, cla
     assert issubclass(getattr(module, class_name), nn.Module)
 
 
-def test_generic_mode_application_reports_missing_measurements(monkeypatch):
+def test_generic_mode_application_reports_missing_measurements():
     """Give generic apply_mode callers an actionable calibration-evidence error."""
     assert DASCModeRegistry["dasc"].next_prohibited_modes == {"dasc"}
     assert DASCModeRegistry["dasc"].update_for_new_mode is not None
@@ -352,22 +378,27 @@ def test_generic_mode_application_reports_missing_measurements(monkeypatch):
             [_candidate(7)],
         )
 
+
+def test_recalibration_does_not_refresh_an_unrelated_trailing_mode(monkeypatch):
+    """Replace DASC state in place without invoking another mode's update hook."""
     model = mtss.calibrate(
         TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
     )
-    ModeloptStateManager(model).state_dict().append(("trailing-mode", {}))
-    refreshed = []
+    state = ModeloptStateManager(model).state_dict()
+    trailing_state = ("trailing-mode", {"config": {}, "metadata": {"sentinel": True}})
+    state.append(copy.deepcopy(trailing_state))
     monkeypatch.setattr(
         ModeloptStateManager,
         "update_last_state_before_new_mode",
-        lambda _manager, current_model: refreshed.append(current_model),
+        lambda *_args: pytest.fail("recalibration must not update an unrelated mode"),
     )
+
     replace_dasc_mode(
         model,
         mtss.DASCConfig(**_config(wmax_candidates=[7])),
         [_candidate(7)],
     )
-    assert refreshed == [model]
+    assert state[-1] == trailing_state
 
 
 def test_public_exports_and_wrapped_model_export():
@@ -388,6 +419,59 @@ def test_public_exports_and_wrapped_model_export():
 
     with pytest.raises(ApplyModeError, match="no valid attached DASC policy"):
         mtss.export_policy(TinyGatedDeltaNetForCausalLM())
+
+
+def test_restore_attaches_policy_to_the_unwrapped_model():
+    """Keep policy attachment and lookup symmetric for a wrapped restore entrypoint."""
+    calibrated = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    state = mto.modelopt_state(calibrated)["modelopt_state_dict"][0][1]
+    wrapped = nn.DataParallel(TinyGatedDeltaNetForCausalLM())
+
+    restore_dasc_model(wrapped, mtss.DASCConfig(**state["config"]), state["metadata"])
+
+    assert mtss.export_policy(wrapped) == mtss.export_policy(calibrated)
+
+
+@pytest.mark.parametrize(("tp_size", "pp_size"), [(2, 1), (1, 2)])
+def test_megatron_policy_fails_closed_on_distributed_geometry(monkeypatch, tp_size, pp_size):
+    """Reject rank-local Megatron head or layer indices until policy geometry is global."""
+    megatron_gdn = type(
+        "GatedDeltaNet",
+        (GatedDeltaNet,),
+        {"__module__": "megatron.core.ssm.gated_delta_net"},
+    )
+    module = megatron_gdn()
+    module.config = SimpleNamespace(
+        tensor_model_parallel_size=tp_size,
+        pipeline_model_parallel_size=pp_size,
+    )
+    model = nn.Module()
+    model.linear_attn = module
+    monkeypatch.setattr(dasc_policy, "_supported_gdn_classes", lambda: (megatron_gdn,))
+
+    with pytest.raises(ApplyModeError, match="distributed policies would contain rank-local"):
+        mtss.analyze_gdn_decay(model)
+
+
+def test_megatron_policy_accepts_single_process_geometry(monkeypatch):
+    """Keep the Megatron adapter available when policy indices are globally unambiguous."""
+    megatron_gdn = type(
+        "GatedDeltaNet",
+        (GatedDeltaNet,),
+        {"__module__": "megatron.core.ssm.gated_delta_net"},
+    )
+    module = megatron_gdn()
+    module.config = SimpleNamespace(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+    )
+    model = nn.Module()
+    model.linear_attn = module
+    monkeypatch.setattr(dasc_policy, "_supported_gdn_classes", lambda: (megatron_gdn,))
+
+    assert mtss.analyze_gdn_decay(model)["linear_attn"]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

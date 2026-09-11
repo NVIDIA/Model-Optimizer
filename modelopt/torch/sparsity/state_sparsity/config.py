@@ -118,7 +118,10 @@ class DASCConfig(ModeloptBaseConfig):
     )
     static_gate_input: float = ModeloptField(
         default=_DEFAULT_STATIC_GATE_INPUT,
-        description="Static gate input added to each GDN head's dt_bias.",
+        description=(
+            "Conservative lower-bound gate input added to each GDN head's dt_bias; larger values "
+            "shorten horizons and omit more heads."
+        ),
     )
     decay_parameter_storage_dtype: _DecayParameterStorageDtype = ModeloptField(
         default="float32",
@@ -256,6 +259,20 @@ class DASCPolicy(ModeloptBaseConfig):
     )
     layers: dict[str, DASCLayerPolicy] = Field(min_length=1)
     measurements: list[DASCCalibrationMeasurement] = Field(min_length=1)
+
+    @field_validator("epsilon")
+    @classmethod
+    def validate_epsilon(cls, epsilon: float) -> float:
+        """Require a finite decay threshold strictly between zero and one."""
+        _validate_analysis_arguments(epsilon=epsilon)
+        return epsilon
+
+    @field_validator("static_gate_input")
+    @classmethod
+    def validate_static_gate_input(cls, value: float) -> float:
+        """Require a finite representative gate input."""
+        _validate_analysis_arguments(static_gate_input=value)
+        return value
 
     @model_validator(mode="after")
     def validate_policy(self) -> "DASCPolicy":

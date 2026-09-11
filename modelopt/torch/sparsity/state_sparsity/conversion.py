@@ -41,6 +41,7 @@ _DASC_POLICY_ATTRIBUTE = "_modelopt_dasc_policy"
 
 def _attach_policy(model: nn.Module, policy: DASCPolicy) -> None:
     """Attach a JSON-safe DASC policy to an unwrapped model."""
+    model = unwrap_model(model, force_unwrap=True)
     setattr(model, _DASC_POLICY_ATTRIBUTE, policy.model_dump(mode="json"))
 
 
@@ -142,8 +143,6 @@ def replace_dasc_mode(
     if not dasc_indices:
         raise ApplyModeError("Cannot replace DASC mode because the model has no DASC state")
     policy = build_dasc_policy(model, config, measurements)
-    if dasc_indices[-1] != len(state) - 1:
-        manager.update_last_state_before_new_mode(model)
 
     first_index = dasc_indices[0]
     state[first_index] = (
