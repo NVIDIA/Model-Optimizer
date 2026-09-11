@@ -43,18 +43,23 @@ def _validate_analysis_arguments(
     """Reject decay-analysis arguments that cannot produce well-defined horizons."""
     try:
         epsilon_is_valid = (
-            isinstance(epsilon, Real) and math.isfinite(epsilon) and 0.0 < epsilon < 1.0
+            isinstance(epsilon, Real)
+            and not isinstance(epsilon, bool)
+            and math.isfinite(epsilon)
+            and 0.0 < epsilon < 1.0
         )
-    except (TypeError, ValueError, OverflowError):
+    except OverflowError:
         epsilon_is_valid = False
     if not epsilon_is_valid:
         raise ValueError("epsilon must be finite and in (0, 1)")
 
     try:
-        static_gate_input_is_valid = isinstance(static_gate_input, Real) and math.isfinite(
-            static_gate_input
+        static_gate_input_is_valid = (
+            isinstance(static_gate_input, Real)
+            and not isinstance(static_gate_input, bool)
+            and math.isfinite(static_gate_input)
         )
-    except (TypeError, ValueError, OverflowError):
+    except OverflowError:
         static_gate_input_is_valid = False
     if not static_gate_input_is_valid:
         raise ValueError("static_gate_input must be finite")
