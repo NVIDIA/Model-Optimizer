@@ -28,27 +28,23 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 29 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 25 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
 | `fp8_default-kv_fp8` | FP8 W8A8, all linears | FP8 (calibrated) | max |
 | `fp8_default-kv_fp8_cast` | FP8 W8A8, all linears | FP8 (constant amax) | max |
-| `fp8_default-kv_fp16` | FP8 W8A8, all linears | none (BF16/FP16) | max |
 | `nvfp4_default-kv_fp8` | NVFP4 W4A4, all linears | FP8 (calibrated) | max |
 | `nvfp4_default-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | max |
 | `nvfp4_act_headroom-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | nvfp4_act_headroom |
 | `nvfp4_default-kv_nvfp4_cast` | NVFP4 W4A4, all linears | NVFP4 (constant amax) | max |
-| `nvfp4_default-kv_fp16` | NVFP4 W4A4, all linears | none (BF16/FP16) | max |
 | `nvfp4_default-kv_none-gptq` | NVFP4 W4A4 (static W), all linears | none | GPTQ (layerwise) |
 | `nvfp4_mlp_only-kv_fp8` | NVFP4 W4A4, MLP + MoE experts | FP8 (calibrated) | max |
 | `nvfp4_mlp_only-novit-kv_fp8` | NVFP4 W4A4, MLP + MoE experts (VL vision tower excluded) | FP8 (calibrated) | max |
 | `nvfp4_mlp_only-kv_fp8_cast` | NVFP4 W4A4, MLP + MoE experts | FP8 (constant amax) | max |
 | `nvfp4_mlp_only_mse-kv_fp8_cast` | NVFP4 W4A4, MLP + MoE experts | FP8 (constant amax) | MSE + FP8 sweep |
-| `nvfp4_mlp_only-kv_fp16` | NVFP4 W4A4, MLP + MoE experts | none (BF16/FP16) | max |
 | `nvfp4_experts_only-kv_fp8` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max |
 | `nvfp4_experts_only-kv_fp8_cast` | NVFP4 W4A4, MoE experts only | FP8 (constant amax) | max |
-| `nvfp4_experts_only-kv_fp16` | NVFP4 W4A4, MoE experts only | none (BF16/FP16) | max |
 | `nvfp4_experts_only-kv_fp8_layerwise` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise |
 | `nvfp4_experts_only-kv_fp8_layerwise_offload` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise (non-mutating, for disk offload) |
 | `nvfp4_experts_only-kv_fp8_layerwise_export` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise (exports each layer as it is calibrated) |
@@ -159,10 +155,8 @@ of the body scheme. Quantizing the KV cache reduces memory at long context.
 - **`kv_fp16`** — the KV cache is **not** quantized; it stays at the model's
   activation dtype (BF16/FP16). Combine with any body scheme when the deployment
   stack does not consume an FP8 KV cache, or when long-context memory is not the
-  binding constraint. Several published checkpoints ship this way (e.g.
-  `nvidia/Qwen2.5-VL-7B-Instruct-NVFP4`, `nvidia/DeepSeek-R1-NVFP4`,
-  `nvidia/Qwen3.8-Flash-Next-NVFP4`), which is why each body scheme has a
-  `-kv_fp16` variant.
+  binding constraint. Some published checkpoints ship this way, so a body scheme
+  gains a `-kv_fp16` variant when one of them needs it.
 
 > **`kv_fp8_cast` vs `kv_fp8`:** both produce an FP8 KV cache. `_cast` uses a
 > fixed scale and skips the KV calibration step (faster, no extra data
