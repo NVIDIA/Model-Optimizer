@@ -19,7 +19,7 @@ license: Apache-2.0
 
 When the user provides a hex ID (e.g. `71f3f3199ea5e1f0`) without specifying what it is, assume it is an **invocation_id** (not an MLflow run_id). An invocation_id identifies a launcher invocation and is stored as both a tag and a param on MLflow runs. One invocation can produce multiple MLflow runs (one per task). You may need to search across multiple experiments if you don't know which experiment the run belongs to.
 
-A **`modelopt_run_id`** tag is different again: it names the ModelOpt PTQ run that quantized the checkpoint being evaluated, not this run. The evaluation skill copies it (with `modelopt_run_name` / `modelopt_run_url`) out of the checkpoint's `.experiment.json`, and files the eval in the PTQ run's own experiment — so a quantization and its evals usually sit in one experiment.
+A **`modelopt_run_id`** tag is different again: it names the ModelOpt PTQ run that quantized the checkpoint being evaluated, not this run, and it belongs to a *different server* — the PTQ's. The evaluation skill copies it (with `modelopt_run_name` / `modelopt_run_url`) out of the checkpoint's `.experiment.json` and files the eval under the PTQ's experiment *name*, so evals of one checkpoint group together. The PTQ run itself is usually not there: reach it through `modelopt_run_url`, and use this server's own `experiment_id` for any query here.
 
 ## Querying Runs
 

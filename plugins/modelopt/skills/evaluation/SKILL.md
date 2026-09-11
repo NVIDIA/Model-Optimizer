@@ -173,20 +173,17 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
-**With the path in hand, read its ModelOpt provenance** — a PTQ run tracked with
-`hf_ptq.py --mlflow` leaves `.experiment.json` in the checkpoint it wrote. Do it now rather
-than at Step 4, so the values are already on hand when you name the experiment:
+**Read its ModelOpt provenance now** — `hf_ptq.py --mlflow` leaves `.experiment.json` in the
+checkpoint it wrote, and having the values in hand saves revisiting this at Step 4:
 
 ```bash
-cat "$CHECKPOINT_PATH"/.experiment.json   # absent (or an HF handle) → nothing to carry, name the experiment as usual
+cat "$CHECKPOINT_PATH"/.experiment.json   # absent (or an HF handle) → nothing to carry
 ```
 
-Carry what it says into `export.mlflow` per **Step 4**.
-
-It is a tracking pointer, not a quantization signal — read it independently of the
-quantization detection below, and never infer deploy flags from it either way. A checkpoint
-can carry one and be quantized by something other than ModelOpt, and a ModelOpt checkpoint
-quantized without `--mlflow` carries none.
+It is a tracking pointer, not a quantization signal: read it independently of the quant
+detection below and never infer deploy flags from it either way. A checkpoint can carry one
+and be quantized by something other than ModelOpt; a ModelOpt checkpoint quantized without
+`--mlflow` carries none.
 
 > **NEVER point `checkpoint_path` at a HuggingFace *cache snapshot* dir.** Entries under
 > `snapshots/<sha>/` are relative symlinks into `../../blobs/`. NEL mounts only the snapshot dir at
@@ -378,36 +375,24 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
 - Find every `???` left. Ask the user only for what can't be inferred (SLURM hostname/account/output_dir, the `cpu_partition` for auto-export, etc.). Don't propose defaults; let them give plain text. (`tracking_uri` is **not** one of these — it's `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config`.)
 - **`parallelism`** — size it yourself from the run shape (total requests = `dataset_size × repeats` vs GPU serving capacity), and set `--max-num-seqs` to match. Read `references/parallelism.md` for the decision rule and worked examples; only ask the user if a non-GPU cap (e.g. judge rate limit) is unknown.
 - Ask about other defaults they may want to change (partition, walltime, MLflow tags).
-- **ModelOpt provenance — carry the PTQ run forward.** When Step 3 found a
-  `.experiment.json`, group this eval under the quantization that produced the checkpoint:
+- **ModelOpt provenance.** When Step 3 found a `.experiment.json`, carry it into
+  `export.mlflow` so evals group under the run that quantized the checkpoint:
 
   | `.experiment.json` field | goes to |
   | --- | --- |
-  | `experiment_name` | `export.mlflow.experiment_name`, verbatim — replaces `${oc.env:USER}/CHANGEME-served-model-name` |
-  | `run_name` | tag `modelopt_run_name` |
-  | `run_id` | tag `modelopt_run_id` |
-  | `run_url` | tag `modelopt_run_url` |
-  | `tracking_uri` | nothing — see below |
-  | `experiment_id` | nothing; an experiment ID is server-local and means nothing on the eval server |
+  | `experiment_name` | `experiment_name`, verbatim — replaces `${oc.env:USER}/CHANGEME-served-model-name` |
+  | `run_name` / `run_id` / `run_url` | tags `modelopt_run_name` / `modelopt_run_id` / `modelopt_run_url` |
+  | `tracking_uri`, `experiment_id` | nothing — both are local to the PTQ's server |
 
-  **Quote all three tag values** like the neighbouring tags: an unquoted all-digit `run_id`
-  or a `run_name` such as `20260910` is coerced to an int or a date and reaches MLflow
-  wrong. Copy them literally — `${deployment.*}` does not resolve in the export block. The
-  `modelopt_` prefix is required: untagged `run_id` / `run_name` read as this eval's own run.
-  Leave `description` identifying the *eval* — once `experiment_name` is the PTQ's, the
-  description is the only run-level place the served model still appears.
+  Quote the tag values (a bare `20260910` becomes a date), keep the `modelopt_` prefix
+  (untagged, they read as this eval's own run), and **skip any value containing `${`** —
+  quoting does not stop OmegaConf resolving it, so a crafted file could interpolate an env
+  var into a tag. Leave `description` identifying the eval.
 
-  **`tracking_uri` stays `${oc.env:MLFLOW_TRACKING_URI}`** — never the file's. What that
-  buys depends on whether the two match, so know which case you are in:
-
-  - **Same server** (file's `tracking_uri` == `$MLFLOW_TRACKING_URI`): the eval genuinely
-    lands in the PTQ run's experiment, next to it.
-  - **Different servers** (the usual case — `modelopttools:eval-config` points evals at
-    `mlflow.frontier-evals`, while `hf_ptq --mlflow` typically writes to
-    `mlflow-modelopt`): the export **creates a new, empty experiment of the same name** on
-    the eval server. Evals of one checkpoint still group together under a stable name, but
-    the PTQ run is *not* there — it is reachable only through `modelopt_run_url`. Say so
-    when you report the run, so nobody goes looking for the PTQ beside the eval.
+  `tracking_uri` stays `${oc.env:MLFLOW_TRACKING_URI}`. When it differs from the file's —
+  the usual case — the export creates a *same-named, empty* experiment on the eval server
+  under a new server-local `experiment_id`; the PTQ run is not in it, and only
+  `modelopt_run_url` reaches it. Say so when you report the run.
 
 - **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
