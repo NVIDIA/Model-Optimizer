@@ -39,83 +39,53 @@ well with downstream accuracy evaluation results.
 How Local Hessian Works
 ***********************
 
-NVFP4 **Local-Hessian** chooses the scale to minimize the output error of NVFP4 matrix multiplication operation.
-Specifically, we use this idea to select the per-block scale for NVFP4 weights only, 
-which does not required any new deployment kernels or changes from the default NVFP4 deployment - we are just computing the 
-per-block scales in a different way from the existing max based per-block scale selection.
+NVFP4 **Local-Hessian** chooses each per-block weight scale to minimize
+the *output* error of the matrix multiplication rather than the weight
+error. Nothing about the format changes -- we just compute the per-block
+scales differently from max scaling.
 
-
-Here is how it works. Consider a linear layer
-
-.. math::
-   :label: lh-linear
-
-   Y = WX,
-   \qquad
-   W\in\mathbb{R}^{C_{\mathrm{out}}\times C_{\mathrm{in}}},
-   \qquad
-   X\in\mathbb{R}^{C_{\mathrm{in}}\times N},
-
-for :math:`N` calibration tokens. We quantize the weights,
-
-.. math::
-   :label: lh-quant
-
-   W_q=\mathcal{Q}(W,s)=W+\Delta(W,s),
-   \qquad
-   \mathcal{Q}(W,s)=\operatorname{Cast}(W/s)\cdot s,
-
-where :math:`s` is the quantization scale, :math:`\operatorname{Cast}`
-rounds to the low-precision datatype such as NVFP4, and :math:`\Delta`
-is the resulting quantization error. 
-
-Let :math:`Y_q=W_qX` be the output after quantizing the weights.
-
-We consider one output channel at a time. Write its weights as the row
-:math:`w` and its quantization error as :math:`\Delta(w,s)`. Its
-output mean squared error is
+Consider a linear layer :math:`Y=WX` with weights
+:math:`W\in\mathbb{R}^{C_{\mathrm{out}}\times C_{\mathrm{in}}}` and
+calibration inputs
+:math:`X\in\mathbb{R}^{C_{\mathrm{in}}\times N}`, where :math:`N` is the
+number of calibration tokens. Quantizing divides by a scale and casts,
+:math:`\mathcal{Q}(W,s)=\operatorname{Cast}(W/s)\cdot s`, leaving an
+error :math:`\Delta(W,s)=\mathcal{Q}(W,s)-W`. Taking one output channel
+at a time, with its weights in the row :math:`w`, the output mean
+squared error is
 
 .. math::
    :label: lh-output-error
 
-   E(s) = \lVert wX-w_qX\rVert_2^2
-     = \lVert \Delta(w,s)\,X\rVert_2^2
-     = \Delta(w,s)\,(XX^{\top})\,\Delta(w,s)^{\top}.
+   E(s) &= \lVert wX-w_qX\rVert_2^2
+         = \lVert \Delta(w,s)\,X\rVert_2^2 \\
+        &= \Delta(w,s)\,(XX^{\top})\,\Delta(w,s)^{\top}.
 
-Here :math:`XX^{\top}\in\mathbb{R}^{C_{\mathrm{in}}\times C_{\mathrm{in}}}`
-is the Hessian (second order derivative) of :math:`E(s)` with respect to
-:math:`\Delta(w,s)`, and it carries the output error minimization
-objective into the scale decision.
+The input second-moment matrix
+:math:`XX^{\top}\in\mathbb{R}^{C_{\mathrm{in}}\times C_{\mathrm{in}}}` is
+the 'Hessian' of the output error, i.e, 
+:math:`\partial^2E(s)/\partial\Delta(w,s)^2`: it weights each
+weight error by how much that input coordinate actually moves the
+output.
 
-For NVFP4, the weight scale :math:`s` for one output channel is a vector
-of dimension :math:`C_{\mathrm{in}}/16`, one entry per block. With
-:math:`M` candidate values per entry, minimizing :math:`E(s)` jointly
-means searching :math:`M^{C_{\mathrm{in}}/16}` combinations -- not
-tractable.
-
-Per-Block Output Error Objective
-================================
-
-We simplify the objective in :eq:`lh-output-error` with one key
-observation: each block's scale can be chosen in isolation, against the
-output error that block alone contributes.
-For block :math:`k`, with scale :math:`s_k`, weight error
-:math:`\Delta(w_k,s_k)`, and inputs
-:math:`X_k\in\mathbb{R}^{16\times N}`,
+For NVFP4, :math:`s` is not a scalar: each output channel has
+:math:`C_{\mathrm{in}}/16` blocks, one scale each. With :math:`M`
+candidates per block, minimizing :math:`E(s)` jointly means searching
+:math:`M^{C_{\mathrm{in}}/16}` combinations -- this is not tractable. So we
+choose each block's scale in isolation, against the output error that
+block alone contributes. For block :math:`b`,
 
 .. math::
    :label: lh-block-error
 
-   E_k(s_k) = \Delta(w_k,s_k)\,(X_kX_k^{\top})\,\Delta(w_k,s_k)^{\top},
+   E_b(s_b) = \Delta(w_b,s_b)\,(X_bX_b^{\top})\,\Delta(w_b,s_b)^{\top},
 
-where :math:`X_kX_k^{\top}` is only :math:`16\times16`. That is the
-local Hessian, and it turns the search into many small independent
-problems instead of one large one.
-
-For each per-block scale, we sweep over all possible 126 FP8 values, just like we do for MSE algorithm.
-See the `Model Optimizer Local-Hessian code
+where the local Hessian :math:`X_bX_b^{\top}` is only
+:math:`16\times16`. For each block we sweep all 126 candidate FP8
+scales, just as the MSE algorithm does. See the `Model Optimizer
+Local-Hessian code
 <https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.layerwise_calibrate>`_
-for more details.
+for details.
 
 Results
 ***********
