@@ -16,6 +16,7 @@
 """Code that export quantized Hugging Face models for deployment."""
 
 import contextlib
+import copy
 import importlib
 import json
 import re
@@ -110,6 +111,7 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
+    _get_kv_cache_postprocess_config,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -1060,12 +1062,12 @@ def _export_transformers_checkpoint(
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,
         kv_cache_max_bound,
-        kv_cache_format,
+        kv_cache_postprocess_config,
         is_modelopt_qlora,
         tied_map=tied_map,
     )
@@ -1564,7 +1566,16 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: dict | None) -> None:
+def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+    """Return a name-reverted copy, leaving the input untouched if mapping fails."""
+    mapped_quant_config = copy.deepcopy(hf_quant_config)
+    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    return mapped_quant_config
+
+
+def _revert_quant_config_names_best_effort(
+    model: nn.Module, hf_quant_config: dict | None
+) -> dict | None:
     """Rename the quant config's modules back to their original checkpoint names.
 
     On failure it warns and keeps the current names, so the config still matches the weights.
@@ -1572,12 +1583,13 @@ def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: di
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
             "names may not match the original HF hub checkpoint."
         )
+    return hf_quant_config
 
 
 def export_hf_checkpoint(
@@ -1673,7 +1685,7 @@ def export_hf_checkpoint(
             )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
-            _revert_quant_config_names_best_effort(model, hf_quant_config)
+            hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank buffers its own share of the model rather than the whole checkpoint, and the
@@ -1693,7 +1705,7 @@ def export_hf_checkpoint(
             if rank == 0:
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
-                _revert_quant_config_names_best_effort(model, hf_quant_config)
+                hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         else:
             post_state_dict, hf_quant_config = _export_transformers_checkpoint(
                 model, dtype, **kwargs
@@ -1716,13 +1728,19 @@ def export_hf_checkpoint(
             # do it here. The same rename is applied to the quant-config module references
             # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
             # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
-            # and fails). Best-effort: any failure (an op we cannot reverse yet, transformers API
-            # drift, unexpected shapes) falls back to the in-memory names.
+            # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
+            # transformers API drift, unexpected shapes) falls back to the in-memory names for
+            # both weights and config so they stay mutually consistent.
             try:
                 name_mapper = build_reverse_name_mapper(model)
-                export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                mapped_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
-                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+                    mapped_quant_config = _revert_hf_quant_config_names(
+                        hf_quant_config, name_mapper
+                    )
+                export_state_dict = mapped_state_dict
+                hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
                     f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "

@@ -44,7 +44,11 @@ from modelopt.torch.utils import distributed as _dist
 
 from .model_utils import get_export_units
 from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
-from .quant_utils import _postprocess_single_tensor, get_quant_config
+from .quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    get_quant_config,
+)
 from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
@@ -282,7 +286,7 @@ def _make_tensor_sink(
     name_mapper,
     tied_alias_keys: set[str],
     kv_cache_max_bound: float,
-    kv_cache_format: str | None,
+    kv_cache_format: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool,
 ):
     """Build the per-tensor step both streaming exporters use.
@@ -373,7 +377,7 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     # --- Tied alias keys to skip ---
     # data_ptr() is unreliable for disk-offloaded weights, so we use _tied_weights_keys.
@@ -639,7 +643,7 @@ def _export_fsdp2_checkpoint_streaming(
     dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
 
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
     # view to compare storage against. tied_map covers dict-style and MoE ties.
