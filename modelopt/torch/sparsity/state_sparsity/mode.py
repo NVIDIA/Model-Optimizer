@@ -50,7 +50,7 @@ class DASCModeDescriptor(ModeDescriptor):
 
     @property
     def next_prohibited_modes(self) -> set[str]:
-        """Prevent applying DASC twice to the same model state."""
+        """Route repeat calibration through the replacing public API."""
         return {"dasc"}
 
     @property

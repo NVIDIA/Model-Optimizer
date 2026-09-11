@@ -21,10 +21,11 @@ from typing import Any
 
 from torch import nn
 
-from modelopt.torch.opt.conversion import apply_mode
+from modelopt.torch.opt.conversion import ModeloptStateManager, apply_mode
+from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig
-from .conversion import get_attached_dasc_policy
+from .conversion import get_attached_dasc_policy, replace_dasc_mode
 from .mode import DASCModeRegistry
 from .policy import validate_dasc_decay_parameters, validate_dasc_model_structure
 
@@ -40,6 +41,7 @@ def calibrate(
 
     ``measurements`` must contain exactly one entry for every configured ``Wmax`` candidate.
     The largest candidate passing every quality, lifecycle, and storage gate is selected.
+    Recalibrating replaces the existing DASC mode-state entry in place.
 
     Example::
 
@@ -58,10 +60,16 @@ def calibrate(
     Returns:
         The input model with a serializable DASC policy attached through ModelOpt state.
     """
-    config_dict = config.model_dump() if isinstance(config, DASCConfig) else config
+    model = unwrap_model(model, force_unwrap=True)
+    config_object = config if isinstance(config, DASCConfig) else DASCConfig(**config)
+    if ModeloptStateManager.is_converted(model, is_root=True) and any(
+        mode == "dasc" for mode, _ in ModeloptStateManager(model).state_dict()
+    ):
+        return replace_dasc_mode(model, config_object, measurements)
+
     return apply_mode(
         model,
-        mode=[("dasc", config_dict)],
+        mode=[("dasc", config_object.model_dump())],
         registry=DASCModeRegistry,
         mode_kwargs={"measurements": measurements},
     )

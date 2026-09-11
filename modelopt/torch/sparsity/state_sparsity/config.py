@@ -18,13 +18,14 @@
 import math
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 __all__ = [
     "DASCCalibrationMeasurement",
     "DASCConfig",
+    "DASCLayerPolicy",
     "DASCPolicy",
     "DASCQualityMeasurement",
 ]
@@ -34,7 +35,11 @@ class DASCQualityMeasurement(ModeloptBaseConfig):
     """Quality and lifecycle measurements for one calibration slice."""
 
     slice_id: str = Field(min_length=1)
-    perplexity_retention: float = Field(gt=0.0, le=1.0, allow_inf_nan=False)
+    perplexity_retention: float = Field(
+        gt=0.0,
+        allow_inf_nan=False,
+        description="Dense perplexity divided by DASC perplexity; values above one are valid.",
+    )
     top1_agreement: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     finite_continuation_logits: bool = Field(strict=True)
     retained_state_exact: bool = Field(strict=True)
@@ -67,6 +72,8 @@ class DASCCalibrationMeasurement(ModeloptBaseConfig):
 class DASCConfig(ModeloptBaseConfig):
     """Configuration for GDN decay-aware state checkpoint sparsity."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     variant: Literal["dasc_nr", "dasc_wr"] = ModeloptField(
         default="dasc_wr",
         description="Use zero recovery (DASC-NR) or suffix replay recovery (DASC-WR).",
@@ -78,6 +85,10 @@ class DASCConfig(ModeloptBaseConfig):
     static_gate_input: float = ModeloptField(
         default=-0.3,
         description="Static gate input added to each GDN head's dt_bias.",
+    )
+    decay_parameter_storage_dtype: Literal["float16", "bfloat16", "float32"] = ModeloptField(
+        default="float32",
+        description="Expected checkpoint storage dtype for GDN A_log and dt_bias.",
     )
     wmax_candidates: list[int] = ModeloptField(
         default=[8, 16, 32, 64, 128, 256],
@@ -135,9 +146,9 @@ class DASCConfig(ModeloptBaseConfig):
     @field_validator("min_perplexity_retention")
     @classmethod
     def validate_perplexity_gate(cls, value: float) -> float:
-        """Require a finite retention gate in (0, 1]."""
-        if not math.isfinite(value) or not 0.0 < value <= 1.0:
-            raise ValueError("min_perplexity_retention must be finite and in (0, 1]")
+        """Require a finite positive retention gate."""
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("min_perplexity_retention must be finite and positive")
         return value
 
     @field_validator("min_top1_agreement")
@@ -188,11 +199,14 @@ class DASCLayerPolicy(ModeloptBaseConfig):
 class DASCPolicy(ModeloptBaseConfig):
     """Standalone JSON-safe DASC deployment policy."""
 
+    model_config = ConfigDict(protected_namespaces=())
+
     format_version: Literal[1] = 1
     variant: Literal["dasc_nr", "dasc_wr"]
     recovery: Literal["zero", "suffix_replay"]
     epsilon: float
     static_gate_input: float
+    decay_parameter_storage_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     selected_wmax: int = Field(strict=True, gt=0)
     wmax_candidates: list[int] = Field(min_length=1)
     quality_gates: dict[str, float]
@@ -204,7 +218,10 @@ class DASCPolicy(ModeloptBaseConfig):
     preserve_convolution_state: Literal[True]
     active_runtime_state: Literal["dense"] = "dense"
     model_structure_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    decay_parameters_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decay_parameters_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="Storage-dtype-canonicalized calibration snapshot retained for provenance.",
+    )
     layers: dict[str, DASCLayerPolicy] = Field(min_length=1)
     measurements: list[DASCCalibrationMeasurement] = Field(min_length=1)
 
