@@ -138,6 +138,8 @@ ordinary dense recurrent state before continuation.
 
     config = {
         "variant": "dasc_wr",  # "dasc_nr" uses zero recovery instead
+        "epsilon": 1e-3,
+        "static_gate_input": -0.3,
         "wmax_candidates": [32],
         # Set this to the dtype used to store A_log and dt_bias in the checkpoint.
         "decay_parameter_storage_dtype": "bfloat16",
@@ -150,6 +152,8 @@ ordinary dense recurrent state before continuation.
     # retained_heads/total_heads measurement geometry for every Wmax candidate.
     horizons = mtss.analyze_gdn_decay(
         model,
+        epsilon=config["epsilon"],
+        static_gate_input=config["static_gate_input"],
         decay_parameter_storage_dtype=config["decay_parameter_storage_dtype"],
     )
     measurements = [
@@ -190,11 +194,12 @@ supported GDN architecture fails closed on both save and restore. In every stale
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and ``dt_bias`` before
 calibration. Derive the evaluated head masks and reported ``retained_heads``/``total_heads`` from
-:func:`~modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay` using that same storage dtype.
-Policy validation allows only the rounding introduced by the declared storage dtype and the live
-tensor dtype, so the effective tolerance is the wider of the two. The default ``float32`` adds no
-storage slack of its own; decay tensors that are live in BF16 or FP16 are still validated against
-that live dtype's rounding.
+:func:`~modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay` using the same ``epsilon``,
+``static_gate_input``, and storage dtype passed to calibration. Policy validation allows only the
+rounding introduced by the declared storage dtype and the live tensor dtype. When they differ,
+distinct lossy inverse rounding bounds are composed in sequence; a duplicate dtype or an exact
+widening cast contributes no additional slack. Decay tensors that are live in BF16 or FP16 are
+still validated against that live dtype's rounding.
 
 .. _sparsity-concepts:
 

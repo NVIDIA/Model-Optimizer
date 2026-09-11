@@ -30,6 +30,8 @@ __all__ = [
     "DASCQualityMeasurement",
 ]
 
+_DecayParameterStorageDtype = Literal["float16", "bfloat16", "float32"]
+
 
 class DASCQualityMeasurement(ModeloptBaseConfig):
     """Quality and lifecycle measurements for one calibration slice."""
@@ -86,7 +88,7 @@ class DASCConfig(ModeloptBaseConfig):
         default=-0.3,
         description="Static gate input added to each GDN head's dt_bias.",
     )
-    decay_parameter_storage_dtype: Literal["float16", "bfloat16", "float32"] = ModeloptField(
+    decay_parameter_storage_dtype: _DecayParameterStorageDtype = ModeloptField(
         default="float32",
         description="Expected checkpoint storage dtype for GDN A_log and dt_bias.",
     )
@@ -206,7 +208,7 @@ class DASCPolicy(ModeloptBaseConfig):
     recovery: Literal["zero", "suffix_replay"]
     epsilon: float
     static_gate_input: float
-    decay_parameter_storage_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
+    decay_parameter_storage_dtype: _DecayParameterStorageDtype = "float32"
     selected_wmax: int = Field(strict=True, gt=0)
     wmax_candidates: list[int] = Field(min_length=1)
     quality_gates: dict[str, float]
