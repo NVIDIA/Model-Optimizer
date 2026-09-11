@@ -203,7 +203,7 @@ python hf_ptq.py \
 
 Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
-> *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field.*
+> *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field or `kv_auto_quantize` follow-up.*
 
 #### KV Cache Quantization
 
@@ -480,6 +480,19 @@ For models without backprop support (e.g. Llama-4), use the `kl_div` scoring met
 Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
 `--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
 
+To optimize GEMM and KV cache in one invocation, compose ordered stages in the same recipe. A fixed
+`quantize` block followed by a KV-domain `auto_quantize` first calibrates the GEMM weight/activation
+configuration, then searches K/V while the existing GEMM QDQ remains enabled with calibration
+frozen. See `general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits`.
+
+A weight-domain `auto_quantize` can instead add a `kv_auto_quantize` follow-up with its own method,
+constraints, candidates, score size, and disabled layers. This supports, for example, a
+gradient-based GEMM search followed by a KL-divergence KV search; see
+`general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits`. When the
+follow-up is present, the recipe owns KV configuration and suppresses the CLI's uniform
+`--kv_cache_qformat` fallback. Use `--auto_quantize_checkpoint` for the weight search and
+`--kv_auto_quantize_checkpoint` for the KV search.
+
 KV-cache AutoQuantize recipes use the same `mtq.auto_quantize` API and set
 `constraints.cost_model: kv_cache` with an `effective_bits` target. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
@@ -493,14 +506,14 @@ companion vLLM implementation does not support that asymmetric per-layer format:
 python hf_ptq.py \
   --pyt_ckpt_path Qwen/Qwen3.8-27B \
   --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
-  --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
+  --kv_auto_quantize_checkpoint /path/to/kv_autoquant.pth \
   --export_path /path/to/qwen3.8-27b-mixed-kv
 ```
 
 Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
 keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
 formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitivity scores and
-selected recipe in its search state; `--auto_quantize_checkpoint` stores that resumable state,
+selected recipe in its search state; `--kv_auto_quantize_checkpoint` stores that resumable state,
 including the candidate quantizer tensors needed for replay.
 
 KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
@@ -513,11 +526,13 @@ times the model vocabulary because reference and candidate log probabilities are
 > [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
 > vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
 > `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
-> Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
-> kernels once the layer-wise metadata consumer is available.
+> The companion consumer also does not yet apply the layer map when uniform FP8/NVFP4 weights are
+> present; export warns for that composed combination. Do not deploy either unsupported case. Full
+> FP8 K/V and full NVFP4 K/V use existing vLLM kernels once the relevant metadata path is available.
 
-The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
-interrupted search (skips re-scoring):
+`--auto_quantize_checkpoint` saves/restores weight-search state. Every KV-domain search uses
+`--kv_auto_quantize_checkpoint`; a KV-primary recipe temporarily accepts the former flag as a
+deprecated fallback. Composed recipes therefore keep the weight and KV search states separate:
 
 ```bash
 scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits \
