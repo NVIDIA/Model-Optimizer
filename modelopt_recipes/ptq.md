@@ -264,9 +264,8 @@ folder may carry a `README.md` spelling out that delta.
 > wholesale and overrides only `metadata` — no duplicated `quant_cfg` — so the
 > recipe is reachable from the checkpoint's own hub path. [Checkpoint
 > mirrors](#checkpoint-mirrors--modelsorgcheckpoint) covers the folders that
-> genuinely deviate and [Aliases](#aliases--a-general-recipe-under-a-checkpoints-hub-path)
-> the ones that don't; see [`models/README.md`](models/README.md) for the alias
-> format and when to write one.
+> genuinely deviate and aliases the ones that don't; see
+> [`models/README.md`](models/README.md) for the alias format and when to write one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
@@ -490,26 +489,6 @@ Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flas
 is the exception: its deviation is a model-specific *scope* — a wildcard scheme
 plus a load-bearing vision-tower exclusion and the VLM-required
 `layerwise.enable=false` — rather than a per-component precision map.
-
----
-
-## Aliases — a general recipe under a checkpoint's hub path
-
-These folders carry no scheme of their own. Each is a one-line delegation to the
-general recipe named next to it, so `--recipe models/<org>/<model_id>/ptq/<name>`
-resolves from a released checkpoint's hub path and edits to the general recipe flow
-through automatically:
-
-- **`models/nvidia/Llama-3_1-Nemotron-Ultra-253B-v1/ptq/fp8_default-kv_fp8_cast`**,
-  **`models/nvidia/Llama-3_3-Nemotron-Super-49B-v1/ptq/fp8_default-kv_fp8_cast`** and
-  **`models/nvidia/Llama-3_3-Nemotron-Super-49B-v1_5/ptq/fp8_default-kv_fp8_cast`**
-  all alias `general/ptq/fp8_default-kv_fp8_cast`. Their FP8 releases are uniform W8A8
-  with an FP8 KV cache and exclude only `lm_head`, which the general recipe's standard
-  exclusions already leave out.
-
-Add one the same way: point `$import` at the general recipe and write a `metadata`
-description saying which release it corresponds to. A checkpoint earns a body of its
-own only when no portable recipe expresses its scheme.
 
 ---
 
