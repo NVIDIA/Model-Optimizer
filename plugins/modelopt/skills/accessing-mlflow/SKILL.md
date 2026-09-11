@@ -19,8 +19,6 @@ license: Apache-2.0
 
 When the user provides a hex ID (e.g. `71f3f3199ea5e1f0`) without specifying what it is, assume it is an **invocation_id** (not an MLflow run_id). An invocation_id identifies a launcher invocation and is stored as both a tag and a param on MLflow runs. One invocation can produce multiple MLflow runs (one per task). You may need to search across multiple experiments if you don't know which experiment the run belongs to.
 
-A **`modelopt_run_id`** tag is different again: it names the ModelOpt PTQ run that quantized the checkpoint being evaluated, not this run, and it belongs to a *different server* — the PTQ's. The evaluation skill copies it (with `modelopt_run_name` / `modelopt_run_url`) out of the checkpoint's `.experiment.json` and files the eval under the PTQ's experiment *name*, so evals of one checkpoint group together. The PTQ run itself is usually not there: reach it through `modelopt_run_url`, and use this server's own `experiment_id` for any query here.
-
 ## Querying Runs
 
 ```python
@@ -30,9 +28,6 @@ MLflow:search_runs_by_tags(experiment_id, {"invocation_id": "<invocation_id>"})
 # Query for example model/task runs
 MLflow:query_runs(experiment_id, "tags.model LIKE '%<model>%'")
 MLflow:query_runs(experiment_id, "tags.task_name LIKE '%<task_name>%'")
-
-# Every eval of the checkpoint a given ModelOpt PTQ run produced
-MLflow:query_runs(experiment_id, "tags.modelopt_run_id = '<ptq_run_id>'")
 
 # Get a config from run's artifacts
 MLflow:get_artifact_content(run_id, "config.yml")

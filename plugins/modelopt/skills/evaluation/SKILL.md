@@ -384,15 +384,18 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
   | `run_name` / `run_id` / `run_url` | tags `modelopt_run_name` / `modelopt_run_id` / `modelopt_run_url` |
   | `tracking_uri`, `experiment_id` | nothing — both are local to the PTQ's server |
 
-  Quote the tag values (a bare `20260910` becomes a date), keep the `modelopt_` prefix
-  (untagged, they read as this eval's own run), and **skip any value containing `${`** —
-  quoting does not stop OmegaConf resolving it, so a crafted file could interpolate an env
-  var into a tag. Leave `description` identifying the eval.
+  **Skip any imported value containing `${`, `experiment_name` included** — quoting does not
+  stop OmegaConf resolving it, and the same pass resolves the whole block, so a crafted file
+  could interpolate an env var into the config. `hf_ptq` only sanitizes the experiment name
+  it derives itself; an explicit `--mlflow_experiment` reaches the file as typed. Otherwise
+  quote the tag values (a bare `20260910` becomes a date), keep the `modelopt_` prefix
+  (untagged, they read as this eval's own run), and leave `description` identifying the eval.
 
   `tracking_uri` stays `${oc.env:MLFLOW_TRACKING_URI}`. When it differs from the file's —
   the usual case — the export creates a *same-named, empty* experiment on the eval server
   under a new server-local `experiment_id`; the PTQ run is not in it, and only
-  `modelopt_run_url` reaches it. Say so when you report the run.
+  `modelopt_run_url` reaches it. Say so when you report the run. To find these evals again
+  later, query this server for `tags.modelopt_run_id = '<ptq_run_id>'`.
 
 - **`execution.gres`** — auto-set if you used a predefined `internal/slurm/<cluster>` config (above). On the `slurm/default` fallback it's `gpu:8`, so set it to the node's GPU count (and match `--data-parallel-size`/`--tensor-parallel-size`) or `sbatch` rejects the job with *"Requested node configuration is not available"* (e.g. 4-GPU GB300 → `gres: gpu:4`; check with `sinfo -o '%P %G'`).
 
