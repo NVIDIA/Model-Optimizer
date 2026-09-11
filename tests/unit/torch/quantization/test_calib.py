@@ -27,6 +27,7 @@ from modelopt.torch.quantization.config import MaxCalibConfig, QuantizerAttribut
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     apply_pre_quant_scale_and_smooth,
+    awq,
     disable_pre_quant_scale_and_resmooth,
     layerwise_calibrate,
     max_calibrate,
@@ -352,6 +353,19 @@ def test_awq_lite_uncalibrated_weight_only_keeps_input_quantizer_disabled():
         "uncalibrated layers — that would silently quantize activations "
         "the user's config left in full precision."
     )
+
+
+def test_awq_unknown_algorithm_raises():
+    """awq() must fail fast on an unknown algorithm instead of silently skipping calibration."""
+    model = _SimpleMLP()
+
+    with pytest.raises(ValueError, match="Invalid AWQ algorithm 'awq-lite'"):
+        awq(model, algorithm="awq-lite")
+
+    # Valid algorithm strings still go through: awq_lite without a forward_loop
+    # warns and skips instead of raising.
+    with pytest.warns(UserWarning, match="forward_loop must be provided"):
+        awq(model, forward_loop=None, algorithm="awq_lite")
 
 
 def test_smoothquant_enable_disable():
