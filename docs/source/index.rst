@@ -25,10 +25,10 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
-     <article class="announcement-card" data-date="2026-09-09" data-title="Local Hessian: Better NVFP4 Weight Scales from Layer Inputs" data-summary="Local Hessian uses calibration inputs to choose NVFP4 block scales that minimize estimated layer-output error without changing the deployment format." data-tags="local-hessian quantization nvfp4 calibration modelopt">
+     <article class="announcement-card" data-date="2026-09-09" data-title="Local Hessian: Better NVFP4 Weight Scales from Layer Inputs" data-summary="How Local Hessian sets NVFP4 block scales from layer inputs, and how it measures up against max, MSE, Four-over-six and GPTQ." data-tags="local-hessian quantization nvfp4 calibration modelopt">
        <div class="announcement-card-meta">September 9, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/local-hessian.html">Local Hessian: Better NVFP4 Weight Scales from Layer Inputs</a></h2>
-       <p>Local Hessian uses calibration inputs to choose NVFP4 block scales that minimize estimated layer-output error without changing the deployment format.</p>
+       <p>How Local Hessian sets NVFP4 block scales from layer inputs, and how it measures up against max, MSE, Four-over-six and GPTQ.</p>
        <div class="announcement-card-tags"><span>local-hessian</span><span>quantization</span><span>nvfp4</span><span>calibration</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
