@@ -123,7 +123,9 @@ derives one static decay horizon per complete GDN head from
 ``A_log`` and ``dt_bias``, then selects the largest caller-evaluated ``Wmax`` that passes every
 configured quality, lifecycle, and physical-storage gate. ``Wmax`` may be any positive integer.
 The measurements are evidence inputs produced by a caller-owned paired evaluation; this API does
-not run the dense-versus-recovery suffix evaluation itself.
+not run the dense-versus-recovery suffix evaluation itself. ``perplexity_retention`` is defined as
+``dense_perplexity / DASC_perplexity`` (equivalently ``exp(dense_NLL - DASC_NLL)``), so higher is
+better and values above one are valid.
 
 The initial API exports policy metadata only. It does not change model execution, quantize state,
 pack ragged checkpoints, replay a suffix, or add a linear-attention kernel. A serving integration
@@ -170,6 +172,11 @@ ordinary dense recurrent state before continuation.
 from zero, while DASC-WR reconstructs them from a zero-initialized suffix replay of at most the
 selected ``Wmax`` tokens. Both retain whole GDN heads, preserve convolution state, and resume with
 dense recurrence. KDA and serving-runtime integration are not supported by this initial API.
+The initial GDN adapter accepts the ``GatedDeltaNet`` and ``Qwen3NextGatedDeltaNet`` class names
+and fails closed for other implementations, even when they expose similarly named decay tensors.
+Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` supersedes a stale policy. A
+stale policy remains serializable so it cannot block saving or composing other ModelOpt modes, but
+:func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 
 .. _sparsity-concepts:
 

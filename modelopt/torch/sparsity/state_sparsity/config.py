@@ -18,13 +18,14 @@
 import math
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
 __all__ = [
     "DASCCalibrationMeasurement",
     "DASCConfig",
+    "DASCLayerPolicy",
     "DASCPolicy",
     "DASCQualityMeasurement",
 ]
@@ -34,7 +35,11 @@ class DASCQualityMeasurement(ModeloptBaseConfig):
     """Quality and lifecycle measurements for one calibration slice."""
 
     slice_id: str = Field(min_length=1)
-    perplexity_retention: float = Field(gt=0.0, le=1.0, allow_inf_nan=False)
+    perplexity_retention: float = Field(
+        gt=0.0,
+        allow_inf_nan=False,
+        description="Dense perplexity divided by DASC perplexity; values above one are valid.",
+    )
     top1_agreement: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     finite_continuation_logits: bool = Field(strict=True)
     retained_state_exact: bool = Field(strict=True)
@@ -66,6 +71,8 @@ class DASCCalibrationMeasurement(ModeloptBaseConfig):
 
 class DASCConfig(ModeloptBaseConfig):
     """Configuration for GDN decay-aware state checkpoint sparsity."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, protected_namespaces=())
 
     variant: Literal["dasc_nr", "dasc_wr"] = ModeloptField(
         default="dasc_wr",
@@ -187,6 +194,8 @@ class DASCLayerPolicy(ModeloptBaseConfig):
 
 class DASCPolicy(ModeloptBaseConfig):
     """Standalone JSON-safe DASC deployment policy."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, protected_namespaces=())
 
     format_version: Literal[1] = 1
     variant: Literal["dasc_nr", "dasc_wr"]

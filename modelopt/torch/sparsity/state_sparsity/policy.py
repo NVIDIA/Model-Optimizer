@@ -24,10 +24,14 @@ import torch.nn.functional as F
 from torch import nn
 
 from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig, DASCLayerPolicy, DASCPolicy
 
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
+
+_SUPPORTED_GDN_CLASS_NAMES = frozenset({"GatedDeltaNet", "Qwen3NextGatedDeltaNet"})
+_HORIZON_DTYPE_CAST_RTOL = 0.05
 
 
 def compute_gdn_decay_horizons(
@@ -58,20 +62,21 @@ def compute_gdn_decay_horizons(
 
 
 def _is_gdn_module(module: nn.Module) -> bool:
-    class_name = "".join(
-        character for character in type(module).__name__.lower() if character.isalnum()
-    )
+    """Return whether a module has one of the explicitly supported GDN implementations."""
     return (
-        "gateddeltanet" in class_name
+        type(module).__name__ in _SUPPORTED_GDN_CLASS_NAMES
         and isinstance(getattr(module, "A_log", None), torch.Tensor)
         and isinstance(getattr(module, "dt_bias", None), torch.Tensor)
     )
 
 
 def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
+    """Find supported GDN layers after removing a recognized model wrapper."""
+    model = unwrap_model(model, force_unwrap=True)
     modules = {name: module for name, module in model.named_modules() if _is_gdn_module(module)}
     if not modules:
-        raise ApplyModeError("DASC found no GatedDeltaNet modules; only GDN is supported")
+        supported = ", ".join(sorted(_SUPPORTED_GDN_CLASS_NAMES))
+        raise ApplyModeError(f"DASC found no supported GDN modules; expected one of: {supported}")
     return dict(sorted(modules.items()))
 
 
@@ -100,11 +105,13 @@ def analyze_gdn_decay(
 
 
 def _canonical_sha256(value: object) -> str:
+    """Hash a JSON value with deterministic ordering and no non-finite numbers."""
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _model_structure(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
+    """Describe the layer names and head counts that define policy geometry."""
     return [
         {
             "name": name,
@@ -115,11 +122,18 @@ def _model_structure(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
 
 
 def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
+    """Serialize decay parameters at canonical BF16 precision for dtype-stable hashing."""
     return [
         {
             "name": name,
-            "A_log": module.A_log.detach().to(device="cpu", dtype=torch.float64).tolist(),
-            "dt_bias": module.dt_bias.detach().to(device="cpu", dtype=torch.float64).tolist(),
+            "A_log": module.A_log.detach()
+            .to(device="cpu", dtype=torch.bfloat16)
+            .to(dtype=torch.float32)
+            .tolist(),
+            "dt_bias": module.dt_bias.detach()
+            .to(device="cpu", dtype=torch.bfloat16)
+            .to(dtype=torch.float32)
+            .tolist(),
         }
         for name, module in modules.items()
     ]
@@ -128,6 +142,7 @@ def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
 def _validate_measurement_coverage(
     config: DASCConfig, measurements: list[DASCCalibrationMeasurement]
 ) -> None:
+    """Require exactly one matching measurement for every configured window."""
     measured = [measurement.wmax for measurement in measurements]
     unexpected = sorted(set(measured) - set(config.wmax_candidates))
     missing = sorted(set(config.wmax_candidates) - set(measured))
@@ -145,6 +160,7 @@ def _validate_measurement_coverage(
 def _validate_measurement_geometry(
     horizons: dict[str, list[float]], measurements: list[DASCCalibrationMeasurement]
 ) -> None:
+    """Bind caller-reported retained and total head counts to the analyzed model."""
     total_heads = sum(len(layer_horizons) for layer_horizons in horizons.values())
     for measurement in measurements:
         retained_heads = sum(
@@ -161,6 +177,7 @@ def _validate_measurement_geometry(
 
 
 def _candidate_passes(config: DASCConfig, measurement: DASCCalibrationMeasurement) -> bool:
+    """Return whether one candidate passes every configured evidence gate."""
     return measurement.checkpoint_savings >= config.min_checkpoint_savings and all(
         result.perplexity_retention >= config.min_perplexity_retention
         and result.top1_agreement >= config.min_top1_agreement
@@ -245,14 +262,43 @@ def build_dasc_policy(
 def validate_dasc_model_structure(model: nn.Module, policy: DASCPolicy) -> None:
     """Reject restoring a policy onto a different GDN module structure."""
     modules = _get_gdn_modules(model)
-    actual = _canonical_sha256(_model_structure(modules))
-    if actual != policy.model_structure_sha256:
+    actual_structure = _model_structure(modules)
+    policy_structure = [
+        {"name": name, "num_heads": layer.num_heads}
+        for name, layer in sorted(policy.layers.items())
+    ]
+    if (
+        actual_structure != policy_structure
+        or _canonical_sha256(actual_structure) != policy.model_structure_sha256
+    ):
         raise ApplyModeError("DASC policy does not match the model's GDN module structure")
 
 
 def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None:
-    """Reject exporting a policy for different GDN decay parameters."""
+    """Reject deployment when current decay parameters no longer derive the stored policy."""
     modules = _get_gdn_modules(model)
     actual = _canonical_sha256(_decay_parameters(modules))
     if actual != policy.decay_parameters_sha256:
         raise ApplyModeError("DASC policy does not match the model's GDN decay parameters")
+
+    current_horizons = analyze_gdn_decay(
+        model,
+        epsilon=policy.epsilon,
+        static_gate_input=policy.static_gate_input,
+    )
+    for name, values in current_horizons.items():
+        layer = policy.layers[name]
+        if not torch.allclose(
+            torch.tensor(values, dtype=torch.float64),
+            torch.tensor(layer.static_horizons, dtype=torch.float64),
+            rtol=_HORIZON_DTYPE_CAST_RTOL,
+            atol=0.0,
+        ):
+            raise ApplyModeError(
+                f"DASC policy horizons do not match current decay parameters in layer {name!r}"
+            )
+        retained = [head for head, horizon in enumerate(values) if horizon > policy.selected_wmax]
+        if retained != layer.retained_heads:
+            raise ApplyModeError(
+                f"DASC policy head mask does not match current decay parameters in layer {name!r}"
+            )

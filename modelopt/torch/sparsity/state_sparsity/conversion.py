@@ -16,6 +16,7 @@
 """ModelOpt conversion and restoration for DASC policy metadata."""
 
 import copy
+import warnings
 from collections.abc import Iterable
 
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from torch import nn
 
 from modelopt.torch.opt.conversion import ApplyModeError
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
+from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig, DASCPolicy
 from .policy import build_dasc_policy, validate_dasc_decay_parameters, validate_dasc_model_structure
@@ -33,6 +35,7 @@ _DASC_POLICY_ATTRIBUTE = "_modelopt_dasc_policy"
 
 
 def _attach_policy(model: nn.Module, policy: DASCPolicy) -> None:
+    """Attach a JSON-safe DASC policy to an unwrapped model."""
     setattr(model, _DASC_POLICY_ATTRIBUTE, policy.model_dump(mode="json"))
 
 
@@ -40,9 +43,14 @@ def convert_dasc_model(
     model: nn.Module,
     config: DASCConfig,
     *,
-    measurements: Iterable[DASCCalibrationMeasurement | dict],
+    measurements: Iterable[DASCCalibrationMeasurement | dict] | None = None,
 ) -> ConvertReturnType:
     """Analyze GDN decay and attach the selected DASC policy without changing execution."""
+    if measurements is None:
+        raise ApplyModeError(
+            "DASC requires calibration measurements; use "
+            "modelopt.torch.sparsity.state_sparsity.calibrate(model, config, measurements)"
+        )
     policy = build_dasc_policy(model, config, measurements)
     _attach_policy(model, policy)
     return model, {"policy": policy.model_dump(mode="json")}
@@ -88,19 +96,23 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
 
 
 def update_dasc_metadata(model: nn.Module, config: DASCConfig, metadata: MetadataDict) -> None:
-    """Refresh serialized metadata from the immutable attached DASC policy."""
-    try:
-        policy = DASCPolicy(**getattr(model, _DASC_POLICY_ATTRIBUTE))
-    except (AttributeError, TypeError, ValidationError) as error:
-        raise ApplyModeError("Model has no valid attached DASC policy") from error
+    """Refresh metadata without making unrelated ModelOpt save or compose paths unusable."""
+    policy = get_attached_dasc_policy(model)
     validate_dasc_model_structure(model, policy)
-    validate_dasc_decay_parameters(model, policy)
+    try:
+        validate_dasc_decay_parameters(model, policy)
+    except ApplyModeError as error:
+        warnings.warn(
+            f"{error}. The saved DASC policy is stale; re-run calibrate() before deployment",
+            stacklevel=2,
+        )
     metadata.clear()
     metadata["policy"] = copy.deepcopy(policy.model_dump(mode="json"))
 
 
 def get_attached_dasc_policy(model: nn.Module) -> DASCPolicy:
     """Return the validated policy attached by conversion or restoration."""
+    model = unwrap_model(model, force_unwrap=True)
     try:
         return DASCPolicy(**getattr(model, _DASC_POLICY_ATTRIBUTE))
     except (AttributeError, TypeError, ValidationError) as error:

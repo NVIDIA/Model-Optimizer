@@ -15,7 +15,25 @@
 
 """Decay-aware sparsity policies for persisted recurrent state."""
 
-from . import mode
-from .api import *
-from .config import *
-from .policy import *
+from . import mode  # imported for mode-registration side effects
+from .api import calibrate, export_policy
+from .config import (
+    DASCCalibrationMeasurement,
+    DASCConfig,
+    DASCLayerPolicy,
+    DASCPolicy,
+    DASCQualityMeasurement,
+)
+from .policy import analyze_gdn_decay, compute_gdn_decay_horizons
+
+__all__ = [
+    "DASCCalibrationMeasurement",
+    "DASCConfig",
+    "DASCLayerPolicy",
+    "DASCPolicy",
+    "DASCQualityMeasurement",
+    "analyze_gdn_decay",
+    "calibrate",
+    "compute_gdn_decay_horizons",
+    "export_policy",
+]

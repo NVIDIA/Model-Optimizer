@@ -49,11 +49,6 @@ class DASCModeDescriptor(ModeDescriptor):
         return DASCConfig
 
     @property
-    def next_prohibited_modes(self) -> set[str]:
-        """Prevent applying DASC twice to the same model state."""
-        return {"dasc"}
-
-    @property
     def convert(self) -> ConvertEntrypoint:
         """Return the DASC calibration entrypoint."""
         return cast("ConvertEntrypoint", convert_dasc_model)
