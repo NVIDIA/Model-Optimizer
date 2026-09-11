@@ -5,11 +5,16 @@
 # checkpoint's own `quantization_config`. NVFP4 needs a Blackwell GPU.
 #
 # Sampling per the nvidia/Qwen3.6-35B-A3B-NVFP4 card: T=1.0, top_p=0.95, max_new_tokens=131072.
-# AGENTIC. Needs --enable-auto-tool-choice --tool-call-parser qwen3_coder in the deployment, which is
+# AGENTIC. Needs a separate USER-SIMULATOR endpoint (tau2 drives a simulated user with a second
+# model): set TAU2_ENDPOINT_URL / TAU2_USER_MODEL_ID / INFERENCE_API_KEY. We used Qwen-235B.
+#
+# Needs --enable-auto-tool-choice --tool-call-parser qwen3_coder in the deployment, which is
 # why it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
 # the Qwen3.6-35B-A3B card specifies; the template's <tool_call> markers resemble `hermes`, which would
 # mis-parse tool calls and silently invalidate the benchmark. Task-level token/parallelism budgets are
-# lower because each task holds a multi-turn conversation plus tool round-trips open.
+# lower than this file's own defaults because each task holds a multi-turn conversation plus tool
+# round-trips open. `top_k`/`presence_penalty` go through tau2's `agent_args` passthrough -- NEL's
+# top-level params block does not accept them, which is why the other five configs omit them.
 #
 # Results use 3 independent run(s): launch this config 3 times and pool the per-run pass@1.
 #
@@ -69,12 +74,14 @@ evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
     DUMMY_API_KEY: lit:dummy
+    # The user simulator is a separate endpoint, so it needs its own key.
+    INFERENCE_API_KEY: host:INFERENCE_API_KEY
   nemo_evaluator_config:
     config:
       params:
         parallelism: 64
         request_timeout: 3600
-        max_retries: 10
+        max_retries: 50
         max_new_tokens: 131072
         temperature: 1.0
         top_p: 0.95
@@ -94,16 +101,29 @@ evaluation:
               enable_thinking: true
   tasks:
     - name: tau2_bench_telecom
+      env_vars:
+        HF_TOKEN: host:HF_TOKEN
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
       nemo_evaluator_config:
         config:
           params:
             max_new_tokens: 65536
             parallelism: 16
-            target:
-              api_endpoint:
-                adapter_config:
-                  params_to_add:
-                    # Qwen3.6 card, thinking mode
-                    top_k: 20
             extra:
+              # 114 tasks x n_samples trials per run.
+              n_samples: 3
+              skip_failed_samples: true
+              # tau2's --agent-llm-args template has an agent_args passthrough, so the Qwen3.6
+              # card's thinking-mode top_k / presence_penalty can be set here (NEL's top-level
+              # params block cannot carry them).
+              agent_args:
+                top_k: 20
+                presence_penalty: 1.5
+              # The simulated user is a second model behind its own endpoint.
+              user:
+                url: ${oc.env:TAU2_ENDPOINT_URL}
+                model_id: ${oc.env:TAU2_USER_MODEL_ID}
+                api_key: INFERENCE_API_KEY
+              judge:
+                enabled: false
               num_repeats: 1

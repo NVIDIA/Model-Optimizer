@@ -100,7 +100,7 @@ Weights are each split's share of the dataset's own token count — a single pas
 
 ### 2. Quantization
 
-W4A4 NVFP4 PTQ using the recipe at [`modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast.yaml`](../../../../modelopt_recipes/models/Qwen/Qwen3.6-35B-A3B/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast.yaml). See [examples/megatron_bridge/README.md](../../README.md) for full PTQ documentation.
+W4A4 NVFP4 PTQ using the recipe at [`modelopt_recipes/huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml`](../../../../modelopt_recipes/huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml). See [examples/megatron_bridge/README.md](../../README.md) for full PTQ documentation.
 
 PTQ takes **~9 min on 2 GB200 nodes (1.2 GPU-hours)** at EP=8.
 
@@ -127,7 +127,7 @@ PTQ takes **~9 min on 2 GB200 nodes (1.2 GPU-hours)** at EP=8.
 # SBATCH --nodes=2 --ntasks-per-node=4 --gpus-per-node=4
 srun ... python /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
     --hf_model_name_or_path Qwen/Qwen3.6-35B-A3B \
-    --recipe models/Qwen/Qwen3.6-35B-A3B/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast \
+    --recipe huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore \
     --tp_size 1 --ep_size 8 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
     --calib_num_samples 1024 \
@@ -155,10 +155,13 @@ Minimum hardware: the student and teacher are both resident, plus an fp32 gradie
 <details>
 <summary>QAD command (click to expand)</summary>
 
-> NOTE: We use `python -u` for slurm multi-node runs.
+Launched with `srun`, one task per GPU, across 32 nodes (128 ranks). Set `RANK` / `WORLD_SIZE` /
+`LOCAL_RANK` from `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_LOCALID` in the `srun` body; `python -u`
+keeps the multi-node logs unbuffered.
 
 ```bash
-python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
+# SBATCH --nodes=32 --ntasks-per-node=4 --gpus-per-node=4
+srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --teacher_hf_path Qwen/Qwen3.6-35B-A3B \
     --student_hf_path Qwen/Qwen3.6-35B-A3B \
     --student_megatron_path /path/to/qwen36_w4a4_megatron \
@@ -221,7 +224,7 @@ One config per benchmark in [eval_configs/](eval_configs/), so each can be launc
 | MMMU-Pro | [mmmu_pro.yaml](eval_configs/mmmu_pro.yaml) | 1.0 | 8 | 2:30 | `mmmu-pro_pass_at_1_symbolic_correct` |
 | GPQA Diamond | [gpqa.yaml](eval_configs/gpqa.yaml) | 1.0 | 1 (avg-of-16) | 4:00 | `gpqa_pass_at_1_avg-of-16_symbolic_correct` |
 | SciCode (Subtask) | [scicode.yaml](eval_configs/scicode.yaml) | **0.6** | 8 | 2:00 | `scicode_pass_at_1_subtask_accuracy` |
-| AA-LCR | [aa_lcr.yaml](eval_configs/aa_lcr.yaml) | 1.0 | 8 | 1:00 | `aalcr_pass_at_1_judge_correct` |
+| AA-LCR | [aa_lcr.yaml](eval_configs/aa_lcr.yaml) | 1.0 | 8 | 2:00 | `aalcr_pass_at_1_judge_correct` |
 | IFBench | [ifbench.yaml](eval_configs/ifbench.yaml) | 1.0 | 8 | 1:30 | `ifbench_pass_at_1_average_score` |
 | tau2-bench Telecom | [tau2_telecom.yaml](eval_configs/tau2_telecom.yaml) | 1.0 | 3 | 1:30 | `tau2_bench_telecom_pass_at_1_pass_at_1` |
 
@@ -282,7 +285,7 @@ The same `vllm serve` command works for BF16 and NVFP4; the quantized checkpoint
 
 ```bash
 vllm serve <checkpoint_path> --served-model-name bench \
-    --host 0.0.0.0 --port 8000 \
+    --host 127.0.0.1 --port 8000 \
     --tensor-parallel-size 4 --data-parallel-size 1 --enable-expert-parallel \
     --max-model-len 262144 --reasoning-parser qwen3 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
