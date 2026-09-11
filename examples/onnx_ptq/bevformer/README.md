@@ -1,6 +1,6 @@
 # BEVFormer ONNX PTQ and nuScenes evaluation
 
-This example extends the pinned [DL4AGX BEVFormer workflow](https://github.com/NVIDIA/DL4AGX/tree/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq) with temporal calibration and FP8 quantization. Build the TensorRT 10.14 environment with its [Dockerfile](https://github.com/NVIDIA/DL4AGX/blob/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq/docker/tensorrt.Dockerfile). The TensorRT plugins are compiled after the container starts so they target the GPU used for deployment.
+This example extends the [DL4AGX BEVFormer workflow at source revision `9f7b291`](https://github.com/NVIDIA/DL4AGX/tree/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq) with temporal calibration and FP8 quantization. Build the TensorRT 10.14 environment with its [Dockerfile](https://github.com/NVIDIA/DL4AGX/blob/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq/docker/tensorrt.Dockerfile). The TensorRT plugins are compiled after the container starts so they target the GPU used for deployment.
 
 ## 1. Build and run the container
 
@@ -51,6 +51,8 @@ export FP16_ONNX=${ARTIFACTS}/bevformer_tiny_epoch_24_cp2_op13.fp16.onnx
 export PLUGIN_PATH=${BEVFORMER_ROOT}/TensorRT/lib/libtensorrt_ops.so
 export FP16_ENGINE=${ARTIFACTS}/bevformer_tiny_epoch_24_cp2_op13.fp16.engine
 ```
+
+Treat `${CONFIG}`, `${PLUGIN_PATH}`, and `${ARTIFACTS}/calibration` as trusted local inputs. MMCV executes the Python configuration, TensorRT loads the native plugin, and quantization reads every matching calibration batch. Use only the configuration and locally compiled plugin from the checked-out source revision and the calibration data produced by this workflow.
 
 Compile the TensorRT plugins for the deployment GPU and prepare the nuScenes metadata:
 
@@ -163,7 +165,7 @@ The accuracy run must complete all 6,019 validation samples. Serialized TensorRT
 
 ## Performance
 
-Following the PETR and FAR3D convention, performance is reported only as speedup normalized to FP16. These values use the archived full-validation engines and the median of five interleaved TensorRT 10.14 trials on the same NVIDIA RTX 6000 Ada Generation GPU. Each trial used the `trtexec` GPU Compute Time median with data transfers disabled, CUDA Graphs enabled, spin-wait, a 1-second warmup, a 10-second measurement window, and one inference stream.
+Following the PETR and FAR3D convention, performance is reported only as speedup normalized to FP16. These informational reference values use the archived full-validation engines and the median of five interleaved TensorRT 10.14 trials on the same NVIDIA RTX 6000 Ada Generation GPU. Each trial used the `trtexec` GPU Compute Time median with data transfers disabled, CUDA Graphs enabled, spin-wait, a 1-second warmup, a 10-second measurement window, and one inference stream.
 
 | Precision | Speedup vs. FP16 |
 | :-- | --: |
