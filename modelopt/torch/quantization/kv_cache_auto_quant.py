@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import math
 from contextlib import contextmanager
@@ -435,6 +436,7 @@ def _search_signature(
     layers: list[tuple[str, nn.Module, int]],
     num_calib_steps: int,
     num_score_steps: int,
+    preceding_quantizers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
@@ -455,11 +457,41 @@ def _search_signature(
             }
             for name, module, _ in layers
         ],
+        "preceding_quantizers": preceding_quantizers,
     }
 
 
 def _checkpoint_state_is_compatible(state: dict[str, Any], signature: dict[str, Any]) -> bool:
-    return state.get("search_signature") == signature
+    checkpoint_signature = state.get("search_signature")
+    if checkpoint_signature == signature:
+        return True
+    if not isinstance(checkpoint_signature, dict) or signature["preceding_quantizers"]:
+        return False
+
+    # Checkpoints written before composed GEMM -> KV searches had no preceding quantizers.
+    # Preserve their compatibility with an unquantized model while rejecting them for a
+    # quantized baseline, whose sensitivity scores depend on that baseline.
+    legacy_signature = signature.copy()
+    legacy_signature.pop("preceding_quantizers")
+    return checkpoint_signature == legacy_signature
+
+
+def _preceding_quantizer_signature(model: nn.Module) -> list[dict[str, Any]]:
+    """Describe enabled non-K/V formats that affect KV sensitivity scores."""
+    return sorted(
+        (
+            {
+                "name": name,
+                "num_bits": copy.deepcopy(module.num_bits),
+                "block_sizes": copy.deepcopy(module.block_sizes),
+            }
+            for name, module in model.named_modules(remove_duplicate=False)
+            if isinstance(module, TensorQuantizer)
+            and module.is_enabled
+            and not name.endswith(_KV_QUANTIZER_ATTRS)
+        ),
+        key=lambda entry: entry["name"],
+    )
 
 
 def _quantizer_state_dict(
@@ -691,13 +723,15 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             layers,
             self.config["num_calib_steps"],
             self.config["num_score_steps"],
+            _preceding_quantizer_signature(self.model),
         )
         if self.search_signature is not None and not _checkpoint_state_is_compatible(
             self.state_dict(), signature
         ):
             raise ValueError(
                 "KV-cache AutoQuantize checkpoint does not match the current candidates, scoring "
-                "setup, or eligible layers. Use a different checkpoint path."
+                "setup, eligible layers, or preceding non-K/V quantizer configuration. Use a "
+                "different checkpoint path."
             )
         self.search_signature = signature
         self._hparams = [
