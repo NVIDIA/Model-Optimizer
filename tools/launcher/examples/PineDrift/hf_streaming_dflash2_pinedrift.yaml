@@ -162,5 +162,11 @@ pipeline:
       # long run dies as a bare Slurm TIMEOUT with no traceback.
       time: "23:50:00"
       container: /home/haoguo/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
+      # container_mounts REPLACES the default, it does not extend it. The default
+      # is exactly ["$SLURM_HF_LOCAL:/hf-local"] (slurm_config.py), and the Slurm
+      # executor never re-adds it -- so listing only the EFA dir here silently
+      # unmounts the model, and vLLM then treats /hf-local/... as a Hub repo id
+      # and dies in huggingface_hub's validate_repo_id (job 406717).
       container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
         - /home/haoguo/lustre/efa-rdma-core:/efa-rdma-core

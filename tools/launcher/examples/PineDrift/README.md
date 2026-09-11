@@ -168,16 +168,22 @@ activation memory.
    `NCCL_IB_DISABLE=1` is separate and still set: it is about NCCL's own ibverbs
    path for the trainer's DDP, not about NIXL.
 
-6. **`report_to=none`** — the trainer runs in the serve container, which has no
+6. **`container_mounts` replaces the default, it does not extend it.** The default
+   is exactly `["$SLURM_HF_LOCAL:/hf-local"]` and the Slurm executor never re-adds
+   it, so adding one mount for the EFA graft silently unmounted the model. vLLM
+   then fell through to the Hub and died in `validate_repo_id` on a local path
+   (job 406717). Any yaml here that sets `container_mounts` must list `/hf-local`
+   itself.
+7. **`report_to=none`** — the trainer runs in the serve container, which has no
    tensorboard.
-7. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
+8. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
    bare Slurm TIMEOUT with no traceback.
-8. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
+9. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
    a custom key is rejected at argument-parse time.
-9. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
+10. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
    is pip-installed, disabling DeepEP v2. Harmless for the trainer; do not reuse that
    env for a standalone serve.
-10. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
+11. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
    `~/.bashrc` activates conda and shadows the container's python.
 
 ## BLOCKER — KV-cache page sizing (root-caused; fix = block_size >= 32*N)
