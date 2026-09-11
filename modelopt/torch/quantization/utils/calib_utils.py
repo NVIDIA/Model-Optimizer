@@ -150,7 +150,7 @@ class GPTQHelper:
 
         def hessian_forward(self, input, *args, **kwargs):
             inp = input.to_local() if hasattr(input, "to_local") else input
-            if self.input_quantizer is not None and self.input_quantizer.is_enabled:
+            if self.input_quantizer is not None:
                 hessian_input = self.input_quantizer(inp)
             else:
                 hessian_input = inp
