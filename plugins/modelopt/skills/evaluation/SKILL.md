@@ -385,11 +385,15 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
   | `tracking_uri`, `experiment_id` | nothing — both are local to the PTQ's server |
 
   **Skip any imported value containing `${`, `experiment_name` included** — quoting does not
-  stop OmegaConf resolving it, and the same pass resolves the whole block, so a crafted file
-  could interpolate an env var into the config. `hf_ptq` only sanitizes the experiment name
-  it derives itself; an explicit `--mlflow_experiment` reaches the file as typed. Otherwise
-  quote the tag values (a bare `20260910` becomes a date), keep the `modelopt_` prefix
-  (untagged, they read as this eval's own run), and leave `description` identifying the eval.
+  stop OmegaConf resolving it, and one pass resolves the whole block, so a crafted file could
+  interpolate an env var into the config. (`hf_ptq` sanitizes only the experiment name it
+  derives itself; an explicit `--mlflow_experiment` reaches the file as typed.) Drop that tag
+  outright — for `experiment_name`, fall back to the usual default — and say which you
+  dropped when you report the run. Otherwise quote the tag values (a bare `20260910` becomes
+  a date), keep the `modelopt_` prefix (untagged, they read as this eval's own run), and
+  leave `description` naming the model and sampling params as the template does. Carry the
+  values verbatim, but flag any that look like placeholders rather than quietly publishing a
+  `run_url` with no run behind it.
 
   `tracking_uri` stays `${oc.env:MLFLOW_TRACKING_URI}`. When it differs from the file's —
   the usual case — the export creates a *same-named, empty* experiment on the eval server
