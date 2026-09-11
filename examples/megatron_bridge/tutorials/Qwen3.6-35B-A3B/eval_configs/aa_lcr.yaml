@@ -5,7 +5,9 @@
 # checkpoint's own `quantization_config`. NVFP4 needs a Blackwell GPU.
 #
 # Sampling per the nvidia/Qwen3.6-35B-A3B-NVFP4 card: T=1.0, top_p=0.95, max_new_tokens=131072.
-# Long-context, judge-scored, only 100 questions -- the noisiest benchmark here.
+# Long-context, only 100 questions -- the noisiest benchmark here.
+# JUDGE-SCORED: needs a separate judge endpoint (NS_JUDGE_URL / LCR_JUDGE_MODEL_ID /
+# INFERENCE_API_KEY). Without it the `judge_correct` metric cannot be produced.
 #
 # Results use 8 independent run(s): launch this config 8 times and pool the per-run pass@1.
 #
@@ -63,6 +65,8 @@ evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
     DUMMY_API_KEY: lit:dummy
+    # The judge is a separate endpoint and needs its own key.
+    INFERENCE_API_KEY: host:INFERENCE_API_KEY
   nemo_evaluator_config:
     config:
       params:
@@ -88,8 +92,17 @@ evaluation:
               enable_thinking: true
   tasks:
     - name: ns_aa_lcr
+      env_vars:
+        HF_TOKEN: host:HF_TOKEN
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
       nemo_evaluator_config:
         config:
           params:
             extra:
               num_repeats: 1
+              # AA-LCR scores answers with a judge model behind its own endpoint.
+              judge_support: true
+              judge:
+                url: ${oc.env:NS_JUDGE_URL}
+                model_id: ${oc.env:LCR_JUDGE_MODEL_ID}
+                api_key: INFERENCE_API_KEY
