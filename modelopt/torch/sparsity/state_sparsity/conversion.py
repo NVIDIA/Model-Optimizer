@@ -22,7 +22,7 @@ from collections.abc import Iterable
 from pydantic import ValidationError
 from torch import nn
 
-from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.opt.conversion import ApplyModeError, ModeloptStateManager
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import unwrap_model
 
@@ -98,8 +98,8 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
 def update_dasc_metadata(model: nn.Module, config: DASCConfig, metadata: MetadataDict) -> None:
     """Refresh metadata without making unrelated ModelOpt save or compose paths unusable."""
     policy = get_attached_dasc_policy(model)
-    validate_dasc_model_structure(model, policy)
     try:
+        validate_dasc_model_structure(model, policy)
         validate_dasc_decay_parameters(model, policy)
     except ApplyModeError as error:
         warnings.warn(
@@ -108,6 +108,35 @@ def update_dasc_metadata(model: nn.Module, config: DASCConfig, metadata: Metadat
         )
     metadata.clear()
     metadata["policy"] = copy.deepcopy(policy.model_dump(mode="json"))
+
+
+def replace_dasc_mode(
+    model: nn.Module,
+    config: DASCConfig,
+    measurements: Iterable[DASCCalibrationMeasurement | dict],
+) -> nn.Module:
+    """Replace existing DASC mode state in place with a newly derived policy."""
+    model = unwrap_model(model, force_unwrap=True)
+    policy = build_dasc_policy(model, config, measurements)
+    manager = ModeloptStateManager(model)
+    manager.update_last_state_before_new_mode(model)
+    state = manager.state_dict()
+    dasc_indices = [index for index, (mode, _) in enumerate(state) if mode == "dasc"]
+    if not dasc_indices:
+        raise ApplyModeError("Cannot replace DASC mode because the model has no DASC state")
+
+    first_index = dasc_indices[0]
+    state[first_index] = (
+        "dasc",
+        {
+            "config": config.model_dump(),
+            "metadata": {"policy": policy.model_dump(mode="json")},
+        },
+    )
+    for index in reversed(dasc_indices[1:]):
+        del state[index]
+    _attach_policy(model, policy)
+    return model
 
 
 def get_attached_dasc_policy(model: nn.Module) -> DASCPolicy:

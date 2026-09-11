@@ -172,10 +172,12 @@ ordinary dense recurrent state before continuation.
 from zero, while DASC-WR reconstructs them from a zero-initialized suffix replay of at most the
 selected ``Wmax`` tokens. Both retain whole GDN heads, preserve convolution state, and resume with
 dense recurrence. KDA and serving-runtime integration are not supported by this initial API.
-The initial GDN adapter accepts the ``GatedDeltaNet`` and ``Qwen3NextGatedDeltaNet`` class names
-and fails closed for other implementations, even when they expose similarly named decay tensors.
-Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` supersedes a stale policy. A
-stale policy remains serializable so it cannot block saving or composing other ModelOpt modes, but
+The initial GDN adapter accepts the ``GatedDeltaNet`` and ``Qwen3NextGatedDeltaNet`` base classes,
+including ModelOpt-generated dynamic subclasses, and fails closed for unrelated implementations
+even when they expose similarly named decay tensors.
+Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` replaces the existing DASC
+mode-state entry and supersedes its stale policy without growing the checkpoint history. A stale
+policy remains serializable so it cannot block saving or composing other ModelOpt modes, but
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 
 .. _sparsity-concepts:

@@ -72,7 +72,7 @@ class DASCCalibrationMeasurement(ModeloptBaseConfig):
 class DASCConfig(ModeloptBaseConfig):
     """Configuration for GDN decay-aware state checkpoint sparsity."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True, protected_namespaces=())
+    model_config = ConfigDict(protected_namespaces=())
 
     variant: Literal["dasc_nr", "dasc_wr"] = ModeloptField(
         default="dasc_wr",
@@ -195,7 +195,7 @@ class DASCLayerPolicy(ModeloptBaseConfig):
 class DASCPolicy(ModeloptBaseConfig):
     """Standalone JSON-safe DASC deployment policy."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True, protected_namespaces=())
+    model_config = ConfigDict(protected_namespaces=())
 
     format_version: Literal[1] = 1
     variant: Literal["dasc_nr", "dasc_wr"]
@@ -213,7 +213,10 @@ class DASCPolicy(ModeloptBaseConfig):
     preserve_convolution_state: Literal[True]
     active_runtime_state: Literal["dense"] = "dense"
     model_structure_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    decay_parameters_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    decay_parameters_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description="BF16-canonicalized calibration snapshot retained for provenance.",
+    )
     layers: dict[str, DASCLayerPolicy] = Field(min_length=1)
     measurements: list[DASCCalibrationMeasurement] = Field(min_length=1)
 

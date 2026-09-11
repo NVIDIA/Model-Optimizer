@@ -31,6 +31,7 @@ from .config import DASCCalibrationMeasurement, DASCConfig, DASCLayerPolicy, DAS
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
 
 _SUPPORTED_GDN_CLASS_NAMES = frozenset({"GatedDeltaNet", "Qwen3NextGatedDeltaNet"})
+# Covers ordinary FP16/BF16 storage casts; the exact retained-head mask below is the semantic gate.
 _HORIZON_DTYPE_CAST_RTOL = 0.05
 
 
@@ -62,9 +63,9 @@ def compute_gdn_decay_horizons(
 
 
 def _is_gdn_module(module: nn.Module) -> bool:
-    """Return whether a module has one of the explicitly supported GDN implementations."""
+    """Accept supported GDN implementations and their ModelOpt dynamic subclasses."""
     return (
-        type(module).__name__ in _SUPPORTED_GDN_CLASS_NAMES
+        any(base.__name__ in _SUPPORTED_GDN_CLASS_NAMES for base in type(module).__mro__)
         and isinstance(getattr(module, "A_log", None), torch.Tensor)
         and isinstance(getattr(module, "dt_bias", None), torch.Tensor)
     )
@@ -122,7 +123,7 @@ def _model_structure(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
 
 
 def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
-    """Serialize decay parameters at canonical BF16 precision for dtype-stable hashing."""
+    """Serialize a compact BF16-canonicalized calibration snapshot for provenance."""
     return [
         {
             "name": name,
@@ -275,12 +276,11 @@ def validate_dasc_model_structure(model: nn.Module, policy: DASCPolicy) -> None:
 
 
 def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None:
-    """Reject deployment when current decay parameters no longer derive the stored policy."""
-    modules = _get_gdn_modules(model)
-    actual = _canonical_sha256(_decay_parameters(modules))
-    if actual != policy.decay_parameters_sha256:
-        raise ApplyModeError("DASC policy does not match the model's GDN decay parameters")
+    """Reject deployment when current decay parameters no longer derive the stored policy.
 
+    Numerical validation deliberately uses re-derived horizons and the exact selected mask rather
+    than the provenance digest because an FP16 or BF16 storage cast is lossy.
+    """
     current_horizons = analyze_gdn_decay(
         model,
         epsilon=policy.epsilon,
