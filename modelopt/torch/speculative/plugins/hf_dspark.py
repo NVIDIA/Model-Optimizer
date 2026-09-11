@@ -124,11 +124,35 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None)
     rather than held — peak memory ~ chunk_size*vocab instead of N*vocab. The math
     is identical to ``(softmax(final)-softmax(teacher)).abs().sum(-1)``.
 
+    Chunking goes through ``Tensor.split``, NOT ``final_logits[i : i + chunk_size]``.
+    Both produce the same views over the same rows, so the forward values are
+    identical — but the backward graphs are not, and the difference is large. A slice
+    per chunk creates one ``SliceBackward0`` each, and every one of those allocates a
+    zero tensor of the FULL [N, vocab] shape and scatters its own chunk's gradient
+    into it, so the cost is O(n_chunks * N * vocab). ``split`` creates a single
+    ``SplitBackward0`` whose backward is one ``cat``, i.e. O(N * vocab).
+
+    At the Gemma-4-E4B shape (N = bsz 4 * n_blocks 512 * block_size 8 = 16384,
+    vocab = 262144 -> 8 GiB per [N, vocab] bf16 tensor, 16 chunks) that is not a
+    micro-optimization: measured on a B300, backward went 198.0 ms -> 107.9 ms, and
+    kernel attribution on the training profile put 93.2 ms/step -- 15% of a 614 ms
+    step, the second-largest item after the DDP all-reduce -- on ``SliceBackward0``.
+    Peak memory is unchanged (41.9 -> 42.1 GiB). Outputs and gradients are bitwise
+    identical: verified elementwise at the production shape for the returned
+    per-token TVD, grad(hidden) and grad(markov_w2.weight).
+
+    Do NOT substitute ``torch.chunk`` or ``torch.tensor_split``. Those split into a
+    fixed NUMBER of pieces and so pick different boundaries (ceil(N/k)), which changes
+    the shapes handed to ``chunk_fn`` -- and ``chunk_fn`` may be a
+    ``torch.compile(..., dynamic=False)`` build that recompiles per shape.
     """
     _chunk = chunk_fn or _tvd_chunk
     outs = []
-    for i in range(0, final_logits.size(0), chunk_size):
-        a, b = final_logits[i : i + chunk_size], teacher_logits[i : i + chunk_size]
+    for a, b in zip(
+        final_logits.split(chunk_size, dim=0),
+        teacher_logits.split(chunk_size, dim=0),
+        strict=True,
+    ):
         if torch.is_grad_enabled() and a.requires_grad:
             outs.append(torch.utils.checkpoint.checkpoint(_chunk, a, b, use_reentrant=False))
         else:
