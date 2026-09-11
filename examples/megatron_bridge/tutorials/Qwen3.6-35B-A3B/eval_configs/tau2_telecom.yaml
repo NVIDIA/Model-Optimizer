@@ -1,0 +1,109 @@
+# tau2-bench Telecom eval for Qwen3.6-35B-A3B. See README section 5 for the task/metric table.
+#
+# Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` (BF16, W4A4 PTQ or QAD)
+# before running. Serves BF16 and NVFP4 unchanged: vLLM reads the FP8 KV-cache setting from the
+# checkpoint's own `quantization_config`. NVFP4 needs a Blackwell GPU.
+#
+# Sampling per the nvidia/Qwen3.6-35B-A3B-NVFP4 card: T=1.0, top_p=0.95, max_new_tokens=131072.
+# AGENTIC. Needs --enable-auto-tool-choice --tool-call-parser qwen3_coder in the deployment, which is
+# why it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
+# the Qwen3.6-35B-A3B card specifies; the template's <tool_call> markers resemble `hermes`, which would
+# mis-parse tool calls and silently invalidate the benchmark. Task-level token/parallelism budgets are
+# lower because each task holds a multi-turn conversation plus tool round-trips open.
+#
+# Results use 3 independent run(s): launch this config 3 times and pool the per-run pass@1.
+#
+#   pip install "nemo-evaluator-launcher[all]==0.2.6"
+#   export HF_TOKEN=<token>; export SLURM_JOB_DIR=<dir>; export HF_HOME=<cache>
+#   nemo-evaluator-launcher run --config eval_configs/tau2_telecom.yaml
+defaults:
+  - execution: slurm/default
+  - deployment: vllm
+  - _self_
+
+execution:
+  type: slurm
+  hostname: ???
+  username: ${oc.env:USER}
+  account: ???
+  partition: batch
+  num_nodes: 1
+  ntasks_per_node: 1
+  gpus_per_node: 4
+  gres: "gpu:4"
+  walltime: 01:30:00
+  output_dir: ${oc.env:SLURM_JOB_DIR}
+  mode: sequential
+  mounts:
+    mount_home: false
+
+deployment:
+  checkpoint_path: ???
+  served_model_name: qwen3.6-35b-a3b
+  port: 8000
+  image: vllm/vllm-openai:v0.28.0
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+  command: >-
+    vllm serve /checkpoint
+    --served-model-name ${deployment.served_model_name}
+    --host 0.0.0.0
+    --port ${deployment.port}
+    --tensor-parallel-size 4
+    --data-parallel-size 1
+    --enable-expert-parallel
+    --max-model-len 262144
+    --reasoning-parser qwen3
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'
+    --max-num-batched-tokens 8192
+    --enable-chunked-prefill
+    --enable-auto-tool-choice
+    --tool-call-parser qwen3_coder
+    --max-num-seqs 16
+  endpoints:
+    chat: /v1/chat/completions
+    completions: /v1/completions
+    health: /health
+
+evaluation:
+  env_vars:
+    HF_TOKEN: host:HF_TOKEN
+    DUMMY_API_KEY: lit:dummy
+  nemo_evaluator_config:
+    config:
+      params:
+        parallelism: 64
+        request_timeout: 3600
+        max_retries: 10
+        max_new_tokens: 131072
+        temperature: 1.0
+        top_p: 0.95
+    target:
+      api_endpoint:
+        api_key_name: DUMMY_API_KEY
+        adapter_config:
+          use_caching: true
+          use_reasoning: true
+          log_failed_requests: true
+          use_request_logging: true
+          max_logged_requests: 2
+          use_response_logging: true
+          max_logged_responses: 2
+          params_to_add:
+            chat_template_kwargs:
+              enable_thinking: true
+  tasks:
+    - name: tau2_bench_telecom
+      nemo_evaluator_config:
+        config:
+          params:
+            max_new_tokens: 65536
+            parallelism: 16
+            target:
+              api_endpoint:
+                adapter_config:
+                  params_to_add:
+                    # Qwen3.6 card, thinking mode
+                    top_k: 20
+            extra:
+              num_repeats: 1

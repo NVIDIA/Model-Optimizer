@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# W4A4 NVFP4 for Qwen/Qwen3.6-35B-A3B under Megatron-Core (examples/megatron_bridge/quantize.py).
+# Used as the QAD student in examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B.
+#
+# Qwen3.6-35B-A3B is a VLM whose language model is a 40-layer hybrid: 30 GatedDeltaNet
+# (linear-attention) layers interleaved with 10 full-attention layers (indices 3, 7, ... 39),
+# 256 routed experts plus a shared expert, and an MTP head.
+#
+# What this quantizes:
+#   routed + shared experts   NVFP4 W4A4 (block 16, dynamic input scales)
+#   output layer (lm_head)    NVFP4 W4A4
+#   self-attention            FP8 W8A8
+#   linear-attention          FP8 W8A8 (in_proj / out_proj)
+#   KV cache                  FP8 (cast mode)
+#   MTP, routers, conv1d, vision tower, embeddings -- BF16
+#
+# W4A4 rather than W4A16 because a BF16 activation forces vLLM onto the Marlin dequant fallback,
+# which measured 0.64-0.86x BF16 throughput; only FP4 activations reach the Blackwell FP4 tensor
+# cores. lm_head is included because it is 34.6% of per-token weight traffic.
+#
+# Megatron-Core fuses several projections that are separate in HuggingFace, so the selectors below
+# are Megatron leaf names: `mlp.experts.linear_fc{1,2}` (TEGrouped), `shared_experts.linear_fc1`
+# (gate+up), `self_attention.linear_qkv` (q+k+v). Both attention kinds are called `self_attention`,
+# so they are told apart by leaf name: `in_proj`/`out_proj`/`conv1d` vs `linear_qkv`/`linear_proj`.
+#
+# `in_proj` fuses HF's [query, key, value, z, beta, alpha], so the reference recipe's in_proj_a /
+# in_proj_b BF16 exclusion cannot be expressed here; `_gated_delta_net_slicing` in
+# modelopt/torch/export/unified_export_megatron.py re-splits it on export and writes those two
+# out in BF16.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+  nvfp4: configs/numerics/nvfp4
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Megatron-Core W4A4 (NVFP4 weights and activations, block 16) on MoE routed experts, shared
+    experts and dense MLP; W4A4 NVFP4 on the output layer; FP8 W8A8 on softmax-attention and
+    GatedDeltaNet projections; FP8 KV cache with constant amax; MTP block, routers, conv1d and
+    the vision tower left in BF16. Max calibration.
+
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+
+    # ---- W4A4 NVFP4 (weights AND activations) ------------------------------
+    # TEGroupedLinear may expose one quantizer per expert (`weight_quantizer_<N>`), so wildcard
+    # both sides of the leaf name.
+    - quantizer_name: '*mlp.experts.linear_fc1*weight_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.experts.linear_fc1*input_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.experts.linear_fc2*weight_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.experts.linear_fc2*input_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.shared_experts.linear_fc1*weight_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.shared_experts.linear_fc1*input_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.shared_experts.linear_fc2*weight_quantizer*'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*mlp.shared_experts.linear_fc2*input_quantizer*'
+      cfg: {$import: nvfp4}
+    # Dense MLP: no-op on this MoE model, kept so the file also covers dense smoke models.
+    - quantizer_name: '*.mlp.linear_fc1.weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*.mlp.linear_fc1.input_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*.mlp.linear_fc2.weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*.mlp.linear_fc2.input_quantizer'
+      cfg: {$import: nvfp4}
+
+    # ---- FP8 W8A8 softmax attention (layers 3, 7, 11, ...) -----------------
+    - quantizer_name: '*self_attention.linear_qkv.weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.linear_qkv.input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.linear_proj.weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.linear_proj.input_quantizer'
+      cfg: {$import: fp8}
+
+    # ---- FP8 W8A8 GatedDeltaNet linear attention (all other layers) --------
+    - quantizer_name: '*self_attention.in_proj.weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.in_proj.input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.out_proj.weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*self_attention.out_proj.input_quantizer'
+      cfg: {$import: fp8}
+
+    # ---- FP8 KV cache, constant amax --------------------------------------
+    - $import: kv_fp8_cast
+
+    # ---- Standard exclusions ----------------------------------------------
+    # Disables routers, conv1d, output_layer, embeddings and vision-tower patterns.
+    # output_layer is re-enabled below.
+    - $import: default_disabled_quantizers
+
+    # Megatron-Bridge names the Qwen3-VL vision tower `vision_model`.
+    - {quantizer_name: 'vision_model*', enable: false}
+
+    # Keep the whole MTP subtree in BF16. Must follow the expert / attention selectors above,
+    # which would otherwise match its inner layers.
+    - {quantizer_name: '*mtp*', enable: false}
+
+    # ---- W4A4 NVFP4 on the output layer (HF `lm_head`) --------------------
+    # Must follow default_disabled_quantizers, which disables `*output_layer*`.
+    - quantizer_name: '*output_layer.weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*output_layer.input_quantizer'
+      cfg: {$import: nvfp4}
