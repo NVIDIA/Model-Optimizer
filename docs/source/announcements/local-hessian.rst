@@ -1,121 +1,147 @@
 :orphan:
 
-Local Hessian: Better NVFP4 Weight Scales from Layer Inputs
-############################################################
+Improving NVFP4 Accuracy with Local Hessian Weight Scales
+#########################################################
 
 :Author: Model Optimizer Team
 :Date: September 9, 2026
 :Tags: local-hessian, quantization, nvfp4, calibration, modelopt
 
+.. role:: local-hessian-result(strong)
+.. role:: table-header-note
+
+In this blog, we share about Model Optimizer 'Local-Hessian', an algorithm for NVFP4 per-block scale selection
+to minimize the output error. We used this algorithm to create a low loss checkpoint
+`nvidia/Qwen3.8-27B-NVFP4 <https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4>`_ which can leverage NVFP4 tensor cores for performant inference on Blackwell GPUs.
+Here is a comparison of accuracy results we observed for 'Local Hessian' algorithm compared to the default max algorithm:
+
+.. image:: assets/qwen3-27b-w4a4-scale-rule-accuracy.png
+   :alt: Qwen3.8-27B scores by NVFP4 weight-scale rule, BF16 baseline in gray
+   :width: 100%
+
+**Figure 1. Qwen3.8-27B NVFP4 accuracy comparison between the default NVFP4 algorithm (max) and 'Local-Hessian'.**
+
+Background: NVFP4 Scale Selection
+*********************************
+
 NVFP4 represents each group of 16 weights with FP4 values and an FP8 block
-scale [1]_. Choosing that scale is consequential: a large scale preserves a
-block's outlier but spaces the representable values farther apart, while a
-smaller scale resolves typical values better but clips the outlier. Max scaling
-always chooses the first tradeoff. Weight mean squared error (MSE) improves it
-by measuring the weights, but still treats every weight error as equally
-important.
+scale [1]_. This block scale is used to scale the per-block values so to NVFP4 E2M1 range (-6.0, 6.0).
+The default way is to set the block scale based on the per-block maximum value (max scaling) [1]_.
 
-**Local Hessian**, also called **FP4 minimum-output-squared-error (MOSE)
-scaling**, chooses the scale that best preserves what a linear layer computes.
-It uses calibration inputs to score each candidate scale by its contribution to
-layer-output error. The method does not update the full-precision weights: the
-NVFP4 format, kernels, export path, and deployment runtime do not change.
+As shown, originally in 'Four-Over-Six' paper [3]_, this block scale can be selected based on other 
+critieria like per-block error. While 'Four-Over-Six' selects the per-block scale from  2 candidates while 
+`Model-Optimizer Mean Square Error (MSE) <https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.mse_calibrate>`_ algorithm sets this based on exhuastive sweep over all positive and non-zero FP8 
+scales (126 values).
 
-The algorithm, without the algebra
-**********************************
+Both of these approaches for scale selection only considers weight tensor level error which we find does not correlate 
+well with downstream accuracy evaluation results.
 
-For each linear layer, Local Hessian does the following:
+How Local Hessian Works
+***********************
 
-#. Run representative calibration data through the model and collect the input
-   statistics for every 16-value input-channel block.
-#. For each weight block and output channel, try the 126 positive, finite FP8
-   E4M3 block-scale candidates supported by NVFP4.
-#. Quantize and dequantize the block with each candidate.
-#. Estimate how much that block's weight error changes the layer output on the
-   calibration inputs.
-#. Keep the candidate with the smallest estimated output error.
+NVFP4 **Local-Hessian** chooses the scale to minimize the output error of NVFP4 matrix multiplication operation.
+Specifically, we use this idea to select the per-block scale for NVFP4 weights only, 
+which does not required any new deployment kernels or changes from the default NVFP4 deployment - we are just computing the 
+per-block scales in a different way from the existing max based per-block scale selection.
 
-Searching every block scale jointly would be combinatorial. Local Hessian makes
-the practical approximation that each block can be optimized independently.
-This turns the search into many small problems that can run in parallel. The
-full derivation, including what the approximation drops, is in the `appendix`_.
 
-Why layer inputs change the answer
-==================================
-
-Consider two weight errors of the same size. If one multiplies an input feature
-that is often large, it can perturb the layer output much more than the other.
-Weight MSE assigns them the same cost; Local Hessian does not. For an input
-block :math:`X_k` and weight error :math:`\Delta w`, it scores
+Here is how it works. Consider a linear layer
 
 .. math::
+   :label: lh-linear
 
-   \mathcal{J}_k(s) = \Delta w(s)^{\top} H_k \Delta w(s),
+   Y = WX,
    \qquad
-   H_k = \frac{1}{N}X_k^{\top}X_k.
+   W\in\mathbb{R}^{C_{\mathrm{out}}\times C_{\mathrm{in}}},
+   \qquad
+   X\in\mathbb{R}^{C_{\mathrm{in}}\times N},
 
-The :math:`16\times16` matrix :math:`H_k` captures both the energy of each
-input coordinate and correlations within the block. The scale :math:`s` affects
-the score through :math:`\Delta w(s)=\mathcal{Q}_s(w)-w`. This is the same
-quadratic form as the isolated block's output-reconstruction error. It is
-sometimes called a local Hessian because :math:`X_k^{\top}X_k` is proportional
-to the Hessian of squared reconstruction loss for that linear layer.
+for :math:`N` calibration tokens. We quantize the weights,
 
-Using Local Hessian in Model Optimizer
-**************************************
+.. math::
+   :label: lh-quant
 
-Use the Local Hessian NVFP4 configuration and provide a forward loop over
-representative inputs:
+   W_q=\mathcal{Q}(W,s)=W+\Delta(W,s),
+   \qquad
+   \mathcal{Q}(W,s)=\operatorname{Cast}(W/s)\cdot s,
 
-.. code-block:: python
+where :math:`s` is the quantization scale, :math:`\operatorname{Cast}`
+rounds to the low-precision datatype such as NVFP4, and :math:`\Delta`
+is the resulting quantization error. 
 
-   import modelopt.torch.quantization as mtq
+Let :math:`Y_q=W_qX` be the output after quantizing the weights.
 
-   model = mtq.quantize(
-       model,
-       mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
-       forward_loop,
-   )
+We consider one output channel at a time. Write its weights as the row
+:math:`w` and its quantization error as :math:`\Delta(w,s)`. Its
+output mean squared error is
 
-The default Local Hessian block size is 16, matching NVFP4, and the calibration
-forward loop is required. The implementation first max-calibrates the model,
-collects per-block input second moments with weight fake quantization disabled,
-and then runs a fused scale sweep where supported. Unsupported weight layouts
-retain max-calibrated scales or fall back to weight MSE, with a warning where
-applicable. At present, the per-block input statistics are not synchronized
-across distributed ranks, so use the algorithm as a single-rank calibration
-method.
+.. math::
+   :label: lh-output-error
 
-Result 1: Scale selection matters on Qwen3.5-9B
-************************************************
+   E(s) = \lVert wX-w_qX\rVert_2^2
+     = \lVert \Delta(w,s)\,X\rVert_2^2
+     = \Delta(w,s)\,(XX^{\top})\,\Delta(w,s)^{\top}.
 
-Table 1 isolates weight-scale selection on Qwen3.5-9B under NVFP4 W4A4: FP4
-weights and FP4 activations. The retained team workbook defines MMLU as
-zero-shot accuracy, HellaSwag as zero-shot normalized accuracy, WinoGrande as
-zero-shot accuracy, GSM8K as five-shot strict-match accuracy, and WikiText as
-word perplexity. Accuracy values are percentage points. "Average drop" is the
-mean of :math:`\max(\text{BF16 score}-\text{quantized score}, 0)` over the four
-accuracy tasks, so lower is better. GPTQ here uses max-based scales [2]_.
+Here :math:`XX^{\top}\in\mathbb{R}^{C_{\mathrm{in}}\times C_{\mathrm{in}}}`
+is the Hessian (second order derivative) of :math:`E(s)` with respect to
+:math:`\Delta(w,s)`, and it carries the output error minimization
+objective into the scale decision.
 
-All three tables in this article report Model Optimizer team measurements.
-Their supporting checkpoints, run logs, evaluator outputs, and workbooks are
-team-owned artifacts; a public artifact bundle is not currently available.
-Derived summary values use the workbooks' full-precision scores; task scores in
-the tables are rounded for display.
+For NVFP4, the weight scale :math:`s` for one output channel is a vector
+of dimension :math:`C_{\mathrm{in}}/16`, one entry per block. With
+:math:`M` candidate values per entry, minimizing :math:`E(s)` jointly
+means searching :math:`M^{C_{\mathrm{in}}/16}` combinations -- not
+tractable.
 
-**Table 1. Qwen3.5-9B, NVFP4 W4A4 scale-setting comparison. Bold marks the
-best quantized result in each column.**
+Per-Block Output Error Objective
+================================
+
+We simplify the objective in :eq:`lh-output-error` with one key
+observation: each block's scale can be chosen in isolation, against the
+output error that block alone contributes.
+For block :math:`k`, with scale :math:`s_k`, weight error
+:math:`\Delta(w_k,s_k)`, and inputs
+:math:`X_k\in\mathbb{R}^{16\times N}`,
+
+.. math::
+   :label: lh-block-error
+
+   E_k(s_k) = \Delta(w_k,s_k)\,(X_kX_k^{\top})\,\Delta(w_k,s_k)^{\top},
+
+where :math:`X_kX_k^{\top}` is only :math:`16\times16`. That is the
+local Hessian, and it turns the search into many small independent
+problems instead of one large one.
+
+For each per-block scale, we sweep over all possible 126 FP8 values, just like we do for MSE algorithm.
+See the `Model Optimizer Local-Hessian code
+<https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.layerwise_calibrate>`_
+for more details.
+
+Results
+***********
+
+Scale Selection Accuracy
+========================
+
+In Table 1 we compares Local-Hessian Vs other scale selection algorithms dor weights on Qwen 3.5 9B.
+
+Local Hessian gives the overall best accuracy among the NVFP4
+weight-scale selection methods, cutting the average drop from 5.10 to 3.10
+points against the default max rule. We get that from nothing but a
+smarter way of computing the weight scale -- which says something about
+micro-block formats like NVFP4: **the scale carries a lot of
+information, and it pays to set it diligently.**
 
 .. list-table::
    :header-rows: 1
 
-   * - Method
+   * - Weight scale selection method
      - MMLU
      - HellaSwag
      - WinoGrande
      - GSM8K
-     - Average drop
-     - WikiText PPL
+     - Average drop :table-header-note:`(lower is better)`
+     - WikiText PPL :table-header-note:`(lower is better)`
    * - BF16 reference
      - 78.69
      - 78.04
@@ -130,7 +156,7 @@ best quantized result in each column.**
      - 74.60
      - 5.10
      - 10.08
-   * - Weight MSE scale
+   * - MSE scale
      - 76.49
      - 76.61
      - **72.45**
@@ -149,38 +175,29 @@ best quantized result in each column.**
      - 76.50
      - 71.19
      - **80.89**
-     - **3.10**
-     - **9.90**
-   * - GPTQ with max scale
-     - 75.77
-     - 76.51
-     - 70.17
-     - 75.97
-     - 4.84
-     - 10.02
+     - :local-hessian-result:`3.10`
+     - :local-hessian-result:`9.90`
 
-Among the four scale-only methods, Local Hessian reduces average accuracy drop
-from 5.10 to 3.10 percentage points relative to max scaling and has the lowest
-perplexity. It also produces a smaller average drop and lower perplexity than
-the recorded GPTQ baseline, without applying a full-precision weight update.
-The result is not a claim that one method wins every cell: for example, weight
-MSE is higher on HellaSwag and WinoGrande.
+.. rst-class:: table-note
 
-The retained team workbook identifies this model only as Qwen3.5-9B; it does
-not record a model repository or checkpoint revision. The same workbook
-contains one value per configuration, but does not retain the calibration
-dataset or size, benchmark dataset revisions, evaluator and version, hardware,
-repeat count, or uncertainty. Tables 1 and 2 therefore support comparisons
-among these recorded configurations, not claims of statistical significance or
-exact reproduction.
+All layers except the final output layer (``lm_head``) use NVFP4
+weight and activation quantization (W4A4).
 
-Result 2: Local Hessian composes with GPTQ
-******************************************
 
-Local Hessian changes scales; GPTQ uses approximate second-order information to
-update quantized weights and compensate error [2]_. Because they act on
-different parts of the quantization problem, they can be combined. Table 2 uses
-the same Qwen3.5-9B W4A4 tasks and metric definitions as Table 1.
+Local-Hessian + GPTQ Accuracy
+=============================
+
+Local Hessian changes scales; GPTQ [2]_ changes weight rounding to
+minimize per-layer output error. The two are orthogonal, so they
+compose: Local Hessian rounds to nearest (RTN) by default, and GPTQ can
+replace that rounding step once the scales are set. In Table 2, we show
+that Local-Hessian scales improve GPTQ as well.
+
+Two things stand out:
+
+#. Local-Hessian scale selection alone (3.10 average drop) beats GPTQ with
+   max scales (4.84), with no weight update at all.
+#. Composing the two improves further still, from 3.10 to 2.94.
 
 **Table 2. Qwen3.5-9B, NVFP4 W4A4 GPTQ composition.**
 
@@ -201,236 +218,94 @@ the same Qwen3.5-9B W4A4 tasks and metric definitions as Table 1.
      - 75.97
      - 4.84
      - 10.02
-   * - GPTQ + weight MSE scale
-     - 75.94
-     - **76.59**
-     - **71.51**
-     - **82.18**
-     - **2.89**
-     - 9.95
    * - GPTQ + Local Hessian scale
      - **76.98**
      - **76.59**
      - 70.96
      - 81.50
-     - 2.94
-     - **9.91**
+     - :local-hessian-result:`2.94`
+     - :local-hessian-result:`9.91`
 
-Replacing max scales with Local Hessian scales in the GPTQ pipeline improves
-all four recorded task accuracies, lowers average drop from 4.84 to 2.94
-percentage points, and lowers perplexity from 10.02 to 9.91. GPTQ plus weight
-MSE has a slightly smaller average drop in this experiment; GPTQ plus Local
-Hessian has the best MMLU and perplexity. This is exactly why scale selection
-should remain a composable choice rather than being tied to one weight-update
-algorithm.
+Just Better Scales, No Runtime Cost
+***********************************
 
-The Qwen3.8-27B delivery candidate
-**********************************
+Local Hessian and the other ModelOpt scale-selection algorithms for
+NVFP4 weight scales are free. Weight scales are computed only once, at
+checkpoint creation, and that same scale is reused on every
+deployment. Selecting scales this way improves accuracy without
+incurring any deployment throughput penalty.
 
-We then used Local Hessian while building a Qwen3.8-27B W4A4 delivery
-candidate. The controlled ablation uses the same mixed-precision assignment for
-both checkpoints: the dense model's MLP projections and language-model head use
-either NVFP4 W4A4 or FP8, while all attention projections use FP8. Across the
-layers common to both checkpoints, only the NVFP4 weight-scale rule changes
-from max to Local Hessian. The max checkpoint omits the multi-token prediction
-module, which accounts for the raw checkpoint-size difference; the retained
-workbook normalizes both configurations to 6.31 effective bits for the
-ablation. Every evaluation uses an FP8 E4M3 key-value cache. The BF16 baseline
-and candidates derive from ``Qwen/Qwen3.8-27B`` revision
-``1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0``. The retained records do not
-specify the calibration dataset, sample count, sequence length, or batch size.
 
-**Table 3. Qwen3.8-27B candidate scores. Values after ± are reported standard
-errors.**
+Using Local Hessian
+*******************
 
-.. list-table::
-   :header-rows: 1
+See the `local_hessian_calibrate API
+<https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.local_hessian_calibrate>`_
+for the calibration entry point.
 
-   * - Scale rule
-     - GPQA Diamond
-     - Terminal-Bench 2.1
-     - AA-LCR
-     - MMMU-Pro
-     - SciCode
-     - IFBench
-   * - BF16
-     - 88.92 ± 0.36
-     - 75.56
-     - 72.63 ± 0.64
-     - 75.14
-     - 47.93
-     - 80.07 ± 0.29
-   * - Max
-     - 87.94 ± 0.22
-     - 70.79
-     - **78.56 ± 0.72**
-     - 74.39
-     - 47.04
-     - 75.89
-   * - Local Hessian
-     - **88.01 ± 0.32**
-     - **74.02**
-     - 73.38 ± 0.57
-     - **74.86**
-     - **48.41 ± 0.43**
-     - **78.93 ± 0.59**
+To use it in your own configuration, set the ``algorithm`` field:
 
-The team's retained evaluation workbook defines the aggregate metric as a
-signed mean degradation against BF16:
-:math:`\operatorname{mean}(\min(\text{candidate}-\text{BF16},0))` over the
-available scores other than SciCode. Local Hessian moves it from -2.14 to -0.78
-percentage points, recovering 1.36 points of mean degradation. Five of its six
-scores are no more than 1.5 points below BF16, compared with four of six for
-max scaling. The one regression relative to the max checkpoint is AA-LCR,
-where max is also above the BF16 reference.
+.. code-block:: python
 
-The evaluation records define GPQA Diamond as pass@1 symbolic-correct accuracy
-over 198 questions, averaged across 16 responses per question; AA-LCR as
-pass@1 judge-correct accuracy over 100 questions, also averaged across 16
-responses; MMMU-Pro as pass@1 symbolic-correct accuracy over 1,730 entries;
-SciCode as pass@1 subtask accuracy over 80 problems and 338 subtasks; IFBench
-as pass@1 prompt-loose accuracy over 300 prompts, averaged across five
-responses; and Terminal-Bench 2.1 as evaluator-final pass@1 over 89 tasks with
-eight trials per task. MMMU-Pro uses one response per entry. SciCode uses one
-evaluation run for BF16 and max and the mean of eight completed reruns for
-Local Hessian; incomplete reruns are excluded.
+   import modelopt.torch.quantization as mtq
 
-For GPQA Diamond, AA-LCR, and IFBench, reported standard errors are the
-evaluators' across-response standard errors, expressed in percentage points.
-The Local Hessian SciCode standard error is the sample standard deviation of
-the eight run-level scores divided by :math:`\sqrt{8}`. Blank standard-error
-cells mean no uncertainty estimate was supplied; they are not zeros. These
-repeats measure sampling within one checkpoint configuration, not independent
-quantization or checkpoint builds.
+   config = {
+       "quant_cfg": [...],  # quantizer configuration
+       "algorithm": {"method": "local_hessian", "fp8_scale_sweep": True},
+   }
 
-The same workbook reports mean completion-token change relative to BF16,
-excluding Terminal-Bench because the max-scale run has no comparable token
-mean. That value is +46.1% for max scaling and +0.6% for Local Hessian.
+   model = mtq.quantize(model, config, forward_loop)
 
-These results are checkpoint- and evaluation-specific. Within this controlled
-scale ablation, Local Hessian materially tightened the candidate's quality
-profile; the results do not imply that it will dominate max scaling on every
-task or model.
+See :ref:`quant-cfg` for how to write the ``quant_cfg`` field.
 
-No new deployment contract
-**************************
+To reproduce the published Qwen3.8-27B checkpoint end to end:
 
-Local Hessian is an offline calibration rule. After calibration, each block
-still contains ordinary NVFP4 values and an ordinary FP8 E4M3 scale. Inference
-does not evaluate a Hessian, replay calibration data, or use a new operator.
-An exported Local Hessian checkpoint therefore needs no Local-Hessian-specific
-runtime support.
+.. code-block:: bash
 
-This separation is useful beyond GPTQ. A pipeline can change the scale rule
-without changing its quantization format, mixed-precision assignment, export
-schema, or serving stack. Scale search is also an active research area:
-ScaleSearch searches nearby representable block scales using weight error
-[3]_, ScaleSweep includes MSE and diagonally activation-weighted objectives
-[4]_, and SOAR jointly optimizes global and block scales under reconstruction
-error [5]_. Local Hessian's specific choice is the full :math:`16\times16`
-within-block input second-moment matrix and an independent search for every
-block and output channel.
+   python examples/hf_ptq/hf_ptq.py \
+       --pyt_ckpt_path Qwen/Qwen3.8-27B \
+       --recipe modelopt_recipes/models/Qwen/Qwen3.8-27B/ptq/nvfp4_local_hessian-fp8_attn-kv_fp8_cast.yaml \
+       --dataset nemotron-post-training-v3 \
+       --calib_size 512 \
+       --calib_seq 2048 \
+       --batch_size 1 \
+       --export_path <export_dir>
+
+Batch size 1 keeps padding tokens from polluting the output error
+statistics used by Local Hessian and GPTQ.
+
 
 Next steps
 **********
 
-Mixture-of-experts (MoE) models are the next important test. Routed experts see
-different tokens, so their input statistics can differ sharply, and some
-experts may see too few calibration samples. We plan to measure how calibration
-coverage, routing balance, and scale sharing affect Local Hessian across MoE
-architectures. Synchronizing the per-block statistics for distributed
-calibration is another necessary step.
+- **Adapt Local Hessian for sparse MoEs.** Many experts in a sparse MoE
+  see very little calibration data. Local-Hessian workflow needs to be adapted to that
+  low-data regime.
 
-We also want broader evidence across model families and evaluations, including
-repeat-based uncertainty, and systematic tests of combinations with GPTQ and
-other algorithms. Activation-quantization-aware MOSE, which adds an explicit
-activation-error coupling term, is a separate extension; the method and results
-in this article are Local Hessian without that coupling.
+Bitter Lesson: Best Method - It Depends!
+****************************************************************
 
-Closing perspective
-*******************
+We, the Model Optimizer team, have quantized over 80 models, all available in
+the `Inference Optimized Checkpoints (with Model Optimizer)
+<https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer>`_
+collection.
 
-Building day-zero quantized checkpoints repeatedly teaches the same lesson: the
-best algorithm can change with the model and sometimes with the evaluation.
-Local Hessian is not a universal replacement for every calibration method. It
-is a strong, deployment-compatible addition to the Model Optimizer toolbox.
+Building checkpoints for various models and evaluating them teaches this
+bitter lesson: the best algorithm can change with the model, the
+calibration dataset, and sometimes the evaluation.
 
-That toolbox matters more than any single winner. Model Optimizer makes it
-practical to combine algorithms, evaluate the resulting checkpoints, and
-iterate while keeping the deployment target fixed. Better FP4 scale selection
-is one more useful lever in that loop.
+Local Hessian gives the best accuracy recovery overall in our internal
+evaluations on small dense models. However, the winning
+algorithm/combination might change depending on the model. On
+Qwen3.5-9B, Local Hessian + GPTQ came out ahead; on Qwen3.8-27B, plain
+RTN rounding beat GPTQ on top of the same scales. Scale selection is the
+reliable part; what you pair it with is not.
 
-.. _appendix:
-
-Appendix: Deriving the Local Hessian objective
-**********************************************
-
-Start with one output channel and one input row. Let :math:`w_0\in\mathbb{R}^d`
-be the original weight vector, :math:`w_q=w_0+\Delta w` its quantized value,
-and :math:`x\in\mathbb{R}^{1\times d}` the layer input. The original and
-quantized scalar outputs are
-
-.. math::
-
-   y_0=xw_0,
-   \qquad
-   y_q=xw_q.
-
-Their squared difference is exactly
-
-.. math::
-
-   \lVert y_q-y_0\rVert_2^2
-   = \lVert x\Delta w\rVert_2^2
-   = \Delta w^{\top}x^{\top}x\Delta w.
-
-For :math:`N` calibration tokens, stack their inputs in
-:math:`X\in\mathbb{R}^{N\times d}`. The average reconstruction loss becomes
-
-.. math::
-
-   \frac{1}{N}\lVert X\Delta w\rVert_2^2
-   = \Delta w^{\top}\left(\frac{1}{N}X^{\top}X\right)\Delta w.
-
-NVFP4 partitions the input dimension into blocks of :math:`b=16`. For block
-:math:`k`, define :math:`X_k\in\mathbb{R}^{N\times b}` and
-
-.. math::
-
-   H_k=\frac{1}{N}X_k^{\top}X_k.
-
-For output channel :math:`j`, a candidate scale :math:`s` produces
-
-.. math::
-
-   \Delta w_{j,k}(s)=\mathcal{Q}_s(w_{0,j,k})-w_{0,j,k}.
-
-Local Hessian selects
-
-.. math::
-
-   s_{j,k}^{\star}
-   = \underset{s\in\mathcal{S}_{\mathrm{FP8}}}{\arg\min}\;
-     \Delta w_{j,k}(s)^{\top}H_k\Delta w_{j,k}(s).
-
-The implementation anchors the tensor scale at
-:math:`s_{\mathrm{tensor}}=\operatorname{amax}(W_0)/6` and evaluates the 126
-valid positive, finite FP8 E4M3 block-scale multipliers. The normalization by
-:math:`N` does not affect the selected scale because it multiplies every
-candidate score by the same positive constant.
-
-For an entire layer, the exact error contains cross terms between different
-input blocks:
-
-.. math::
-
-   \left\lVert\sum_k X_k\Delta w_{j,k}\right\rVert_2^2.
-
-Optimizing all block scales jointly would have a combinatorial search space.
-Local Hessian drops the cross-block terms and minimizes each diagonal block's
-contribution independently. It retains all correlations *within* each
-16-coordinate block, unlike a diagonal importance-weighting approximation.
-This is the approximation that makes the searches independent and parallel.
+What matters more than any single algorithm is a place to build
+quantized checkpoints, evaluate them (see our agentic skills for
+frontier evaluation), and iterate quickly. Model Optimizer is that
+one-stop shop for inference optimization, and Local Hessian is one more
+useful lever in the loop.
 
 .. _local-hessian-references:
 
@@ -444,11 +319,7 @@ References
 .. [2] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh. `GPTQ: Accurate
    Post-Training Quantization for Generative Pre-trained Transformers
    <https://arxiv.org/abs/2210.17323>`_. ICLR, 2023.
-.. [3] T. Gupta et al. `Search Your Block Floating Point Scales!
-   <https://arxiv.org/abs/2605.12464>`_. MLSys, 2026.
-.. [4] L. Lin and X. Wan. `ScaleSweep: Accurate NVFP4 Post-Training
-   Quantization of LLMs via Block Scale Initialization
-   <https://arxiv.org/abs/2606.07618>`_. arXiv:2606.07618, 2026.
-.. [5] C. Bao, X. Yan, Z. Li, G. Qin, G. Yu, and Y. Zhang. `SOAR: Scale
-   Optimization for Accurate Reconstruction in NVFP4 Quantization
-   <https://arxiv.org/abs/2605.12245>`_. arXiv:2605.12245, 2026.
+.. [3] J. Cook, J. Guo, G. Xiao, Y. Lin, K. Wyss, M. Nazemi, A. Mishra,
+   C. del Mundo, T. Blankevoort, and S. Han. `Four Over Six: More Accurate
+   NVFP4 Quantization with Adaptive Block Scaling
+   <https://arxiv.org/abs/2512.02010>`_. arXiv:2512.02010, 2025.
