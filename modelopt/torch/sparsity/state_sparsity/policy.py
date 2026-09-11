@@ -53,8 +53,16 @@ _STORAGE_DTYPES: dict[_DecayParameterStorageDtype, torch.dtype] = {
 }
 
 
-class _DASCModelStructureMismatchError(ApplyModeError):
+class _DASCRecoverableStalenessError(ApplyModeError):
+    """Identify DASC state that may become valid after model rematerialization."""
+
+
+class _DASCModelStructureMismatchError(_DASCRecoverableStalenessError):
     """Identify recoverable policy-versus-GDN-geometry drift during restore."""
+
+
+class _DASCDecayParametersUnavailableError(_DASCRecoverableStalenessError):
+    """Identify supported GDN modules whose decay tensors are temporarily unavailable."""
 
 
 def _validate_gdn_decay_tensors(a_log: torch.Tensor, dt_bias: torch.Tensor) -> None:
@@ -143,7 +151,7 @@ def _reject_incomplete_gdn_modules(identity_modules: list[tuple[str, nn.Module]]
         )
     ]
     if missing_decay_parameters:
-        raise ApplyModeError(
+        raise _DASCDecayParametersUnavailableError(
             "DASC found supported GDN modules without A_log and dt_bias tensors at: "
             f"{', '.join(missing_decay_parameters)}"
         )
@@ -202,8 +210,9 @@ def _analyze_gdn_modules(
         a_log = module.A_log
         dt_bias = module.dt_bias
         try:
+            # Check the original tensors before a storage cast can hide an invalid integer dtype.
+            _validate_gdn_decay_tensors(a_log, dt_bias)
             if storage_dtype is not None:
-                _validate_gdn_decay_tensors(a_log, dt_bias)
                 a_log = a_log.detach().to(device="cpu", dtype=storage_dtype)
                 dt_bias = dt_bias.detach().to(device="cpu", dtype=storage_dtype)
             layer_horizons = compute_gdn_decay_horizons(
@@ -228,15 +237,27 @@ def analyze_gdn_decay(
     decay_parameter_storage_dtype: _DecayParameterStorageDtype | None = None,
 ) -> dict[str, list[float]]:
     """Return per-head horizons, optionally canonicalized to a checkpoint storage dtype."""
+    try:
+        epsilon_is_valid = math.isfinite(epsilon) and 0.0 < epsilon < 1.0
+    except TypeError:
+        epsilon_is_valid = False
+    if not epsilon_is_valid:
+        raise ValueError("epsilon must be finite and in (0, 1)")
+    try:
+        static_gate_input_is_valid = math.isfinite(static_gate_input)
+    except TypeError:
+        static_gate_input_is_valid = False
+    if not static_gate_input_is_valid:
+        raise ValueError("static_gate_input must be finite")
     storage_dtype = None
     if decay_parameter_storage_dtype is not None:
-        try:
-            storage_dtype = _STORAGE_DTYPES[decay_parameter_storage_dtype]
-        except KeyError as error:
+        if (
+            not isinstance(decay_parameter_storage_dtype, str)
+            or decay_parameter_storage_dtype not in _STORAGE_DTYPES
+        ):
             supported = ", ".join(_STORAGE_DTYPES)
-            raise ValueError(
-                f"decay_parameter_storage_dtype must be one of: {supported}"
-            ) from error
+            raise ValueError(f"decay_parameter_storage_dtype must be one of: {supported}")
+        storage_dtype = _STORAGE_DTYPES[decay_parameter_storage_dtype]
     return _analyze_gdn_modules(
         _get_gdn_modules(model),
         epsilon=epsilon,
