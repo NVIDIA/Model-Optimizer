@@ -337,16 +337,6 @@ def test_init_existing_plugin_library_added(tmp_path):
     assert any(arg == f"--staticPlugins={plugin.resolve()}" for arg in b._base_cmd)
 
 
-def test_init_safe_flag_sets_is_safe(tmp_path):
-    """``--safe`` in trtexec_args (without remote config) flips ``is_safe``."""
-    b = TrtExecBenchmark(
-        timing_cache_file=str(tmp_path / "cache.bin"),
-        trtexec_args=["--safe"],
-    )
-    assert b.is_safe is True
-    assert b.has_remote_config is False
-
-
 # --- --remoteAutoTuningConfig parsing ---
 
 
@@ -406,7 +396,6 @@ def test_remote_config_injects_safe_and_skipinference(tmp_path):
     )
     assert "--safe" in b.trtexec_args
     assert "--skipInference" in b.trtexec_args
-    assert b.is_safe is True
 
 
 @pytest.mark.usefixtures("trtexec_version_ok")

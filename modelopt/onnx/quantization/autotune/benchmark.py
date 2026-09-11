@@ -414,9 +414,6 @@ class TrtExecBenchmark(Benchmark):
                 raise
             self.trtexec_args = _ensure_remote_autotuning_flags(self.trtexec_args, log=self.logger)
 
-        # Must come after _ensure_remote_autotuning_flags has injected --safe into
-        # self.trtexec_args for the remote path.
-        self.is_safe = "--safe" in self.trtexec_args
         self._base_cmd.extend(self.trtexec_args)
 
         self.logger.debug(
