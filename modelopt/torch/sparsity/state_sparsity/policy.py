@@ -520,7 +520,7 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
                     "DASC policy head mask does not match current decay parameters in layer "
                     f"{name!r}"
                 )
-        stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
+        stored = torch.tensor(layer.static_horizons, device="cpu", dtype=torch.float64)
         numerical_slack = 32.0 * torch.finfo(torch.float64).eps
         if torch.any(stored < lower * (1.0 - numerical_slack)) or torch.any(
             stored > upper * (1.0 + numerical_slack)
