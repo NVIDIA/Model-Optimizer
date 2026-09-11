@@ -114,18 +114,24 @@ class HistogramCalibrator(_Calibrator):
                 # Because we collect histogram on absolute value, setting min=0 simplifying the rare case where
                 # minimum value is not exactly 0 and first batch collected has larger min value than later batches
                 x_max = x.max()
-                if self._calib_bin_edges is None and self._calib_hist is None:
-                    self._calib_hist = torch.histc(x, bins=self._num_bins, min=0, max=x_max)
+                if self._calib_bin_edges is None or self._calib_bin_edges[-1] == 0:
+                    # A zero-only prefix has no bin width yet. Preserve its counts
+                    # in the first bin when the first nonzero batch defines the range.
+                    zero_count = 0 if self._calib_hist is None else self._calib_hist.sum()
+                    self._calib_hist = torch.histc(
+                        x, bins=self._num_bins, min=0, max=x_max if x_max > 0 else 1
+                    )
+                    self._calib_hist[0] += zero_count
                     self._calib_bin_edges = torch.linspace(0, x_max, self._num_bins + 1)
                 else:
-                    if x_max > self._calib_bin_edges[-1]:  # type: ignore[index]
-                        width = self._calib_bin_edges[1] - self._calib_bin_edges[0]  # type: ignore[index]
+                    if x_max > self._calib_bin_edges[-1]:
+                        width = self._calib_bin_edges[1] - self._calib_bin_edges[0]
                         self._num_bins = int((x_max / width).ceil().item())
                         self._calib_bin_edges = torch.arange(
                             0, x_max + width, width, device=x.device
                         )
 
-                    hist = torch.histc(x, bins=self._num_bins, min=0, max=self._calib_bin_edges[-1])  # type: ignore[index]
+                    hist = torch.histc(x, bins=self._num_bins, min=0, max=self._calib_bin_edges[-1])
                     hist[: self._calib_hist.numel()] += self._calib_hist  # type: ignore[union-attr]
                     self._calib_hist = hist
 
