@@ -1,8 +1,16 @@
 # DFlash2 drafter for PineDrift-820B-A42B-NVFP4, trained by streaming against a
 # vLLM TP8 serve of the base, on AWS PDX (B300, 8 GPU/node).
 #
-# SMOKE SIZE: 2 nodes = 1 serve replica (TP8) + 1 trainer. Raise `nodes` and
-# SERVE_NODES together for the real run; the trainer count is nodes - SERVE_NODES.
+# SHAPE: 4 nodes = 3 serve replicas (TP8 each) + 1 trainer. The trainer count is
+# nodes - SERVE_NODES. Submitted with interactive QOS on the batch_long PARTITION:
+# interactive is capped at 4 nodes/user but is priority 700 and starts immediately
+# at this size, while `batch` would reject the 23:50 walltime (MaxTime 04:00:00)
+# and normal@batch_long estimated a start three days out.
+#
+# `~/pinedrift_dflash2.sh smoke` runs the same yaml through sed into a 2-node,
+# 1-serve, 8-shard, 1-epoch copy. Overriding these from the command line does NOT
+# work: nemo_run's arg parser rejects list-index paths like
+# `pipeline.task_0.environment.2.SERVE_NODES=3` with "Invalid index '2' for 2".
 #
 # PineDrift specifics this yaml encodes (each is a silent failure mode):
 #   * --language-model-only: the base is an omni model (vision tower + audio
@@ -94,7 +102,7 @@ pipeline:
       # recipe target_layer_ids [3,19,31,47,59] -> +1 -> [4,20,32,48,60], plus
       # 62 = layer 61 = the true final hidden (1-based, post-layer convention).
       - EAGLE_CAPTURE_IDS: "[4,20,32,48,60,62]"
-      - SERVE_NODES: "1"
+      - SERVE_NODES: "3"
       - SERVE_TP: "8"
       - STREAMING_NUM_WORKERS: "4"
       - SERVE_EXTRA_ARGS: "--language-model-only"
@@ -150,10 +158,10 @@ pipeline:
       - PIP_CACHE_DIR: "/home/haoguo/lustre/.cache/pip-pinedrift"
     slurm_config:
       _factory_: "slurm_factory"
-      nodes: 2
+      nodes: 4
       ntasks_per_node: 1
       gpus_per_node: 8
       # Walltime must be set explicitly: the launcher asks for 4 h otherwise and a
       # long run dies as a bare Slurm TIMEOUT with no traceback.
-      time: "03:50:00"
+      time: "23:50:00"
       container: /home/haoguo/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
