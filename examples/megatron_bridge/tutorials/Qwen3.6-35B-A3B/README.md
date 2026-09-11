@@ -231,6 +231,18 @@ One config per benchmark in [eval_configs/](eval_configs/), so each can be launc
 Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) card (`T=1.0, top_p=0.95, max_new_tokens=131072`), except SciCode, which the card specifies at `T=0.6`. `parallelism` varies (32 default, 16 for AA-LCR's long contexts, 8 for SciCode's long generations) as a throughput knob only. The same configs serve BF16 and NVFP4 unchanged — vLLM reads the FP8 KV-cache setting from the checkpoint's own `quantization_config`.
 
 > [!IMPORTANT]
+> **Two benchmarks need a second model endpoint besides the one under test.** AA-LCR scores answers
+> with a judge (`NS_JUDGE_URL` / `LCR_JUDGE_MODEL_ID`); tau2-bench drives a simulated user
+> (`TAU2_ENDPOINT_URL` / `TAU2_USER_MODEL_ID`). Both read `INFERENCE_API_KEY`, and neither can
+> produce its metric without that endpoint. tau2-bench additionally needs its own **deployment** —
+> `--enable-auto-tool-choice --tool-call-parser qwen3_coder` and `--max-num-seqs 16` — which is why
+> it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
+> the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
+> mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
+> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept —
+> that is why the other five configs omit them.
+
+> [!IMPORTANT]
 > Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]` with no spread. GPQA is the deliberate exception.
 
 > [!IMPORTANT]
@@ -244,9 +256,16 @@ Set `execution.hostname`, `execution.account` and `deployment.checkpoint_path` i
 ```bash
 pip install "nemo-evaluator-launcher[all]==0.2.6"
 
-# The only environment variables these configs reference:
+# Required by every config:
 export HF_TOKEN=<your_huggingface_token>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
+
+# Required only by AA-LCR (judge) and tau2-bench (user simulator):
+export INFERENCE_API_KEY=<key_for_those_endpoints>
+export NS_JUDGE_URL=<judge_endpoint_url>
+export LCR_JUDGE_MODEL_ID=<judge_model_id>
+export TAU2_ENDPOINT_URL=<user_simulator_url>
+export TAU2_USER_MODEL_ID=<user_simulator_model>
 
 # One benchmark. To verify the pipeline first, add
 # `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8`
