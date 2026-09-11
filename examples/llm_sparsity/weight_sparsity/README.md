@@ -135,28 +135,39 @@ ROUGE scores: {'rouge1': 42.174, 'rouge2': 19.2724, 'rougeL': 28.6989, 'rougeLsu
 
 Please refer to [link](../llm_eval/README.md#Evaluation-scripts-for-LLM-tasks) for more details of how to evaluate the sparsified models on other benchmarks, such as MMLU and HumanEval.
 
-## Export TensorRT-LLM Checkpoint
+## Export and Serve a Hugging Face Checkpoint
 
-To export the PTS pytorch model to a TensorRT-LLM checkpoint, run the following command:
+Export the PTS model to a Hugging Face checkpoint:
 
 ```sh
-python export_trtllm_ckpt.py --model_name_or_path meta-llama/Llama-2-7b-hf \
+python export_hf_ckpt.py --model_name_or_path meta-llama/Llama-2-7b-hf \
     --model_max_length 1024 \
     --dtype fp16 \
-    --modelopt_restore_path saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/pts_modelopt_state.pth \
-    --output_dir saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/trtllm/ckpt_pts
+    --modelopt_restore_path saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/pts/pts_modelopt_state.pth \
+    --output_dir saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/hf/pts
 ```
 
-To export the finetuned pytorch model to a TensorRT-LLM checkpoint, run the following command:
+Export the finetuned model in the same way:
 
 ```sh
-python export_trtllm_ckpt.py --model_name_or_path meta-llama/Llama-2-7b-hf \
+python export_hf_ckpt.py --model_name_or_path meta-llama/Llama-2-7b-hf \
     --model_max_length 1024 \
     --dtype fp16 \
     --modelopt_restore_path saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/finetuned/finetuned_modelopt_state.pth \
-    --output_dir saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/trtllm/ckpt_finetuned
+    --output_dir saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/hf/finetuned
 ```
 
-## Build TensorRT-LLM Engine
+The output is a standard Hugging Face checkpoint, including the tokenizer and sparse model weights.
+TensorRT-LLM loads it directly; no checkpoint conversion or engine build is required.
 
-For guidance on how to build TensorRT-LLM engines, please refer to [link](https://nvidia.github.io/TensorRT-LLM/commands/trtllm-build.html#trtllm-build) and use the `--weight_sparsity` flag.
+Serve the exported checkpoint and set the deployment parallelism at startup:
+
+```sh
+trtllm-serve saved_models_Llama-2-7b-hf_sparsegpt_tp1_pp1/hf/pts \
+    --tp_size 1 \
+    --pp_size 1 \
+    --host 0.0.0.0 \
+    --port 8000
+```
+
+After the server starts, send requests to the OpenAI-compatible `/v1/chat/completions` endpoint.

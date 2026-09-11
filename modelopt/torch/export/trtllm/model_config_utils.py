@@ -23,10 +23,9 @@ from typing import Union, get_args, get_origin
 import numpy as np
 import torch
 
+from ..quant_format import QUANTIZATION_FP8_PC_PT, QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ
+from ..quant_utils import to_quantized_weight
 from .model_config import (
-    QUANTIZATION_FP8_PC_PT,
-    QUANTIZATION_INT4_AWQ,
-    QUANTIZATION_W4A8_AWQ,
     DecoderLayerConfig,
     LayernormConfig,
     LinearConfig,
@@ -35,7 +34,6 @@ from .model_config import (
     MOEConfig,
     QKVConfig,
 )
-from .quant_utils import to_quantized_weight
 
 # numpy doesn't know bfloat16, define abstract binary type instead
 np_bfloat16 = np.dtype("V2", metadata={"dtype": "bfloat16"})
