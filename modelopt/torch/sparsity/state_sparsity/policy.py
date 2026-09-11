@@ -19,6 +19,7 @@ import hashlib
 import importlib
 import json
 import math
+import warnings
 from collections.abc import Iterable
 from functools import lru_cache
 
@@ -38,6 +39,7 @@ _SUPPORTED_GDN_CLASS_PATHS = (
     ("megatron.core.ssm.gated_delta_net", "GatedDeltaNet"),
     ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextGatedDeltaNet"),
 )
+_SUPPORTED_STORAGE_DTYPES = (torch.float16, torch.bfloat16)
 
 
 @lru_cache(maxsize=1)
@@ -47,10 +49,26 @@ def _supported_gdn_classes() -> tuple[type[nn.Module], ...]:
     for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS:
         try:
             candidate = getattr(importlib.import_module(module_name), class_name)
-        except (AttributeError, ImportError):
+        except ModuleNotFoundError as error:
+            root_module = module_name.partition(".")[0]
+            if importlib.util.find_spec(root_module) is None:
+                continue
+            warnings.warn(
+                f"DASC could not resolve {module_name}.{class_name}: {error!r}", stacklevel=2
+            )
+            continue
+        except Exception as error:
+            warnings.warn(
+                f"DASC could not resolve {module_name}.{class_name}: {error!r}", stacklevel=2
+            )
             continue
         if isinstance(candidate, type) and issubclass(candidate, nn.Module):
             classes.append(candidate)
+        else:
+            warnings.warn(
+                f"DASC resolved {module_name}.{class_name}, but it is not an nn.Module class",
+                stacklevel=2,
+            )
     return tuple(classes)
 
 
@@ -81,9 +99,8 @@ def compute_gdn_decay_horizons(
     return horizons
 
 
-def _is_gdn_module(module: nn.Module) -> bool:
+def _is_gdn_module(module: nn.Module, supported_classes: tuple[type[nn.Module], ...]) -> bool:
     """Accept supported GDN implementations and their ModelOpt dynamic subclasses."""
-    supported_classes = _supported_gdn_classes()
     module_class = type(module)
     is_supported_class = module_class in supported_classes or (
         isinstance(module, DynamicModule)
@@ -99,22 +116,37 @@ def _is_gdn_module(module: nn.Module) -> bool:
 def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
     """Find supported GDN layers after removing a recognized model wrapper."""
     model = unwrap_model(model, force_unwrap=True)
-    modules = {name: module for name, module in model.named_modules() if _is_gdn_module(module)}
+    supported_classes = _supported_gdn_classes()
+    named_modules = list(model.named_modules())
+    modules = {
+        name: module for name, module in named_modules if _is_gdn_module(module, supported_classes)
+    }
     if not modules:
-        supported = ", ".join(class_name for _, class_name in _SUPPORTED_GDN_CLASS_PATHS)
+        unsupported_subclasses = [
+            name or "<root>"
+            for name, module in named_modules
+            if not isinstance(module, DynamicModule)
+            and type(module) not in supported_classes
+            and any(base in supported_classes for base in type(module).__mro__[1:])
+        ]
+        if unsupported_subclasses:
+            raise ApplyModeError(
+                "DASC found GDN subclasses that are not ModelOpt dynamic modules at: "
+                f"{', '.join(unsupported_subclasses)}; use an exact supported class"
+            )
+        supported = ", ".join(
+            f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS
+        )
         raise ApplyModeError(f"DASC found no supported GDN modules; expected one of: {supported}")
     return dict(sorted(modules.items()))
 
 
-def analyze_gdn_decay(
-    model: nn.Module,
-    *,
-    epsilon: float = 1e-3,
-    static_gate_input: float = -0.3,
+def _analyze_gdn_modules(
+    modules: dict[str, nn.Module], *, epsilon: float, static_gate_input: float
 ) -> dict[str, list[float]]:
-    """Return deterministic per-head horizons for every GDN module in a model."""
+    """Compute deterministic per-head horizons for already-resolved GDN modules."""
     horizons = {}
-    for name, module in _get_gdn_modules(model).items():
+    for name, module in modules.items():
         try:
             layer_horizons = compute_gdn_decay_horizons(
                 module.A_log,
@@ -128,6 +160,18 @@ def analyze_gdn_decay(
             ) from error
         horizons[name] = layer_horizons.tolist()
     return horizons
+
+
+def analyze_gdn_decay(
+    model: nn.Module,
+    *,
+    epsilon: float = 1e-3,
+    static_gate_input: float = -0.3,
+) -> dict[str, list[float]]:
+    """Return deterministic per-head horizons for every GDN module in a model."""
+    return _analyze_gdn_modules(
+        _get_gdn_modules(model), epsilon=epsilon, static_gate_input=static_gate_input
+    )
 
 
 def _canonical_sha256(value: object) -> str:
@@ -166,12 +210,19 @@ def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
 
 
 def _storage_rounding_radius(tensor: torch.Tensor) -> torch.Tensor:
-    """Bound one cast-to-storage rounding step around the represented tensor values."""
-    values = tensor.detach().to(device="cpu", dtype=torch.float64)
-    dtype_info = torch.finfo(tensor.dtype)
-    unit_roundoff = dtype_info.eps / 2.0
-    subnormal_slack = dtype_info.tiny * dtype_info.eps
-    return values.abs() * (unit_roundoff / (1.0 - unit_roundoff)) + subnormal_slack
+    """Bound one FP16/BF16 storage cast even after values are reloaded in a wider dtype."""
+    if not tensor.dtype.is_floating_point:
+        raise ApplyModeError("DASC decay parameters must use a floating-point dtype")
+    values = tensor.detach().to(device="cpu", dtype=torch.float64).abs()
+    radius = torch.zeros_like(values)
+    for dtype in (tensor.dtype, *_SUPPORTED_STORAGE_DTYPES):
+        dtype_info = torch.finfo(dtype)
+        unit_roundoff = dtype_info.eps / 2.0
+        candidate = (
+            values * (unit_roundoff / (1.0 - unit_roundoff)) + dtype_info.tiny * dtype_info.eps
+        )
+        radius = torch.maximum(radius, candidate)
+    return radius
 
 
 def _storage_cast_horizon_bounds(
@@ -261,8 +312,8 @@ def build_dasc_policy(
     validated_measurements.sort(key=lambda measurement: measurement.wmax)
 
     modules = _get_gdn_modules(model)
-    horizons = analyze_gdn_decay(
-        model, epsilon=config.epsilon, static_gate_input=config.static_gate_input
+    horizons = _analyze_gdn_modules(
+        modules, epsilon=config.epsilon, static_gate_input=config.static_gate_input
     )
     _validate_measurement_geometry(horizons, validated_measurements)
 
@@ -333,12 +384,12 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
     Numerical validation deliberately uses re-derived horizons and the exact selected mask rather
     than the provenance digest because an FP16 or BF16 storage cast is lossy.
     """
-    current_horizons = analyze_gdn_decay(
-        model,
+    modules = _get_gdn_modules(model)
+    current_horizons = _analyze_gdn_modules(
+        modules,
         epsilon=policy.epsilon,
         static_gate_input=policy.static_gate_input,
     )
-    modules = _get_gdn_modules(model)
     for name, values in current_horizons.items():
         layer = policy.layers[name]
         retained = [head for head, horizon in enumerate(values) if horizon > policy.selected_wmax]

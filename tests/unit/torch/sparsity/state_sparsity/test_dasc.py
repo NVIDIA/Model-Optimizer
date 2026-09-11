@@ -244,7 +244,7 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     class UnsupportedSubclass(GatedDeltaNet):
         pass
 
-    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+    with pytest.raises(ApplyModeError, match="subclasses that are not ModelOpt dynamic modules"):
         mtss.calibrate(UnsupportedSubclass(), _config(wmax_candidates=[7]), [_candidate(7)])
 
     same_name_lookalike = type("GatedDeltaNet", (UnsupportedGatedDeltaNet,), {})
@@ -263,6 +263,8 @@ def test_supported_class_resolution_uses_imported_module_identities(monkeypatch)
         ("valid", "GatedDeltaNet"),
         ("invalid", "NotAModule"),
         ("missing", "Missing"),
+        ("installed", "Missing"),
+        ("broken", "Broken"),
     )
     modules = {
         "valid": type("ValidModule", (), {"GatedDeltaNet": GatedDeltaNet}),
@@ -270,14 +272,33 @@ def test_supported_class_resolution_uses_imported_module_identities(monkeypatch)
     }
 
     def import_module(name):
-        if name == "missing":
-            raise ImportError(name)
+        if name in {"missing", "installed"}:
+            raise ModuleNotFoundError(name)
+        if name == "broken":
+            raise RuntimeError(name)
         return modules[name]
 
     monkeypatch.setattr(dasc_policy, "_SUPPORTED_GDN_CLASS_PATHS", module_paths)
     monkeypatch.setattr(dasc_policy.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        dasc_policy.importlib.util,
+        "find_spec",
+        lambda name: object() if name == "installed" else None,
+    )
 
-    assert _resolve_supported_gdn_classes() == (GatedDeltaNet,)
+    with pytest.warns(UserWarning) as caught:
+        assert _resolve_supported_gdn_classes() == (GatedDeltaNet,)
+    assert len(caught) == 3
+
+
+@pytest.mark.parametrize(("module_name", "class_name"), dasc_policy._SUPPORTED_GDN_CLASS_PATHS)
+def test_declared_gdn_paths_resolve_when_framework_is_installed(module_name, class_name):
+    """Guard supported identities against upstream dependency path drift."""
+    root_module = module_name.partition(".")[0]
+    if dasc_policy.importlib.util.find_spec(root_module) is None:
+        pytest.skip(f"optional framework {root_module!r} is not installed")
+    module = dasc_policy.importlib.import_module(module_name)
+    assert issubclass(getattr(module, class_name), nn.Module)
 
 
 def test_generic_mode_application_reports_missing_measurements(monkeypatch):
@@ -355,6 +376,34 @@ def test_dtype_cast_preserves_policy_when_the_selected_mask_is_unchanged(dtype):
     )
     assert not torch.equal(original_decay, cast_decay)
     assert mtss.export_policy(model) == policy
+
+
+def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
+    """Accept BF16-rounded values after a checkpoint loader materializes FP32 tensors."""
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    policy = mtss.export_policy(model)
+    original_decay = torch.cat(
+        [model.linear_attn.A_log.detach(), model.linear_attn.dt_bias.detach()]
+    )
+
+    with torch.no_grad():
+        model.linear_attn.A_log.copy_(model.linear_attn.A_log.to(torch.bfloat16).float())
+        model.linear_attn.dt_bias.copy_(model.linear_attn.dt_bias.to(torch.bfloat16).float())
+
+    reloaded_decay = torch.cat(
+        [model.linear_attn.A_log.detach(), model.linear_attn.dt_bias.detach()]
+    )
+    assert reloaded_decay.dtype == torch.float32
+    assert not torch.equal(original_decay, reloaded_decay)
+    assert mtss.export_policy(model) == policy
+
+    model.linear_attn.A_log = nn.Parameter(
+        model.linear_attn.A_log.detach().to(torch.int64), requires_grad=False
+    )
+    with pytest.raises(ApplyModeError, match="floating-point dtype"):
+        mtss.export_policy(model)
 
 
 def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure():
