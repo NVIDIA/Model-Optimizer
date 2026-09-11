@@ -1,0 +1,125 @@
+# DFlash2 drafter for PineDrift-820B-A42B-NVFP4 (musespark1x_omni), trained by
+# STREAMING against a vLLM TP8 serve of the base.
+#
+# Why streaming and not online: the base is 820B NVFP4 and has no transformers
+# implementation at all (model_type musespark1x_omni lives only in vLLM), so it
+# cannot be loaded in-process. The trainer therefore runs against a FakeBaseModel
+# -- embed_tokens + lm_head + the final norm -- while a vLLM serve supplies the
+# hidden states. Unlike LiLiCorr, DFlash2 imposes no mode restriction.
+#
+# MuseSpark-specific handling lives in modelopt (modeling_fakebase.py
+# _select_base_transforms + modeling_final_norm.py); this file only has to point
+# at the checkpoint. See tools/launcher/examples/PineDrift/README.md.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DFlash2 drafter for PineDrift-820B-A42B-NVFP4 via streaming.
+
+model:
+  # Set per run; the launcher yaml points this at the mounted /hf-local copy.
+  model_name_or_path:
+  trust_remote_code: false
+  # Mandatory here: there is no HF implementation of the base to load.
+  use_fake_base_for_offline: true
+
+data:
+  # streaming_server_url / streaming_model_name are injected by
+  # train_eagle_streaming.sh once the serve replicas report ready; setting
+  # streaming_server_url is what selects streaming mode (the `mode:` key is ignored).
+  streaming_server_url:
+  streaming_model_name:
+  # The messages-only build. The published default.jsonl carries BOTH a prompt-only
+  # `messages` field and the real reply under `conversations`, and
+  # hf_streaming_dataset prefers `messages` -> empty answer span -> a silent hang.
+  data_path:
+  # PineDrift's own template already carries {% generation %}/{% endgeneration %}
+  # (lines 192/222), so answer_only_loss works without a separate training template.
+  chat_template:
+
+training:
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  learning_rate: 6.0e-4
+  warmup_ratio: 0.04
+  training_seq_len: 3072
+  logging_steps: 20
+  save_steps: 500
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # AR validation would need the real base in-process; there is none.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 256
+  dflash_use_torch_compile: false
+  dflash_self_logit_distillation: false
+  # dflash_loss_objective defaults to dpace, which derives per-position weights from
+  # draft confidence and IGNORES dflash_loss_decay_factor -- so that knob is left out
+  # rather than set to a value the run silently discards (the reference dflash2.yaml
+  # still carries it). dpace is what the DFlash2 results were produced with.
+  # Highest <|reserved_special_token_*|>. Verified: inside vocab_size (202048), never
+  # emitted by the tokenizer, absent from chat_template.jinja, not a config-declared
+  # special, and its embedding row is real (L2 5.6568, same as every other row --
+  # this table is row-normalized). The 230 ids at 201818..202047 are padding rows no
+  # token maps to; they would also work but are not inspectable through the tokenizer.
+  dflash_mask_token_id: 201817
+  dflash_selector_loss_alpha: 1.0
+
+  # Keeps the draft's master weights (and therefore AdamW's moments) in fp32 while
+  # compute stays bf16. A bf16 second moment cannot represent a beta2=0.999 update.
+  dflash_fp32_master_weights: true
+  # Block-sparse draft attention via FlexAttention. REQUIRES a node-local
+  # TRITON_CACHE_DIR -- it compiles Triton templates on the first backward, and
+  # concurrent ranks racing on lustre die with "OSError: [Errno 14] Bad address".
+  dflash_use_flex_attention: true
+
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    projector_type: dflash2
+
+    # Mirrors the BASE's attention geometry, as the Qwen3-8B reference recipe does
+    # (its draft copies Qwen3-8B's 32 heads / 8 kv / head_dim 128). PineDrift:
+    # 128 q heads x head_dim 64 = 8192 = hidden_size, 16 kv heads.
+    # The draft does NOT inherit any of this -- it must be spelled out.
+    num_attention_heads: 128
+    num_key_value_heads: 16
+    head_dim: 64
+    # The base has no single intermediate_size: every layer is MoE over a compressed
+    # 4096-dim expert space. 3x hidden matches the reference's ratio (12288 / 4096).
+    intermediate_size: 24576
+
+    # Aux capture layers, 0-based, one per draft layer. All are congruent to 3 mod 4,
+    # i.e. the LAST layer of each of PineDrift's [SWA2048, SWA2048, SWA2048, global+NoPE]
+    # blocks, so all five features come from the same point in the period rather than
+    # mixing windowed and global attention outputs. The default
+    # build_target_layer_ids(62, 5) = [1, 16, 30, 44, 59] lands on phases [1,0,2,0,3].
+    # NOTE: this is a structural argument, not a measured one -- worth an A/B against
+    # the default once the pipeline runs.
+    target_layer_ids: [3, 19, 31, 47, 59]
+
+    # Grouped dynamic depthwise convolution: taps must not exceed dflash_block_size,
+    # group size must divide hidden_size (8192 % 16 == 0).
+    conv_kernel_size: 2
+    conv_group_size: 16
+    # Candidate selector: transition-codebook rank, and how many backbone top-k
+    # candidates per block position it re-ranks.
+    selector_rank: 256
+    selector_top_k: 16

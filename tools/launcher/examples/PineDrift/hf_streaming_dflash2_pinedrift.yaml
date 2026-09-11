@@ -1,0 +1,116 @@
+# DFlash2 drafter for PineDrift-820B-A42B-NVFP4, trained by streaming against a
+# vLLM TP8 serve of the base, on AWS PDX (B300, 8 GPU/node).
+#
+# SMOKE SIZE: 2 nodes = 1 serve replica (TP8) + 1 trainer. Raise `nodes` and
+# SERVE_NODES together for the real run; the trainer count is nodes - SERVE_NODES.
+#
+# PineDrift specifics this yaml encodes (each is a silent failure mode):
+#   * --language-model-only: the base is an omni model (vision tower + audio
+#     perception in a separate shard). Without it vLLM builds the perception
+#     stack for a text-only job. It is the ONLY serve flag we add, deliberately:
+#     SERVE_EXTRA_ARGS is exported unquoted, so its value must be space-free.
+#     --enable-expert-parallel and --tokenizer-mode hf are omitted for that
+#     reason and because neither is required for correctness (plain TP8 shards
+#     the 256 experts fine; tokenizer-mode auto resolves to the same fast
+#     tokenizer). Add a dedicated knob, as SERVE_BLOCK_SIZE did, if EP is wanted.
+#   * EAGLE_CAPTURE_IDS = the recipe's target_layer_ids + 1 (the script takes
+#     1-based ids), plus 62 = the true final layer. All five aux ids sit on
+#     PineDrift's [SWA2048 x3, global+NoPE] block boundaries; see the recipe.
+#   * TRITON_CACHE_DIR must be NODE-LOCAL: the recipe turns on
+#     dflash_use_flex_attention, which compiles Triton templates on the first
+#     backward. Ranks sharing a lustre cache die with "OSError: [Errno 14] Bad
+#     address". /raid/scratch is the only user-writable node-local NVMe on PDX.
+#   * NIXL over EFA: PDX has no RC-routable IB, and UCX segfaults at agent init
+#     on EFA nodes, so hidden-state RDMA must use LIBFABRIC. NCCL_IB_DISABLE=1
+#     for the trainer's DDP for the same reason.
+#   * report_to=none: the serve container has no tensorboard, and the trainer
+#     runs in that same container.
+#   * The corpus is the messages-only rebuild. The published default.jsonl is
+#     gzip (despite the name) and stores the reply under `conversations`;
+#     hf_streaming_dataset prefers `messages`, so an unconverted file gives an
+#     empty answer span and a silent hang.
+#
+# The MuseSpark base needs no serve-side patch: MuseSpark1xOmniForCausalLM is
+# native in this container's vLLM and carries the aux-capture mixin. The
+# trainer-side handling (final norm, embedding norm, metap multiplier, logit
+# soft cap) lives in modelopt's modeling_fakebase.py / modeling_final_norm.py.
+#
+# Run ON the PDX login node:
+#   cd tools/launcher
+#   SLURM_HOST=$(hostname) SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+#   SLURM_PARTITION=batch SLURM_QOS=interactive \
+#   SLURM_HF_LOCAL=$HOME/lustre/hf-local \
+#   SLURM_JOB_DIR=$HOME/lustre/pinedrift-experiments NEMORUN_HOME=$PWD \
+#   uv run launch.py --yaml examples/PineDrift/hf_streaming_dflash2_pinedrift.yaml \
+#     identity=$HOME/.ssh/id_ed25519 detach=True --yes
+
+job_name: PineDrift_820B_DFlash2_streaming_smoke
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/pinedrift-820b-a42b-nvfp4_vv3
+    corpus: /hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs.jsonl
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash2_pinedrift.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=false
+      - data.data_path=<<global_vars.corpus>>
+      # PineDrift's own template already has {% generation %}/{% endgeneration %}
+      # (lines 192/222), so no tagged copy is needed -- unlike M3.
+      - data.chat_template=<<global_vars.hf_model>>/chat_template.jinja
+      - training.output_dir=/scratchspace/dflash2
+      - training.num_train_epochs=1
+      - training.per_device_train_batch_size=1
+      - training.training_seq_len=3072
+      - training.save_steps=500
+      - training.logging_steps=20
+      - training.answer_only_loss=true
+      # No tensorboard in the serve container.
+      - training.report_to=none
+      # No base model in-process, so AR validation cannot run.
+      - training.estimate_ar=false
+      - training.ar_validate_steps=0
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # recipe target_layer_ids [3,19,31,47,59] -> +1 -> [4,20,32,48,60], plus
+      # 62 = layer 61 = the true final hidden (1-based, post-layer convention).
+      - EAGLE_CAPTURE_IDS: "[4,20,32,48,60,62]"
+      - SERVE_NODES: "1"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      - SERVE_EXTRA_ARGS: "--language-model-only"
+      # training_seq_len 3072 + the draft block; keep small so KV does not eat the
+      # headroom the 496 GiB of weights leaves (62 GiB/GPU used of 269).
+      - SERVE_MAX_MODEL_LEN: "4096"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      # Cold start measured at 450 s with CUDA graphs + autotune; this path runs
+      # --enforce-eager --no-enable-flashinfer-autotune, so it should be well under.
+      - SERVE_READY_TIMEOUT: "3600"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # AWS EFA: UCX segfaults at agent init on these nodes, so NIXL must use
+      # LIBFABRIC; NCCL must not try native IB either.
+      - NIXL_BACKENDS: "LIBFABRIC"
+      - FI_PROVIDER: "efa"
+      - NCCL_IB_DISABLE: "1"
+      # Node-local, per the FlexAttention note in the header.
+      - TRITON_CACHE_DIR: "/raid/scratch/haoguo-triton"
+      # Editable install of modelopt happens per job; keep its cache off $HOME.
+      - PIP_CACHE_DIR: "/home/haoguo/lustre/.cache/pip-pinedrift"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # Walltime must be set explicitly: the launcher asks for 4 h otherwise and a
+      # long run dies as a bare Slurm TIMEOUT with no traceback.
+      time: "03:50:00"
+      container: /home/haoguo/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
