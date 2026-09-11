@@ -17,6 +17,7 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 
 > [!TIP]
 > Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+> Or the [Qwen3.6-35B-A3B W4A4 NVFP4 + QAD tutorial](tutorials/Qwen3.6-35B-A3B/README.md) for an end-to-end quantization-aware distillation workflow.
 
 ## Pre-Requisites
 
