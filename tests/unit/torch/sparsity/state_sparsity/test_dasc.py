@@ -454,14 +454,14 @@ def test_analysis_arguments_fail_at_the_public_boundary(invalid_storage_dtype):
         )
 
 
-@pytest.mark.parametrize("epsilon", [1.0, []])
+@pytest.mark.parametrize("epsilon", [1.0, [], 10**1000])
 def test_analysis_rejects_invalid_epsilon_at_the_public_boundary(epsilon):
     """Normalize invalid epsilon values to the public ValueError contract."""
     with pytest.raises(ValueError, match=r"epsilon must be finite and in \(0, 1\)"):
         mtss.analyze_gdn_decay(TinyGatedDeltaNetForCausalLM(), epsilon=epsilon)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("static_gate_input", [torch.nan, []])
+@pytest.mark.parametrize("static_gate_input", [torch.nan, [], 10**1000])
 def test_analysis_rejects_invalid_static_gate_input_at_the_public_boundary(static_gate_input):
     """Normalize invalid static gate values to the public ValueError contract."""
     with pytest.raises(ValueError, match="static_gate_input must be finite"):
@@ -475,7 +475,11 @@ def test_analysis_rejects_invalid_static_gate_input_at_the_public_boundary(stati
     ("argument", "value", "message"),
     [
         ("epsilon", [], r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", torch.nan, r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", 10**1000, r"epsilon must be finite and in \(0, 1\)"),
         ("static_gate_input", [], "static_gate_input must be finite"),
+        ("static_gate_input", torch.nan, "static_gate_input must be finite"),
+        ("static_gate_input", 10**1000, "static_gate_input must be finite"),
     ],
 )
 def test_horizon_computation_rejects_invalid_public_arguments(argument, value, message):
@@ -487,6 +491,18 @@ def test_horizon_computation_rejects_invalid_public_arguments(argument, value, m
             torch.tensor([0.0]),
             **kwargs,  # type: ignore[arg-type]
         )
+
+
+def test_analysis_accepts_tensor_scalar_arguments():
+    """Preserve support for real-like scalar values accepted by the numeric operations."""
+    horizons = mtss.compute_gdn_decay_horizons(
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
+        epsilon=torch.tensor(1e-3),  # type: ignore[arg-type]
+        static_gate_input=torch.tensor(-0.3),  # type: ignore[arg-type]
+    )
+    assert horizons.shape == (1,)
+    assert torch.isfinite(horizons).all()
 
 
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():

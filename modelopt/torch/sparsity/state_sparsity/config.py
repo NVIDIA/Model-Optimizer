@@ -16,7 +16,7 @@
 """Configuration and result schemas for DASC state sparsity."""
 
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -31,6 +31,28 @@ __all__ = [
 ]
 
 _DecayParameterStorageDtype = Literal["float16", "bfloat16", "float32"]
+_DEFAULT_EPSILON = 1e-3
+_DEFAULT_STATIC_GATE_INPUT = -0.3
+
+
+def _validate_analysis_arguments(
+    epsilon: Any = _DEFAULT_EPSILON,
+    static_gate_input: Any = _DEFAULT_STATIC_GATE_INPUT,
+) -> None:
+    """Reject decay-analysis arguments that cannot produce well-defined horizons."""
+    try:
+        epsilon_is_valid = math.isfinite(epsilon) and 0.0 < epsilon < 1.0
+    except (TypeError, ValueError, OverflowError):
+        epsilon_is_valid = False
+    if not epsilon_is_valid:
+        raise ValueError("epsilon must be finite and in (0, 1)")
+
+    try:
+        static_gate_input_is_valid = math.isfinite(static_gate_input)
+    except (TypeError, ValueError, OverflowError):
+        static_gate_input_is_valid = False
+    if not static_gate_input_is_valid:
+        raise ValueError("static_gate_input must be finite")
 
 
 class DASCQualityMeasurement(ModeloptBaseConfig):
@@ -81,11 +103,11 @@ class DASCConfig(ModeloptBaseConfig):
         description="Use zero recovery (DASC-NR) or suffix replay recovery (DASC-WR).",
     )
     epsilon: float = ModeloptField(
-        default=1e-3,
+        default=_DEFAULT_EPSILON,
         description="Retained contribution threshold used to derive static decay horizons.",
     )
     static_gate_input: float = ModeloptField(
-        default=-0.3,
+        default=_DEFAULT_STATIC_GATE_INPUT,
         description="Static gate input added to each GDN head's dt_bias.",
     )
     decay_parameter_storage_dtype: _DecayParameterStorageDtype = ModeloptField(
@@ -118,16 +140,14 @@ class DASCConfig(ModeloptBaseConfig):
     @classmethod
     def validate_epsilon(cls, epsilon: float) -> float:
         """Require a finite decay threshold strictly between zero and one."""
-        if not math.isfinite(epsilon) or not 0.0 < epsilon < 1.0:
-            raise ValueError("epsilon must be finite and in (0, 1)")
+        _validate_analysis_arguments(epsilon=epsilon)
         return epsilon
 
     @field_validator("static_gate_input")
     @classmethod
     def validate_static_gate_input(cls, value: float) -> float:
         """Require a finite representative gate input."""
-        if not math.isfinite(value):
-            raise ValueError("static_gate_input must be finite")
+        _validate_analysis_arguments(static_gate_input=value)
         return value
 
     @field_validator("wmax_candidates", mode="before")
