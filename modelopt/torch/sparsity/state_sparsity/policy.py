@@ -16,23 +16,42 @@
 """Decay analysis and policy selection for GDN state sparsity."""
 
 import hashlib
+import importlib
 import json
+import math
 from collections.abc import Iterable
+from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import unwrap_model
 
 from .config import DASCCalibrationMeasurement, DASCConfig, DASCLayerPolicy, DASCPolicy
 
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
 
-_SUPPORTED_GDN_CLASS_NAMES = frozenset({"GatedDeltaNet", "Qwen3NextGatedDeltaNet"})
-# Covers ordinary FP16/BF16 storage casts; the exact retained-head mask below is the semantic gate.
-_HORIZON_DTYPE_CAST_RTOL = 0.05
+_SUPPORTED_GDN_CLASS_PATHS = (
+    ("megatron.core.ssm.gated_delta_net", "GatedDeltaNet"),
+    ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextGatedDeltaNet"),
+)
+
+
+@lru_cache(maxsize=1)
+def _supported_gdn_classes() -> tuple[type[nn.Module], ...]:
+    """Resolve installed GDN implementations without making either framework mandatory."""
+    classes = []
+    for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS:
+        try:
+            candidate = getattr(importlib.import_module(module_name), class_name)
+        except (AttributeError, ImportError):
+            continue
+        if isinstance(candidate, type) and issubclass(candidate, nn.Module):
+            classes.append(candidate)
+    return tuple(classes)
 
 
 def compute_gdn_decay_horizons(
@@ -64,8 +83,14 @@ def compute_gdn_decay_horizons(
 
 def _is_gdn_module(module: nn.Module) -> bool:
     """Accept supported GDN implementations and their ModelOpt dynamic subclasses."""
+    supported_classes = _supported_gdn_classes()
+    module_class = type(module)
+    is_supported_class = module_class in supported_classes or (
+        isinstance(module, DynamicModule)
+        and any(base in supported_classes for base in module_class.__mro__)
+    )
     return (
-        any(base.__name__ in _SUPPORTED_GDN_CLASS_NAMES for base in type(module).__mro__)
+        is_supported_class
         and isinstance(getattr(module, "A_log", None), torch.Tensor)
         and isinstance(getattr(module, "dt_bias", None), torch.Tensor)
     )
@@ -76,7 +101,7 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
     model = unwrap_model(model, force_unwrap=True)
     modules = {name: module for name, module in model.named_modules() if _is_gdn_module(module)}
     if not modules:
-        supported = ", ".join(sorted(_SUPPORTED_GDN_CLASS_NAMES))
+        supported = ", ".join(class_name for _, class_name in _SUPPORTED_GDN_CLASS_PATHS)
         raise ApplyModeError(f"DASC found no supported GDN modules; expected one of: {supported}")
     return dict(sorted(modules.items()))
 
@@ -138,6 +163,33 @@ def _decay_parameters(modules: dict[str, nn.Module]) -> list[dict[str, object]]:
         }
         for name, module in modules.items()
     ]
+
+
+def _storage_rounding_radius(tensor: torch.Tensor) -> torch.Tensor:
+    """Bound one cast-to-storage rounding step around the represented tensor values."""
+    values = tensor.detach().to(device="cpu", dtype=torch.float64)
+    dtype_info = torch.finfo(tensor.dtype)
+    unit_roundoff = dtype_info.eps / 2.0
+    subnormal_slack = dtype_info.tiny * dtype_info.eps
+    return values.abs() * (unit_roundoff / (1.0 - unit_roundoff)) + subnormal_slack
+
+
+def _storage_cast_horizon_bounds(
+    module: nn.Module, *, epsilon: float, static_gate_input: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bound horizons compatible with the current parameters before one storage cast."""
+    a_log = module.A_log.detach().to(device="cpu", dtype=torch.float64)
+    dt_bias = module.dt_bias.detach().to(device="cpu", dtype=torch.float64)
+    a_radius = _storage_rounding_radius(module.A_log)
+    dt_radius = _storage_rounding_radius(module.dt_bias)
+    scale = -math.log(epsilon)
+    lower = scale / (
+        torch.exp(a_log + a_radius) * F.softplus(dt_bias + dt_radius + static_gate_input)
+    )
+    upper = scale / (
+        torch.exp(a_log - a_radius) * F.softplus(dt_bias - dt_radius + static_gate_input)
+    )
+    return lower, upper
 
 
 def _validate_measurement_coverage(
@@ -286,19 +338,24 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
         epsilon=policy.epsilon,
         static_gate_input=policy.static_gate_input,
     )
+    modules = _get_gdn_modules(model)
     for name, values in current_horizons.items():
         layer = policy.layers[name]
-        if not torch.allclose(
-            torch.tensor(values, dtype=torch.float64),
-            torch.tensor(layer.static_horizons, dtype=torch.float64),
-            rtol=_HORIZON_DTYPE_CAST_RTOL,
-            atol=0.0,
-        ):
-            raise ApplyModeError(
-                f"DASC policy horizons do not match current decay parameters in layer {name!r}"
-            )
         retained = [head for head, horizon in enumerate(values) if horizon > policy.selected_wmax]
         if retained != layer.retained_heads:
             raise ApplyModeError(
                 f"DASC policy head mask does not match current decay parameters in layer {name!r}"
+            )
+        lower, upper = _storage_cast_horizon_bounds(
+            modules[name],
+            epsilon=policy.epsilon,
+            static_gate_input=policy.static_gate_input,
+        )
+        stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
+        numerical_slack = 32.0 * torch.finfo(torch.float64).eps
+        if torch.any(stored < lower * (1.0 - numerical_slack)) or torch.any(
+            stored > upper * (1.0 + numerical_slack)
+        ):
+            raise ApplyModeError(
+                f"DASC policy horizons do not match current decay parameters in layer {name!r}"
             )

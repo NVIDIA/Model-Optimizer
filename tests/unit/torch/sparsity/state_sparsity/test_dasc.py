@@ -26,9 +26,13 @@ from torch import nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.state_sparsity as mtss
+import modelopt.torch.sparsity.state_sparsity.policy as dasc_policy
 from modelopt.torch.opt.conversion import ApplyModeError, ModeloptStateManager
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.sparsity.state_sparsity.conversion import replace_dasc_mode
 from modelopt.torch.sparsity.state_sparsity.mode import DASCModeRegistry
+
+_resolve_supported_gdn_classes = dasc_policy._supported_gdn_classes.__wrapped__
 
 
 class GatedDeltaNet(nn.Module):
@@ -36,8 +40,8 @@ class GatedDeltaNet(nn.Module):
 
     def __init__(self, num_heads: int = 2):
         super().__init__()
-        a_log = torch.zeros(num_heads)
-        dt_bias = torch.tensor([-2.0, 2.0]) if num_heads == 2 else torch.zeros(num_heads)
+        a_log = torch.tensor([0.1, 0.7]) if num_heads == 2 else torch.zeros(num_heads)
+        dt_bias = torch.tensor([-2.3, 1.7]) if num_heads == 2 else torch.zeros(num_heads)
         self.A_log = nn.Parameter(a_log)
         self.dt_bias = nn.Parameter(dt_bias)
 
@@ -54,6 +58,12 @@ class TinyGatedDeltaNetForCausalLM(nn.Module):
 
     def forward(self, inputs):
         return self.linear_attn(inputs)
+
+
+@pytest.fixture(autouse=True)
+def _register_test_gdn_class(monkeypatch):
+    """Use the exact toy GDN identity without weakening production class checks."""
+    monkeypatch.setattr(dasc_policy, "_supported_gdn_classes", lambda: (GatedDeltaNet,))
 
 
 def _config(**overrides):
@@ -231,15 +241,49 @@ def test_calibration_fails_closed_on_measurements_and_model_mismatch():
     with pytest.raises(ApplyModeError, match="no supported GDN modules"):
         mtss.calibrate(UnsupportedGatedDeltaNet(), _config(wmax_candidates=[7]), [_candidate(7)])
 
+    class UnsupportedSubclass(GatedDeltaNet):
+        pass
+
+    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+        mtss.calibrate(UnsupportedSubclass(), _config(wmax_candidates=[7]), [_candidate(7)])
+
+    same_name_lookalike = type("GatedDeltaNet", (UnsupportedGatedDeltaNet,), {})
+    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+        mtss.calibrate(same_name_lookalike(), _config(wmax_candidates=[7]), [_candidate(7)])
+
     invalid_decay = TinyGatedDeltaNetForCausalLM()
     invalid_decay.linear_attn.dt_bias = nn.Parameter(torch.zeros(3))
     with pytest.raises(ApplyModeError, match="Invalid GDN decay parameters"):
         mtss.analyze_gdn_decay(invalid_decay)
 
 
-def test_generic_mode_application_reports_missing_measurements():
+def test_supported_class_resolution_uses_imported_module_identities(monkeypatch):
+    """Ignore absent and non-module symbols while retaining exact supported identities."""
+    module_paths = (
+        ("valid", "GatedDeltaNet"),
+        ("invalid", "NotAModule"),
+        ("missing", "Missing"),
+    )
+    modules = {
+        "valid": type("ValidModule", (), {"GatedDeltaNet": GatedDeltaNet}),
+        "invalid": type("InvalidModule", (), {"NotAModule": object()}),
+    }
+
+    def import_module(name):
+        if name == "missing":
+            raise ImportError(name)
+        return modules[name]
+
+    monkeypatch.setattr(dasc_policy, "_SUPPORTED_GDN_CLASS_PATHS", module_paths)
+    monkeypatch.setattr(dasc_policy.importlib, "import_module", import_module)
+
+    assert _resolve_supported_gdn_classes() == (GatedDeltaNet,)
+
+
+def test_generic_mode_application_reports_missing_measurements(monkeypatch):
     """Give generic apply_mode callers an actionable calibration-evidence error."""
     assert DASCModeRegistry["dasc"].next_prohibited_modes == {"dasc"}
+    assert DASCModeRegistry["dasc"].update_for_new_mode is not None
     with pytest.raises(ApplyModeError, match="requires calibration measurements"):
         mto.apply_mode(
             TinyGatedDeltaNetForCausalLM(),
@@ -255,6 +299,23 @@ def test_generic_mode_application_reports_missing_measurements():
             [_candidate(7)],
         )
 
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    ModeloptStateManager(model).state_dict().append(("trailing-mode", {}))
+    refreshed = []
+    monkeypatch.setattr(
+        ModeloptStateManager,
+        "update_last_state_before_new_mode",
+        lambda _manager, current_model: refreshed.append(current_model),
+    )
+    replace_dasc_mode(
+        model,
+        mtss.DASCConfig(**_config(wmax_candidates=[7])),
+        [_candidate(7)],
+    )
+    assert refreshed == [model]
+
 
 def test_public_exports_and_wrapped_model_export():
     """Expose only supported symbols and accept wrappers and ModelOpt subclasses."""
@@ -266,10 +327,10 @@ def test_public_exports_and_wrapped_model_export():
     assert "mode" not in mtss.__all__
     assert mtss.export_policy(nn.DataParallel(model)) == mtss.export_policy(model)
 
-    class _DynamicGatedDeltaNet(GatedDeltaNet):
-        """Stand in for the subclass synthesized by ModelOpt dynamic conversion."""
-
-    model.linear_attn = _DynamicGatedDeltaNet()
+    dynamic_class = type("_DynamicGatedDeltaNet", (DynamicModule, GatedDeltaNet), {})
+    dynamic_module = GatedDeltaNet()
+    dynamic_module.__class__ = dynamic_class
+    model.linear_attn = dynamic_module
     assert mtss.export_policy(model)["layers"]["linear_attn"]["num_heads"] == 2
 
     with pytest.raises(ApplyModeError, match="no valid attached DASC policy"):
@@ -283,9 +344,16 @@ def test_dtype_cast_preserves_policy_when_the_selected_mask_is_unchanged(dtype):
         TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
     )
     policy = mtss.export_policy(model)
+    original_decay = torch.cat(
+        [model.linear_attn.A_log.detach(), model.linear_attn.dt_bias.detach()]
+    )
 
     model.to(dtype)
 
+    cast_decay = torch.cat(
+        [model.linear_attn.A_log.detach().float(), model.linear_attn.dt_bias.detach().float()]
+    )
+    assert not torch.equal(original_decay, cast_decay)
     assert mtss.export_policy(model) == policy
 
 
@@ -309,12 +377,12 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
 
     manager_state = ModeloptStateManager(model).state_dict()
     manager_state.append(copy.deepcopy(manager_state[0]))
-    with pytest.warns(UserWarning, match="saved DASC policy is stale"):
-        model = mtss.calibrate(
-            model,
-            _config(wmax_candidates=[7], model_revision="revision-2"),
-            [_candidate(7)],
-        )
+    delattr(model, "_modelopt_dasc_policy")
+    model = mtss.calibrate(
+        model,
+        _config(wmax_candidates=[7], model_revision="revision-2"),
+        [_candidate(7)],
+    )
     policy = mtss.export_policy(model)
     assert policy["model_revision"] == "revision-2"
     model_state = copy.deepcopy(model.state_dict())
@@ -324,8 +392,12 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
     restored.load_state_dict(model_state)
     assert mtss.export_policy(restored) == policy
 
+    with pytest.warns(UserWarning, match="restored DASC policy is stale"):
+        mismatched = mto.restore_from_modelopt_state(
+            TinyGatedDeltaNetForCausalLM(num_heads=3), state
+        )
     with pytest.raises(ApplyModeError, match="module structure"):
-        mto.restore_from_modelopt_state(TinyGatedDeltaNetForCausalLM(num_heads=3), state)
+        mtss.export_policy(mismatched)
 
     tampered_state = copy.deepcopy(state)
     tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["quality_gates"][
@@ -348,16 +420,14 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
     layer = tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["layers"][
         "linear_attn"
     ]
-    layer["static_horizons"][0] = 1.0
-    layer["retained_heads"] = []
-    layer["omitted_heads"] = [0, 1]
+    layer["static_horizons"][0] *= 1.01
     restored = mto.restore_from_modelopt_state(TinyGatedDeltaNetForCausalLM(), tampered_state)
     with pytest.raises(ApplyModeError, match="horizons do not match"):
         mtss.export_policy(restored)
 
 
 def test_structure_staleness_does_not_block_checkpoint_save():
-    """Keep checkpoint saving available after a calibrated GDN structure changes."""
+    """Keep checkpoint save and restore available after a calibrated GDN structure changes."""
     model = mtss.calibrate(
         TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
     )
@@ -370,6 +440,16 @@ def test_structure_staleness_does_not_block_checkpoint_save():
     assert checkpoint.tell() > 0
     with pytest.raises(ApplyModeError, match="module structure"):
         mtss.export_policy(model)
+
+    with pytest.warns(UserWarning, match="saved DASC policy is stale"):
+        stale_state = mto.modelopt_state(model)
+    with pytest.warns(UserWarning, match="restored DASC policy is stale"):
+        restored = mto.restore_from_modelopt_state(
+            TinyGatedDeltaNetForCausalLM(num_heads=3), stale_state
+        )
+    restored.load_state_dict(model.state_dict())
+    with pytest.raises(ApplyModeError, match="module structure"):
+        mtss.export_policy(restored)
 
 
 def test_export_rederives_the_selected_head_mask():

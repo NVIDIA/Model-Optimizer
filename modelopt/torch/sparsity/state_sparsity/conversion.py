@@ -90,7 +90,13 @@ def restore_dasc_model(model: nn.Module, config: DASCConfig, metadata: MetadataD
     if mismatched:
         raise ApplyModeError(f"DASC policy metadata does not match its mode config: {mismatched}")
 
-    validate_dasc_model_structure(model, policy)
+    try:
+        validate_dasc_model_structure(model, policy)
+    except ApplyModeError as error:
+        warnings.warn(
+            f"{error}. The restored DASC policy is stale; re-run calibrate() before deployment",
+            stacklevel=2,
+        )
     _attach_policy(model, policy)
     return model
 
@@ -117,13 +123,14 @@ def replace_dasc_mode(
 ) -> nn.Module:
     """Replace existing DASC mode state in place with a newly derived policy."""
     model = unwrap_model(model, force_unwrap=True)
-    policy = build_dasc_policy(model, config, measurements)
     manager = ModeloptStateManager(model)
-    manager.update_last_state_before_new_mode(model)
     state = manager.state_dict()
     dasc_indices = [index for index, (mode, _) in enumerate(state) if mode == "dasc"]
     if not dasc_indices:
         raise ApplyModeError("Cannot replace DASC mode because the model has no DASC state")
+    policy = build_dasc_policy(model, config, measurements)
+    if dasc_indices[-1] != len(state) - 1:
+        manager.update_last_state_before_new_mode(model)
 
     first_index = dasc_indices[0]
     state[first_index] = (
