@@ -38,6 +38,7 @@ from .config import (
     DASCLayerPolicy,
     DASCPolicy,
     _DecayParameterStorageDtype,
+    _validate_analysis_arguments,
 )
 
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
@@ -63,14 +64,6 @@ class _DASCModelStructureMismatchError(_DASCRecoverableStalenessError):
 
 class _DASCDecayParametersUnavailableError(_DASCRecoverableStalenessError):
     """Identify supported GDN modules whose decay tensors are temporarily unavailable."""
-
-
-def _validate_analysis_arguments(epsilon: float, static_gate_input: float) -> None:
-    """Normalize invalid public analysis arguments to the ValueError contract."""
-    if not isinstance(epsilon, float | int) or not (math.isfinite(epsilon) and 0.0 < epsilon < 1.0):
-        raise ValueError("epsilon must be finite and in (0, 1)")
-    if not isinstance(static_gate_input, float | int) or not math.isfinite(static_gate_input):
-        raise ValueError("static_gate_input must be finite")
 
 
 def _validate_gdn_decay_tensors(a_log: torch.Tensor, dt_bias: torch.Tensor) -> None:
@@ -129,7 +122,7 @@ def compute_gdn_decay_horizons(
     dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
 
     decay = -torch.exp(a_log_cpu) * F.softplus(dt_bias_cpu + static_gate_input)
-    horizons = torch.log(torch.tensor(epsilon, dtype=torch.float64)) / decay
+    horizons = math.log(epsilon) / decay
     if not torch.isfinite(horizons).all() or not torch.all(horizons > 0):
         raise ValueError("GDN decay parameters produced non-finite or non-positive horizons")
     return horizons
@@ -527,7 +520,7 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
                     "DASC policy head mask does not match current decay parameters in layer "
                     f"{name!r}"
                 )
-        stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
+        stored = torch.tensor(layer.static_horizons, device="cpu", dtype=torch.float64)
         numerical_slack = 32.0 * torch.finfo(torch.float64).eps
         if torch.any(stored < lower * (1.0 - numerical_slack)) or torch.any(
             stored > upper * (1.0 + numerical_slack)
