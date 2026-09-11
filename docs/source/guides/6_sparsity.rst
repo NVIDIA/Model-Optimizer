@@ -192,9 +192,9 @@ Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and 
 calibration. Derive the evaluated head masks and reported ``retained_heads``/``total_heads`` from
 :func:`~modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay` using that same storage dtype.
 Policy validation allows only the rounding introduced by the declared storage dtype and the live
-tensor dtype, so the effective tolerance is the wider of the two. The default ``float32`` adds no
-storage slack of its own; decay tensors that are live in BF16 or FP16 are still validated against
-that live dtype's rounding.
+tensor dtype. When they differ, their inverse rounding bounds are composed in sequence; when they
+match, the duplicate cast is counted once. The default ``float32`` adds no storage slack of its own;
+decay tensors that are live in BF16 or FP16 are still validated against that live dtype's rounding.
 
 .. _sparsity-concepts:
 

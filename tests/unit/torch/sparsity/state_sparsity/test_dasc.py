@@ -474,6 +474,14 @@ def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
     with pytest.raises(ApplyModeError, match="floating-point dtype"):
         mtss.export_policy(model)
 
+    invalid = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    with torch.no_grad():
+        invalid.linear_attn.dt_bias[0] = torch.nan
+    with pytest.raises(ApplyModeError, match="GDN decay parameters must be finite"):
+        mtss.export_policy(invalid)
+
 
 @pytest.mark.parametrize(
     ("storage_name", "storage_dtype", "live_dtype"),

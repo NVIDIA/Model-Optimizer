@@ -52,6 +52,24 @@ class _DASCModelStructureMismatchError(ApplyModeError):
     """Identify recoverable policy-versus-GDN-geometry drift during restore."""
 
 
+def _validated_gdn_decay_tensors(
+    a_log: torch.Tensor, dt_bias: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate decay tensors and return deterministic CPU float64 values."""
+    if a_log.ndim != 1 or dt_bias.ndim != 1 or a_log.shape != dt_bias.shape or not a_log.numel():
+        raise ValueError(
+            "GDN A_log and dt_bias must be non-empty one-dimensional tensors of equal shape"
+        )
+    if not a_log.dtype.is_floating_point or not dt_bias.dtype.is_floating_point:
+        raise ValueError("GDN A_log and dt_bias must use floating-point dtypes")
+
+    a_log_cpu = a_log.detach().to(device="cpu", dtype=torch.float64)
+    dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
+    if not torch.isfinite(a_log_cpu).all() or not torch.isfinite(dt_bias_cpu).all():
+        raise ValueError("GDN decay parameters must be finite")
+    return a_log_cpu, dt_bias_cpu
+
+
 @lru_cache(maxsize=1)
 def _supported_gdn_classes() -> tuple[type[nn.Module], ...]:
     """Resolve installed GDN implementations without making either framework mandatory."""
@@ -90,19 +108,10 @@ def compute_gdn_decay_horizons(
     static_gate_input: float = -0.3,
 ) -> torch.Tensor:
     """Compute one static retention horizon per GDN head in CPU float64."""
-    if a_log.ndim != 1 or dt_bias.ndim != 1 or a_log.shape != dt_bias.shape or not a_log.numel():
-        raise ValueError(
-            "GDN A_log and dt_bias must be non-empty one-dimensional tensors of equal shape"
-        )
-    if not a_log.dtype.is_floating_point or not dt_bias.dtype.is_floating_point:
-        raise ValueError("GDN A_log and dt_bias must use floating-point dtypes")
     if not 0.0 < epsilon < 1.0:
         raise ValueError("epsilon must be in (0, 1)")
 
-    a_log_cpu = a_log.detach().to(device="cpu", dtype=torch.float64)
-    dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
-    if not torch.isfinite(a_log_cpu).all() or not torch.isfinite(dt_bias_cpu).all():
-        raise ValueError("GDN decay parameters must be finite")
+    a_log_cpu, dt_bias_cpu = _validated_gdn_decay_tensors(a_log, dt_bias)
 
     decay = -torch.exp(a_log_cpu) * F.softplus(dt_bias_cpu + static_gate_input)
     horizons = torch.log(torch.tensor(epsilon, dtype=torch.float64)) / decay
@@ -192,9 +201,8 @@ def _analyze_gdn_modules(
         a_log = module.A_log
         dt_bias = module.dt_bias
         try:
-            if not a_log.dtype.is_floating_point or not dt_bias.dtype.is_floating_point:
-                raise ValueError("GDN A_log and dt_bias must use floating-point dtypes")
             if storage_dtype is not None:
+                _validated_gdn_decay_tensors(a_log, dt_bias)
                 a_log = a_log.detach().to(device="cpu", dtype=storage_dtype)
                 dt_bias = dt_bias.detach().to(device="cpu", dtype=storage_dtype)
             layer_horizons = compute_gdn_decay_horizons(
@@ -461,8 +469,12 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
     modules = _get_gdn_modules(model)
     for name, module in modules.items():
         layer = policy.layers[name]
-        if not module.A_log.dtype.is_floating_point or not module.dt_bias.dtype.is_floating_point:
-            raise ApplyModeError("GDN A_log and dt_bias must use floating-point dtypes")
+        try:
+            _validated_gdn_decay_tensors(module.A_log, module.dt_bias)
+        except ValueError as error:
+            raise ApplyModeError(
+                f"Invalid GDN decay parameters in module {name!r}: {error}"
+            ) from error
         lower, upper = _storage_cast_horizon_bounds(
             module,
             epsilon=policy.epsilon,
