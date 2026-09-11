@@ -170,7 +170,7 @@ def _get_gdn_modules(model: nn.Module) -> dict[str, nn.Module]:
             f"{module_name}.{class_name}" for module_name, class_name in _SUPPORTED_GDN_CLASS_PATHS
         )
         raise ApplyModeError(f"DASC found no supported GDN modules; expected one of: {supported}")
-    return dict(sorted(identity_modules))
+    return dict(sorted(identity_modules, key=lambda item: item[0]))
 
 
 def _analyze_gdn_modules(
