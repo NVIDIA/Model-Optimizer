@@ -100,7 +100,7 @@ activation memory.
 9. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
    `~/.bashrc` activates conda and shadows the container's python.
 
-## OPEN BLOCKER — serve dies in KV-cache sizing
+## BLOCKER (diagnosed, fix applied, not yet observed to pass) — KV-cache sizing
 
 Job 405516 (first smoke) failed at engine init:
 
@@ -111,24 +111,37 @@ Job 405516 (first smoke) failed at engine init:
 Same class as the gpt-oss DFlash serve crash (ModelOpt PR #1692), which was fixed
 with `--block-size=32`.
 
-Diagnosis: `kv_cache_utils.py:1376` unifies hybrid KV groups by setting
-`page_size_padded` to the **max over layer specs**; the assertion firing means some
-spec received a padded size below its own unpadded requirement, i.e. the aux
-hidden-state pseudo-layer was not in the set the max was taken over. The trigger is
-**hybrid attention + aux capture**: PineDrift's `global_attn_cfg [2048,2048,2048,0]`
-interleave creates multiple KV groups, so the unification path runs at all — a
-uniform-attention base never reaches it.
+Root cause (this is the same one as gpt-oss, and it is *not* the hybrid attention —
+that was a red herring there too). vLLM's `extract_hidden_states` packs **all** captured
+layers into a single `HiddenStateCacheSpec` with `num_kv_heads = len(capture_ids)` and
+`head_size = hidden_size`, then re-adds it to the KV groups. Its per-token cost is
+therefore **independent of block size**, while the attention page scales with it:
 
-Candidates, in order:
+    hidden-state spec : N x hidden x 2 B            = 6 x 8192 x 2   =  98304 B/token
+    attention page    : 2 x B x kv_heads x head_dim x 2 B
+                        = 2 x B x 16 x 64 x 2       = 4096 x B       B=16 ->  65536
+                                                                     B=32 -> 131072
 
-1. `SERVE_BLOCK_SIZE: "32"` (then 64, 128) — the gpt-oss fix. **Untested here**, and
-   note both the attention page and the hidden-state page scale with block size, so it
-   may not move the ratio the way it did for gpt-oss.
-2. Fewer capture ids — 6 planes × 8192 × 2 B = 98304 B/token of hidden state is far
-   more than the 4096 B/token of KV (16 kv heads × 64 head_dim × 2 × 2 B). Dropping to
-   3 aux + final would quarter it, at the cost of a shallower drafter.
-3. Patch the unification to include the hidden-state spec in the max. This is the
-   actual fix and belongs upstream.
+`page_size_padded` is the max over specs, so the assert fires exactly when the
+hidden-state spec exceeds the attention page. At the default block size 16 it does, by
+1.5x. **`--block-size 32` clears it** with 33 % headroom; that is the whole fix, and it
+is safe because this is a throwaway producer serve where block size only changes KV
+paging granularity. Encoded as `SERVE_BLOCK_SIZE: "32"` in the pipeline yaml.
+
+The crossover in capture count at B=16 is N=4 (65536 fits exactly); at B=32 it is N=8.
+So the alternative lever — fewer capture ids — would also work but costs drafter depth,
+and is not needed.
+
+(An earlier version of this section guessed that both pages scale with block size and
+that `--block-size` might not move the ratio. That was wrong: only the attention page
+scales.)
+
+## Serve port
+
+`SERVE_PORT`/`HS_SIDECAR_PORT` are pinned to 27650/27651, not the script defaults
+8765/18999. Job 405564 died with `OSError: [Errno 98] Address already in use` on 8765 —
+those defaults are shared by every modelopt streaming run on the cluster, and PDX
+hands out nodes that other people's serves are still holding.
 
 ## Running it
 
