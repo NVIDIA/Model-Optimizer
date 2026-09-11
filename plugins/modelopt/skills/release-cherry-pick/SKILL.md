@@ -56,7 +56,7 @@ gh search prs \
     done
 ```
 
-`git cherry` marks patches absent from the release branch with `+`. It omits directly inherited commits and marks patch-equivalent cherry-picks with `-`, so only `+` candidates proceed. Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
+Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
 
 Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
 
