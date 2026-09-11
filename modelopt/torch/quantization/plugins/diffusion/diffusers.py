@@ -16,6 +16,7 @@
 """Support quantization of diffusers layers."""
 
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from functools import partial
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -25,6 +26,7 @@ import onnx
 import torch
 from diffusers.models.attention_processor import Attention
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
+from diffusers.models.modeling_utils import ModelMixin
 from packaging.version import parse as parse_version
 
 if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
@@ -64,7 +66,8 @@ from ...nn import (
     TensorQuantizer,
 )
 from ...nn.modules.quant_conv import _QuantConv3d
-from ..custom import _QuantFunctionalMixin
+from ..attention import register_attention_for_kv_quant
+from ..custom import CUSTOM_MODEL_PLUGINS, _QuantFunctionalMixin
 
 onnx_dtype_map = {
     "BFloat16": onnx.TensorProto.BFLOAT16,
@@ -206,6 +209,41 @@ if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
         QuantModuleRegistry.register({Flux2ParallelSelfAttention: "Flux2ParallelSelfAttention"})(
             _QuantAttentionModuleMixin
         )
+
+
+def _try_register_attention(attention_cls):
+    with suppress(
+        IndentationError, IndexError, KeyError, OSError, SyntaxError, TypeError, ValueError
+    ):
+        register_attention_for_kv_quant(attention_cls)
+
+
+def _register_diffusers_attentions_on_the_fly(model):
+    """Register unrecognized leaf attention modules in diffusers model graphs."""
+    if not isinstance(model, ModelMixin):
+        return
+
+    seen_classes = set()
+    for module in model.modules():
+        module_type = type(module)
+        if (
+            not module_type.__name__.endswith("Attention")
+            or module_type in seen_classes
+            or module_type in QuantModuleRegistry
+            or module_type.__module__.startswith("transformers.")
+            or hasattr(module_type, "_setup")
+            or not all(isinstance(getattr(module, name, None), torch.nn.Module) for name in "qkv")
+            or any(
+                child is not module and type(child).__name__.endswith("Attention")
+                for child in module.modules()
+            )
+        ):
+            continue
+        seen_classes.add(module_type)
+        _try_register_attention(module_type)
+
+
+CUSTOM_MODEL_PLUGINS.add(_register_diffusers_attentions_on_the_fly)
 
 
 original_scaled_dot_product_attention = F.scaled_dot_product_attention
