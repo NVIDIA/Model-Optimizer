@@ -193,7 +193,7 @@ def _load_raw_config_with_schema(config_file: str | Path | Traversable) -> _RawC
     schema = _parse_modelopt_schema(text, config_path)
     docs = list(yaml.safe_load_all(text))
 
-    if len(docs) == 0 or docs[0] is None:
+    if len(docs) == 0 or (len(docs) == 1 and docs[0] is None):
         return _RawConfig({}, schema=schema, path=config_path)
     if len(docs) == 1:
         _raw = docs[0]
@@ -201,6 +201,10 @@ def _load_raw_config_with_schema(config_file: str | Path | Traversable) -> _RawC
         # Multi-document: first doc is imports/metadata, second is content.
         # Merge the imports into the content for downstream resolution.
         header, content = docs[0], docs[1]
+        if header is None:
+            # An explicit null/empty first document is an empty header, not an
+            # empty file — the second document still carries the real body.
+            header = {}
         if not isinstance(header, dict):
             raise ValueError(
                 f"Config file {config_path}: first YAML document must be a mapping, "
