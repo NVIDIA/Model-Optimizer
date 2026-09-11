@@ -44,7 +44,7 @@ gh search prs \
   --json number,title,author,labels,url
 ```
 
-Assert that the GitHub result has no next-page token before continuing; abort the audit if it does.
+Assert that the GitHub result has no next-page token before continuing; abort the audit if it does. A release is not normally expected to exceed 1,000 merged PRs.
 
 Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
 
