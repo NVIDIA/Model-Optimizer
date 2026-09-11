@@ -653,7 +653,7 @@ version behind each entry.
 The user can specify the inference time TP and PP size and the export API will organize the weights to fit the target GPUs.
 
 ```python
-from modelopt.torch.export import export_tensorrt_llm_checkpoint
+from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 
 with torch.inference_mode():
     export_tensorrt_llm_checkpoint(
@@ -700,6 +700,7 @@ seconds rather than after a full calibration.
 | --- | --- |
 | `command.txt` | The full invocation, copy-pasteable, with credentials masked |
 | `version.txt` | The ModelOpt version that ran |
+| `experiment.json` | The experiment name, run id and run URL — the same file written into `--export_path` |
 | `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
 | `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
@@ -710,6 +711,22 @@ seconds rather than after a full calibration.
 Every command-line argument is also logged as a searchable param, alongside
 `user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
 still recorded, with status `FAILED` and its log attached.
+
+A tracked run also drops `.experiment.json` into `--export_path`, so a checkpoint found on
+disk names the run that produced it:
+
+```bash
+cat <quantized_ckpt_path>/.experiment.json
+# {"tracking_uri": ..., "experiment_name": ..., "experiment_id": ..., "run_id": ...,
+#  "run_name": ..., "run_url": ...}
+```
+
+The local file is written only once the export itself completes, so a run that fails
+earlier leaves whatever checkpoint is already in `--export_path` — and its pointer —
+untouched. The `experiment.json` artifact is uploaded for every run that opened, so a
+failed run stays traceable from the server. An export that is *not* tracked removes any
+pointer it would otherwise inherit, from a reused `--export_path` or from a tracked source
+checkpoint.
 
 Other flags:
 

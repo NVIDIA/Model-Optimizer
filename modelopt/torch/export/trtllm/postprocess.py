@@ -28,14 +28,12 @@ from modelopt.torch.quantization.nn.modules.quant_linear import QuantLinear
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.utils import distributed as dist
 
+from ..quant_format import QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT
 from .distribute import get_configs_parallel, get_tensors_parallel
 from .model_config import (
     LINEAR_COLUMN,
     LINEAR_GROUP,
     LINEAR_ROW,
-    QUANTIZATION_NVFP4,
-    QUANTIZATION_NVFP4_AWQ,
-    QUANTIZATION_NVFP4_SVDQUANT,
     ConvConfig,
     EmbeddingConfig,
     ExpertConfig,

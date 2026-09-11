@@ -99,6 +99,7 @@ class PrecisionConverter:
         tensor_block_dict: dict[str, dict[str, list[int]]] = {},
         use_standalone_type_inference: bool = False,
         original_network_io_metadata: dict[str, list[onnx.ValueInfoProto]] | None = None,
+        sanitize_model: bool = True,
     ) -> None:
         """Initialize PrecisionConverter.
 
@@ -118,11 +119,18 @@ class PrecisionConverter:
             tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
             use_standalone_type_inference: Use standalone type inference instead of ONNX's infer_shapes.
             original_network_io_metadata: Original public input/output metadata captured at the API boundary.
+            sanitize_model: Whether to sanitize the model before precision conversion.
         """
         self.model = deepcopy(model)
-        self.value_info_map = value_info_map
-        self.initializer_map = initializer_map
-        self.node_to_init_map = node_to_init_map
+        self.sanitize_model = sanitize_model
+        if sanitize_model:
+            self.value_info_map = value_info_map
+            self.initializer_map = initializer_map
+            self.node_to_init_map = node_to_init_map
+        else:
+            self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
+                self.model
+            )
         self.keep_io_types = keep_io_types
         self.init_conversion_max_bytes = (
             np.inf if init_conversion_max_bytes is None else init_conversion_max_bytes
@@ -195,7 +203,8 @@ class PrecisionConverter:
                 "AutoCast can only operate on valid ONNX models, but the input model is invalid. See log for details."
             )
 
-        self._sanitize_model()
+        if self.sanitize_model:
+            self._sanitize_model()
 
         # Filter out nodes that are not allowed to be in low precision
         # This is done here and not in NodeClassifier because it is required for the model to be valid
