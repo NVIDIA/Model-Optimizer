@@ -52,7 +52,11 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/pinedrift-820b-a42b-nvfp4_vv3
-    corpus: /hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs.jsonl
+    # SMOKE: a 20k-record head of the full corpus. The full file is 1.96M records /
+    # 31.65 GB; tokenizing it before step 1 would sit well past the 30 min the PDX
+    # GPU-idle reaper allows. Swap to default-msgs.jsonl for the real run (and then
+    # resubmit the generated sbatch with the reaper exemption --comment).
+    corpus: /hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs-smoke20k.jsonl
 
   task_0:
     script: common/eagle3/train_eagle_streaming.sh
