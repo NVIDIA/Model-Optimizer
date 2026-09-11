@@ -56,6 +56,7 @@ from modelopt.onnx.utils import (
     get_output_names,
     get_output_shapes,
     infer_shapes,
+    is_model_too_large_for_protobuf,
     remove_node_training_mode,
     remove_redundant_casts,
 )
@@ -96,7 +97,6 @@ ValueInfoType = Any
 # a few constants...
 DEFAULT_ONNX_OPSET = 20
 ONNX_EXPORT_OUT_PREFIX = "out"
-TWO_GB = 2 * 1024 * 1024 * 1024
 
 
 class OnnxBytes:
@@ -765,6 +765,6 @@ def create_model_metadata(
         "output_onnx_names": get_output_names(onnx_graph),
         "signature": inspect.signature(model.forward),
         "onnx_node_names": get_node_names(onnx_graph),
-        "is_bytes_pickled": onnx_graph.ByteSize() > TWO_GB,
+        "is_bytes_pickled": is_model_too_large_for_protobuf(onnx_graph),
         "config": model.config if hasattr(model, "config") else None,
     }
