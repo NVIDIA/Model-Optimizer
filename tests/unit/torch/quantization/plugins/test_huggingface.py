@@ -434,6 +434,7 @@ def test_fold_transposed_expert_weights_preserves_forward(
     with torch.no_grad():
         expected = model(input_ids).logits
         if offload is not None:
+            # Accelerate is optional; only offload cases require it.
             accelerate = pytest.importorskip("accelerate")
             if offload == "cpu":
                 accelerate.cpu_offload(experts, execution_device=torch.device("cpu"))
