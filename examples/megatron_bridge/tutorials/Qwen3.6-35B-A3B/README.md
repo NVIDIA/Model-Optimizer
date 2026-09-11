@@ -150,7 +150,7 @@ Set `RANK`/`WORLD_SIZE`/`LOCAL_RANK` from `SLURM_PROCID`/`SLURM_NTASKS`/`SLURM_L
 
 QAD fine-tunes the quantized student against the BF16 teacher, so the student learns weights that survive 4-bit rounding. See the [QAD section of the Megatron-Bridge README](../../README.md#quantization-aware-distillation-qad).
 
-Minimum hardware: the student and teacher are both resident, plus an fp32 gradient buffer and optimizer state — roughly 124 GB/GPU of the 185 GiB on a GB200 at the settings below. We used **32 nodes × 4 GB200 (128 GPUs)**; 500 iterations took **5.7 hours wall-clock (~735 GB200 GPU-hours)** at ~37 s/iter.
+Minimum hardware: the student and teacher are both resident, plus an fp32 gradient buffer and optimizer state — roughly 124 GB/GPU of the 185 GiB on a GB200 at the settings below. We used **32 nodes × 4 GB200 (128 GPUs)**; 500 iterations took **5.7 hours wall-clock (~735 GB200 GPU-hours)**. Steady-state training is ~37 s/iter (3.1 h of the total); the remaining ~35 min is per-job startup, loading the 67 GiB teacher and the student — the run was split across two 4-hour jobs, so that cost is paid twice.
 
 <details>
 <summary>QAD command (click to expand)</summary>
@@ -228,7 +228,7 @@ One config per benchmark in [eval_configs/](eval_configs/), so each can be launc
 | IFBench | [ifbench.yaml](eval_configs/ifbench.yaml) | 1.0 | 8 | 1:30 | `ifbench_pass_at_1_average_score` |
 | tau2-bench Telecom | [tau2_telecom.yaml](eval_configs/tau2_telecom.yaml) | 1.0 | 3 | 1:30 | `tau2_bench_telecom_pass_at_1_pass_at_1` |
 
-Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) card (`T=1.0, top_p=0.95, max_new_tokens=131072`), except SciCode, which the card specifies at `T=0.6`. `parallelism` varies (32 default, 16 for AA-LCR's long contexts, 8 for SciCode's long generations) as a throughput knob only. The same configs serve BF16 and NVFP4 unchanged — vLLM reads the FP8 KV-cache setting from the checkpoint's own `quantization_config`.
+Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) card (`T=1.0, top_p=0.95, max_new_tokens=131072`), except SciCode, which the card specifies at `T=0.6`. `parallelism` varies (32 default, 16 for AA-LCR's long contexts and for tau2-bench's multi-turn tool round-trips, 8 for SciCode's long generations) as a throughput knob only. The same configs serve BF16 and NVFP4 unchanged — vLLM reads the FP8 KV-cache setting from the checkpoint's own `quantization_config`.
 
 > [!IMPORTANT]
 > **Two benchmarks need a second model endpoint besides the one under test.** AA-LCR scores answers
