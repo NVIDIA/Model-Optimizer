@@ -52,11 +52,6 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/pinedrift-820b-a42b-nvfp4_vv3
-    # SMOKE: a 20k-record head of the full corpus. The full file is 1.96M records /
-    # 31.65 GB; tokenizing it before step 1 would sit well past the 30 min the PDX
-    # GPU-idle reaper allows. Swap to default-msgs.jsonl for the real run (and then
-    # resubmit the generated sbatch with the reaper exemption --comment).
-    corpus: /hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs-smoke20k.jsonl
 
   task_0:
     script: common/eagle3/train_eagle_streaming.sh
@@ -65,7 +60,11 @@ pipeline:
       - model.model_name_or_path=<<global_vars.hf_model>>
       - model.use_fake_base_for_offline=true
       - model.trust_remote_code=false
-      - data.data_path=<<global_vars.corpus>>
+      # SMOKE: a 20k-record head of the corpus. The full default-msgs.jsonl is 1.96M
+      # records / 31.65 GB; tokenizing it before step 1 would sit well past the 30 min
+      # the PDX GPU-idle reaper allows. (Inlined rather than a global_vars entry --
+      # global_vars keys must name real launch() parameters, and only hf_model does.)
+      - data.data_path=/hf-local/Speculative-Decoding-Dataset-v1-Qwen3-8B/default-msgs-smoke20k.jsonl
       # PineDrift's own template already has {% generation %}/{% endgeneration %}
       # (lines 192/222), so no tagged copy is needed -- unlike M3.
       - data.chat_template=<<global_vars.hf_model>>/chat_template.jinja
