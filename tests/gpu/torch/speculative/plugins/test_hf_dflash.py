@@ -250,3 +250,124 @@ class TestDFlashOfflineForwardGPU:
         assert hasattr(output, "logits")
         assert output.logits is not None
         assert torch.isfinite(output.loss).item()
+
+
+class TestDFlashFlexAttentionGPU:
+    """FlexAttention path must match the dense-mask SDPA path it replaces.
+
+    The block-sparse BlockMask encodes exactly the predicate
+    ``_build_draft_attention_mask`` materializes, so switching implementations may only
+    move results by float rounding -- not by a masked position becoming visible, and not
+    at the fully-masked query rows that invalid blocks produce.
+
+    These build a wider model than the rest of this file: ``get_tiny_llama`` defaults to
+    hidden_size 32 over 16 heads, i.e. head_dim 2, and FlexAttention's Triton templates
+    need head_dim >= 16 (below that Inductor finds no valid config and raises). 128/2
+    heads gives head_dim 64, the smallest standard size.
+    """
+
+    SEQ = 64
+    BASE_KWARGS = {
+        "num_hidden_layers": 4,
+        "hidden_size": 128,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "intermediate_size": 64,
+        "max_position_embeddings": 256,
+        "vocab_size": 64,
+    }
+
+    @classmethod
+    def _model(cls, **cfg_overrides):
+        model = get_tiny_llama(**cls.BASE_KWARGS)
+        config = get_dflash_config()
+        config.update(cfg_overrides)
+        mtsp.convert(model, [("dflash", config)])
+        return model.cuda().train()
+
+    @classmethod
+    def _pair(cls, **cfg_overrides):
+        """A dense model and a flex model with identical draft weights."""
+        dense = cls._model(**cfg_overrides)
+        flex = cls._model(dflash_use_flex_attention=True, **cfg_overrides)
+        flex.dflash_module.load_state_dict(dense.dflash_module.state_dict())
+        return dense, flex
+
+    @classmethod
+    def _inputs(cls, bsz=2):
+        input_ids = torch.randint(0, cls.BASE_KWARGS["vocab_size"], (bsz, cls.SEQ), device="cuda")
+        attention_mask = torch.ones(bsz, cls.SEQ, dtype=torch.long, device="cuda")
+        return input_ids, attention_mask
+
+    def test_mask_builder_returns_block_mask(self):
+        """With the flag on, the mask builder hands back a BlockMask, not a dense tensor."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        from modelopt.torch.speculative.plugins.dflash_flex_attention import is_block_mask
+
+        model = self._model(dflash_use_flex_attention=True)
+        mask = model._build_draft_attention_mask(
+            self.SEQ,
+            torch.tensor([[4, 8]], device="cuda"),
+            torch.tensor([[True, True]], device="cuda"),
+            2,
+            torch.float32,
+            torch.device("cuda"),
+            window=None,
+        )
+        assert is_block_mask(mask)
+        assert not torch.is_tensor(mask)
+
+    @pytest.mark.parametrize("window", [None, 8])
+    def test_matches_dense_mask_path(self, window):
+        """Loss agrees with the dense path to bf16 tolerance, with and without SWA."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        overrides = {} if window is None else {"dflash_swa_window_size": window}
+        dense, flex = self._pair(**overrides)
+        input_ids, attention_mask = self._inputs()
+
+        # Anchors are resampled from the RNG on every forward, so both models must draw
+        # from the same seed or they would see different anchors, not different kernels.
+        torch.manual_seed(1234)
+        out_dense = dense(input_ids=input_ids, attention_mask=attention_mask)
+        torch.manual_seed(1234)
+        out_flex = flex(input_ids=input_ids, attention_mask=attention_mask)
+
+        torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
+
+    def test_matches_dense_mask_path_with_invalid_blocks(self):
+        """Fully-masked query rows (invalid blocks) must not diverge either.
+
+        A row of all -inf is the one place the two kernels could legitimately disagree
+        (softmax of nothing), and answer_only_loss produces such rows whenever a sample
+        has fewer valid anchors than the batch maximum.
+        """
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        dense, flex = self._pair()
+        input_ids, attention_mask = self._inputs()
+        # Row 1 keeps far fewer supervised positions than row 0, so its trailing blocks
+        # come back with block_keep_mask False.
+        labels = input_ids.clone()
+        labels[1, : self.SEQ - BLOCK_SIZE] = -100
+
+        torch.manual_seed(7)
+        out_dense = dense(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        torch.manual_seed(7)
+        out_flex = flex(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+        assert torch.isfinite(out_flex.loss), "flex produced a non-finite loss"
+        torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
+
+    def test_backward_produces_finite_grads(self):
+        """The flex path is differentiable and its grads are finite."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        flex = self._model(dflash_use_flex_attention=True)
+        input_ids, attention_mask = self._inputs()
+
+        flex(input_ids=input_ids, attention_mask=attention_mask).loss.backward()
+        grads = [
+            p.grad
+            for p in flex.dflash_module.parameters()
+            if p.requires_grad and p.grad is not None
+        ]
+        assert grads, "no draft gradients were produced"
+        assert all(torch.isfinite(g).all() for g in grads)

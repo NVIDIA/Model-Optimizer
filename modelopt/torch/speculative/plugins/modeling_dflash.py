@@ -238,6 +238,60 @@ class DFlashAttention(nn.Module):
         self._attn_fn = ALL_ATTENTION_FUNCTIONS.get(impl, ALL_ATTENTION_FUNCTIONS["sdpa"])
         return self._attn_fn
 
+    def _attend(self, q, k, v, attention_mask, bsz, q_len):
+        """Run attention and project, routing a FlexAttention BlockMask to the flex kernel.
+
+        ``attention_mask`` is either the dense additive [B, 1, Q, KV] tensor (HF attention
+        dispatch and the eager sink path) or a BlockMask carrying the same predicate
+        block-sparsely. Keeping the branch here rather than at the call sites means
+        DFlash, DSpark, Domino and LiLiCorr all pick it up.
+        """
+        from .dflash_flex_attention import flex_attention_forward, is_block_mask
+
+        block_mask = is_block_mask(attention_mask)
+
+        if self.attention_sink_bias is not None:
+            if block_mask:
+                # _sink_attention extends a dense additive mask with the sink logit; a
+                # BlockMask carries no additive term to extend.
+                raise NotImplementedError(
+                    "dflash_attention_sink is not supported together with "
+                    "dflash_use_flex_attention; unset one of them."
+                )
+            if self.sliding_window is not None:
+                # The eager sink path applies only the caller-supplied mask; a per-layer
+                # window from config.layer_types would be silently dropped. DFlash windows
+                # the context through the attention mask instead (dflash_swa_window_size),
+                # so this combination is rejected rather than trained with the wrong mask.
+                raise NotImplementedError(
+                    "dflash_attention_sink is not supported together with a per-layer "
+                    "sliding window from dflash_architecture_config.layer_types. Use "
+                    "dflash_swa_window_size for the draft's sliding window instead."
+                )
+            attn_output = self._sink_attention(q, k, v, attention_mask)
+        elif block_mask:
+            dropout = 0.0 if not self.training else self.attention_dropout
+            if dropout:
+                raise ValueError(
+                    "FlexAttention path does not support attention_dropout > 0 "
+                    f"(got {dropout}); unset dflash_use_flex_attention."
+                )
+            attn_output = flex_attention_forward(q, k, v, attention_mask, self.scaling)
+        else:
+            # Use HF's attention dispatch (handles GQA internally)
+            attn_fn = self._get_attn_fn()
+            attn_output, _ = attn_fn(
+                self,
+                q,
+                k,
+                v,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+            )
+        return self.o_proj(attn_output.reshape(bsz, q_len, -1))
+
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
         """Forward with KV injection.
 
@@ -271,33 +325,7 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if self.attention_sink_bias is not None:
-            if self.sliding_window is not None:
-                # The eager sink path applies only the caller-supplied mask; a per-layer
-                # window from config.layer_types would be silently dropped. DFlash windows
-                # the context through the attention mask instead (dflash_swa_window_size),
-                # so this combination is rejected rather than trained with the wrong mask.
-                raise NotImplementedError(
-                    "dflash_attention_sink is not supported together with a per-layer "
-                    "sliding window from dflash_architecture_config.layer_types. Use "
-                    "dflash_swa_window_size for the draft's sliding window instead."
-                )
-            attn_output = self._sink_attention(q, k, v, attention_mask)
-        else:
-            # Use HF's attention dispatch (handles GQA internally)
-            attn_fn = self._get_attn_fn()
-            attn_output, _ = attn_fn(
-                self,
-                q,
-                k,
-                v,
-                attention_mask,
-                dropout=0.0 if not self.training else self.attention_dropout,
-                scaling=self.scaling,
-                sliding_window=self.sliding_window,
-            )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
     def _sink_attention(self, q, k, v, attention_mask):
         """Attention with a learnable per-head sink logit.
