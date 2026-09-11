@@ -27,7 +27,7 @@ Download nuScenes v1.0 trainval and CAN bus expansion data under the [nuScenes t
 ```bash
 export BEVFORMER_ARTIFACTS=/path/to/bevformer_artifacts
 mkdir -p "${BEVFORMER_ARTIFACTS}"
-docker run --rm -it --gpus=all --ipc=host --shm-size=20g \
+docker run --rm -it --gpus=all --shm-size=20g \
   -e PYTHONPATH=/opt/Model-Optimizer \
   -v "${MODELOPT_ROOT}:/opt/Model-Optimizer:ro" \
   -v "${DL4AGX_EXAMPLE}:/mnt/dl4agx:ro" \
