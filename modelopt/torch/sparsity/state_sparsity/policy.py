@@ -38,6 +38,7 @@ from .config import (
     DASCLayerPolicy,
     DASCPolicy,
     _DecayParameterStorageDtype,
+    _validate_analysis_arguments,
 )
 
 __all__ = ["analyze_gdn_decay", "compute_gdn_decay_horizons"]
@@ -53,8 +54,16 @@ _STORAGE_DTYPES: dict[_DecayParameterStorageDtype, torch.dtype] = {
 }
 
 
-class _DASCModelStructureMismatchError(ApplyModeError):
+class _DASCRecoverableStalenessError(ApplyModeError):
+    """Identify DASC state that may become valid after model rematerialization."""
+
+
+class _DASCModelStructureMismatchError(_DASCRecoverableStalenessError):
     """Identify recoverable policy-versus-GDN-geometry drift during restore."""
+
+
+class _DASCDecayParametersUnavailableError(_DASCRecoverableStalenessError):
+    """Identify supported GDN modules whose decay tensors are temporarily unavailable."""
 
 
 def _validate_gdn_decay_tensors(a_log: torch.Tensor, dt_bias: torch.Tensor) -> None:
@@ -107,15 +116,13 @@ def compute_gdn_decay_horizons(
     static_gate_input: float = -0.3,
 ) -> torch.Tensor:
     """Compute one static retention horizon per GDN head in CPU float64."""
-    if not 0.0 < epsilon < 1.0:
-        raise ValueError("epsilon must be in (0, 1)")
-
+    _validate_analysis_arguments(epsilon, static_gate_input)
     _validate_gdn_decay_tensors(a_log, dt_bias)
     a_log_cpu = a_log.detach().to(device="cpu", dtype=torch.float64)
     dt_bias_cpu = dt_bias.detach().to(device="cpu", dtype=torch.float64)
 
     decay = -torch.exp(a_log_cpu) * F.softplus(dt_bias_cpu + static_gate_input)
-    horizons = torch.log(torch.tensor(epsilon, dtype=torch.float64)) / decay
+    horizons = math.log(epsilon) / decay
     if not torch.isfinite(horizons).all() or not torch.all(horizons > 0):
         raise ValueError("GDN decay parameters produced non-finite or non-positive horizons")
     return horizons
@@ -143,7 +150,7 @@ def _reject_incomplete_gdn_modules(identity_modules: list[tuple[str, nn.Module]]
         )
     ]
     if missing_decay_parameters:
-        raise ApplyModeError(
+        raise _DASCDecayParametersUnavailableError(
             "DASC found supported GDN modules without A_log and dt_bias tensors at: "
             f"{', '.join(missing_decay_parameters)}"
         )
@@ -228,15 +235,16 @@ def analyze_gdn_decay(
     decay_parameter_storage_dtype: _DecayParameterStorageDtype | None = None,
 ) -> dict[str, list[float]]:
     """Return per-head horizons, optionally canonicalized to a checkpoint storage dtype."""
+    _validate_analysis_arguments(epsilon, static_gate_input)
     storage_dtype = None
     if decay_parameter_storage_dtype is not None:
-        try:
-            storage_dtype = _STORAGE_DTYPES[decay_parameter_storage_dtype]
-        except KeyError as error:
+        if (
+            not isinstance(decay_parameter_storage_dtype, str)
+            or decay_parameter_storage_dtype not in _STORAGE_DTYPES
+        ):
             supported = ", ".join(_STORAGE_DTYPES)
-            raise ValueError(
-                f"decay_parameter_storage_dtype must be one of: {supported}"
-            ) from error
+            raise ValueError(f"decay_parameter_storage_dtype must be one of: {supported}")
+        storage_dtype = _STORAGE_DTYPES[decay_parameter_storage_dtype]
     return _analyze_gdn_modules(
         _get_gdn_modules(model),
         epsilon=epsilon,
@@ -512,7 +520,7 @@ def validate_dasc_decay_parameters(model: nn.Module, policy: DASCPolicy) -> None
                     "DASC policy head mask does not match current decay parameters in layer "
                     f"{name!r}"
                 )
-        stored = torch.tensor(layer.static_horizons, dtype=torch.float64)
+        stored = torch.tensor(layer.static_horizons, device="cpu", dtype=torch.float64)
         numerical_slack = 32.0 * torch.finfo(torch.float64).eps
         if torch.any(stored < lower * (1.0 - numerical_slack)) or torch.any(
             stored > upper * (1.0 + numerical_slack)

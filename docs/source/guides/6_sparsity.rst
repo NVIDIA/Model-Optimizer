@@ -189,8 +189,9 @@ including ModelOpt-generated dynamic subclasses, and fails closed for unrelated 
 even when they expose similarly named decay tensors.
 Re-running :func:`~modelopt.torch.sparsity.state_sparsity.calibrate` replaces the existing DASC
 mode-state entry and supersedes its stale policy without growing the checkpoint history. A policy
-with recoverable GDN geometry or decay drift remains serializable, but removing or replacing the
-supported GDN architecture fails closed on both save and restore. In every stale-policy case,
+with recoverable GDN geometry drift, decay drift, or temporarily unavailable decay tensors remains
+serializable, but removing or replacing the supported GDN architecture fails closed on both save
+and restore. In every stale-policy case,
 :func:`~modelopt.torch.sparsity.state_sparsity.export_policy` rejects it until recalibration.
 Set ``decay_parameter_storage_dtype`` to the checkpoint dtype for ``A_log`` and ``dt_bias`` before
 calibration. Derive the evaluated head masks and reported ``retained_heads``/``total_heads`` from
