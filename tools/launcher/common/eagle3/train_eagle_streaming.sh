@@ -95,6 +95,11 @@ fi
 pip install --no-cache-dir -e modules/Model-Optimizer/
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
+# Whatever else this particular base model's image is missing. Partner-model images
+# are built for serving, not for streaming training, and e.g. the PineDrift day-0
+# vllm ships no nixl at all -- the serve dies at connector init with
+# ModuleNotFoundError: No module named 'nixl'.
+[ -n "${PIP_EXTRA_PACKAGES:-}" ] && pip install --no-cache-dir ${PIP_EXTRA_PACKAGES}
 export PATH=$PATH:/workspace/.local/bin
 
 ###################################################################################################

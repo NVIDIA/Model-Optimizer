@@ -86,18 +86,40 @@ activation memory.
    Triton templates on the first backward; ranks sharing a lustre cache die with
    `OSError: [Errno 14] Bad address`. `/raid/scratch` is the only user-writable
    node-local NVMe on PDX (`/raid` and `/raid/enroot` are root-only).
-4. **NIXL must use LIBFABRIC on PDX.** UCX segfaults at agent init on EFA nodes.
-   `NCCL_IB_DISABLE=1` for the trainer's DDP for the same reason.
-5. **`report_to=none`** — the trainer runs in the serve container, which has no
+4. **The image has no `nixl`.** It is a serving image; the serve dies at connector
+   init with `ModuleNotFoundError: No module named 'nixl'` (job 405777).
+   `PIP_EXTRA_PACKAGES: "nixl==1.3.0"` installs it on every node. Install **plain
+   `nixl`**, not `nixl-cu13` — the latter installs the module as `nixl_cu13` and the
+   connector imports `nixl`. Plain `nixl` pulls both cu12 and cu13 builds. It also
+   downgrades `nvidia-nccl-cu13` (see trap 9).
+5. **NIXL transport: UCX with `UCX_TLS=tcp,sm,self,cuda_copy`.** All of this was
+   measured in this image (probe job 405849):
+   - `cuda_copy` is load-bearing. Without it UCX logs `8 NVIDIA GPU(s) were detected,
+     but UCX CUDA support was not found` and `registerMem` fails on the VRAM
+     hidden-state buffers with `NIXL_ERR_BACKEND`. `libuct_cuda.so` is on disk the
+     whole time; restricting `UCX_TLS` is what hides it.
+   - The rest of `UCX_TLS` is not optional either: left to probe, UCX finds the node's
+     16 EFA NICs, which segfaults the trainer's forked dataloader workers at agent init.
+   - **Fallback, also measured working here**: `NIXL_BACKENDS=LIBFABRIC` +
+     `FI_PROVIDER=efa`, but only after grafting the AWS rdma-core set from
+     `~/lustre/k3work/efa701` into `/usr/lib/x86_64-linux-gnu` (+ `libibverbs/`
+     providers, `/etc/libibverbs.d/`, `ldconfig`) and pointing `NIXL_PLUGIN_DIR` at
+     `.nixl_cu13.mesonpy.libs/plugins`. Without the graft `createBackend` returns
+     `NIXL_ERR_NOT_FOUND`. Not used, because when it was A/B'd on K3 it measured
+     24 s/step against TCP's 15 s — the bottleneck is serve prefill, not transfer,
+     and that is only more true for an 820 B base. The `libionic-rdmav59.so` load
+     warning under the graft is benign.
+   `NCCL_IB_DISABLE=1` for the trainer's DDP for the same EFA reason.
+6. **`report_to=none`** — the trainer runs in the serve container, which has no
    tensorboard.
-6. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
+7. **Explicit `time:`** — the launcher asks for 4 h otherwise and a long run dies as a
    bare Slurm TIMEOUT with no traceback.
-7. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
+8. **`global_vars` keys must name real `launch()` parameters.** Only `hf_model` does;
    a custom key is rejected at argument-parse time.
-8. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
+9. **The serve container downgrades `nvidia-nccl-cu13` 2.30.7 → 2.29.7** when modelopt
    is pip-installed, disabling DeepEP v2. Harmless for the trainer; do not reuse that
    env for a standalone serve.
-9. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
+10. **Use `bash -c`, not `bash -lc`**, in any hand-rolled srun with `~/lustre` mounted:
    `~/.bashrc` activates conda and shadows the container's python.
 
 ## BLOCKER — KV-cache page sizing (root-caused; fix = block_size >= 32*N)

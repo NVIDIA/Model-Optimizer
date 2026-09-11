@@ -20,9 +20,12 @@
 #     dflash_use_flex_attention, which compiles Triton templates on the first
 #     backward. Ranks sharing a lustre cache die with "OSError: [Errno 14] Bad
 #     address". /raid/scratch is the only user-writable node-local NVMe on PDX.
-#   * NIXL over EFA: PDX has no RC-routable IB, and UCX segfaults at agent init
-#     on EFA nodes, so hidden-state RDMA must use LIBFABRIC. NCCL_IB_DISABLE=1
-#     for the trainer's DDP for the same reason.
+#   * NIXL: this image ships no nixl at all, so it is pip-installed per job.
+#     Transport is UCX pinned to tcp+cuda_copy -- leaving UCX_TLS to probe makes
+#     UCX find the node's 16 EFA NICs and segfault the forked dataloader workers,
+#     and dropping cuda_copy makes VRAM registration fail outright. See README
+#     traps 4-5 for the measurements and for the LIBFABRIC fallback.
+#     NCCL_IB_DISABLE=1 for the trainer's DDP for the same EFA reason.
 #   * report_to=none: the serve container has no tensorboard, and the trainer
 #     runs in that same container.
 #   * The corpus is the messages-only rebuild. The published default.jsonl is
@@ -110,10 +113,24 @@ pipeline:
       - SERVE_READY_TIMEOUT: "3600"
       - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
-      # AWS EFA: UCX segfaults at agent init on these nodes, so NIXL must use
-      # LIBFABRIC; NCCL must not try native IB either.
-      - NIXL_BACKENDS: "LIBFABRIC"
-      - FI_PROVIDER: "efa"
+      # This image ships no nixl (it is a serving image), so the serve dies at
+      # connector init with ModuleNotFoundError. 1.3.0 is the version validated
+      # on PDX; the wheel bundles its own UCX.
+      # NOTE: the package to install is plain `nixl`, not `nixl-cu13`. nixl-cu13
+      # installs the module as `nixl_cu13`, and the connector imports `nixl`.
+      - PIP_EXTRA_PACKAGES: "nixl==1.3.0"
+      # Transport. The LIBFABRIC/EFA path needs the whole AWS rdma-core set
+      # grafted into the image (validated for K3 in ~/lustre/k3work/efa701, but
+      # against a different image), and when it was A/B'd it came out SLOWER
+      # than TCP -- the bottleneck is serve prefill, not transfer, and that is
+      # only more true for an 820 B base. So: UCX, pinned to tcp.
+      # UCX_TLS is not optional. Left to probe, UCX finds the node's 18 EFA
+      # NICs and segfaults the dataloader workers at agent init.
+      - NIXL_BACKENDS: "UCX"
+      # cuda_copy is load-bearing, not decoration: without it UCX reports
+      # "UCX CUDA support was not found" and registerMem fails on the VRAM
+      # hidden-state buffers. tcp/sm/self keep the EFA NICs out.
+      - UCX_TLS: "tcp,sm,self,cuda_copy"
       - NCCL_IB_DISABLE: "1"
       # Node-local, per the FlexAttention note in the header.
       - TRITON_CACHE_DIR: "/raid/scratch/haoguo-triton"
