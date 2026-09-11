@@ -22,7 +22,16 @@ docker build --build-arg VLLM_VERSION=0.26.0 \
   -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.26.0 .
 ```
 
-Alternatively, install vLLM and ModelOpt directly with pip.
+For a direct installation from the ModelOpt repository root, install the tested vLLM
+release and the ModelOpt extras used by this example:
+
+```bash
+python3 -m pip install "vllm==0.28.0"
+python3 -m pip install -e ".[all,mlflow]"
+```
+
+See the [ModelOpt installation guide](../../docs/source/getting_started/_installation_for_Linux.rst)
+for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 

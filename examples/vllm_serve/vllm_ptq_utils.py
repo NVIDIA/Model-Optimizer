@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import dataclasses
-import warnings
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -64,20 +64,19 @@ def _allocate_calibration_blocks(
             return [empty_block_ids for _ in sequence_lengths], None
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
+            """Calculate the vLLM 0.26 warmup block reservation."""
             # vLLM 0.26's warmup reservation policy.
             if isinstance(kv_cache_spec, CrossAttentionSpec):
                 num_tokens = 0
             num_blocks = cdiv(num_tokens, kv_cache_spec.block_size)
-            if (
-                isinstance(kv_cache_spec, MambaSpec)
-                and kv_cache_spec.mamba_cache_mode == "align"
-            ):
+            if isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode == "align":
                 num_blocks += kv_cache_spec.num_speculative_blocks
             return num_blocks
 
     else:
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
+            """Calculate the current vLLM warmup block reservation."""
             # Calibration runs before model_state is initialized, so call the
             # underlying reservation policy rather than _warmup_block_counter.
             return _reserved_block_count(
@@ -87,6 +86,7 @@ def _allocate_calibration_blocks(
                 max_model_len=model_runner.max_model_len,
                 max_encoder_len=0,
             )
+
     next_block_id = 1  # Block 0 is reserved as the null block.
     block_ids_batch: list[tuple[list[int], ...]] = []
     allocated_block_ids: list[int] = []
@@ -110,14 +110,33 @@ def _allocate_calibration_blocks(
         )
 
     scheduler_fields = {field.name for field in dataclasses.fields(SchedulerOutput)}
-    blocks_to_zero = (
-        allocated_block_ids if "new_block_ids_to_zero" in scheduler_fields else None
-    )
+    blocks_to_zero = allocated_block_ids if "new_block_ids_to_zero" in scheduler_fields else None
     return block_ids_batch, blocks_to_zero
 
 
+def _cleanup_calibration_requests(
+    self: Any,
+    cleanup_output: SchedulerOutput,
+    calibration_error: BaseException | None,
+) -> None:
+    """Clean request state without hiding an active calibration error."""
+    try:
+        self.execute_model(cleanup_output)
+    except Exception as execute_error:
+        try:
+            self.model_runner.finish_requests(cleanup_output)
+        except Exception as finish_error:
+            if calibration_error is not None:
+                finish_error.__cause__ = execute_error
+                raise calibration_error from finish_error
+            raise finish_error from execute_error
+
+
 def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], None]:
+    """Create a calibration loop backed by the vLLM worker scheduler."""
+
     def calibrate_loop(model: Any) -> None:
+        """Calibrate the model with batches submitted through the scheduler."""
         for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
             input_ids_batch = batch["input_ids"]
 
@@ -204,18 +223,11 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     structured_output_request_ids={},
                     grammar_bitmask=None,
                 )
-                try:
-                    self.execute_model(cleanup_output)
-                except Exception:
-                    # Older runners expose cleanup directly instead of accepting
-                    # an empty execute_model step.
-                    try:
-                        self.model_runner.finish_requests(cleanup_output)
-                    except Exception:
-                        warnings.warn(
-                            "Failed to clean up request state after calibration batch.",
-                            stacklevel=2,
-                        )
+                _cleanup_calibration_requests(
+                    self,
+                    cleanup_output,
+                    calibration_error=sys.exc_info()[1],
+                )
 
     return calibrate_loop
 
@@ -257,6 +269,7 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
 
 
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
+    """Resolve and merge model and KV-cache quantization configuration."""
     import copy
 
     if quant_config["recipe_path"]:
