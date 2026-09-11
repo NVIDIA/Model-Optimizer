@@ -395,7 +395,7 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
-- **`models/Qwen/Qwen3.8-27B/ptq/autoquant_nvfp4_max_5p5bits_local_hessian`**
+- **`models/Qwen/Qwen3.8-27B/ptq/local_hessian_nvfp4_w4a4_mlp_fp8_attn`**
   reproduces the 5.5-bit NVFP4-max AutoQuantize assignment for `Qwen/Qwen3.8-27B`:
   MLP projections and `lm_head` use NVFP4 W4A4, self-attention and the large
   linear-attention projections use FP8 W8A8, and the vision tower, MTP layers,

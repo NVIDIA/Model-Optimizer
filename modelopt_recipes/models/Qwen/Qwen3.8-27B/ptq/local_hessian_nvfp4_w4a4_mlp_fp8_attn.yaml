@@ -15,7 +15,7 @@
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
-  assignment: models/Qwen/Qwen3.8-27B/ptq/autoquant_nvfp4_max_5p5bits_local_hessian.quant_cfg
+  base: models/Qwen/Qwen3.8-27B/ptq/max_nvfp4_w4a4_mlp_fp8_attn
 
 metadata:
   recipe_type: ptq
@@ -24,11 +24,10 @@ metadata:
     the 5.5-bit NVFP4-max AutoQuantize sweep.
 
 quantize:
+  $import: base
   algorithm:
     method: local_hessian
     fp8_scale_sweep: true
     layerwise:
       enable: true
       get_qdq_activations_from_prev_layer: true
-  quant_cfg:
-    - $import: assignment

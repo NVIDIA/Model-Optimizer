@@ -13,15 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Qwen3.8-27B precision assignment exported by a 5.5-bit NVFP4-max AutoQuantize sweep.
+# QuantizeConfig for the precision assignment exported by a 5.5-bit NVFP4-max AutoQuantize sweep.
 
-# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   fp8: configs/numerics/fp8
   nvfp4: configs/numerics/nvfp4
   nvfp4_static: configs/numerics/nvfp4_static
----
+
+algorithm: max
+quant_cfg:
   - $import: base_disable_all
 
   - quantizer_name: '*language_model.layers.*.mlp.*.weight_quantizer'
