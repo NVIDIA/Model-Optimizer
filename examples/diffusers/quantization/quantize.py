@@ -586,22 +586,6 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _apply_quantization_policy(
-    backbone: torch.nn.Module,
-    backbone_name: str,
-    quant_config: QuantizationConfig,
-    model_type: ModelType,
-) -> None:
-    if backbone_name in ("video_decoder", "vae"):
-        return
-
-    check_conv_and_mha(
-        backbone,
-        quant_config.format == QuantFormat.FP4 and model_type not in _SDXL_MODEL_TYPES,
-        quant_config.quantize_mha,
-    )
-
-
 def _restore_quantization_policy(
     backbones: list[tuple[str, torch.nn.Module]],
 ) -> QuantFormat:
@@ -610,14 +594,12 @@ def _restore_quantization_policy(
 
     for backbone_name, backbone in backbones:
         for module in backbone.modules():
-            if isinstance(module, TensorQuantizer):
+            if isinstance(module, TensorQuantizer) and module.is_enabled:
                 has_nvfp4 |= module.is_nvfp4_dynamic or module.is_nvfp4_static
                 has_fp8 |= module.is_fp8
 
-        if backbone_name in ("video_decoder", "vae"):
-            continue
-
-        for module in backbone.modules():
+            if backbone_name in ("video_decoder", "vae"):
+                continue
             q_quantizer = getattr(module, "q_bmm_quantizer", None)
             k_quantizer = getattr(module, "k_bmm_quantizer", None)
             v_quantizer = getattr(module, "v_bmm_quantizer", None)
@@ -724,7 +706,7 @@ def main() -> None:
 
         export_manager = ExportManager(export_config, logger, pipeline_manager)
 
-        if export_config.restore_from and export_config.restore_from.exists():
+        if export_config.restore_from:
             export_manager.restore_checkpoint()
             quant_config.format = _restore_quantization_policy(
                 list(pipeline_manager.iter_backbones())
@@ -759,9 +741,13 @@ def main() -> None:
                     mtq.compress(backbone)
                     logger.info(f"{backbone_name} compression completed")
 
-                _apply_quantization_policy(
-                    backbone, backbone_name, quant_config, model_config.model_type
-                )
+                if backbone_name not in ("video_decoder", "vae"):
+                    check_conv_and_mha(
+                        backbone,
+                        quant_config.format == QuantFormat.FP4
+                        and model_config.model_type not in _SDXL_MODEL_TYPES,
+                        quant_config.quantize_mha,
+                    )
 
                 export_manager.save_checkpoint(backbone, backbone_name)
 

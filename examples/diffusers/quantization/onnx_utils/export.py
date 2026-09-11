@@ -30,7 +30,6 @@
 # limitations under the License.
 
 import os
-import shutil
 import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -125,12 +124,11 @@ def flux_convert_rope_weight_type(onnx_graph):
 
 
 def _has_enabled_conv(backbone):
-    for module in backbone.modules():
-        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and (
-            module.input_quantizer.is_enabled or module.weight_quantizer.is_enabled
-        ):
-            return True
-    return False
+    return any(
+        isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d))
+        and (module.input_quantizer.is_enabled or module.weight_quantizer.is_enabled)
+        for module in backbone.modules()
+    )
 
 
 @contextmanager
@@ -143,7 +141,7 @@ def _temporary_fp8_export_scales(backbone, conv_only=False):
     )
     quantizer_states = []
     try:
-        for _, module in backbone.named_modules():
+        for module in backbone.modules():
             if not isinstance(module, module_types):
                 continue
             for quantizer_name in ("input_quantizer", "weight_quantizer"):
@@ -501,14 +499,13 @@ def _normalize_fp8_qdq(onnx_model):
 
 
 def _ensure_default_opset(onnx_model, minimum_version):
-    for opset_import in onnx_model.opset_import:
-        if opset_import.domain in {"", "ai.onnx"}:
-            opset_import.version = max(opset_import.version, minimum_version)
-            return
-
-    opset_import = onnx_model.opset_import.add()
-    opset_import.domain = ""
-    opset_import.version = minimum_version
+    opset_import = next(
+        (item for item in onnx_model.opset_import if item.domain in {"", "ai.onnx"}), None
+    )
+    if opset_import is None:
+        opset_import = onnx_model.opset_import.add()
+        opset_import.domain = ""
+    opset_import.version = max(opset_import.version, minimum_version)
 
 
 def _process_fp4_onnx_graph(onnx_model, model_name):
@@ -582,9 +579,8 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     do_constant_folding = True
     opset_version = 20
 
-    tmp_subfolder = tempfile.mkdtemp(prefix="myapp_")
-    tmp_output = Path(f"{tmp_subfolder}/{model_file_name}")
-    try:
+    with tempfile.TemporaryDirectory(prefix="myapp_", ignore_cleanup_errors=True) as tmp_subfolder:
+        tmp_output = Path(tmp_subfolder) / model_file_name
         with quantizer_context, fp8_scale_context, torch.inference_mode():
             onnx_export(
                 backbone,
@@ -608,5 +604,3 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         if precision == "fp4":
             onnx_model = _process_fp4_onnx_graph(onnx_model, model_name)
         save_onnx(onnx_model, q_output)
-    finally:
-        shutil.rmtree(tmp_subfolder, ignore_errors=True)
