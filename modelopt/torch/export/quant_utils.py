@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.models import get_spec, list_all_possible, match_class_names
+from modelopt.torch.models import get_spec, list_all_possible
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -1378,9 +1378,23 @@ def fuse_prequant_to_linear(
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    # Weight-plus-one norm class names are per-model data (ExportSpec); the
-    # zero_centered_gamma attribute check is the structural fallback.
-    if match_class_names(module, list_all_possible("weight_plus_one_norm_names")):
+    """Whether this norm stores ``w - 1``, so export must fold scales into ``weight + 1``.
+
+    The names are per-model data (``ExportSpec.weight_plus_one_norm_names``) but the match
+    is by *substring*, not exact name, which is what the hardcoded list this replaced did.
+    That is load-bearing rather than sloppy: the convention travels by family, and
+    transformers derives several norms whose names embed a registered one --
+    ``DiffusionGemmaRMSNorm``, ``RecurrentGemmaRMSNorm``, ``T5GemmaRMSNorm``,
+    ``T5Gemma2RMSNorm``, ``VaultGemmaRMSNorm`` all carry the Gemma convention. Exact
+    matching would drop them silently, and the failure is wrong numerics in an exported
+    checkpoint rather than an error.
+
+    Checked against every class in the MRO so quantized subclasses still match.
+    ``zero_centered_gamma`` is the structural fallback for norms that announce it.
+    """
+    registered = [n.lower() for n in list_all_possible("weight_plus_one_norm_names")]
+    mro_names = [cls.__name__.lower() for cls in type(module).__mro__]
+    if any(name in cls_name for cls_name in mro_names for name in registered):
         return True
 
     return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
