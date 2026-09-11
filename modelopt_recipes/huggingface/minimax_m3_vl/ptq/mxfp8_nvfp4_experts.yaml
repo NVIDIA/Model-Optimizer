@@ -47,18 +47,4 @@ quantize:
         $import: nvfp4
         # 2688 = E2M1_MAX * E4M3_MAX (6 * 448), so input_scale is exactly 1.0.
         constant_amax: 2688.0
-    # The HF `minimax_m3_vl` classes name the MoE block `block_sparse_moe`, so the
-    # routed experts are `block_sparse_moe.experts.<i>.w{1,2,3}` and the `mlp.experts`
-    # patterns above never reach them. Same pair as the sibling
-    # `nvfp4_experts_only.yaml`; without it the experts fall through to MXFP8 and the
-    # recipe does not reproduce nvidia/MiniMax-M3-NVFP4.
-    - quantizer_name: "*block_sparse_moe.experts.*weight_quantizer"
-      cfg: {$import: nvfp4_static}
-    - quantizer_name: "*block_sparse_moe.experts.*input_quantizer"
-      cfg:
-        $import: nvfp4
-        constant_amax: 2688.0
     - $import: default_disabled_quantizers
-    # The multimodal patch merger is part of the vision path but does not match any
-    # `default_disabled_quantizers` pattern; the published checkpoint leaves it BF16.
-    - {quantizer_name: '*patch_merge_mlp*', enable: false}

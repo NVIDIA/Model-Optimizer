@@ -72,6 +72,3 @@ quantize:
     # Latent-MoE projections stay BF16 -- `*_proj` wildcards above do not reach them,
     # but pin it so a widened pattern cannot silently pull them in.
     - {quantizer_name: '*latent_proj*', enable: false}
-    # MTP head -> BF16. MUST stay last: the broad `*mixer.experts*` /
-    # `*mixer.shared_experts*` patterns also reach `mtp.layers.*.mixer.*`.
-    - {quantizer_name: 'mtp.*', enable: false}
