@@ -29,3 +29,13 @@ testpaths = ["tests"]
 
 [dependency-groups]
 dev = []
+
+# Without these `uv run launch.py` fails with ModuleNotFoundError: modelopt_launcher --
+# uv reports "this project is not packaged" and never installs it into the venv, so the
+# package-dir mapping above (modelopt_launcher -> .) is never applied.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
