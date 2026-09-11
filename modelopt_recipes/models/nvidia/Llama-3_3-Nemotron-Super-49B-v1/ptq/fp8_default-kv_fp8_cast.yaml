@@ -13,17 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Alias for `general/ptq/fp8_default-kv_fp8_cast`, at the hub path of
-# nvidia/Llama-3_3-Nemotron-Super-49B-v1, so the recipe behind a released
-# checkpoint can be found from the model rather than only under the general tier.
+# Same recipe as `general/ptq/fp8_default-kv_fp8_cast`, recorded at the hub path of
+# nvidia/Llama-3_3-Nemotron-Super-49B-v1 so it is reachable from the checkpoint
+# rather than only from the general tier.
 #
-# `nvidia/Llama-3_3-Nemotron-Super-49B-v1-FP8` is an FP8 W8A8 release with an
-# FP8 KV cache; its `hf_quant_config.json` excludes only `lm_head`, which is what the
-# general recipe's standard exclusions already leave out.
-#
-# A top-level `$import` brings in the imported recipe whole, so `quantize` -- its
-# algorithm and every `quant_cfg` entry -- comes from there and only `metadata` is local.
-# Edit the base recipe to change what this produces.
+# FP8 W8A8 on every linear, with an FP8 KV cache in cast mode. `nvidia/Llama-3_3-Nemotron-Super-49B-v1-FP8`
+# excludes only `lm_head`, which the general recipe's standard exclusions already leave
+# out, so nothing checkpoint-specific is needed.
 
 imports:
   base: general/ptq/fp8_default-kv_fp8_cast
