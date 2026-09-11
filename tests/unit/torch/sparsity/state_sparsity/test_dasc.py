@@ -422,11 +422,11 @@ def test_calibration_uses_storage_canonical_mask_at_wmax_boundary():
     live_horizon = mtss.compute_gdn_decay_horizons(
         model.linear_attn.A_log, model.linear_attn.dt_bias, static_gate_input=0.0
     )[0]
-    stored_horizon = mtss.compute_gdn_decay_horizons(
-        model.linear_attn.A_log.to(torch.float16),
-        model.linear_attn.dt_bias.to(torch.float16),
+    stored_horizon = mtss.analyze_gdn_decay(
+        model,
         static_gate_input=0.0,
-    )[0]
+        decay_parameter_storage_dtype="float16",
+    )["linear_attn"][0]
     assert live_horizon > 7
     assert stored_horizon < 7
 
@@ -441,6 +441,82 @@ def test_calibration_uses_storage_canonical_mask_at_wmax_boundary():
 
     assert policy["layers"]["linear_attn"]["retained_heads"] == []
     assert policy["layers"]["linear_attn"]["static_horizons"][0] < 7
+
+
+@pytest.mark.parametrize("invalid_storage_dtype", ["float8", []])
+def test_analysis_arguments_fail_at_the_public_boundary(invalid_storage_dtype):
+    """Report invalid analysis arguments uniformly without blaming a GDN module."""
+    model = TinyGatedDeltaNetForCausalLM()
+    with pytest.raises(ValueError, match="decay_parameter_storage_dtype must be one of"):
+        mtss.analyze_gdn_decay(
+            model,
+            decay_parameter_storage_dtype=invalid_storage_dtype,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("epsilon", [1.0, True, [], 10**1000, torch.tensor([1e-3, 2e-3])])
+def test_analysis_rejects_invalid_epsilon_at_the_public_boundary(epsilon):
+    """Normalize invalid epsilon values to the public ValueError contract."""
+    with pytest.raises(ValueError, match=r"epsilon must be finite and in \(0, 1\)"):
+        mtss.analyze_gdn_decay(TinyGatedDeltaNetForCausalLM(), epsilon=epsilon)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "static_gate_input", [torch.nan, True, [], 10**1000, torch.tensor([-0.3, -0.2])]
+)
+def test_analysis_rejects_invalid_static_gate_input_at_the_public_boundary(static_gate_input):
+    """Normalize invalid static gate values to the public ValueError contract."""
+    with pytest.raises(ValueError, match="static_gate_input must be finite"):
+        mtss.analyze_gdn_decay(
+            TinyGatedDeltaNetForCausalLM(),
+            static_gate_input=static_gate_input,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "message"),
+    [
+        ("epsilon", [], r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", True, r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", torch.nan, r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", 10**1000, r"epsilon must be finite and in \(0, 1\)"),
+        ("epsilon", torch.tensor([1e-3, 2e-3]), r"epsilon must be finite and in \(0, 1\)"),
+        ("static_gate_input", [], "static_gate_input must be finite"),
+        ("static_gate_input", True, "static_gate_input must be finite"),
+        ("static_gate_input", torch.nan, "static_gate_input must be finite"),
+        ("static_gate_input", 10**1000, "static_gate_input must be finite"),
+        ("static_gate_input", torch.tensor([-0.3, -0.2]), "static_gate_input must be finite"),
+    ],
+)
+def test_horizon_computation_rejects_invalid_public_arguments(argument, value, message):
+    """Use the same public argument contract for direct horizon computation."""
+    kwargs = {argument: value}
+    with pytest.raises(ValueError, match=message):
+        mtss.compute_gdn_decay_horizons(
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_horizon_computation_ignores_the_default_device():
+    """Keep CPU horizon analysis independent of PyTorch's ambient allocation device."""
+    a_log = torch.tensor([0.0])
+    dt_bias = torch.tensor([0.0])
+    with torch.device("meta"):
+        horizons = mtss.compute_gdn_decay_horizons(a_log, dt_bias)
+    assert horizons.device.type == "cpu"
+
+
+def test_policy_lifecycle_ignores_the_default_device():
+    """Keep calibration and checkpoint metadata validation on their declared CPU path."""
+    model = TinyGatedDeltaNetForCausalLM()
+    with torch.device("meta"):
+        calibrated = mtss.calibrate(model, _config(wmax_candidates=[7]), [_candidate(7)])
+        state = mto.modelopt_state(calibrated)
+        policy = mtss.export_policy(calibrated)
+    assert state["modelopt_state_dict"][0][0] == "dasc"
+    assert policy["layers"]["linear_attn"]["static_horizons"]
 
 
 def test_bf16_storage_round_trip_loaded_in_fp32_preserves_policy():
@@ -496,6 +572,29 @@ def test_cross_dtype_reload_accumulates_both_rounding_bounds(
     assert mtss.export_policy(model) == policy
 
 
+@pytest.mark.parametrize("live_dtype", [torch.float16, torch.bfloat16])
+def test_storage_rounding_excludes_exact_fp32_widening(live_dtype):
+    """Do not add FP32 slack when only the low-precision cast can round values."""
+    tensor = torch.tensor([1.25], dtype=live_dtype)
+
+    assert torch.equal(
+        dasc_policy._storage_rounding_radius(tensor, torch.float32),
+        dasc_policy._storage_rounding_radius(tensor, live_dtype),
+    )
+
+
+def test_non_finite_decay_parameters_are_rejected_on_export():
+    """Reject NaNs before interval comparisons can silently accept them."""
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    with torch.no_grad():
+        model.linear_attn.dt_bias[0] = torch.nan
+
+    with pytest.raises(ApplyModeError, match="GDN decay parameters must be finite"):
+        mtss.export_policy(model)
+
+
 def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure():
     """Keep saving recoverable while rejecting stale or tampered deployment policies."""
     model = mtss.calibrate(
@@ -540,6 +639,13 @@ def test_export_rejects_changed_decay_parameters_and_restore_rejects_structure()
 
     with pytest.raises(ApplyModeError, match="no supported GDN modules"):
         mto.restore_from_modelopt_state(nn.Linear(2, 2), state)
+
+    unsupported = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    unsupported.linear_attn = nn.Linear(2, 2)
+    with pytest.raises(ApplyModeError, match="no supported GDN modules"):
+        mto.modelopt_state(unsupported)
 
     tampered_state = copy.deepcopy(state)
     tampered_state["modelopt_state_dict"][0][1]["metadata"]["policy"]["quality_gates"][
@@ -591,6 +697,25 @@ def test_structure_staleness_does_not_block_checkpoint_save():
         )
     restored.load_state_dict(model.state_dict())
     with pytest.raises(ApplyModeError, match="module structure"):
+        mtss.export_policy(restored)
+
+
+def test_temporarily_unavailable_decay_tensors_are_recoverable_staleness():
+    """Keep save and restore symmetric when a supported GDN is temporarily flattened."""
+    model = mtss.calibrate(
+        TinyGatedDeltaNetForCausalLM(), _config(wmax_candidates=[7]), [_candidate(7)]
+    )
+    state = mto.modelopt_state(model)
+    model.linear_attn.A_log = None
+
+    with pytest.warns(UserWarning, match="saved DASC policy is stale"):
+        mto.modelopt_state(model)
+
+    target = TinyGatedDeltaNetForCausalLM()
+    target.linear_attn.A_log = None
+    with pytest.warns(UserWarning, match="restored DASC policy is stale"):
+        restored = mto.restore_from_modelopt_state(target, state)
+    with pytest.raises(ApplyModeError, match="without A_log and dt_bias tensors"):
         mtss.export_policy(restored)
 
 
