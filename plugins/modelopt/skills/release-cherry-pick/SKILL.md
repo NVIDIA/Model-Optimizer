@@ -19,35 +19,32 @@ Before fetching the labeled queue, audit release NVBugs and recent merged PRs so
 
 ### Audit release NVBugs
 
-Use NVBug IDs supplied by the user or found in their release source (for example, a test-plan document or release message). If none were supplied, ask the user for the NVBug list; do not assume the GitHub queue is complete.
+Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned; do not ask the user for a list.
 
-For each NVBug:
-
-1. Open `https://nvbugspro.nvidia.com/bug/<NVBUG>`.
-2. Verify it has the exact release label `Committed_ModelOpt_<VERSION>`.
-3. Inspect its comments for `github.com/NVIDIA/Model-Optimizer/pull/<PR>` links. Record every linked PR, not only the latest comment.
-4. Verify each linked PR is merged into `main` and is a bug fix. A release-labeled NVBug is evidence for review, not by itself proof that every linked PR should be picked.
-
-If an NVBug lacks the expected NVBug label, report it but do not edit NVBug. If browser access is unavailable, report that the NVBug portion of the audit could not be completed and ask the user for the relevant PR links or exported comments.
+Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Verify each linked PR is merged into `main` and is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
 
 ### Audit recent merged PRs
 
-Treat PRs merged into `main` since the release branch diverged as "recent":
+Treat PRs merged into `main` since the latest release candidate as "recent":
 
 ```bash
-git fetch origin main release/<VERSION>
-BASE=$(git merge-base origin/main origin/release/<VERSION>)
-SINCE=$(git show -s --format=%cs "$BASE")
+git fetch origin main release/<VERSION> --tags
+RC_TAG=$(git tag --merged origin/release/<VERSION> \
+  --list '<VERSION>rc*' --sort=-version:refname | head -1)
+test -n "$RC_TAG"
+SINCE=$(git for-each-ref --format='%(creatordate:iso-strict)' \
+  "refs/tags/$RC_TAG")
 
-gh pr list \
+gh search prs \
   --repo NVIDIA/Model-Optimizer \
-  --state merged \
+  --merged \
   --base main \
+  --merged-at ">=$SINCE" \
   --limit 1000 \
-  --json number,title,author,mergedAt,labels,url \
-  | jq --arg since "${SINCE}T00:00:00Z" \
-      '[.[] | select(.mergedAt >= $since)]'
+  --json number,title,author,labels,url
 ```
+
+Assert that the GitHub result has no next-page token before continuing; abort the audit if it does.
 
 Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
 
@@ -55,7 +52,7 @@ Review each PR's title, body, labels, changed files, and linked issue context. C
 - **No** — feature, refactor, cleanup, dependency refresh, or other change not needed to correct the release.
 - **Unclear** — insufficient evidence or meaningful backport risk; ask the user.
 
-Do not classify a PR as a bug fix from the word `fix` alone. Deduplicate PRs found through both audits.
+Deduplicate PRs found through both audits.
 
 ### Report and label
 
@@ -64,7 +61,7 @@ Present the complete audit before changing GitHub labels:
 | PR | Title | Author | NVBug(s) | Bug fix? | `cherry-pick-<VERSION>` present? | Recommendation |
 |---|---|---|---|---|---|---|
 
-Use `—` when no NVBug is known. Also list NVBugs with no linked PR or a missing `Committed_ModelOpt_<VERSION>` label. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
+Use `—` when no NVBug is known. Also list NVBugs with no linked PR. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
 
 ```bash
 for pr in <APPROVED_NUMBERS>; do
