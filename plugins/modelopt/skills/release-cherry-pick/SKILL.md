@@ -73,6 +73,12 @@ Present the complete audit before changing GitHub labels:
 | PR | Title | Author | NVBug(s) | Bug fix? | `cherry-pick-<VERSION>` present? | Recommendation |
 |---|---|---|---|---|---|---|
 
+Use these recommendation values and sort the table in this order:
+
+1. **Needs label** — confirmed release-relevant bug fix.
+2. **Unknown** — requires user judgment.
+3. **No action needed** — not a release-relevant bug fix.
+
 Use `—` when no NVBug is known. Also list NVBugs with no linked PR. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
 
 ```bash
