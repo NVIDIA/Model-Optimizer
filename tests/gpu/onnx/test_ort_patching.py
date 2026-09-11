@@ -154,13 +154,13 @@ class TestHistogramCollection:
         assert "tensor2" in mock_histogram_collector.histogram_dict
 
     @pytest.mark.parametrize(
-        ("collect_value", "batched_input"),
+        "collect_value",
         [
-            (_collect_value, True),
-            (_collect_value_histogram_collector_single_node_calibration, False),
+            _collect_value,
+            _collect_value_histogram_collector_single_node_calibration,
         ],
     )
-    def test_collect_value_fp16_narrow_range(self, collect_value, batched_input):
+    def test_collect_value_fp16_narrow_range(self, collect_value):
         collector = HistogramCollector(
             method="entropy",
             symmetric=False,
@@ -172,8 +172,7 @@ class TestHistogramCollection:
         activations = np.zeros(1000, dtype=np.float16)
         for activation_max in (1e-6, 1e-6, 2e-6):
             activations[0] = np.float16(activation_max)
-            name_to_arr = {"narrow_fp16_tensor": [activations] if batched_input else activations}
-            collect_value(collector, name_to_arr)
+            collect_value(collector, {"narrow_fp16_tensor": [activations]})
 
         hist, edges, _, _, threshold = collector.histogram_dict["narrow_fp16_tensor"]
         assert hist.sum() == 3 * activations.size
