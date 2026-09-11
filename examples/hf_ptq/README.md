@@ -477,8 +477,44 @@ leaving the original recipe unchanged.
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 
-KV cache is applied as a uniform post-step, not part of the per-layer search. An AutoQuantize recipe
-falls back to `--kv_cache_qformat` (default `fp8_cast`) unless it sets an explicit `kv_cache` field.
+Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
+`--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
+
+KV-cache AutoQuantize recipes use the same `mtq.auto_quantize` API and set
+`constraints.cost_model: kv_cache` with an `effective_bits` target. Their
+`candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
+packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
+preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.
+The shipped recipe searches FP8-cast K/V (8.0 bits/scalar) and NVFP4-cast K/V
+(4.5 bits/scalar) at 5.4 bits/scalar. It intentionally excludes FP8-K/NVFP4-V because the
+companion vLLM implementation does not support that asymmetric per-layer format:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path Qwen/Qwen3.8-27B \
+  --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
+  --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
+  --export_path /path/to/qwen3.8-27b-mixed-kv
+```
+
+Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
+keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
+formats in `kv_cache_quantized_layers`. `mtq.auto_quantize` returns the sensitivity scores and
+selected recipe in its search state; `--auto_quantize_checkpoint` stores that resumable state,
+including the candidate quantizer tensors needed for replay.
+
+KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
+for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible
+layers and candidates in mind. Peak scoring memory also grows with the number of selected tokens
+times the model vocabulary because reference and candidate log probabilities are computed in FP32.
+
+> [!NOTE]
+> Layer-wise KV checkpoints require the companion
+> [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
+> vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
+> `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
+> Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
+> kernels once the layer-wise metadata consumer is available.
 
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):
@@ -514,6 +550,8 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 ## Multi-Node Post-Training Quantization with FSDP2
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
+
+> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
 
 ### Usage
 
@@ -700,6 +738,7 @@ seconds rather than after a full calibration.
 | --- | --- |
 | `command.txt` | The full invocation, copy-pasteable, with credentials masked |
 | `version.txt` | The ModelOpt version that ran |
+| `experiment.json` | The experiment name, run id and run URL — the same file written into `--export_path` |
 | `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
 | `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
@@ -710,6 +749,22 @@ seconds rather than after a full calibration.
 Every command-line argument is also logged as a searchable param, alongside
 `user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
 still recorded, with status `FAILED` and its log attached.
+
+A tracked run also drops `.experiment.json` into `--export_path`, so a checkpoint found on
+disk names the run that produced it:
+
+```bash
+cat <quantized_ckpt_path>/.experiment.json
+# {"tracking_uri": ..., "experiment_name": ..., "experiment_id": ..., "run_id": ...,
+#  "run_name": ..., "run_url": ...}
+```
+
+The local file is written only once the export itself completes, so a run that fails
+earlier leaves whatever checkpoint is already in `--export_path` — and its pointer —
+untouched. The `experiment.json` artifact is uploaded for every run that opened, so a
+failed run stays traceable from the server. An export that is *not* tracked removes any
+pointer it would otherwise inherit, from a reused `--export_path` or from a tracked source
+checkpoint.
 
 Other flags:
 

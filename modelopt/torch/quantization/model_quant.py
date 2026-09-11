@@ -19,7 +19,7 @@ import fnmatch
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
 
@@ -38,9 +38,12 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
+from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
+from .kv_cache_auto_quant import AutoQuantizeKVSearcher, get_kv_cache_auto_quantize_config
+from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
@@ -269,10 +272,133 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
 }
 
 
+def _process_quantization_formats(formats, custom_name_prefix):
+    """Resolve search formats and preserve explicitly supplied display names."""
+    processed = []
+    for index, item in enumerate(formats):
+        if item is None:
+            continue
+        if isinstance(item, tuple):
+            if len(item) != 2:
+                raise ValueError("Named quantization formats must be (config, name) pairs.")
+            quant_cfg, name = item
+            if not isinstance(name, str) or not name:
+                raise ValueError("Quantization format names must be non-empty strings.")
+        else:
+            quant_cfg = item
+            name = QuantRecipe.get_auto_name_for_config(quant_cfg)
+            if name is None:
+                name = f"{custom_name_prefix}_{index}"
+                warnings.warn(
+                    "Received custom quantization formats for search, auto_quantize results may "
+                    f"not be optimal. This config will be displayed as {name}"
+                )
+        processed.append((quant_cfg, name))
+    return processed
+
+
+def _auto_quantize_kv_cache(
+    model: nn.Module,
+    constraints: dict[str, Any],
+    quantization_formats: Sequence[dict[str, Any] | str | tuple[dict[str, Any], str]],
+    *,
+    data_loader: Iterable | None,
+    forward_step: Callable[[nn.Module, Any], Any | torch.Tensor] | None,
+    loss_func: Callable[[Any, Any], torch.Tensor] | None,
+    forward_backward_step: Callable[[nn.Module, Any], Any] | None,
+    disabled_layers: list[str] | str | None,
+    num_calib_steps: int,
+    num_score_steps: int,
+    verbose: bool,
+    method: str | None,
+    checkpoint: str | None,
+    module_search_spaces: list[dict[str, Any]] | None,
+    fixed_quantization_config: dict[str, Any] | str | None,
+):
+    """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
+    if (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+    ):
+        raise RuntimeError(
+            "KV-cache AutoQuantize is single-process only; distributed scoring, selection, "
+            "and checkpoint writes are not synchronized."
+        )
+    if is_quantized(model):
+        raise NotImplementedError(
+            "KV-cache AutoQuantize requires an unquantized model; composing it after GEMM "
+            "PTQ or AutoQuantize is not supported yet."
+        )
+    if method not in (None, "kl_div"):
+        raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
+    if fixed_quantization_config is not None or module_search_spaces:
+        raise ValueError(
+            "KV-cache AutoQuantize does not support fixed_quantization_config or "
+            "module_search_spaces."
+        )
+    if loss_func is not None or forward_backward_step is not None:
+        raise ValueError(
+            "KV-cache AutoQuantize uses forward KL and does not accept loss_func or "
+            "forward_backward_step."
+        )
+    if not quantization_formats:
+        raise ValueError("cost_model='kv_cache' requires a non-empty quantization_formats list.")
+    if data_loader is None or forward_step is None:
+        raise ValueError("data_loader and forward_step must be provided for KV-cache AutoQuantize.")
+
+    processed_kv_formats: list[tuple[dict[str, Any], str | None]] = []
+    for candidate in quantization_formats:
+        if isinstance(candidate, tuple):
+            raw_config, name = candidate
+            if not isinstance(name, str) or not name:
+                raise ValueError("KV-cache AutoQuantize candidate names must be non-empty strings.")
+        elif isinstance(candidate, str):
+            if not hasattr(mtq, candidate):
+                raise ValueError(f"Unknown KV-cache quantization format: {candidate!r}.")
+            raw_config, name = getattr(mtq, candidate), candidate
+        elif isinstance(candidate, dict):
+            raw_config = candidate
+            name = QuantRecipe.get_auto_name_for_config(candidate)
+        else:
+            raise TypeError(
+                "KV-cache quantization formats must be config dictionaries, preset names, "
+                "or (config, name) tuples."
+            )
+        if not isinstance(raw_config, dict):
+            raise TypeError("KV-cache AutoQuantize formats must resolve to config dictionaries.")
+        processed_kv_formats.append((raw_config, name))
+
+    _validate_kv_cache_search_inputs(
+        constraints,
+        processed_kv_formats,
+        num_calib_steps,
+        num_score_steps,
+    )
+    model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+    searcher = AutoQuantizeKVSearcher()
+    searcher.search(
+        model,
+        cast("ConstraintsDict", constraints),
+        config={
+            "quantization_formats": processed_kv_formats,
+            "data_loader": data_loader,
+            "forward_step": forward_step,
+            "num_calib_steps": num_calib_steps,
+            "num_score_steps": num_score_steps,
+            "disabled_layers": disabled_layers,
+            "verbose": verbose,
+            "checkpoint": checkpoint,
+        },
+    )
+    return model, searcher.state_dict()
+
+
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
-    quantization_formats: list[dict[str, Any] | str] | None = None,
+    quantization_formats: Sequence[dict[str, Any] | str | tuple[dict[str, Any], str]] | None = None,
     data_loader: Iterable | None = None,
     forward_step: Callable[[nn.Module, Any], Any | torch.Tensor] | None = None,
     loss_func: Callable[[Any, Any], torch.Tensor] | None = None,
@@ -281,7 +407,7 @@ def auto_quantize(
     num_calib_steps: int = 512,
     num_score_steps: int = 128,
     verbose: bool = False,
-    method: str = "gradient",
+    method: str | None = None,
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
@@ -305,9 +431,11 @@ def auto_quantize(
         model: A pytorch model with quantizer modules.
         constraints: Constraints for the search. ``effective_bits`` specifies the effective number
             of bits for the quantized model and defaults to 4.8. ``cost_model`` selects the metric
-            used for the effective-bits constraint and currently supports ``"weight"`` (default)
-            and ``"active_moe"``. Additional cost-model parameters are provided through the nested
-            ``cost`` dict.
+            used for the effective-bits constraint and supports ``"weight"`` (default),
+            ``"active_moe"``, and ``"kv_cache"``. The KV-cache cost model dispatches to isolated
+            forward-KL scoring over paired K/V formats; BF16/no-quant is its scoring reference but
+            is never solver-selectable. Additional cost-model parameters are provided through the
+            nested ``cost`` dict.
 
             Here is an example for valid ``effective_bits`` argument:
 
@@ -326,7 +454,10 @@ def auto_quantize(
                     },
                 }
 
-        quantization_formats: A list of quantization format config dictionaries or string names to search for.
+                # For paired K/V-cache formats with exact K/V storage accounting
+                constraints = {"effective_bits": 5.4, "cost_model": "kv_cache"}
+
+        quantization_formats: A sequence of quantization format config dictionaries or string names to search for.
             Each config dictionary should be valid as a ``config`` argument in
             :meth:`quantize <modelopt.torch.quantization.model_quant.quantize>`.
             The supported quantization format names are as listed by :attr:`modelopt.torch.quantization.config.choices`.
@@ -509,30 +640,40 @@ def auto_quantize(
         might not be readily deployable to TensorRT-LLM yet.
 
     """
+    if quantization_formats is not None:
+        if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
+            raise TypeError("`quantization_formats` must be a sequence of formats.")
+        quantization_formats = list(quantization_formats)
 
-    def _process_quantization_formats(formats, custom_name_prefix):
-        processed = []
-        for i, quant_cfg in enumerate(formats):
-            if quant_cfg is None:
-                continue
+    is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
+    if is_kv_search:
+        assert constraints is not None
+        assert quantization_formats is not None
+        return _auto_quantize_kv_cache(
+            model,
+            constraints,
+            quantization_formats,
+            data_loader=data_loader,
+            forward_step=forward_step,
+            loss_func=loss_func,
+            forward_backward_step=forward_backward_step,
+            disabled_layers=disabled_layers,
+            num_calib_steps=num_calib_steps,
+            num_score_steps=num_score_steps,
+            verbose=verbose,
+            method=method,
+            checkpoint=checkpoint,
+            module_search_spaces=module_search_spaces,
+            fixed_quantization_config=fixed_quantization_config,
+        )
 
-            name = QuantRecipe.get_auto_name_for_config(quant_cfg)
-            if name is None:
-                name = f"{custom_name_prefix}_{i}"
-                warnings.warn(
-                    "Received custom quantization formats for search, auto_quantize results may "
-                    f"not be optimal. This config will be displayed as {name}"
-                )
-            processed.append((quant_cfg, name))
-        return processed
+    method = method or "gradient"
 
     if fixed_quantization_config is None and quantization_formats is None:
         quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
     elif fixed_quantization_config is not None and quantization_formats is None:
         quantization_formats = []
 
-    if not isinstance(quantization_formats, list):
-        raise TypeError("`quantization_formats` must be a list.")
     if fixed_quantization_config is not None and quantization_formats:
         raise ValueError(
             "`fixed_quantization_config` cannot be combined with global "
@@ -692,6 +833,8 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             # fresh_model = load_model(...)
             # fresh_model = mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
     """
+    if search_state.get("cost_model") == COST_MODEL_KV_CACHE:
+        return get_kv_cache_auto_quantize_config(search_state, constraints, verbose=verbose)
     return _get_auto_quantize_config(search_state, constraints, verbose=verbose)
 
 
