@@ -95,24 +95,39 @@ def load_recipe(
 
       .. _recipe-alias:
 
-      A recipe may instead **delegate its whole body to another recipe** with a
-      top-level ``$import``, keeping only its own ``metadata``::
+      A recipe can instead **alias an existing recipe**. A top-level ``$import``
+      brings the imported recipe in whole, so the file needs nothing else::
+
+          imports:
+            base: general/ptq/nvfp4_default-kv_fp8_cast
+
+          $import: base
+
+      That resolves to exactly the imported recipe -- its body, its algorithm and
+      its metadata alike -- under a second name.
+
+      Keys given alongside the ``$import`` override the imported ones, so an alias
+      can say what it is for while inheriting everything else::
 
           imports:
             base: general/ptq/nvfp4_default-kv_fp8_cast
 
           $import: base
           metadata:
-            recipe_type: ptq
             description: What this checkpoint uses the base recipe for.
 
-      Top-level keys given alongside the ``$import`` override the imported ones, so
-      the alias supplies its own ``metadata`` while inheriting ``quantize``
-      unchanged. The imported recipe must declare
-      ``# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe`` (or the
-      matching recipe schema), like any other importable snippet. This is how the
-      checkpoint aliases under ``models/<org>/<model_id>/`` record that a released
-      checkpoint is reproduced by a general recipe without duplicating it.
+      An override replaces a top-level key outright rather than merging into it, so
+      a partial ``metadata`` supplies the whole section. Nothing needs restating in
+      either form: the recipe's kind comes from the imported recipe (see
+      :func:`_peek_recipe_type`), and the two must agree if the alias states one.
+
+      The one requirement is on the other side -- the imported recipe must carry a
+      ``# modelopt-schema:`` comment naming its schema class, as every
+      ``$import``-able file must.
+
+      This is how the checkpoint entries under ``models/<org>/<model_id>/`` record
+      that a released checkpoint is reproduced by an existing recipe without
+      duplicating it.
     * A directory containing ``metadata.yml`` and ``quantize.yml`` —
       **PTQ recipes only**. Speculative-decoding recipes are always single YAML files.
 
@@ -184,8 +199,10 @@ def _peek_recipe_type(
        that are **imported** by another one need this -- it is what
        ``$import`` resolution requires of any snippet -- so a leaf recipe never has to
        carry it;
-    2. ``metadata.recipe_type`` in the YAML body. This is what an ordinary standalone
-       recipe uses, and the only option for a directory recipe's ``metadata.yml``;
+    2. ``metadata.recipe_type`` in the YAML body. **Deprecated** -- still read and still
+       honoured, so no existing recipe has to change, but a new one should declare its
+       schema instead. It remains the only option for a directory recipe's
+       ``metadata.yml``, which has no comment preamble to read;
     3. the recipe this one **delegates to** via a top-level ``$import``. A checkpoint
        alias states neither of the above: its kind is whatever its base is, and the base
        must declare a schema to be importable at all, so the walk terminates.
@@ -255,8 +272,10 @@ def _load_recipe_from_file(
 ) -> ModelOptRecipeBase:
     """Load a recipe from a YAML file, optionally applying dotlist overrides.
 
-    The file must contain a ``metadata`` section with at least ``recipe_type``,
-    plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
+    The file has to say what kind of recipe it is -- see :func:`_peek_recipe_type` for
+    the three ways to do that -- and to supply the matching body section (``quantize`` /
+    ``eagle`` / ``dflash`` / ``medusa``), either directly or through a top-level
+    ``$import`` of a recipe that has one.
     """
     rtype = _peek_recipe_type(recipe_file)
     if rtype is None:
