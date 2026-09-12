@@ -112,15 +112,18 @@ def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequ
 
     exporter._name_remapping(linear, "model.layers.0.mlp.down_proj.")
 
-    packed_key = "model.layers.0.mlp.down_proj.packed_weights"
-    shape_key = "model.layers.0.mlp.down_proj.weight_shape"
-    assert "model.layers.0.mlp.down_proj.weight" not in exporter._state_dict
+    packed_key = "model.layers.0.mlp.down_proj.weight"
     assert exporter._state_dict[packed_key].shape == (2, 1, payload_bytes)
     assert exporter._state_dict[packed_key].dtype == torch.uint8
-    assert exporter._state_dict[shape_key].tolist() == [2, 256]
+    logical_shape = torch.tensor(
+        [
+            *exporter._state_dict[packed_key].shape[:-2],
+            exporter._state_dict[packed_key].shape[-2] * 256,
+        ]
+    )
     reconstructed = dequantize(
         exporter._state_dict[packed_key],
-        exporter._state_dict[shape_key],
+        logical_shape,
         dtype=torch.bfloat16,
     )
     torch.testing.assert_close(reconstructed, linear.weight_quantizer(linear.weight))

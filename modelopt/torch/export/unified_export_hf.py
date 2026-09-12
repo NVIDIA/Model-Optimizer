@@ -634,12 +634,9 @@ def _export_quantized_weight(
         quantize_iq = (
             quantize_iq1_s if quantization_format == QUANTIZATION_IQ1_S else quantize_iq2_xs
         )
-        packed_weights, weight_shape = quantize_iq(weight.to(dtype))
+        packed_weight, _ = quantize_iq(weight.to(dtype))
         delattr(sub_module, weight_name)
-        sub_module.register_buffer("packed_weights", packed_weights)
-        # The internal prefix distinguishes this from compressed-tensors metadata,
-        # which export intentionally drops. postprocess_state_dict renames it.
-        sub_module.register_buffer("_iq_weight_shape", weight_shape)
+        sub_module.register_buffer("weight", packed_weight)
         maybe_clear_cuda_cache()
         return
 

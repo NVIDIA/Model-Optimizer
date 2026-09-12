@@ -912,7 +912,6 @@ _KV_CACHE_REPLACEMENTS: dict[str, str] = {
     "k_bmm_quantizer._bias_value": "k_proj.k_bias",
     "v_bmm_quantizer._bias_value": "v_proj.v_bias",
     "input_quantizer._pre_quant_scale": "pre_quant_scale",
-    "_iq_weight_shape": "weight_shape",
 }
 _BASE_SKIP_KEYS: tuple[str, ...] = (
     "output_quantizer",
@@ -1091,7 +1090,6 @@ def postprocess_state_dict(
         # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
         weight_suffixes = (
             "weight",
-            "packed_weights",
             "weight_shape",
             "weight_scale",
             "weight_scale_2",

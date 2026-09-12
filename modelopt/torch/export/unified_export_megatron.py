@@ -1153,16 +1153,12 @@ class GPTModelExporter:
 
     @staticmethod
     def _get_iq_weight_state(
-        prefix: str, weight: torch.Tensor, qformat: str
+        weight_key: str, weight: torch.Tensor, qformat: str
     ) -> dict[str, torch.Tensor]:
         """Pack one final-layout weight into the IQ unified-checkpoint representation."""
         quantize_iq = quantize_iq1_s if qformat == QUANTIZATION_IQ1_S else quantize_iq2_xs
-        packed_weights, weight_shape = quantize_iq(weight)
-        prefix = prefix.rstrip(".") + "."
-        return {
-            prefix + "packed_weights": packed_weights.detach().cpu(),
-            prefix + "weight_shape": weight_shape.detach().cpu(),
-        }
+        packed_weight, _ = quantize_iq(weight)
+        return {weight_key: packed_weight.detach().cpu()}
 
     def _record_layer_quant_config(self, prefix: str, qformat: str | None, block_size: int | None):
         """Record per-HF-layer quantization metadata for mixed precision exports."""
@@ -1229,7 +1225,7 @@ class GPTModelExporter:
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            self._state_dict.update(self._get_iq_weight_state(prefix, weight, qformat))
+            self._state_dict.update(self._get_iq_weight_state(prefix + "weight", weight, qformat))
         elif weight_scale is None:
             self._state_dict[prefix + "weight"] = weight
         else:
@@ -1277,10 +1273,10 @@ class GPTModelExporter:
 
         if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
             self._state_dict.update(
-                self._get_iq_weight_state(gate_proj_prefix, gate_proj_weight, qformat)
+                self._get_iq_weight_state(gate_proj_prefix + "weight", gate_proj_weight, qformat)
             )
             self._state_dict.update(
-                self._get_iq_weight_state(up_proj_prefix, up_proj_weight, qformat)
+                self._get_iq_weight_state(up_proj_prefix + "weight", up_proj_weight, qformat)
             )
         elif weight_scale is None:
             self._state_dict[gate_proj_prefix + "weight"] = gate_proj_weight
@@ -1483,7 +1479,9 @@ class GPTModelExporter:
                 for shard_prefix, shard_weight, shard_scale in shards:
                     if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
                         local_expert_state.update(
-                            self._get_iq_weight_state(shard_prefix, shard_weight, qformat)
+                            self._get_iq_weight_state(
+                                shard_prefix + "weight", shard_weight, qformat
+                            )
                         )
                     elif shard_scale is None:
                         local_expert_state[shard_prefix + "weight"] = shard_weight
@@ -1649,8 +1647,8 @@ class GPTModelExporter:
         proj_keys = [p + "weight" for p in prefixes]
 
         if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            for prefix, weight in zip(prefixes, proj_weights):
-                self._state_dict.update(self._get_iq_weight_state(prefix, weight, qformat))
+            for key, weight in zip(proj_keys, proj_weights):
+                self._state_dict.update(self._get_iq_weight_state(key, weight, qformat))
         elif weight_scale is None:
             for key, weight in zip(proj_keys, proj_weights):
                 self._state_dict[key] = weight
@@ -1772,7 +1770,7 @@ class GPTModelExporter:
                     self._state_dict[proj_prefix + "weight"] = proj_weight.cpu()
                 else:
                     self._state_dict.update(
-                        self._get_iq_weight_state(proj_prefix, proj_weight, qformat)
+                        self._get_iq_weight_state(proj_prefix + "weight", proj_weight, qformat)
                     )
         elif weight_scale is None:
             for key, proj_weight in zip(proj_keys, proj_weights):

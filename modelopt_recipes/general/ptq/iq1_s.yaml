@@ -10,6 +10,6 @@ metadata:
   recipe_type: ptq
   description: >-
     Applies GGML-compatible IQ1_S weight-only quantization. No calibration data is required;
-    unified export writes packed_weights and weight_shape for every quantized Linear weight.
+    unified export writes the GGML block payload to weight for every quantized Linear weight.
 quantize:
   $import: preset

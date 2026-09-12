@@ -59,6 +59,28 @@ The unified HF export API supports the following quantization formats:
    activation scale semantics. Converting a ModelOpt FP8 checkpoint to GGUF therefore requires
    conversion to another GGML-supported tensor type rather than a lossless FP8 encoding.
 
+IQ weight representation
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+For IQ1_S and IQ2_XS, unified export replaces each floating-point ``<module>.weight`` with a
+``uint8`` tensor containing byte-exact GGML blocks. Its shape is
+``[*logical_shape[:-1], logical_shape[-1] // 256, payload_bytes]``, where ``payload_bytes`` is 50
+for IQ1_S and 74 for IQ2_XS. No separate shape tensor is stored: a loader recovers the logical
+shape as ``[*weight.shape[:-2], weight.shape[-2] * 256]``. This is unambiguous because IQ export
+requires the logical last dimension to be divisible by 256.
+
+Each 74-byte IQ2_XS block represents 256 logical weights:
+
+* bytes 0--1 are the little-endian FP16 super-block scale ``d``;
+* bytes 2--65 are 32 little-endian ``uint16`` codes, one per group of eight weights. Each code
+  contains a 9-bit codebook index and seven stored sign bits; the eighth sign bit is derived from
+  parity; and
+* bytes 66--73 contain sixteen 4-bit local-scale codes, packed two per byte. Each local scale is
+  shared by two adjacent eight-weight groups.
+
+The canonical 512-by-8 IQ2_XS codebook is part of the implementation rather than the checkpoint.
+The complete block therefore costs ``74 * 8 / 256 = 2.3125`` bits per logical weight.
+
 Minimum Framework Versions
 --------------------------
 

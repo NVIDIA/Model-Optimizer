@@ -106,7 +106,7 @@ def test_export_per_block_quantized_weight():
 
 
 @pytest.mark.parametrize(("num_bits", "payload_bytes"), [("iq1_s", 50), ("iq2_xs", 74)])
-def test_export_iq_weight_as_packed_weights_and_shape(num_bits, payload_bytes):
+def test_export_iq_payload_as_weight(num_bits, payload_bytes):
     linear = nn.Linear(256, 4, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
@@ -120,10 +120,10 @@ def test_export_iq_weight_as_packed_weights_and_shape(num_bits, payload_bytes):
     _export_quantized_weight(linear, torch.bfloat16)
     state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
 
-    assert "weight" not in state_dict
-    assert state_dict["packed_weights"].shape == (4, 1, payload_bytes)
-    assert state_dict["packed_weights"].dtype == torch.uint8
-    assert state_dict["weight_shape"].tolist() == [4, 256]
+    assert state_dict["weight"].shape == (4, 1, payload_bytes)
+    assert state_dict["weight"].dtype == torch.uint8
+    assert "packed_weights" not in state_dict
+    assert "weight_shape" not in state_dict
 
 
 class QuantMoELinear(nn.Module):

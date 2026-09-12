@@ -8,7 +8,7 @@ Changelog
 
 *Quantization*
 
-- Add IQ1_S and IQ2_XS weight quantization and unified checkpoint export from Hugging Face and TP=1 Megatron models. Supported weights are encoded in GGML-compatible 256-value blocks and stored as packed ``uint8`` payloads with their logical shapes in safetensors.
+- Add IQ1_S and IQ2_XS weight quantization and unified checkpoint export from Hugging Face and TP=1 Megatron models. Supported weights are encoded in GGML-compatible 256-value blocks and stored as packed ``uint8`` weight tensors in safetensors.
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
 
 *Misc*
