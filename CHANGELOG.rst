@@ -56,6 +56,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX INT8 entropy calibration failing or producing invalid quantization parameters for FP16 activations.
 - Speed up ``mtq.quantize`` on FSDP2-sharded fused-MoE models. Promoting static-block weight quantizers gathered each expert's slice of the fused weight across ranks even though only quantizer state is read, adding a collective per expert to calibration.
 - Fix ONNX AutoCast failing on models with external initializers larger than 2 GiB.
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
