@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import math
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -435,6 +437,7 @@ def _search_signature(
     layers: list[tuple[str, nn.Module, int]],
     num_calib_steps: int,
     num_score_steps: int,
+    preceding_quantizers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
@@ -455,11 +458,82 @@ def _search_signature(
             }
             for name, module, _ in layers
         ],
+        "preceding_quantizers": preceding_quantizers,
     }
 
 
 def _checkpoint_state_is_compatible(state: dict[str, Any], signature: dict[str, Any]) -> bool:
-    return state.get("search_signature") == signature
+    checkpoint_signature = state.get("search_signature")
+    if checkpoint_signature == signature:
+        return True
+    if not isinstance(checkpoint_signature, dict) or signature["preceding_quantizers"]:
+        return False
+
+    # Checkpoints written before composed GEMM -> KV searches had no preceding quantizers.
+    # Preserve their compatibility with an unquantized model while rejecting them for a
+    # quantized baseline, whose sensitivity scores depend on that baseline.
+    legacy_signature = signature.copy()
+    legacy_signature.pop("preceding_quantizers")
+    return checkpoint_signature == legacy_signature
+
+
+def _fingerprint_value(value: Any) -> Any:
+    """Convert quantizer configuration and tensor state into a stable JSON value."""
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "meta":
+            raise ValueError("Cannot fingerprint a meta-device preceding quantizer state.")
+        tensor = value.detach().contiguous().cpu()
+        raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+        return {
+            "dtype": str(tensor.dtype),
+            "shape": list(tensor.shape),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if hasattr(value, "model_dump"):
+        return _fingerprint_value(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return [
+            [_fingerprint_value(key), _fingerprint_value(item)]
+            for key, item in sorted(
+                value.items(), key=lambda entry: (type(entry[0]).__qualname__, repr(entry[0]))
+            )
+        ]
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, (torch.dtype, torch.device)):
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"Unsupported preceding quantizer state value: {type(value).__qualname__}.")
+
+
+def _quantizer_fingerprint(module: TensorQuantizer) -> str:
+    payload = {
+        "type": f"{type(module).__module__}.{type(module).__qualname__}",
+        "properties": module.get_modelopt_state(properties_only=True),
+        "state_dict": module.state_dict(),
+    }
+    serialized = json.dumps(
+        _fingerprint_value(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _preceding_quantizer_signature(model: nn.Module) -> list[dict[str, Any]]:
+    """Fingerprint enabled non-K/V configuration and state that affect KV scores."""
+    return sorted(
+        (
+            {
+                "name": name,
+                "fingerprint": _quantizer_fingerprint(module),
+            }
+            for name, module in model.named_modules(remove_duplicate=False)
+            if isinstance(module, TensorQuantizer)
+            and module.is_enabled
+            and not name.endswith(_KV_QUANTIZER_ATTRS)
+        ),
+        key=lambda entry: entry["name"],
+    )
 
 
 def _quantizer_state_dict(
@@ -691,13 +765,15 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             layers,
             self.config["num_calib_steps"],
             self.config["num_score_steps"],
+            _preceding_quantizer_signature(self.model),
         )
         if self.search_signature is not None and not _checkpoint_state_is_compatible(
             self.state_dict(), signature
         ):
             raise ValueError(
                 "KV-cache AutoQuantize checkpoint does not match the current candidates, scoring "
-                "setup, or eligible layers. Use a different checkpoint path."
+                "setup, eligible layers, or preceding non-K/V quantizer configuration. Use a "
+                "different checkpoint path."
             )
         self.search_signature = signature
         self._hparams = [

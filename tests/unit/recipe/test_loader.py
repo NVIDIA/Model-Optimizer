@@ -25,6 +25,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
@@ -1955,8 +1956,10 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
 @pytest.mark.parametrize(
     "recipe_path",
     [
+        "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
@@ -1998,6 +2001,91 @@ def test_load_recipe_kv_autoquantize_contract():
             assert not entry.cfg.use_constant_amax
             assert entry.cfg.constant_amax == 448.0
         assert fmt.algorithm is None
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "kv_stage"),
+    [
+        (
+            "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "auto_quantize",
+        ),
+        (
+            "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "kv_auto_quantize",
+        ),
+    ],
+)
+def test_builtin_composed_kv_recipes_use_calibration_free_cast_candidates(recipe_path, kv_stage):
+    aq = getattr(load_recipe(recipe_path), kv_stage)
+
+    assert aq is not None
+    assert aq.constraints.cost_model == "kv_cache"
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert all(
+        candidate.quant_cfg[0].cfg.constant_amax == 448.0 for candidate in aq.candidate_formats
+    )
+
+
+def _weight_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], algorithm="max")],
+    )
+    return config.model_copy(update=updates)
+
+
+def _kv_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0, cost_model="kv_cache"),
+        candidate_formats=[
+            qcfg.QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+    )
+    return config.model_copy(update=updates)
+
+
+def test_autoquantize_recipe_rejects_second_kv_search():
+    with pytest.raises(ValidationError, match=r"cannot follow.*already searches the KV cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_kv_autoquantize_test_config(),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_non_kv_followup():
+    with pytest.raises(ValidationError, match="must use cost_model=kv_cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(),
+            kv_auto_quantize=_weight_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_uniform_and_searched_kv():
+    uniform_kv = qcfg.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+        algorithm=None,
+    )
+    with pytest.raises(ValidationError, match=r"must omit.*uniform auto_quantize.kv_cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(kv_cache=uniform_kv),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
 
 
 def test_kv_autoquantize_rejects_cost_excluded_layers():

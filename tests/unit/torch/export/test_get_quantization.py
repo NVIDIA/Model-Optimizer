@@ -220,6 +220,45 @@ def test_uniform_vlm_export_ignores_disabled_vision_attention():
     assert "kv_cache_quantized_layers" not in quantization
 
 
+def test_uniform_weight_quantization_exports_mixed_kv_cache_map():
+    model = ToyModel()
+    mtq.quantize(model, partial_fp8_config, lambda x: x(torch.randn(1, 4, 10)))
+    model.attn0 = _FakeAttention()
+    model.attn1 = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model.attn0,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+    )
+    mtq.set_quantizer_by_cfg(
+        model.attn1,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "constant_amax": 1.0,
+                },
+            }
+        ],
+    )
+
+    with pytest.warns(UserWarning, match="uniform quantized weights.*mixed-precision KV-cache"):
+        quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quantized_layers"] == {
+        "attn0": {"quant_algo": "FP8"},
+        "attn1": {"quant_algo": "NVFP4"},
+    }
+
+
 def test_quant_config_tolerates_ambiguous_language_model_roots():
     model = torch.nn.Module()
     model.model = torch.nn.Module()
