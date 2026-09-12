@@ -13,320 +13,179 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for on-the-fly registration of delegated diffusion attention."""
-
 import copy
 import io
-from collections import defaultdict
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-pytest.importorskip("diffusers")
-from diffusers import ModelMixin
+ModelMixin = pytest.importorskip("diffusers").ModelMixin
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.attention import register_attention_for_kv_quant
+from modelopt.torch.quantization.plugins.diffusion.diffusers import _fp8_mha_disabled
 
-_QKV_QUANTIZER_NAMES = ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer")
+_SDPA_ALIAS = F.scaled_dot_product_attention
 
 
-def delegated_attention(q, k, v):
-    return F.scaled_dot_product_attention(q, k, v)
+def _fake_attention(q, k, v):
+    return torch.softmax(q @ k.transpose(-2, -1), dim=-1) @ v
+
+
+def _wan_attention(q, k, v):
+    if torch.onnx.is_in_onnx_export():
+        return F.scaled_dot_product_attention(q, k, v)
+    return _fake_attention(q, k, v)
 
 
 class DelegatedAttention(nn.Module):
-    def __init__(self, hidden_size=16, num_heads=2):
+    def __init__(self, style="keyword"):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
-        self.q = nn.Linear(hidden_size, hidden_size)
-        self.k = nn.Linear(hidden_size, hidden_size)
-        self.v = nn.Linear(hidden_size, hidden_size)
-        self.o = nn.Linear(hidden_size, hidden_size)
+        self.style = style
+        self.q, self.k, self.v, self.o = (nn.Linear(32, 32) for _ in range(4))
 
-    def _reshape(self, hidden_states):
-        batch_size, sequence_length, _ = hidden_states.shape
-        return hidden_states.view(
-            batch_size, sequence_length, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+    def _qkv(self, x):
+        qkv = (self.q(x), self.k(x), self.v(x))
+        return tuple(tensor.view(2, 4, 2, 16).transpose(1, 2) for tensor in qkv)
 
-    def _unused_attention(self, q, k, v):
-        scores = torch.matmul(q, k)
-        return torch.matmul(scores, v)
-
-    def forward(self, hidden_states):
-        q = self._reshape(self.q(hidden_states))
-        k = self._reshape(self.k(hidden_states))
-        v = self._reshape(self.v(hidden_states))
-        output = delegated_attention(q=q * 0.5, k=k * 0.25, v=v)
-        return self.o(output.transpose(1, 2).flatten(2))
-
-
-class PositionalDelegatedAttention(DelegatedAttention):
-    def forward(self, hidden_states):
-        q = self._reshape(self.q(hidden_states))
-        k = self._reshape(self.k(hidden_states))
-        v = self._reshape(self.v(hidden_states))
-        output = delegated_attention(q * 0.5, k * 0.25, v)
-        return self.o(output.transpose(1, 2).flatten(2))
-
-
-class RepeatedDelegatedAttention(DelegatedAttention):
-    def forward(self, hidden_states):
-        q = self._reshape(self.q(hidden_states))
-        k = self._reshape(self.k(hidden_states))
-        v = self._reshape(self.v(hidden_states))
-        output = delegated_attention(q, k, v)
-        output = delegated_attention(output, k, v)
-        return self.o(output.transpose(1, 2).flatten(2))
-
-
-class HelperWithMethodMatmulAttention(DelegatedAttention):
-    def forward(self, hidden_states):
-        q = self._reshape(self.q(hidden_states))
-        k = self._reshape(self.k(hidden_states))
-        v = self._reshape(self.v(hidden_states))
-        if hidden_states.shape[0] == 0:
-            scores = q.matmul(k.transpose(-2, -1))
-            output = scores.matmul(v)
+    def forward(self, x):
+        q, k, v = self._qkv(x)
+        if self.style == "keyword":
+            output = _wan_attention(q=q, k=k, v=v)
         else:
-            output = delegated_attention(q, k, v)
+            output = _wan_attention(q, k, v)
+            if self.style == "repeated":
+                output = _wan_attention(output, k, v)
         return self.o(output.transpose(1, 2).flatten(2))
 
 
-class AuxiliaryHelperAttention(nn.Module):
-    def forward(self, hidden_states):
-        return hidden_states
-
-    def _unused_attention(self, q, k, v):
-        return delegated_attention(q, k, v)
+class AliasedAttention(DelegatedAttention):
+    def forward(self, x):
+        return self.o(_SDPA_ALIAS(*self._qkv(x)).transpose(1, 2).flatten(2))
 
 
-class MethodMatmulAttention(nn.Module):
-    def forward(self, q, k, v):
-        scores = q.matmul(k.transpose(-2, -1))
-        return scores.matmul(v)
+class NonSDPAAttention(DelegatedAttention):
+    def forward(self, x):
+        return self.o(_fake_attention(*self._qkv(x)).transpose(1, 2).flatten(2))
 
 
-class CustomSetupDelegatedAttention(DelegatedAttention):
-    def _setup(self):
-        pass
-
-    def forward(self, hidden_states):
-        q = self._reshape(self.q(hidden_states))
-        k = self._reshape(self.k(hidden_states))
-        v = self._reshape(self.v(hidden_states))
-        output = delegated_attention(q, k, v)
-        return self.o(output.transpose(1, 2).flatten(2))
-
-
-class DelegatedDiffusionModel(ModelMixin):
-    def __init__(self, attention_cls):
+class DelegatedModel(ModelMixin):
+    def __init__(self, attention_cls=DelegatedAttention, **kwargs):
         super().__init__()
-        self.attn = attention_cls()
+        self.attn = attention_cls(**kwargs)
 
-    def forward(self, hidden_states):
-        return self.attn(hidden_states)
+    def forward(self, x):
+        return self.attn(x)
 
 
-def _get_fp8_attention_config():
-    quant_config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    quant_config["quant_cfg"].append(
-        {
-            "quantizer_name": "*[qkv]_bmm_quantizer",
-            "cfg": {"num_bits": (4, 3), "axis": None},
-            "enable": True,
-        }
+@pytest.fixture(autouse=True)
+def _clean_registrations():
+    yield
+    for cls in (DelegatedAttention, AliasedAttention, NonSDPAAttention):
+        if cls in mtq.QuantModuleRegistry:
+            mtq.unregister(cls)
+
+
+def _quantize(model, enabled=True):
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    attrs = {"num_bits": (4, 3), "axis": None, "trt_high_precision_dtype": "Half"}
+    config["quant_cfg"].extend(
+        {"quantizer_name": name, "cfg": attrs, "enable": enabled}
+        for name in ("*[qkv]_bmm_quantizer", "*softmax_quantizer")
     )
-    return quant_config
+    inputs = torch.randn(2, 4, 32)
+    mtq.quantize(model, config, lambda quant_model: quant_model(inputs))
+    return inputs
 
 
-@pytest.mark.parametrize(
-    ("attention_cls", "expected_calls"),
-    [
-        (DelegatedAttention, 1),
-        (PositionalDelegatedAttention, 1),
-        (RepeatedDelegatedAttention, 2),
-        (HelperWithMethodMatmulAttention, 1),
-    ],
-)
-def test_quantize_registers_delegated_attention(attention_cls, expected_calls):
-    model = DelegatedDiffusionModel(attention_cls)
-    inputs = torch.randn(2, 4, 16)
-
-    try:
-        mtq.quantize(model, _get_fp8_attention_config(), lambda quant_model: quant_model(inputs))
-
-        for name in _QKV_QUANTIZER_NAMES:
-            quantizer = getattr(model.attn, name)
-            assert quantizer.is_enabled
-            assert quantizer.amax is not None
-
-        call_counts = dict.fromkeys(_QKV_QUANTIZER_NAMES, 0)
-
-        def make_count_hook(name):
-            def count_call(_module, _args, _output):
-                call_counts[name] += 1
-
-            return count_call
-
-        handles = [
-            getattr(model.attn, name).register_forward_hook(make_count_hook(name))
-            for name in _QKV_QUANTIZER_NAMES
-        ]
-        model(inputs)
-        for handle in handles:
-            handle.remove()
-        assert call_counts == dict.fromkeys(_QKV_QUANTIZER_NAMES, expected_calls)
-    finally:
-        if attention_cls in mtq.QuantModuleRegistry:
-            mtq.unregister(attention_cls)
-
-
-def test_helper_registration_preserves_direct_attention_methods():
-    model = DelegatedDiffusionModel(DelegatedAttention)
-    inputs = torch.randn(2, 4, 16)
-
-    try:
-        mtq.quantize(model, _get_fp8_attention_config(), lambda quant_model: quant_model(inputs))
-        call_counts = dict.fromkeys(_QKV_QUANTIZER_NAMES, 0)
-
-        def make_count_hook(name):
-            def count_call(_module, _args, _output):
-                call_counts[name] += 1
-
-            return count_call
-
-        handles = [
-            getattr(model.attn, name).register_forward_hook(make_count_hook(name))
-            for name in _QKV_QUANTIZER_NAMES
-        ]
-        q, k, v = (torch.randn(1, 2, 2) for _ in range(3))
-        model.attn._unused_attention(q, k, v)
-        for handle in handles:
-            handle.remove()
-        assert call_counts == dict.fromkeys(_QKV_QUANTIZER_NAMES, 1)
-    finally:
-        if DelegatedAttention in mtq.QuantModuleRegistry:
-            mtq.unregister(DelegatedAttention)
-
-
-def test_default_fp8_config_disables_delegated_attention_quantizers():
-    model = DelegatedDiffusionModel(DelegatedAttention)
-    inputs = torch.randn(2, 4, 16)
-
-    try:
-        mtq.quantize(
-            model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda quant_model: quant_model(inputs)
-        )
-        for name in _QKV_QUANTIZER_NAMES:
-            assert not getattr(model.attn, name).is_enabled
-    finally:
-        if DelegatedAttention in mtq.QuantModuleRegistry:
-            mtq.unregister(DelegatedAttention)
-
-
-@pytest.mark.parametrize("attention_cls", [AuxiliaryHelperAttention, MethodMatmulAttention])
-def test_register_attention_rejects_unsupported_patterns(attention_cls):
-    try:
-        assert not register_attention_for_kv_quant(attention_cls)
-        assert attention_cls not in mtq.QuantModuleRegistry
-    finally:
-        if attention_cls in mtq.QuantModuleRegistry:
-            mtq.unregister(attention_cls)
-
-
-def test_discovery_skips_attention_with_custom_setup():
-    model = DelegatedDiffusionModel(CustomSetupDelegatedAttention)
-    inputs = torch.randn(2, 4, 16)
-
-    try:
-        mtq.quantize(model, _get_fp8_attention_config(), lambda quant_model: quant_model(inputs))
-        assert not hasattr(model.attn, "q_bmm_quantizer")
-    finally:
-        if CustomSetupDelegatedAttention in mtq.QuantModuleRegistry:
-            mtq.unregister(CustomSetupDelegatedAttention)
-
-
-def test_exported_attention_matmuls_have_fp8_qdq():
+def _export(attention_cls):
     onnx = pytest.importorskip("onnx")
-    from modelopt.onnx.export import FP8QuantExporter
+    model = DelegatedModel(attention_cls).eval()
+    inputs, buffer = _quantize(model), io.BytesIO()
+    torch.onnx.export(model.half(), inputs.half(), buffer, opset_version=20, dynamo=False)
+    graph = onnx.load_model_from_string(buffer.getvalue())
+    onnx.checker.check_model(graph)
+    return graph
 
-    model = DelegatedDiffusionModel(DelegatedAttention).eval()
-    inputs = torch.randn(2, 4, 16)
 
-    try:
-        mtq.quantize(model, _get_fp8_attention_config(), lambda quant_model: quant_model(inputs))
-        assert model.attn.o.input_quantizer.is_enabled
-        buffer = io.BytesIO()
-        torch.onnx.export(model, inputs, buffer, opset_version=20, dynamo=False)
-        exported_model = onnx.load_model_from_string(buffer.getvalue())
-        processed_model = FP8QuantExporter.process_model(exported_model)
-        onnx.checker.check_model(processed_model)
+def _attention_qdq(graph):
+    producers = {output: node for node in graph.graph.node for output in node.output}
 
-        producer_by_output = {
-            output: node for node in processed_model.graph.node for output in node.output
-        }
-        consumers_by_input = defaultdict(list)
-        for node in processed_model.graph.node:
-            for tensor_name in node.input:
-                consumers_by_input[tensor_name].append(node)
+    def source(name):
+        node = producers.get(name)
+        if node is not None and node.op_type == "Cast":
+            node = producers.get(node.input[0])
+        if node is None or node.op_type != "TRT_FP8DequantizeLinear":
+            return None
+        quantize = producers.get(node.input[0])
+        if quantize is None or quantize.op_type != "TRT_FP8QuantizeLinear":
+            return None
+        return quantize, producers.get(quantize.input[0])
 
-        def is_activation_dq(tensor_name):
-            dq_node = producer_by_output.get(tensor_name)
-            return (
-                dq_node is not None
-                and dq_node.op_type == "DequantizeLinear"
-                and (q_node := producer_by_output.get(dq_node.input[0])) is not None
-                and q_node.op_type == "QuantizeLinear"
-            )
+    return producers, [
+        (node, inputs)
+        for node in graph.graph.node
+        if node.op_type == "MatMul" and all(inputs := [source(name) for name in node.input])
+    ]
 
-        def is_softmax_qdq_input(tensor_name):
-            dq_node = producer_by_output[tensor_name]
-            q_node = producer_by_output[dq_node.input[0]]
-            source_node = producer_by_output.get(q_node.input[0])
-            return source_node is not None and source_node.op_type == "Softmax"
 
-        attention_matmuls = [
-            node
-            for node in processed_model.graph.node
-            if node.op_type == "MatMul" and all(is_activation_dq(name) for name in node.input)
-        ]
-        assert len(attention_matmuls) == 2
+@pytest.mark.parametrize(("style", "calls"), [("keyword", 1), ("positional", 1), ("repeated", 2)])
+def test_delegated_helper_call_styles(style, calls):
+    model = DelegatedModel(style=style)
+    inputs = _quantize(model)
+    seen = []
+    with model.attn.q_bmm_quantizer.register_forward_hook(lambda *_: seen.append(None)):
+        model(inputs)
+    assert len(seen) == calls
+    assert all(getattr(model.attn, f"{name}_bmm_quantizer").amax is not None for name in "qkv")
 
-        value_matmuls = [
-            node
-            for node in attention_matmuls
-            if any(is_softmax_qdq_input(tensor_name) for tensor_name in node.input)
-        ]
-        assert len(value_matmuls) == 1
 
-        def feeds_dequantized_matmul(q_node):
-            return any(
-                dq_node.op_type == "DequantizeLinear"
-                and any(
-                    consumer.op_type == "MatMul"
-                    for consumer in consumers_by_input[dq_node.output[0]]
-                )
-                for dq_node in consumers_by_input[q_node.output[0]]
-            )
+@pytest.mark.parametrize("attention_cls", [DelegatedAttention, AliasedAttention])
+def test_export_uses_fp8_sdpa_symbolic(attention_cls):
+    graph = _export(attention_cls)
+    producers, attention = _attention_qdq(graph)
+    qk = next(x for _, x in attention if all(source.op_type == "Mul" for _, source in x))
+    assert any(producers[source.input[0]].op_type == "Transpose" for _, source in qk)
+    pv, inputs = next(
+        x for x in attention if any(source.op_type == "Softmax" for _, source in x[1])
+    )
+    softmax_q = next(q for q, source in inputs if source.op_type == "Softmax")
+    scale = producers[softmax_q.input[1]].attribute[0].t.raw_data
+    assert scale == torch.tensor(1 / 448, dtype=torch.float16).numpy().tobytes()
+    reachable = set(pv.output)
+    for node in graph.graph.node:
+        if reachable.intersection(node.input):
+            reachable.update(node.output)
+    qdq = {node.input[0] for node in graph.graph.node if node.op_type == "TRT_FP8QuantizeLinear"}
+    assert reachable & qdq
 
-        pending = list(value_matmuls[0].output)
-        visited = set(pending)
-        output_projection_qdq = False
-        while pending:
-            tensor_name = pending.pop()
-            for node in consumers_by_input.get(tensor_name, []):
-                if node.op_type == "QuantizeLinear" and feeds_dequantized_matmul(node):
-                    output_projection_qdq = True
-                for output_name in node.output:
-                    if output_name not in visited:
-                        visited.add(output_name)
-                        pending.append(output_name)
-        assert output_projection_qdq
-    finally:
-        if DelegatedAttention in mtq.QuantModuleRegistry:
-            mtq.unregister(DelegatedAttention)
+
+def test_export_fails_when_helper_does_not_reach_sdpa():
+    helper = _fake_attention
+    with pytest.raises(RuntimeError, match="did not reach SDPA"):
+        _export(NonSDPAAttention)
+    assert _fake_attention is helper and F.scaled_dot_product_attention is _SDPA_ALIAS
+
+
+@pytest.mark.parametrize("case", ["eligible", "fp32", "int8", "misaligned", "explicit"])
+def test_fp8_mha_eligibility(case):
+    model = DelegatedModel()
+    _quantize(model)
+    model.attn.q_bmm_quantizer.num_bits = 8 if case == "int8" else (4, 3)
+    if case == "explicit":
+        model.attn._disable_fp8_mha = True
+    dtype = torch.float32 if case == "fp32" else torch.float16
+    head_dim = 15 if case == "misaligned" else 16
+    qkv = (torch.randn(2, 2, 4, head_dim, dtype=dtype) for _ in range(3))
+    assert _fp8_mha_disabled(model.attn, *qkv) is (case != "eligible")
+
+
+@pytest.mark.parametrize(("model_mixin", "enabled"), [(True, True), (True, False), (False, True)])
+def test_registration_and_enablement_guards(model_mixin, enabled):
+    model = DelegatedModel() if model_mixin else nn.Sequential(DelegatedAttention())
+    _quantize(model, enabled)
+    attention = model.attn if model_mixin else model[0]
+    assert bool(getattr(attention, "_auto_fp8_mha", False)) is model_mixin
+    if model_mixin:
+        assert attention.q_bmm_quantizer.is_enabled is enabled

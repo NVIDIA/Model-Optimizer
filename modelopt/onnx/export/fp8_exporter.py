@@ -32,8 +32,6 @@ from .base_exporter import ONNXQuantExporter
 # when using 1/448 as the Q scale (single fixed value — softmax range is data-independent).
 _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
-_ELEMENTWISE_SCALAR_OPS = {"Add", "Div", "Mul", "Pow", "Sub"}
-_UNARY_SCALAR_OPS = {"Cast", "Reciprocal", "Sqrt"}
 
 
 def _torch_from_numpy_for_fp8(array: np.ndarray) -> torch.Tensor:
@@ -41,144 +39,6 @@ def _torch_from_numpy_for_fp8(array: np.ndarray) -> torch.Tensor:
     if array.dtype == ml_dtypes.bfloat16:
         return torch.from_numpy(array.view(np.int16)).view(torch.bfloat16).float()
     return torch.from_numpy(array)
-
-
-def _constant_values(tensor: gs.Tensor) -> np.ndarray | None:
-    if isinstance(tensor, gs.Constant):
-        return tensor.values
-    if not isinstance(tensor, gs.Variable) or len(tensor.inputs) != 1:
-        return None
-    producer = tensor.inputs[0]
-    if producer.op != "Constant":
-        return None
-    value = producer.attrs.get("value")
-    return value.values if isinstance(value, gs.Constant) else None
-
-
-def _shape_vector_length(tensor: gs.Tensor) -> int | None:
-    if not isinstance(tensor, gs.Variable) or len(tensor.inputs) != 1:
-        return None
-    shape_node = tensor.inputs[0]
-    if shape_node.op != "Shape" or len(shape_node.inputs) != 1:
-        return None
-    source_shape = shape_node.inputs[0].shape
-    if source_shape is None:
-        return None
-    rank = len(source_shape)
-    start = shape_node.attrs.get("start", 0)
-    end = shape_node.attrs.get("end", rank)
-    return len(range(*slice(start, end).indices(rank)))
-
-
-def _is_data_independent_scale(tensor: gs.Tensor, memo=None) -> bool:
-    """Return whether a tensor is provably scalar and independent of data values."""
-    if memo is None:
-        memo = {}
-    tensor_id = id(tensor)
-    if tensor_id in memo:
-        return memo[tensor_id]
-    memo[tensor_id] = False
-
-    values = _constant_values(tensor)
-    if values is not None:
-        memo[tensor_id] = values.size == 1
-        return memo[tensor_id]
-    if not isinstance(tensor, gs.Variable) or len(tensor.inputs) != 1:
-        return False
-
-    producer = tensor.inputs[0]
-    inputs = producer.inputs
-    result = False
-    if producer.op == "Gather" and len(inputs) == 2:
-        indices = _constant_values(inputs[1])
-        if (
-            _shape_vector_length(inputs[0]) is not None
-            and producer.attrs.get("axis", 0) in (0, -1)
-            and indices is not None
-            and indices.size == 1
-        ):
-            result = True
-    elif producer.op == "Slice" and 3 <= len(inputs) <= 5:
-        vector_length = _shape_vector_length(inputs[0])
-        starts = _constant_values(inputs[1])
-        ends = _constant_values(inputs[2])
-        axes = _constant_values(inputs[3]) if len(inputs) >= 4 else np.array([0])
-        steps = _constant_values(inputs[4]) if len(inputs) == 5 else np.array([1])
-        if (
-            vector_length is not None
-            and starts is not None
-            and ends is not None
-            and axes is not None
-            and steps is not None
-            and all(value.size == 1 for value in (starts, ends, axes, steps))
-            and axes.item() in (0, -1)
-            and steps.item() != 0
-        ):
-            result = (
-                len(range(*slice(starts.item(), ends.item(), steps.item()).indices(vector_length)))
-                == 1
-            )
-    elif producer.op in _UNARY_SCALAR_OPS and len(inputs) == 1:
-        result = _is_data_independent_scale(inputs[0], memo)
-    elif producer.op in _ELEMENTWISE_SCALAR_OPS and inputs:
-        result = all(_is_data_independent_scale(input_tensor, memo) for input_tensor in inputs)
-
-    memo[tensor_id] = result
-    return result
-
-
-def _rebase_shape_sources(tensor, old_tensors, new_tensor):
-    """Rebase direct ``Shape(Q/DQ)`` inputs, rejecting dependencies that would cycle."""
-    dependency_memo = {}
-
-    def is_old_tensor(candidate):
-        return any(candidate is old_tensor for old_tensor in old_tensors)
-
-    def depends_on_old_tensor(candidate):
-        if is_old_tensor(candidate):
-            return True
-        if not isinstance(candidate, gs.Variable):
-            return False
-        candidate_id = id(candidate)
-        if candidate_id in dependency_memo:
-            return dependency_memo[candidate_id]
-        dependency_memo[candidate_id] = False
-        dependency_memo[candidate_id] = any(
-            depends_on_old_tensor(producer_input)
-            for producer in candidate.inputs
-            for producer_input in producer.inputs
-        )
-        return dependency_memo[candidate_id]
-
-    shape_nodes = []
-    visited = set()
-
-    def collect_shape_nodes(candidate):
-        if not isinstance(candidate, gs.Variable) or id(candidate) in visited:
-            return True
-        visited.add(id(candidate))
-        for producer in candidate.inputs:
-            if producer.op == "Shape":
-                if any(
-                    not is_old_tensor(input_tensor) and depends_on_old_tensor(input_tensor)
-                    for input_tensor in producer.inputs
-                ):
-                    return False
-                if any(is_old_tensor(input_tensor) for input_tensor in producer.inputs):
-                    shape_nodes.append(producer)
-                continue
-            if not all(collect_shape_nodes(producer_input) for producer_input in producer.inputs):
-                return False
-        return True
-
-    if not collect_shape_nodes(tensor):
-        return False
-    for shape_node in shape_nodes:
-        shape_node.inputs = [
-            new_tensor if is_old_tensor(input_tensor) else input_tensor
-            for input_tensor in shape_node.inputs
-        ]
-    return True
 
 
 class FP8QuantExporter(ONNXQuantExporter):
@@ -393,24 +253,23 @@ class FP8QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def _move_mul_before_qdq(graph: gs.Graph) -> int:
-        """Move attention scaling from after DQ to before Q for TRT MatMul fusion.
+        """Move attention-scaling Mul(const) from after DQ to before Q for TRT MatMul fusion.
 
-        The scale must be scalar and data-independent. Handles both ``DQ → Mul → MatMul``
-        and ``DQ → Transpose → Mul → MatMul`` (K path).
+        Handles both ``DQ → Mul → MatMul`` and ``DQ → Transpose → Mul → MatMul`` (K path).
         """
         count = 0
         for mul_node in list(graph.nodes):
             if mul_node.op != "Mul":
                 continue
 
-            scale_input = next(
-                (tensor for tensor in mul_node.inputs if _is_data_independent_scale(tensor)),
+            const_input = next(
+                (i for i in mul_node.inputs if isinstance(i, gs.Constant) and i.values.size == 1),
                 None,
             )
             tensor_input = next(
-                (tensor for tensor in mul_node.inputs if tensor is not scale_input), None
+                (i for i in mul_node.inputs if not isinstance(i, gs.Constant)), None
             )
-            if scale_input is None or tensor_input is None:
+            if const_input is None or tensor_input is None:
                 continue
             if not (isinstance(tensor_input, gs.Variable) and len(tensor_input.inputs) == 1):
                 continue
@@ -430,7 +289,6 @@ class FP8QuantExporter(ONNXQuantExporter):
                 continue
 
             q_output = dq_node.inputs[0]
-            dq_output = dq_node.outputs[0]
             if (
                 not isinstance(q_output, gs.Variable)
                 or len(q_output.inputs) != 1
@@ -449,13 +307,6 @@ class FP8QuantExporter(ONNXQuantExporter):
             if not mul_consumers or not all(c.op == "MatMul" for c in mul_consumers):
                 continue
 
-            if not _rebase_shape_sources(scale_input, (q_output, dq_output), q_input):
-                continue
-            if q_input.shape is None:
-                q_input.shape = dq_output.shape
-            if q_input.dtype is None:
-                q_input.dtype = dq_output.dtype
-
             new_mul_output = gs.Variable(
                 q_input.name + "_scaled", dtype=q_input.dtype, shape=q_input.shape
             )
@@ -463,13 +314,15 @@ class FP8QuantExporter(ONNXQuantExporter):
                 gs.Node(
                     op="Mul",
                     name=mul_node.name + "_moved",
-                    inputs=[q_input, scale_input],
+                    inputs=[q_input, const_input],
                     outputs=[new_mul_output],
                 )
             )
             q_node.inputs[0] = new_mul_output
 
-            replacement = transpose_node.outputs[0] if transpose_node is not None else dq_output
+            replacement = (
+                transpose_node.outputs[0] if transpose_node is not None else dq_node.outputs[0]
+            )
             for consumer in mul_consumers:
                 for i, inp in enumerate(consumer.inputs):
                     if inp is mul_output:

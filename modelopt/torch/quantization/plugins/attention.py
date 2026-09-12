@@ -34,7 +34,6 @@ import ast
 import inspect
 import tempfile
 import types
-from typing import cast
 from warnings import warn
 
 from ..conversion import register
@@ -51,8 +50,6 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     """
     source_code = inspect.getsource(attention_cls)
     model_module = inspect.getmodule(attention_cls)
-    if model_module is None:
-        return False
     head = ast.parse(source_code)
 
     bmm_ops = ("matmul", "bmm", "baddbmm")
@@ -75,48 +72,6 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     def is_bin_matmul(node):
         return isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult)
 
-    def get_attention_helper_parameters(node):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and callable(helper := model_module.__dict__.get(node.func.id))
-        ):
-            return None
-
-        helper_name = getattr(helper, "__name__", node.func.id).lower()
-        if "attention" not in helper_name and "attn" not in helper_name:
-            return None
-
-        try:
-            positional_parameters = [
-                parameter.name
-                for parameter in inspect.signature(helper).parameters.values()
-                if parameter.kind
-                in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            ]
-        except (TypeError, ValueError):
-            return None
-
-        keyword_names = {keyword.arg for keyword in node.keywords}
-        for parameter_names in (("q", "k", "v"), ("query", "key", "value")):
-            if tuple(positional_parameters[:3]) == parameter_names and all(
-                name in keyword_names or index < len(node.args)
-                for index, name in enumerate(parameter_names)
-            ):
-                return parameter_names
-        return None
-
-    def quantize_argument(argument, quantizer_name):
-        return ast.Call(
-            func=ast.Attribute(
-                value=ast.Name(id="self", ctx=ast.Load()),
-                attr=quantizer_name,
-                ctx=ast.Load(),
-            ),
-            args=[argument],
-            keywords=[],
-        )
-
     def patch(node, quantizer_names, transpose=False):
         for index, quantizer_name in enumerate(quantizer_names):
             if quantizer_name is None:
@@ -124,16 +79,33 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
             arg = node.args[index]
 
             if not transpose:
-                node.args[index] = quantize_argument(arg, quantizer_name)
-            else:
-                transposed_arg = ast.Call(
-                    func=ast.Attribute(value=arg, attr="transpose", ctx=ast.Load()),
-                    args=[ast.Constant(value=-1), ast.Constant(value=-2)],
-                    keywords=[],
-                )
                 node.args[index] = ast.Call(
                     func=ast.Attribute(
-                        value=quantize_argument(transposed_arg, quantizer_name),
+                        value=ast.Name(id="self", ctx=ast.Load()),
+                        attr=quantizer_name,
+                        ctx=ast.Load(),
+                    ),
+                    args=[arg],
+                    keywords=[],
+                )
+            else:
+                node.args[index] = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id="self", ctx=ast.Load()),
+                                attr=quantizer_name,
+                                ctx=ast.Load(),
+                            ),
+                            args=[
+                                ast.Call(
+                                    func=ast.Attribute(value=arg, attr="transpose", ctx=ast.Load()),
+                                    args=[ast.Constant(value=-1), ast.Constant(value=-2)],
+                                    keywords=[],
+                                )
+                            ],
+                            keywords=[],
+                        ),
                         attr="transpose",
                         ctx=ast.Load(),
                     ),
@@ -141,22 +113,18 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
                     keywords=[],
                 )
 
-    def patch_attention_helper(node, parameter_names):
-        keyword_by_name = {
-            keyword.arg: keyword for keyword in node.keywords if keyword.arg is not None
-        }
-        for index, (parameter_name, quantizer_name) in enumerate(
-            zip(parameter_names, ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"))
-        ):
-            if keyword := keyword_by_name.get(parameter_name):
-                keyword.value = quantize_argument(keyword.value, quantizer_name)
-            else:
-                node.args[index] = quantize_argument(node.args[index], quantizer_name)
-
     def patch_binop(node, quantizer_names, transpose=False):
         assert len(quantizer_names) == 2
         if quantizer_names[0] is not None:
-            node.left = quantize_argument(node.left, quantizer_names[0])
+            node.left = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="self", ctx=ast.Load()),
+                    attr=quantizer_names[0],
+                    ctx=ast.Load(),
+                ),
+                args=[node.left],
+                keywords=[],
+            )
         if quantizer_names[1] is not None:
             arg = node.right
             if transpose:
@@ -169,7 +137,15 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
                     args=[arg, ast.Constant(value=-1), ast.Constant(value=-2)],
                     keywords=[],
                 )
-            quant_arg = quantize_argument(arg, quantizer_names[1])
+            quant_arg = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="self", ctx=ast.Load()),
+                    attr=quantizer_names[1],
+                    ctx=ast.Load(),
+                ),
+                args=[arg],
+                keywords=[],
+            )
             if transpose:
                 quant_arg = ast.Call(
                     func=ast.Attribute(
@@ -182,43 +158,28 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
                 )
             node.right = quant_arg
 
-    class_node = next(node for node in head.body if isinstance(node, ast.ClassDef))
-    org_class_name = class_node.name
-    new_class_name = class_node.name = "_Quant" + class_node.name
-    forward_node = next(
-        (
-            node
-            for node in class_node.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "forward"
-        ),
-        None,
-    )
-    attention_helper_nodes = [
-        (node, parameter_names)
-        for node in (ast.walk(forward_node) if forward_node is not None else ())
-        if (parameter_names := get_attention_helper_parameters(node)) is not None
-    ]
+    nodes = list(ast.walk(head))
+    org_class_name = nodes[1].name  # type: ignore[attr-defined]
+    new_class_name = nodes[1].name = "_Quant" + nodes[1].name  # type: ignore[attr-defined]
 
-    direct_nodes = list(ast.walk(head))
-    bmm_nodes = [cast("ast.Call", node) for node in direct_nodes if is_bmm(node)]
-    sdpa_nodes = [cast("ast.Call", node) for node in direct_nodes if is_sdpa(node)]
-    bin_matmul_nodes = [cast("ast.BinOp", node) for node in direct_nodes if is_bin_matmul(node)]
-    patch_bmm = len(bmm_nodes) == 2 and all(len(node.args) >= 2 for node in bmm_nodes)
-    patch_sdpa = len(sdpa_nodes) == 1 and len(sdpa_nodes[0].args) >= 3
-    patch_bin_matmul = len(bin_matmul_nodes) == 2
-    if not attention_helper_nodes and not (patch_bmm or patch_sdpa or patch_bin_matmul):
+    bmm_nodes = []
+    sdpa_nodes = []
+    bin_matmul_nodes = []
+    for node in ast.walk(head):
+        if is_bmm(node):
+            bmm_nodes.append(node)
+        if is_sdpa(node):
+            sdpa_nodes.append(node)
+        if is_bin_matmul(node):
+            bin_matmul_nodes.append(node)
+    if len(bmm_nodes) != 2 and len(sdpa_nodes) != 1 and len(bin_matmul_nodes) != 2:
         print(f"Expect 2 bmm/matmul op in the {org_class_name}, found {len(bmm_nodes)}")
         print(f"Or expect 1 sdpa op in the {org_class_name}, found {len(sdpa_nodes)}")
         print(f"Or expect 2 @ op in the {org_class_name}, found {len(bin_matmul_nodes)}")
-        print(f"Or expect an attention helper call in the {org_class_name}")
         print("Auto quantization of KV Cache fails")
         return False
 
-    if attention_helper_nodes:
-        for node, parameter_names in attention_helper_nodes:
-            patch_attention_helper(node, parameter_names)
-        print(f"Patching {len(attention_helper_nodes)} attention helper call(s) with quantizers")
-    if patch_bmm:
+    if len(bmm_nodes) == 2:
         # transpose k cache here to enable per-token quantization
         # without transpose, the quantization will be per-channel, i.e.,
         # self.k_bmm_quantizer(key_states.transpose(-1, -2))
@@ -226,13 +187,9 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
         # self.k_bmm_quantizer(key_states.transpose(-1, -2).transpose(-1, -2)).transpose(-1, -2)
         # removing the additional transpose is doable but not trivial
         patch(bmm_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
-        patch(
-            bmm_nodes[1],
-            quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"),
-            transpose=True,
-        )
+        patch(bmm_nodes[1], quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"), transpose=True)
         print("Patching 2 BMM/Matmul operators with quantizers")
-    if patch_bin_matmul:
+    if len(bin_matmul_nodes) == 2:
         patch_binop(
             bin_matmul_nodes[1],
             quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer"),
@@ -240,14 +197,10 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
         )
         patch_binop(bin_matmul_nodes[0], quantizer_names=(None, "v_bmm_quantizer"))
         print("Patching 2 @ operators with quantizers")
-    if patch_sdpa:
+
+    if len(sdpa_nodes) == 1:
         patch(
-            sdpa_nodes[0],
-            quantizer_names=(
-                "q_bmm_quantizer",
-                "k_bmm_quantizer",
-                "v_bmm_quantizer",
-            ),
+            sdpa_nodes[0], quantizer_names=("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer")
         )
         print("Patching 1 scaled_dot_product_attention operator with quantizers")
 
