@@ -60,6 +60,39 @@ The fp32 gap is half an ulp — `_SoftCappedLMHead` computes in fp32 and casts b
 the head dtype on purpose, so a `[seq, 202048]` fp32 logit tensor does not dominate
 activation memory.
 
+## The capture bug this harness was built blind to (fixed 2026-09-12, `33bea53ac`)
+
+For every run before this commit, the drafter trained on hidden states belonging to
+**other requests**. `save_kv_layer` walked the batch's `slot_mapping` with a running
+offset, assuming the newly scheduled requests sat at its front; vLLM appends them at the
+back, so any request already decoding shifted the window.
+
+Nothing errored. Shapes, pool slot, the `/done` generation check and the recorded
+`token_ids` were all correct — only the bytes belonged to a different prompt. The
+drafter therefore had nothing but its anchor token to go on and learned a bigram model,
+which is exactly what its position-1 accuracy of 0.217 was.
+
+Measured on one smoke, changing only the serve's concurrency:
+
+| serve `max_num_seqs` | per-sequence hidden/token match | `teacher_top1_match` |
+|---|---|---|
+| 32, before | 0.00 - 0.02 (8x8 pairing matrix all dark) | 0.0103 |
+| 1, before | 0.94 - 1.00 (clean identity) | — |
+| **32, after** | **0.94 - 1.00 (clean identity)** | **0.9714** |
+
+Three things worth keeping:
+
+- **`SERVE_MAX_NUM_SEQS=1` is the fastest test for this whole class of bug.** If a
+  metric jumps when the serve can only hold one request per batch, the problem is batch
+  bookkeeping, not the model or the data.
+- **The 8x8 pairing matrix** (`DFLASH_TEACHER_SWEEP=1`, `HFDFlashModel._teacher_sweep`)
+  distinguishes the cases that matter: a bright diagonal means correct, a bright
+  off-diagonal means a permutation, all dark means the hidden is not from this batch at
+  all. Per-plane and per-offset sweeps could not tell these apart — they all read ~0.00.
+- **`teacher_top1_match` is what surfaced this.** Without a target-side ceiling to read
+  the draft against, the only symptom is "accuracy seems a bit low", which looks exactly
+  like a hyperparameter problem. Loss goes down the whole time.
+
 ## Teacher-side diagnostics
 
 Every log step also reports two numbers about the BASE, not the draft, over exactly the
