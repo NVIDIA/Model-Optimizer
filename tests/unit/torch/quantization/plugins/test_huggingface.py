@@ -250,7 +250,8 @@ def test_autoquantize_huggingface(model_provider, method):
     input_ids = model.dummy_inputs["input_ids"]
 
     def forward_step(model, batch):
-        return model(**batch) if method == "gradient" else model(**batch).logits
+        out = model(**batch, use_cache=False)
+        return out if method == "gradient" else out.logits
 
     warnings.filterwarnings(
         "error", message="AutoQuantize: Error enabling gradient checkpointing for huggingface model"
@@ -301,7 +302,9 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
         raise ValueError(f"Unsupported quant_config: {quant_config}")
 
     model_ref = model_cls.from_pretrained(tiny_llama_dir)
-    mtq.quantize(model_ref, quant_config, lambda model: model(**model.dummy_inputs))
+    mtq.quantize(
+        model_ref, quant_config, lambda model: model(**model.dummy_inputs, use_cache=False)
+    )
     mtq.compress(model_ref)
     model_ref.save_pretrained(tiny_llama_dir / "modelopt_model")
     assert os.path.exists(tiny_llama_dir / "modelopt_model/modelopt_state.pth")

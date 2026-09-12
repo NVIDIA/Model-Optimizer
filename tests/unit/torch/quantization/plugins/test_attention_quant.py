@@ -99,7 +99,9 @@ def test_kv_quant_hf(model_getter, attn_cls):
                 setattr(parent, attention_module, attn_cls())
 
     model_test(input_ids, **kwargs)
-    mtq.quantize(model_test, kv_cache_config, lambda model: model(input_ids, **kwargs))
+    mtq.quantize(
+        model_test, kv_cache_config, lambda model: model(input_ids, use_cache=False, **kwargs)
+    )
 
     for name, module in model_test.named_modules():
         if name.endswith(attention_module):
@@ -128,7 +130,7 @@ def test_kv_quant_bert():
     mtq.quantize(
         model_test,
         kv_cache_config,
-        lambda model: model(input_ids, attention_mask=attention_mask),
+        lambda model: model(input_ids, attention_mask=attention_mask, use_cache=False),
     )
 
     # BERT attention modules are at encoder.layer.X.attention.self
