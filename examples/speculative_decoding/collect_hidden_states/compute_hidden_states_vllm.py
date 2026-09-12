@@ -55,7 +55,7 @@ def _resolve_aux_layers_standalone(
     This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
     'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
     pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
-    container does not have, so the import fails. Resolve the 'dflash' preset inline
+    container does not have, so the import fails. Resolve the 'eagle' and 'dflash' presets inline
     (mirroring ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers)
     and accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
     ``dflash.dflash_architecture_config.num_hidden_layers`` (pass --num-draft-layers) or the
@@ -66,6 +66,11 @@ def _resolve_aux_layers_standalone(
     ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
     spec = aux_layers.strip().lower()
+    if spec == "eagle":
+        # Mirrors hf_eagle.default_eagle_aux_layer_ids: three layers near the start,
+        # middle, and end of the stack. This is add_aux_layers_args' default, so the
+        # dump must resolve it without modelopt or the documented invocation fails.
+        return sorted({1, max(0, num_hidden_layers // 2 - 1), max(0, num_hidden_layers - 4)})
     if spec == "dflash":
         if num_draft == 1:
             return [num_hidden_layers // 2]
@@ -73,7 +78,16 @@ def _resolve_aux_layers_standalone(
         end = max(start, num_hidden_layers - 3)
         span = end - start
         return sorted({round(start + (i * span) / (num_draft - 1)) for i in range(num_draft)})
-    ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    try:
+        ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    except ValueError as exc:
+        # An unrecognised preset name would otherwise surface as a bare
+        # "invalid literal for int()", which hides what the caller should pass.
+        raise ValueError(
+            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
+            "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
+            "are supported."
+        ) from exc
     # Match the shared helper's contract: ids must be valid layer indices.
     out_of_range = [i for i in ids if not 0 <= i < num_hidden_layers]
     if out_of_range:
@@ -84,7 +98,8 @@ def _resolve_aux_layers_standalone(
     if not ids:
         raise ValueError(
             f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
-            "'dflash' preset or an explicit comma-separated layer-id list are supported."
+            "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
+            "are supported."
         )
     return ids
 
