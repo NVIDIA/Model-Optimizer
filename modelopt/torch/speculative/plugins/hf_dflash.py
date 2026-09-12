@@ -201,6 +201,19 @@ def _dpace_position_weights(
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
+
+def _top1_id_and_prob(logits):
+    """Argmax token id and its softmax probability, without keeping the softmax around.
+
+    ``max - logsumexp`` is the log-probability of the argmax, so the full probability
+    vector is never materialised -- which matters because callers hand this multi-hundred
+    -megabyte chunks of a 202k-wide vocabulary.
+    """
+    logits = logits.float()
+    top_val, top_id = logits.max(dim=-1)
+    return top_id, (top_val - torch.logsumexp(logits, dim=-1)).exp()
+
+
 class HFDFlashModel(DFlashModel):
     """DFlash Model for HuggingFace transformers."""
 
@@ -389,6 +402,11 @@ class HFDFlashModel(DFlashModel):
         super().modify(config)
 
         self.dflash_fp32_master_weights = getattr(config, "dflash_fp32_master_weights", False)
+        self.dflash_report_teacher_metrics = getattr(
+            config, "dflash_report_teacher_metrics", True
+        )
+        # Extra per-step scalars handed to the trainer's logging callback.
+        self._dflash_metrics = {}
 
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
@@ -949,6 +967,53 @@ class HFDFlashModel(DFlashModel):
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
+    def _teacher_top1(self, base_logits, base_outputs, teacher_indices, chunk=256):
+        """Teacher top-1 token id and its probability at the supervised block positions.
+
+        Returns flat ``[B * N * block_size]`` tensors, or ``(None, None)`` when the base
+        distribution is not available here.
+
+        Two sources, in order: the full base logits when something already materialised
+        them (self-logit-distillation), otherwise the post-final-norm base hidden, which
+        streaming/offline training carries precisely so consumers can project only the
+        rows they need. That second path is why this is not simply
+        ``base_outputs.logits.softmax(-1)``: at PineDrift's 202048-token vocabulary a
+        full-sequence logits tensor is ~10 GB and a gathered one ~6.6 GB, on top of the
+        draft logits already resident, so the projection is done on gathered rows in
+        chunks and reduced to two scalars per row immediately. The chunk is small on
+        purpose: this runs beside draft logits that are already ~6.6 GB, and a near-OOM
+        step on PyTorch's expandable segments silently retries instead of crashing, so
+        it shows up as a slowdown rather than an error.
+        """
+        if not getattr(self, "dflash_report_teacher_metrics", False):
+            return None, None
+
+        _, n_blocks, _ = teacher_indices.shape
+        full_logits = base_logits if base_logits is not None else getattr(base_outputs, "logits", None)
+        if full_logits is not None:
+            gathered = torch.gather(
+                full_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
+                2,
+                teacher_indices.unsqueeze(-1).expand(-1, -1, -1, full_logits.size(-1)),
+            ).reshape(-1, full_logits.size(-1))
+            return _top1_id_and_prob(gathered)
+
+        base_hidden = getattr(base_outputs, "base_hidden", None)
+        if base_hidden is None:
+            return None, None
+        rows = torch.gather(
+            base_hidden.unsqueeze(1).expand(-1, n_blocks, -1, -1),
+            2,
+            teacher_indices.unsqueeze(-1).expand(-1, -1, -1, base_hidden.size(-1)),
+        ).reshape(-1, base_hidden.size(-1))
+        ids, probs = [], []
+        for start in range(0, rows.shape[0], chunk):
+            piece = self._base_model_lm_head(rows[start : start + chunk])
+            piece_ids, piece_probs = _top1_id_and_prob(piece)
+            ids.append(piece_ids)
+            probs.append(piece_probs)
+        return torch.cat(ids), torch.cat(probs)
+
     def _compute_loss(
         self,
         logits,
@@ -975,6 +1040,7 @@ class HFDFlashModel(DFlashModel):
         Returns:
             (loss, accuracy) tuple.
         """
+        self._dflash_metrics = {}
         bsz, seq_len = input_ids.shape
         block_size = self.dflash_block_size
         n_blocks = anchor_positions.shape[1]
@@ -1073,6 +1139,27 @@ class HFDFlashModel(DFlashModel):
                 # like the empty-loss-mask failure signature. So index 0 of the reported
                 # vector is block position 1, the first token the draft has to guess.
                 accuracy = (c / (d + 1e-6))[1:].tolist()
+
+                # Teacher-side diagnostics over the same supervised positions. These
+                # describe the TARGET model, not the draft: how often the teacher's own
+                # top-1 IS the corpus's next token, and how peaked that top-1 is. They
+                # bound what any draft can learn here -- a low match rate means the
+                # corpus is off-distribution for the target, and a flat top-1 means the
+                # target itself is uncertain there, so acceptance cannot be high no
+                # matter how good the draft gets. Teacher logits for the token at label
+                # index j sit at position j-1, the same alignment the KD term uses.
+                t_ids, t_probs = self._teacher_top1(
+                    base_logits, base_outputs, (safe_label_indices - 1).clamp(min=0)
+                )
+                if t_ids is not None:
+                    keep = binary_eval_mask > 0.5
+                    eval_count = keep.sum().float() + 1e-6
+                    self._dflash_metrics["teacher_top1_match"] = (
+                        ((t_ids == flat_targets) & keep).sum().float() / eval_count
+                    ).item()
+                    self._dflash_metrics["teacher_top1_confidence"] = (
+                        (t_probs * keep.float()).sum() / eval_count
+                    ).item()
         else:
             loss = flat_logits.sum() * 0.0
             accuracy = [0.0] * max(block_size - 1, 1)
@@ -1153,7 +1240,12 @@ class HFDFlashModel(DFlashModel):
                 kwargs["base_model_outputs"],
                 self._base_model_norm,
                 self._base_model_lm_head,
-                need_logits=self.dflash_self_logit_distillation,
+                # The teacher-side metrics need the base distribution too, but only at a
+                # few thousand rows -- so ask for the post-norm base hidden and defer the
+                # lm_head, instead of materialising [B, seq, vocab] logits nobody wants.
+                need_logits=self.dflash_self_logit_distillation
+                or getattr(self, "dflash_report_teacher_metrics", False),
+                defer_lm_head=not self.dflash_self_logit_distillation,
             )
             target_hidden = base_outputs.target_hidden
         else:
@@ -1230,6 +1322,7 @@ class HFDFlashModel(DFlashModel):
             return ModelOutput(
                 loss=dummy, logits=base_outputs.logits,
                 train_acc=[[0.0] * max(self.dflash_block_size - 1, 1)],
+                dflash_metrics={},
             )
 
         # 4. Build draft inputs
@@ -1272,6 +1365,7 @@ class HFDFlashModel(DFlashModel):
             loss=loss,
             logits=base_outputs.logits,
             train_acc=[accuracy],
+            dflash_metrics=dict(self._dflash_metrics),
         )
 
     @torch.no_grad()

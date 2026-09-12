@@ -152,7 +152,13 @@ class HFDFlash2Model(HFDFlashModel):
         remain comparable; the selector's own accuracy is logged separately.
         """
         loss, accuracy = super()._compute_loss(
-            logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits
+            logits,
+            input_ids,
+            anchor_positions,
+            block_keep_mask,
+            loss_mask,
+            base_logits,
+            base_outputs=base_outputs,
         )
         if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
             return loss, accuracy
@@ -192,8 +198,8 @@ class HFDFlash2Model(HFDFlashModel):
             predecessor_ids,
             weight_mask,
         )
-        self._selector_metrics = {
-            "selector_accuracy": selector_accuracy,
-            "selector_coverage": selector_coverage,
-        }
+        # Same channel the backbone's teacher-side diagnostics use, so the selector's
+        # numbers actually reach the log instead of sitting on an attribute nobody reads.
+        self._dflash_metrics["selector_accuracy"] = selector_accuracy
+        self._dflash_metrics["selector_coverage"] = selector_coverage
         return loss + self.dflash_selector_loss_alpha * selector_loss, accuracy

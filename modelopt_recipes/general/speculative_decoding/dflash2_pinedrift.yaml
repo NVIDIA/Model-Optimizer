@@ -40,7 +40,7 @@ training:
   output_dir:
   num_train_epochs: 1
   per_device_train_batch_size: 1
-  learning_rate: 6.0e-4
+  learning_rate: 1.0e-3
   warmup_ratio: 0.04
   training_seq_len: 3072
   logging_steps: 20
@@ -77,6 +77,17 @@ dflash:
   # number is dominated by positions that never get accepted anyway.
   dflash_block_size: 8
   dflash_num_anchors: 256
+  # Sliding-window draft attention. The base is NOT full attention: its layers run
+  # [SWA2048, SWA2048, SWA2048, global+NoPE] on a period of 4, so 3 of every 4 layers
+  # only ever saw 2048 tokens of context. A full-attention draft at training_seq_len
+  # 3072 therefore looks further back than most of the model it is imitating. 2048
+  # matches the base's own window. Must be >= dflash_block_size (config-validated);
+  # at 3072 it genuinely bites rather than being a no-op.
+  # NOTE for serving: the window is exported (dflash_config.use_swa/swa_window_size +
+  # top-level sliding_window), but a serving stack whose draft attention ignores it
+  # will run FULL attention SILENTLY -- that exact mismatch cost a Gemma-4 run. Verify
+  # on the vLLM side before trusting an AL from an SWA drafter.
+  dflash_swa_window_size: 2048
   dflash_use_torch_compile: false
   dflash_self_logit_distillation: false
   # dflash_loss_objective defaults to dpace, which derives per-position weights from
@@ -90,6 +101,11 @@ dflash:
   # token maps to; they would also work but are not inspectable through the tokenizer.
   dflash_mask_token_id: 201817
   dflash_selector_loss_alpha: 1.0
+  # Log the TARGET's own top-1 match and top-1 probability over the supervised block
+  # positions. They are the ceiling the draft is being measured against: a draft top-1
+  # of 0.20 means something different when the teacher itself only matches the corpus
+  # 0.55 of the time than when it matches 0.90.
+  dflash_report_teacher_metrics: true
 
   # Keeps the draft's master weights (and therefore AdamW's moments) in fp32 while
   # compute stays bf16. A bf16 second moment cannot represent a beta2=0.999 update.

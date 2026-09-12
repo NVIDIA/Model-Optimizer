@@ -230,6 +230,15 @@ class EagleTrainerWithAccLog(Trainer):
             val = getattr(outputs, attr, None)
             if val is not None:
                 self.state.component_losses[key].append(val.item())
+        # DFlash/DFlash2 report extra per-step scalars (selector accuracy/coverage and
+        # the teacher-side diagnostics); accumulate them so the logging callback can
+        # average over the interval the same way it averages accuracy.
+        dflash_metrics = getattr(outputs, "dflash_metrics", None)
+        if dflash_metrics:
+            if not hasattr(self.state, "dflash_metrics"):
+                self.state.dflash_metrics = {}
+            for key, val in dflash_metrics.items():
+                self.state.dflash_metrics.setdefault(key, []).append(float(val))
         return loss
 
 
@@ -386,6 +395,18 @@ class EagleTrainingPlot(TrainerCallback):
         for i, draft_acc in enumerate(average_acc):
             for j, step_acc in enumerate(draft_acc):
                 logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+        dflash_metrics = getattr(state, "dflash_metrics", None)
+        if dflash_metrics:
+            averaged = {k: float(np.mean(v)) for k, v in dflash_metrics.items() if v}
+            logs.update(averaged)
+            # Printed as well as logged: the extras are added to `logs` after the Trainer
+            # has already snapshotted it into log_history, so a checkpoint's
+            # trainer_state.json will not carry them -- stdout is what curve tooling reads.
+            print_rank_0(
+                f"Step {state.global_step} "
+                + ", ".join(f"{k}: {v:.4f}" for k, v in averaged.items())
+            )
+            state.dflash_metrics = {}
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.

@@ -396,6 +396,19 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_report_teacher_metrics: bool = ModeloptField(
+        default=True,
+        description=(
+            "Log two TARGET-side diagnostics alongside the draft's accuracy: how often the "
+            "base model's own top-1 is the corpus's next token (teacher_top1_match) and how "
+            "peaked that top-1 is (teacher_top1_confidence), both over the supervised block "
+            "positions. They bound what any draft can reach on this corpus, so a low draft "
+            "accuracy can be read against them instead of in a vacuum. Costs one extra "
+            "lm_head projection of the supervised rows per step (chunked, no full-sequence "
+            "logits)."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha

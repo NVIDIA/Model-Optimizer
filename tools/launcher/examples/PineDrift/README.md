@@ -60,6 +60,33 @@ The fp32 gap is half an ulp — `_SoftCappedLMHead` computes in fp32 and casts b
 the head dtype on purpose, so a `[seq, 202048]` fp32 logit tensor does not dominate
 activation memory.
 
+## Teacher-side diagnostics
+
+Every log step also reports two numbers about the BASE, not the draft, over exactly the
+block positions the draft is scored on:
+
+    teacher_top1_match       how often PineDrift's own top-1 is the corpus's next token
+    teacher_top1_confidence  the mean probability it puts on that top-1
+
+They are the ceiling the draft is being read against. A draft position-1 accuracy of
+0.20 means one thing if the teacher matches 0.90 and something completely different if
+the teacher itself only matches 0.45 — the latter says the corpus is off-distribution
+for the target (or the mask/template is wrong), not that the draft is undertrained.
+Both are flat by construction, so drift in them means the data mix moved.
+
+Getting them was NOT a copy of the DSpark implementation, which reads a
+`flat_teacher` that its KD term had already gathered. This run has
+`dflash_self_logit_distillation: false`, so no teacher distribution exists anywhere in
+the step. `HFDFlashModel._teacher_top1` therefore asks `from_offline_dict` for the
+post-final-norm base hidden with `defer_lm_head=True` and projects only the supervised
+rows, in chunks of 256, reducing each to `(argmax, max - logsumexp)` immediately. The
+obvious version -- gather then softmax -- costs 6.6 GB at this vocabulary, and the
+full-sequence version 10 GB, next to draft logits that are already 6.6 GB.
+
+`selector_accuracy` / `selector_coverage` ride the same channel. DFlash2 had been
+computing them into `self._selector_metrics` since the port; nothing ever read that
+attribute, so they had never once been logged.
+
 ## Configuration decisions, and which are measured
 
 | decision | value | basis |
