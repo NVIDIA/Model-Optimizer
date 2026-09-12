@@ -208,6 +208,47 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     assert calls[1]["checkpoint"] == "kv-search.pth"
 
 
+def test_hf_ptq_runs_real_weight_then_kv_autoquantize_stages(monkeypatch):
+    """Exercise the shipped gradient-weight -> KL-div KV composition without mocked stages."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
+    )
+    recipe = load_recipe(
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+    )
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    input_ids = torch.arange(8).unsqueeze(0) % model.config.vocab_size
+    data = [{"input_ids": input_ids, "labels": input_ids.clone()}]
+    args = SimpleNamespace(
+        qformat="fp8",
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        kv_cache_qformat="none",
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+        kv_auto_quantize_checkpoint=None,
+    )
+
+    hf_ptq._run_auto_quantize_recipe(args, recipe, model, model, None, False, data, False)
+
+    enabled_weight_quantizers = [
+        module
+        for name, module in model.named_modules()
+        if name.endswith("weight_quantizer") and getattr(module, "is_enabled", False)
+    ]
+    assert enabled_weight_quantizers
+    assert all(module.num_bits in ((2, 1), (4, 3)) for module in enabled_weight_quantizers)
+    attention = model.model.layers[0].self_attn
+    assert attention.k_bmm_quantizer.is_enabled
+    assert attention.v_bmm_quantizer.is_enabled
+    assert attention.k_bmm_quantizer.num_bits in ((2, 1), (4, 3))
+    assert attention.v_bmm_quantizer.num_bits in ((2, 1), (4, 3))
+
+
 def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(
@@ -275,6 +316,7 @@ def test_fixed_ptq_kv_precheck_does_not_widen_scoped_gemm_rule(monkeypatch):
     [
         "model.layers.*.self_attn.*[kv]_bmm_quantizer",
         "*self_attn*k_bmm_quantizer",
+        "*.language_model.*.attention.*_bmm_quantizer",
     ],
 )
 def test_fixed_ptq_kv_precheck_ignores_unrelated_parent_scoped_rules(monkeypatch, kv_pattern):
@@ -290,6 +332,23 @@ def test_fixed_ptq_kv_precheck_ignores_unrelated_parent_scoped_rules(monkeypatch
                 "parent_class": "nn.Embedding",
                 "quantizer_name": "*",
                 "enable": False,
+            },
+        ],
+        algorithm="max",
+    )
+
+    assert hf_ptq._quantize_config_explicitly_enables_kv(fixed.model_dump())
+
+
+def test_fixed_ptq_kv_precheck_detects_parent_scoped_kv_rule(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
+            {
+                "parent_class": "LlamaAttention",
+                "quantizer_name": "*_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
             },
         ],
         algorithm="max",

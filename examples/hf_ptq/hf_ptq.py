@@ -441,18 +441,28 @@ def _mtq_inputs_from_auto_quantize_config(
 
 def _quantize_config_explicitly_enables_kv(quant_cfg: dict[str, Any]) -> bool:
     """Detect explicit K/V rules while preserving their ordered override semantics."""
-    enabled = dict.fromkeys(("k_bmm_quantizer", "v_bmm_quantizer"), False)
+    names = ("k_bmm_quantizer", "v_bmm_quantizer")
+    enabled_by_parent = {None: dict.fromkeys(names, False)}
     for entry in quant_cfg["quant_cfg"]:
-        if entry.get("parent_class") is not None:
-            continue
         pattern = entry["quantizer_name"]
         if pattern != "*" and "bmm_quantizer" not in pattern:
             continue
-        for name in enabled:
-            qualified_name = f"model.layers.0.self_attn.{name}"
-            if fnmatch(name, pattern) or fnmatch(qualified_name, pattern) or pattern.endswith(name):
+        basename_pattern = pattern.rsplit(".", 1)[-1]
+        matched_names = [
+            name for name in names if fnmatch(name, basename_pattern) or pattern.endswith(name)
+        ]
+        if not matched_names:
+            continue
+
+        parent_class = entry.get("parent_class")
+        if parent_class is None:
+            scopes = enabled_by_parent.values()
+        else:
+            scopes = [enabled_by_parent.setdefault(parent_class, enabled_by_parent[None].copy())]
+        for enabled in scopes:
+            for name in matched_names:
                 enabled[name] = entry["enable"]
-    return any(enabled.values())
+    return any(any(enabled.values()) for enabled in enabled_by_parent.values())
 
 
 def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
