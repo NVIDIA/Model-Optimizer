@@ -65,7 +65,7 @@ onnx = [
     # ORT for Windows x64
     "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
     # ORT host and standalone TensorRT-RTX ABI EP for native Windows ARM64.
-    "onnxruntime~=1.24.2; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "onnxruntime~=1.26.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
     "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
     # ORT with Python <= 3.10 on supported platforms
     "onnxruntime~=1.22.0; python_version <= '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
