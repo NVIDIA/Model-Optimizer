@@ -43,6 +43,17 @@ def parse_args():
         default=None,
         help=CONFIG_OVERRIDES_HELP,
     )
+    parser.add_argument(
+        "--speculation_profile",
+        type=str,
+        default=None,
+        help=(
+            "Optional speculation_profile.json describing this draft's measured "
+            "acceptance (produced by examples/specdec_bench). Copied into the export so "
+            "deployment consumers need not guess the draft's quality. Omitted, an "
+            "unmeasured stub is written instead."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -60,5 +71,6 @@ with torch.inference_mode():
     export_speculative_decoding(
         model,
         export_dir=args.export_path,
+        speculation_profile=args.speculation_profile,
     )
 print(f"Exported checkpoint to {args.export_path}")
