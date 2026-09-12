@@ -30,8 +30,9 @@
 # limitations under the License.
 
 import os
+import shutil
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 
 import onnx
@@ -49,8 +50,6 @@ from torch.onnx import export as onnx_export
 from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
 from modelopt.torch.utils import torch_to
-
-from .fp8_onnx_graphsurgeon import convert_zp_fp8
 
 MODEL_ID_TO_DYNAMIC_AXES = {
     "sdxl-1.0": {
@@ -121,46 +120,6 @@ def flux_convert_rope_weight_type(onnx_graph):
         if node.op == "Einsum":
             node.inputs[1].dtype = "float32"
     return gs.export_onnx(graph)
-
-
-def _has_enabled_conv(backbone):
-    return any(
-        isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d))
-        and (module.input_quantizer.is_enabled or module.weight_quantizer.is_enabled)
-        for module in backbone.modules()
-    )
-
-
-@contextmanager
-def _temporary_fp8_export_scales(backbone, conv_only=False):
-    # temporary solution due to a known bug in torch.onnx._dynamo_export
-    module_types = (
-        (torch.nn.Conv2d,)
-        if conv_only
-        else (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)
-    )
-    quantizer_states = []
-    try:
-        for module in backbone.modules():
-            if not isinstance(module, module_types):
-                continue
-            for quantizer_name in ("input_quantizer", "weight_quantizer"):
-                quantizer = getattr(module, quantizer_name, None)
-                if (
-                    quantizer is None
-                    or not quantizer.is_enabled
-                    or not quantizer.is_fp8
-                    or getattr(quantizer, "_amax", None) is None
-                ):
-                    continue
-                quantizer_states.append((quantizer, quantizer._num_bits, quantizer._amax))
-                quantizer._num_bits = 8
-                quantizer._amax = quantizer._amax * (127 / 448.0)
-        yield
-    finally:
-        for quantizer, num_bits, amax in reversed(quantizer_states):
-            quantizer._num_bits = num_bits
-            quantizer._amax = amax
 
 
 def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1):
@@ -490,14 +449,6 @@ def save_onnx(onnx_model, output):
     print(f"ONNX model saved to {output}")
 
 
-def _normalize_fp8_qdq(onnx_model):
-    graph = gs.import_onnx(onnx_model)
-    graph.cleanup().toposort()
-    onnx_model = convert_zp_fp8(gs.export_onnx(graph))
-    graph = gs.import_onnx(onnx_model)
-    return gs.export_onnx(graph.cleanup())
-
-
 def _ensure_default_opset(onnx_model, minimum_version):
     opset_import = next(
         (item for item in onnx_model.opset_import if item.domain in {"", "ai.onnx"}), None
@@ -508,28 +459,16 @@ def _ensure_default_opset(onnx_model, minimum_version):
     opset_import.version = max(opset_import.version, minimum_version)
 
 
-def _process_fp4_onnx_graph(onnx_model, model_name):
-    if model_name in {"sdxl-1.0", "sdxl-turbo"}:
-        onnx_model = _normalize_fp8_qdq(onnx_model)
-    onnx_model = NVFP4QuantExporter.process_model(onnx_model)
-    if model_name in {"sdxl-1.0", "sdxl-turbo"}:
-        _ensure_default_opset(onnx_model, 23)
-    return onnx_model
-
-
 def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     model_file_name = "model.onnx"
     os.makedirs(f"{onnx_dir}", exist_ok=True)
+    tmp_subfolder = tempfile.mkdtemp(prefix="myapp_")
+    tmp_output = Path(f"{tmp_subfolder}/{model_file_name}")
     q_output = Path(f"{onnx_dir}/{model_file_name}")
     is_sdxl_fp4 = precision == "fp4" and model_name in {"sdxl-1.0", "sdxl-turbo"}
 
     quantizer_context = (
         configure_linear_module_onnx_quantizers(backbone) if precision == "fp4" else nullcontext()
-    )
-    fp8_scale_context = (
-        _temporary_fp8_export_scales(backbone, conv_only=is_sdxl_fp4)
-        if is_sdxl_fp4 or (precision == "fp8" and _has_enabled_conv(backbone))
-        else nullcontext()
     )
 
     dummy_kwargs, dynamic_axes, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
@@ -579,28 +518,26 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     do_constant_folding = True
     opset_version = 20
 
-    with tempfile.TemporaryDirectory(prefix="myapp_", ignore_cleanup_errors=True) as tmp_subfolder:
-        tmp_output = Path(tmp_subfolder) / model_file_name
-        with quantizer_context, fp8_scale_context, torch.inference_mode():
-            onnx_export(
-                backbone,
-                (),
-                f=tmp_output.as_posix(),
-                kwargs=dummy_kwargs,
-                input_names=input_names,
-                output_names=output_names,
-                dynamic_axes=dynamic_axes,
-                do_constant_folding=do_constant_folding,
-                opset_version=opset_version,
-                dynamo=False,
-            )
-        print(f"Saved at {tmp_output}")
-        onnx_model = onnx.load(str(tmp_output), load_external_data=True)
-        if precision == "fp8":
-            if not model_name.startswith("flux"):
-                onnx_model = _normalize_fp8_qdq(onnx_model)
-            else:
-                onnx_model = flux_convert_rope_weight_type(onnx_model)
-        if precision == "fp4":
-            onnx_model = _process_fp4_onnx_graph(onnx_model, model_name)
-        save_onnx(onnx_model, q_output)
+    with quantizer_context, torch.inference_mode():
+        onnx_export(
+            backbone,
+            (),
+            f=tmp_output.as_posix(),
+            kwargs=dummy_kwargs,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            do_constant_folding=do_constant_folding,
+            opset_version=opset_version,
+            dynamo=False,
+        )
+    print(f"Saved at {tmp_output}")
+    onnx_model = onnx.load(str(tmp_output), load_external_data=True)
+    if precision == "fp8" and model_name.startswith("flux"):
+        flux_convert_rope_weight_type(onnx_model)
+    if precision == "fp4":
+        onnx_model = NVFP4QuantExporter.process_model(onnx_model)
+        if is_sdxl_fp4:
+            _ensure_default_opset(onnx_model, 23)
+    save_onnx(onnx_model, q_output)
+    shutil.rmtree(tmp_subfolder, ignore_errors=True)

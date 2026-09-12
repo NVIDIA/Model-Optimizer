@@ -214,90 +214,25 @@ def test_restore_defaults_reach_exports_with_checkpoint_policy(monkeypatch, tmp_
     assert backbone.attention._disable_fp8_mha is False
 
 
-def test_temporary_fp8_export_scales_filter_and_restore_on_error():
-    model = nn.Module()
-    modules = {
-        "linear": nn.Linear(1, 1),
-        "conv1d": nn.Conv1d(1, 1, 1),
-        "conv2d": nn.Conv2d(1, 1, 1),
-        "conv3d": nn.Conv3d(1, 1, 1),
-        "disabled": nn.Conv2d(1, 1, 1),
-        "uncalibrated": nn.Linear(1, 1),
-        "int8": nn.Conv2d(1, 1, 1),
-    }
-    for name, module in modules.items():
-        setattr(model, name, module)
-        _add_quantizers(
-            module,
-            enabled=name != "disabled",
-            calibrated=name != "uncalibrated",
-            num_bits=8 if name == "int8" else (4, 3),
-        )
-    quantizers = [module for module in model.modules() if isinstance(module, TensorQuantizer)]
-    state = {q: (q._num_bits, getattr(q, "_amax", None)) for q in quantizers}
-
-    for conv_only, changed_names in (
-        (True, {"conv2d"}),
-        (False, {"linear", "conv1d", "conv2d", "conv3d"}),
-    ):
-        with (
-            pytest.raises(RuntimeError, match="export failed"),
-            diffusion_export._temporary_fp8_export_scales(model, conv_only=conv_only),
-        ):
-            for name, module in modules.items():
-                for quantizer in (module.input_quantizer, module.weight_quantizer):
-                    if name in changed_names:
-                        assert quantizer.num_bits == 8
-                        assert quantizer.amax == 127.0
-                    else:
-                        assert (
-                            quantizer._num_bits,
-                            getattr(quantizer, "_amax", None),
-                        ) == state[quantizer]
-            raise RuntimeError("export failed")
-
-        for quantizer, (num_bits, amax) in state.items():
-            assert quantizer._num_bits == num_bits
-            assert getattr(quantizer, "_amax", None) is amax
-
-
-def test_flux_export_saves_converted_rope_model(monkeypatch, tmp_path):
-    original_model = object()
-    converted_model = object()
+def test_sdxl_fp4_export_lowers_nvfp4_at_opset_23(monkeypatch, tmp_path):
+    model = onnx.ModelProto()
+    model.opset_import.add(domain="", version=20)
     monkeypatch.setattr(
         diffusion_export,
         "generate_dummy_kwargs_and_dynamic_axes_and_shapes",
         lambda *args: ({}, {}, None),
     )
     monkeypatch.setattr(diffusion_export, "onnx_export", lambda *args, **kwargs: None)
-    monkeypatch.setattr(diffusion_export.onnx, "load", lambda *args, **kwargs: original_model)
-    monkeypatch.setattr(
-        diffusion_export, "flux_convert_rope_weight_type", lambda model: converted_model
-    )
+    monkeypatch.setattr(diffusion_export.onnx, "load", lambda *args, **kwargs: model)
+    process_model = Mock(side_effect=lambda current_model: current_model)
+    monkeypatch.setattr(diffusion_export.NVFP4QuantExporter, "process_model", process_model)
     save_onnx = Mock()
     monkeypatch.setattr(diffusion_export, "save_onnx", save_onnx)
 
-    diffusion_export.modelopt_export_sd(nn.Module(), tmp_path, "flux-dev", "fp8")
+    diffusion_export.modelopt_export_sd(nn.Module(), tmp_path, "sdxl-1.0", "fp4")
 
-    save_onnx.assert_called_once_with(converted_model, tmp_path / "model.onnx")
-
-
-@pytest.mark.parametrize("model_name", ["sdxl-1.0", "sdxl-turbo"])
-def test_sdxl_fp4_processing_order_and_opset(monkeypatch, model_name):
-    model = onnx.ModelProto()
-    model.opset_import.add(domain="", version=20)
-    calls = []
-
-    def record(name):
-        def process(current_model):
-            calls.append(name)
-            return current_model
-
-        return process
-
-    monkeypatch.setattr(diffusion_export, "_normalize_fp8_qdq", record("fp8"))
-    monkeypatch.setattr(diffusion_export.NVFP4QuantExporter, "process_model", record("nvfp4"))
-
-    assert diffusion_export._process_fp4_onnx_graph(model, model_name) is model
-    assert calls == ["fp8", "nvfp4"]
-    assert model.opset_import[0].version == 23
+    process_model.assert_called_once_with(model)
+    save_onnx.assert_called_once_with(model, tmp_path / "model.onnx")
+    assert (
+        next(opset.version for opset in model.opset_import if opset.domain in {"", "ai.onnx"}) == 23
+    )

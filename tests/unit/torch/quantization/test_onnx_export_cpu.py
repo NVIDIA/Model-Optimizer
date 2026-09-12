@@ -59,6 +59,56 @@ def test_onnx_export_cpu(model_cls, num_bits, per_channel_quantization, constant
     )
 
 
+def test_fp8_conv_export_preserves_custom_qdq_and_kernel_shape():
+    model = torch.nn.Conv2d(3, 4, 3, bias=False).eval()
+    sample_input = torch.randn(1, 3, 8, 8)
+    model = mtq.quantize(
+        model,
+        mtq.FP8_DEFAULT_CFG,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+
+    buffer = io.BytesIO()
+    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
+        kwargs = {"enable_onnx_checker": False}
+    else:
+        kwargs = {}
+    torch.onnx.export(
+        model,
+        sample_input,
+        buffer,
+        opset_version=20,
+        dynamo=False,
+        **kwargs,
+    )
+
+    buffer.seek(0)
+    exported_model = onnx.load_model_from_string(buffer.read())
+    producers = {output: node for node in exported_model.graph.node for output in node.output}
+    conv = next(node for node in exported_model.graph.node if node.op_type == "Conv")
+
+    for conv_input in conv.input[:2]:
+        dequantize = producers[conv_input]
+        quantize = producers[dequantize.input[0]]
+        assert dequantize.op_type == "TRT_FP8DequantizeLinear"
+        assert quantize.op_type == "TRT_FP8QuantizeLinear"
+
+    value_info = {value.name: value for value in exported_model.graph.value_info}
+    weight_dequantize = producers[conv.input[1]]
+    weight_quantize = producers[weight_dequantize.input[0]]
+    for value_name in (*weight_quantize.output, *weight_dequantize.output):
+        shape = [
+            dimension.dim_value for dimension in value_info[value_name].type.tensor_type.shape.dim
+        ]
+        assert shape == [4, 3, 3, 3]
+
+    kernel_shape = next(
+        attribute for attribute in conv.attribute if attribute.name == "kernel_shape"
+    )
+    assert list(kernel_shape.ints) == [3, 3]
+    onnx.checker.check_model(exported_model)
+
+
 def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
     def forward_loop(model):
         model(sample_input)
