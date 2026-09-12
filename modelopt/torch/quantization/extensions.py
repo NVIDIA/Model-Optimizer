@@ -19,10 +19,18 @@ from pathlib import Path
 
 from modelopt.torch.utils import load_cpp_extension
 
-__all__ = ["get_cuda_ext", "get_cuda_ext_fp8", "get_cuda_ext_mx", "precompile"]
+__all__ = [
+    "get_cuda_ext",
+    "get_cuda_ext_fp8",
+    "get_cuda_ext_iq1_s",
+    "get_cuda_ext_iq2_xs",
+    "get_cuda_ext_mx",
+    "precompile",
+]
 
 path = Path(__file__).parent
 kernels_gemm = path.parent / "kernels" / "quantization" / "gemm"
+kernels_ggml = path.parent / "kernels" / "quantization" / "ggml"
 
 
 def get_cuda_ext(raise_if_failed: bool = False):
@@ -72,6 +80,34 @@ def get_cuda_ext_mx(raise_if_failed: bool = False):
     return get_cuda_ext_mx.extension  # type:ignore[attr-defined]
 
 
+def get_cuda_ext_iq1_s(raise_if_failed: bool = False):
+    """Return the GGML-compatible IQ1_S packing extension."""
+    if not hasattr(get_cuda_ext_iq1_s, "extension"):
+        get_cuda_ext_iq1_s.extension = load_cpp_extension(  # type:ignore[attr-defined]
+            name="modelopt_cuda_ext_iq1_s",
+            sources=[kernels_ggml / "iq1_s.cpp", kernels_ggml / "iq1_s.cu"],
+            cuda_version_specifiers=">=11.8",
+            fail_msg="IQ1_S CUDA packing is unavailable; using the PyTorch reference encoder.",
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            raise_if_failed=raise_if_failed,
+        )
+    return get_cuda_ext_iq1_s.extension  # type:ignore[attr-defined]
+
+
+def get_cuda_ext_iq2_xs(raise_if_failed: bool = False):
+    """Return the GGML-compatible IQ2_XS packing extension."""
+    if not hasattr(get_cuda_ext_iq2_xs, "extension"):
+        get_cuda_ext_iq2_xs.extension = load_cpp_extension(  # type:ignore[attr-defined]
+            name="modelopt_cuda_ext_iq2_xs",
+            sources=[kernels_ggml / "iq2_xs.cpp", kernels_ggml / "iq2_xs.cu"],
+            cuda_version_specifiers=">=11.8",
+            fail_msg="IQ2_XS CUDA packing is unavailable; using the PyTorch reference encoder.",
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            raise_if_failed=raise_if_failed,
+        )
+    return get_cuda_ext_iq2_xs.extension  # type:ignore[attr-defined]
+
+
 def __getattr__(name):
     if name == "cuda_ext":
         return get_cuda_ext()
@@ -79,6 +115,10 @@ def __getattr__(name):
         return get_cuda_ext_fp8()
     elif name == "cuda_ext_mx":
         return get_cuda_ext_mx()
+    elif name == "cuda_ext_iq1_s":
+        return get_cuda_ext_iq1_s()
+    elif name == "cuda_ext_iq2_xs":
+        return get_cuda_ext_iq2_xs()
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")
 
@@ -88,3 +128,5 @@ def precompile():
     print(get_cuda_ext())
     print(get_cuda_ext_fp8())
     print(get_cuda_ext_mx())
+    print(get_cuda_ext_iq1_s())
+    print(get_cuda_ext_iq2_xs())

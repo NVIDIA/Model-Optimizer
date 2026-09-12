@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# IQ1_S weight-only PTQ and unified-checkpoint export.
+
+imports:
+  preset: configs/ptq/presets/model/iq1_s
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Applies GGML-compatible IQ1_S weight-only quantization. No calibration data is required;
+    unified export writes the GGML block payload to weight for every quantized Linear weight.
+quantize:
+  $import: preset
