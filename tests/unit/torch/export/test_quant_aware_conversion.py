@@ -32,6 +32,7 @@ from modelopt.torch.export.quant_aware_conversion import (
     RenameRule,
     SplitRule,
     _assert_experts_pre_expanded,
+    _strip_sentinel_or_raise,
     apply_reverse_rules,
     build_reverse_name_mapper,
     revert_quant_config_names,
@@ -490,6 +491,34 @@ def test_stacked_experts_guard():
 
     # No expert converters in the mapping -> guard is a no-op even for 3-D tensors.
     _assert_experts_pre_expanded(bad, [])
+
+
+def test_strip_sentinel_clean_strip():
+    """A rename rule that leaves the sentinel untouched strips cleanly, no raise."""
+    sentinel = ".\x00modelopt_name_sentinel"
+    mapped = "backbone.layers.4.mixer.in_proj" + sentinel
+    assert _strip_sentinel_or_raise(mapped, sentinel, "original.name") == "backbone.layers.4.mixer.in_proj"
+
+
+def test_strip_sentinel_mangled_raises():
+    """A rename rule that eats into the appended sentinel (most commonly a greedy `.`,
+    since rename patterns treat `.` as "any path-separator char") must raise instead of
+    silently emitting a corrupted name.
+
+    Regression for the real failure: ModelOpt main (0.47.0.dev41) exported an NVFP4
+    Nemotron-Cascade-2-30B checkpoint whose exclude_modules were 100% corrupted with
+    this exact kind of mangled-sentinel remnant (`\\x00backbone.pt_name_sentinel`,
+    not matching the real sentinel `\\x00modelopt_name_sentinel` -- proof a rename rule
+    partially rewrote it). vLLM couldn't match any of the 77 entries, defaulted every
+    quant-aware fused linear to quantized-width allocation, and crashed loading the
+    correctly-unquantized-but-unlabeled weights.
+    """
+    sentinel = ".\x00modelopt_name_sentinel"
+    # Simulates a greedy rule (e.g. `re.sub(r"\.experts\..*", "", key)`) that consumed
+    # past its intended boundary and ate the sentinel instead of leaving it as a suffix.
+    mangled = "backbone.layers.4.mixer.in_proj.\x00backbone.pt_name_sentinel"
+    with pytest.raises(QuantConversionUnsupportedError, match="mangled the internal sentinel"):
+        _strip_sentinel_or_raise(mangled, sentinel, "backbone.layers.4.mixer.in_proj.*")
 
 
 def test_revert_quant_config_names_mapper():
