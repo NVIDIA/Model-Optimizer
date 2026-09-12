@@ -22,7 +22,7 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.export.model_config import QUANTIZATION_NONE
+from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master

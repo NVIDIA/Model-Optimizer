@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import json
 from functools import partial
+from pathlib import Path
 
 import pytest
 import torch
@@ -23,16 +25,26 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
+from _test_utils.torch.transformers_models import get_tiny_llama
+from safetensors.torch import load_file
 from torch.distributed._composable.fsdp import fully_shard
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
+    _export_transformers_checkpoint,
     requantize_resmooth_fused_llm_layers,
 )
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, patch_fsdp_mp_dtypes
+from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+from modelopt.torch.quantization.utils import (
+    enable_weight_access_and_writeback,
+    fsdp2_aware_weight_update,
+    module_name_maps,
+    patch_fsdp_mp_dtypes,
+)
 
 
 def _update_weight_test(rank, size):
@@ -261,7 +273,9 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
         # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
-        mtq.NVFP4_MLP_ONLY_CFG,
+        # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
+        # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
+        # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
@@ -281,10 +295,171 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
-        mtq.NVFP4_MLP_ONLY_CFG,
+        # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
+        # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
+        # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])
 def test_fsdp2_weight_update_context_for_export_quantized_weight(dist_workers, quant_config, bias):
     dist_workers.run(partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias))
+
+
+def _gathered_pack_matches_reference_test(rank, size, quant_config):
+    """Packing a gathered weight must give the same checkpoint as a single-process export.
+
+    This is the check that catches format-specific breakage, so it runs over every quantization
+    format. dim=256 keeps the model wider than a 128-wide quantization block, otherwise blockwise
+    configs collapse to one block and prove nothing.
+    """
+    with patch_fsdp_mp_dtypes():
+        model = SmallQKVModel(dim=256).to("cuda").eval()
+        reference = SmallQKVModel(dim=256).to("cuda").eval()
+        reference.load_state_dict(copy.deepcopy(model.state_dict()))
+
+        calib_data = torch.randn(1, 256, device="cuda")
+
+        def calib_fn(m):
+            return m(calib_data)
+
+        fully_shard(model)
+        torch.distributed.barrier()
+
+        mtq.quantize(model, quant_config, calib_fn)
+        mtq.quantize(reference, quant_config, calib_fn)
+        torch.distributed.barrier()
+
+        ref_names = module_name_maps(reference)
+        expected = {}
+        # reference: pack the whole weight, exactly as a single-process export would
+        for sub_module in reference.modules():
+            if is_quantlinear(sub_module):
+                _export_quantized_weight(sub_module, torch.float16)
+                base = ref_names.module_to_name[id(sub_module)]
+                for key, tensor in sub_module.state_dict().items():
+                    expected[f"{base}.{key}"] = tensor.detach().cpu()
+
+        names = module_name_maps(model)
+        packed = {}
+        # under test: gather the layer to plain full weights, pack it, and copy the result out
+        # inside the window -- on exit the weights revert to sharded and the packed ones are
+        # dropped, which is exactly what the export path relies on.
+        for sub_module in list(model.modules()):
+            if is_quantlinear(sub_module):
+                base = names.module_to_name[id(sub_module)]
+                with enable_weight_access_and_writeback(sub_module, model, names, writeback=True):
+                    _export_quantized_weight(sub_module, torch.float16)
+                    for key, tensor in sub_module.state_dict().items():
+                        packed[f"{base}.{key}"] = tensor.detach().cpu()
+
+        torch.distributed.barrier()
+        assert set(packed) == set(expected), (
+            f"key mismatch: only gathered {sorted(set(packed) - set(expected))}, "
+            f"only reference {sorted(set(expected) - set(packed))}"
+        )
+        for name, tensor in packed.items():
+            assert tensor.shape == expected[name].shape, (
+                f"{name}: gathered {tuple(tensor.shape)} vs reference {tuple(expected[name].shape)}"
+            )
+            assert torch.allclose(tensor.to(torch.float32), expected[name].to(torch.float32)), (
+                f"{name} differs between gathered and whole-weight packing"
+            )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        mtq.NVFP4_DEFAULT_CFG,  # per-block amax, dynamic
+        mtq.FP8_DEFAULT_CFG,  # per-tensor amax
+        mtq.INT8_DEFAULT_CFG,  # per-channel amax
+        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,  # per-channel amax, per-token activations
+        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,  # per-block amax, static scale grid
+    ],
+    ids=["nvfp4", "fp8", "int8", "fp8_pc_pt", "int4_blockwise"],
+)
+def test_fsdp2_gathered_pack_matches_reference(dist_workers, quant_config):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs for the weight to actually be sharded")
+    dist_workers.run(partial(_gathered_pack_matches_reference_test, quant_config=quant_config))
+
+
+def _streaming_export_matches_reference_test(rank, size, export_dir, quant_config):
+    """The merged multi-rank checkpoint must equal a single-process export of the same model.
+
+    The only test that drives ``_export_fsdp2_checkpoint_streaming`` at world > 1, so it is what
+    covers the two things the design turns on and a world=1 run cannot reach: the round-robin
+    ownership split (no unit skipped, none claimed twice -- ``seen_keys`` is rank-local and cannot
+    notice either) and rank 0 merging every rank's part manifest into one index.
+    """
+    with patch_fsdp_mp_dtypes():
+        mto.enable_huggingface_checkpointing()
+        # get_tiny_llama seeds itself, so every rank builds bit-identical weights and the
+        # unsharded reference is the same model rather than merely a similar one.
+        model = get_tiny_llama(num_hidden_layers=4).to("cuda").eval()
+        reference = get_tiny_llama(num_hidden_layers=4).to("cuda").eval()
+
+        torch.manual_seed(0)
+        calib = [torch.randint(0, 32, (1, 8), device="cuda") for _ in range(4)]
+
+        def calib_fn(m):
+            for batch in calib:
+                m(batch)
+
+        # Shard per layer as well as at the root: that is what makes the layer units and the
+        # leftover root unit land in different FSDP param groups, as they do in a real run.
+        for layer in model.model.layers:
+            fully_shard(layer)
+        fully_shard(model)
+        torch.distributed.barrier()
+
+        # Identical calibration input on every rank, so FSDP2's amax reduction lands on the value
+        # the unsharded reference computes by itself.
+        mtq.quantize(model, quant_config, calib_fn)
+        mtq.quantize(reference, quant_config, calib_fn)
+        torch.distributed.barrier()
+
+        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        # Rank 0 writes the index only after gathering the other ranks' manifests, so everyone
+        # must arrive before the checks below read the directory.
+        torch.distributed.barrier()
+        if rank != 0:
+            return
+
+        export_dir = Path(export_dir)
+        assert not list(export_dir.glob("__shard_part*")), "part files left behind after the merge"
+        index = json.loads((export_dir / "model.safetensors.index.json").read_text())
+        weight_map = index["weight_map"]
+        assert len(set(weight_map.values())) >= 2, (
+            "every key landed in one shard file, so the ranks did not each write their own share"
+        )
+
+        merged: dict[str, torch.Tensor] = {}
+        for fname in set(weight_map.values()):
+            merged.update(load_file(str(export_dir / fname)))
+        assert set(merged) == set(weight_map), "the index and the shard contents disagree"
+
+        ref, _ = _export_transformers_checkpoint(reference, torch.bfloat16)
+        assert set(merged) == set(ref), (
+            f"only merged {sorted(set(merged) - set(ref))}, "
+            f"only reference {sorted(set(ref) - set(merged))}"
+        )
+        for key, tensor in ref.items():
+            assert torch.equal(merged[key].float(), tensor.cpu().float()), key
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
+    ids=["nvfp4", "fp8"],
+)
+def test_fsdp2_streaming_export_matches_reference(dist_workers, tmp_path, quant_config):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs to actually split ownership across ranks")
+    dist_workers.run(
+        partial(
+            _streaming_export_matches_reference_test,
+            export_dir=str(tmp_path),
+            quant_config=quant_config,
+        )
+    )

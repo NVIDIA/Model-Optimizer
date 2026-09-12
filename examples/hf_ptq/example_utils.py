@@ -22,8 +22,8 @@ import json
 import logging
 import os
 import warnings
-from collections.abc import Callable, Iterable
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -101,7 +101,11 @@ _HF_PTQ_WEIGHT_FILE_PATTERNS = (
     "*.tgz",
     "*.zip",
 )
+# Dotted like the other sidecars hf_ptq drops in the export directory, so it is ignored by
+# from_pretrained and does not look like part of the model.
+_EXPERIMENT_JSON = ".experiment.json"
 _HF_PTQ_EXPORT_OWNED_FILES = {
+    _EXPERIMENT_JSON,
     "config.json",
     "hf_quant_config.json",
     "quant_config.json",
@@ -1134,6 +1138,27 @@ def copy_custom_model_files(
         print("No checkpoint sidecar files found to copy")
 
 
+def save_source_config(args, export_path) -> None:
+    """Copy the source model's config to the export path, for VLMs the exporters skip."""
+    print(f"Saving original model config to {export_path}")
+    config_kwargs = {"trust_remote_code": args.trust_remote_code}
+    if args.attn_implementation is not None:
+        config_kwargs["attn_implementation"] = args.attn_implementation
+    AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
+
+
+def save_processor_config(args, export_path) -> None:
+    """Copy the processor config, without which a VLM checkpoint cannot preprocess images."""
+    try:
+        print(f"Saving processor config to {export_path}")
+        AutoProcessor.from_pretrained(
+            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+        ).save_pretrained(export_path)
+    except Exception as e:
+        print(f"Warning: Could not save processor config: {e}")
+        print("This is normal for some VLM architectures that don't use AutoProcessor")
+
+
 def _layerwise_blocks(algorithm) -> list[dict]:
     """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
     entries = algorithm if isinstance(algorithm, list) else [algorithm]
@@ -1288,9 +1313,11 @@ def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
             "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries. MLflow's own $MLFLOW_TRACKING_URI enables tracking without this "
-            "flag, which overrides it. A URI taken from the environment is best-effort: if "
-            "it is unusable the run warns and continues untracked."
+            "summaries, and writing .experiment.json into --export_path so the checkpoint "
+            "names the run that produced it. MLflow's own $MLFLOW_TRACKING_URI enables "
+            "tracking without this flag, which overrides it. A URI taken from the "
+            "environment is best-effort: if it is unusable the run warns and continues "
+            "untracked."
         ),
     )
     parser.add_argument(
@@ -1332,7 +1359,14 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
 
 
 _MLFLOW_NON_PARAM_ARGS = frozenset(
-    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"}
+    {
+        "checkpoint_exported",
+        "dist_state",
+        "mlflow",
+        "mlflow_experiment",
+        "mlflow_required",
+        "mlflow_run_name",
+    }
 )
 
 
@@ -1361,19 +1395,81 @@ def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
     )
 
 
-def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
-    """Track this invocation for the duration of the block, or do nothing if untracked."""
+@contextmanager
+def mlflow_run(args: argparse.Namespace) -> Iterator[None]:
+    """Track this invocation for the duration of the block, and keep the checkpoint's
+    provenance pointer honest whether or not the run is tracked."""
     logger = _mlflow_logger(args)
+    export_path = Path(args.export_path)
     if not logger.enabled:
         # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        return nullcontext()
+        try:
+            yield
+        finally:
+            _drop_inherited_experiment_json(args, export_path)
+        return
     params, texts = _mlflow_run_inputs(args)
-    return logger.track(
+    with logger.track(
         params=params,
         tags=_mlflow_run_tags(args),
         texts=texts,
         files=_mlflow_run_outputs(args),
-    )
+    ):
+        try:
+            yield
+        finally:
+            _log_experiment_json(logger, args, export_path)
+
+
+def _log_experiment_json(
+    logger: MlflowRunLogger, args: argparse.Namespace, export_path: Path
+) -> None:
+    """Record which MLflow run produced this checkpoint, in the checkpoint and on the server.
+
+    The tags point from the run to the checkpoint it wrote; this file is the reverse, so a
+    checkpoint found on disk can be traced back to the run that quantized it without
+    searching the server.
+
+    The artifact goes up for any run that opened, so a failure is traceable from the server
+    side. The local copy is written only once ``export_quantized`` has returned, because the
+    file claims authorship of the checkpoint sitting next to it: ``--export_path`` existing
+    proves nothing, since ``print_quant_summary`` creates it before quantization and the
+    directory may hold a valid checkpoint from an earlier attempt whose weights this run
+    never touched.
+
+    There is nothing to record at all when the run never opened, which a URI taken from the
+    environment reaches by design: it disables tracking from inside the block rather than
+    failing the quantization.
+    """
+    info = logger.run_info
+    if not info:
+        return
+    text = json.dumps(info, indent=2) + "\n"
+    logger.log_text(_EXPERIMENT_JSON.removeprefix("."), text)
+    if not args.checkpoint_exported:
+        return
+    try:
+        (export_path / _EXPERIMENT_JSON).write_text(text)
+    except OSError as e:
+        print(f"[mlflow] WARNING: could not write {export_path / _EXPERIMENT_JSON}: {e}")
+
+
+def _drop_inherited_experiment_json(args: argparse.Namespace, export_path: Path) -> None:
+    """Remove a pointer an untracked export would otherwise inherit.
+
+    A fresh checkpoint written into a reused ``--export_path`` would keep the previous run's
+    pointer, and one quantized from a tracked source checkpoint could be handed that
+    source's pointer. Either way the file would name a run that did not produce these
+    weights. Only a completed export clears it; a failed run leaves whatever checkpoint was
+    already there, pointer included.
+    """
+    if not args.checkpoint_exported or not args.dist_state.is_main:
+        return
+    stale = export_path / _EXPERIMENT_JSON
+    try:
+        stale.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"Warning: could not remove stale {stale}: {e}")
 
 
 def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:

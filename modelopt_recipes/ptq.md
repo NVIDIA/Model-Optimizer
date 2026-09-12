@@ -314,6 +314,15 @@ A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is clo
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).
 
+**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_mlp_only-kv_fp8}`** are the
+Step-3.7 equivalents, and the reason they exist is **module naming**: Step calls
+the MoE block `moe` and the dense sibling `share_expert`, so the general
+recipes' `*.experts.*`, `*block_sparse_moe*` and `*mlp*` patterns match nothing
+on the routed experts — the general recipe would quantize *nothing* and export a
+checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
+router (`moe.gate`) and `share_expert` on top. Use them, not the general
+recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
+
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
 These quantize the **same layers** as the general recipes; only the
@@ -406,11 +415,46 @@ checkpoint's** quant config verbatim:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
   W4A16, `lm_head` → FP8 W8A16, and the F32 tensors (conv1d, norms) → BF16.
+- **`models/Qwen/Qwen3.8-2.4T-A95B/ptq/nvfp4_experts_mse-fp8_self_attn-fp8_linear_attn-kv_fp8_cast`**
+  mirrors `nvidia/Qwen3.8-2.4T-A95B-NVFP4`: a `qwen3_5_moe_text` MoE with **hybrid
+  attention** — gated-delta (linear-attention) layers interleaved with
+  full-attention layers. Routed experts → NVFP4 (MSE-searched static weight
+  scales, dynamic input scales); **both** self-attention and the full gated-delta
+  linear-attention path (`conv1d`, `in_proj_qkv/z/a/b`, `out_proj`) → FP8 W8A8; KV
+  cache → FP8 cast; everything else, including the MTP block, stays BF16. The
+  gated-delta norms stay BF16, but the `conv1d` is FP8 like the projections:
+  `nn.Conv1d` is a registered quant module, so the recipe's broad `*linear_attn*`
+  wildcards reach `linear_attn.conv1d` too — matching the published checkpoint,
+  whose `hf_quant_config.json` lists `linear_attn.conv1d` as FP8 on every gated-delta
+  layer (the full-attention layers have no `conv1d`). The
+  source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
+  dequantizes it to BF16 before quantizers are inserted, so the scales are
+  calibrated against BF16 weights, not the shipped FP8.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
+  the NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+  **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
+  sparse-MLA layers. Routed experts **and** the dense MLP → NVFP4 W4A4; KV cache
+  → FP8 cast; everything else stays BF16 (shared experts, router gate, both
+  attention families, the vision tower, embeddings and `lm_head`).
+  `mlp_layer_types` marks only layers 0-2 `dense`, so the dense-MLP scope adds
+  just 9 modules (`mlp.gate_proj` / `up_proj` / `down_proj`) on top of the routed
+  experts. The vision tower reuses those same leaf names, so a single `*visual*`
+  disable is appended **last** to keep `model.visual.*` in BF16. It pins
+  `layerwise.enable=false`, which this VLM requires because its decoder layers
+  nest under `model.language_model.layers`. The MTP layer is not built by the HF
+  class at `num_hidden_layers: 45`, so it is neither quantized nor exported.
+  (For plain experts-only NVFP4 on this model, use the general
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
+  the dense-MLP scope plus the vision-tower exclusion.)
 
-*Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
-different component types — or individual layers** — and hardcode the precise
-published layout (for Super, matched on both HF and Megatron-Core module names)
-rather than a portable wildcard scheme.
+*Why special:* unlike any general recipe, each is pinned to one checkpoint and
+captures a model-specific deviation a portable general recipe can't express. Most
+**mix FP8 and NVFP4 across different component types — or individual layers** —
+and hardcode the precise published layout (for Super, matched on both HF and
+Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flash
+is the exception: its deviation is a model-specific *scope* — a wildcard scheme
+plus a load-bearing vision-tower exclusion and the VLM-required
+`layerwise.enable=false` — rather than a per-component precision map.
 
 ---
 
