@@ -36,6 +36,7 @@ from evaluation import evaluate
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch._deploy.utils.torch_onnx import is_int4_quantized
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
 
@@ -537,6 +538,17 @@ def main():
         type=str,
     )
     parser.add_argument(
+        "--dynamo_export",
+        action="store_true",
+        help="Use the torch.export-based ONNX exporter. Requires ONNX opset 21 or newer.",
+    )
+    parser.add_argument(
+        "--onnx_opset",
+        type=int,
+        default=20,
+        help="ONNX opset version.",
+    )
+    parser.add_argument(
         "--calibration_data_size",
         type=int,
         default=512,
@@ -607,6 +619,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.dynamo_export and args.onnx_opset < 21:
+        parser.error("--dynamo_export requires --onnx_opset=21 or newer.")
 
     recipe = load_recipe(args.recipe) if args.recipe is not None else None
     if recipe is not None and not isinstance(
@@ -702,6 +717,12 @@ def main():
     # Blackwell has no tactic for an FP8 Q→Conv fusion on the first RGB layer.
     _disable_low_channel_fp8_conv_input_quantizers(quantized_model)
 
+    if args.trt_build and is_int4_quantized(quantized_model):
+        parser.error(
+            "--trt_build is not supported when the exported graph contains INT4 AWQ weights; "
+            "export ONNX without --trt_build."
+        )
+
     # Print quantization summary
     print("\nQuantization Summary:")
     mtq.print_quant_summary(quantized_model)
@@ -726,6 +747,8 @@ def main():
         args.onnx_save_path,
         device,
         weights_dtype="fp16",
+        dynamo_export=args.dynamo_export,
+        onnx_opset=args.onnx_opset,
     )
 
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")

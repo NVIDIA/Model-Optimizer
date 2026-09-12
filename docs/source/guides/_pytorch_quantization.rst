@@ -70,11 +70,25 @@ To verify that the quantizer nodes are placed correctly in the model, let's prin
     mtq.print_quant_summary(model)
 
 
-After PTQ, the model can be exported to ONNX with the normal PyTorch ONNX export flow.
+After PTQ, ModelOpt's helper supplies the operator translations and weight
+postprocessing required by the ``torch.export``-based ONNX workflow.
 
 .. code-block:: python
 
-    torch.onnx.export(model, sample_input, onnx_file)
+    from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
+
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model,
+        (sample_input,),
+        dynamo_export=True,
+        onnx_opset=21,
+    )
+    OnnxBytes.from_bytes(onnx_bytes).write_to_disk("onnx_model")
+
+Dynamo export supports FP8, INT8, INT4 AWQ, MXFP8, NVFP4, and mixed AutoQuant on
+canonical Linear, MatMul, or Gemm weight paths with opset 21 or newer. Direct
+PyTorch ONNX export is unsupported. The legacy helper path remains the default
+and can be selected explicitly with ``dynamo_export=False``.
 
 ModelOpt also supports direct export of Huggingface or Megatron-Bridge/Megatron-LM LLM models to TensorRT-LLM for deployment.
 Please see :doc:`TensorRT-LLM Deployment <../deployment/1_tensorrt_llm>` for more details.

@@ -43,6 +43,7 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
     ONNXQuantExporter,
 )
+from modelopt.onnx.export.base_exporter import _sync_initializer_metadata
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
@@ -517,10 +518,16 @@ def get_onnx_bytes_and_metadata(
         ModelMetadata: The model's meta data.
 
     Raises:
-        ValueError: If model is not an nn.Module or the requested precision conversion is unsupported.
+        ValueError: If model is not an nn.Module or the requested export configuration is unsupported.
+        NotImplementedError: If Dynamo export is requested with dynamic axes.
     """
     if not isinstance(model, nn.Module):
         raise ValueError("Only PyTorch model compilation is supported.")
+
+    if dynamo_export and onnx_opset < 21:
+        raise ValueError("Dynamo ONNX export requires opset 21 or newer.")
+    if dynamo_export and dynamic_axes:
+        raise NotImplementedError("Dynamo ONNX export does not support dynamic_axes yet.")
 
     assert weights_dtype in ["fp32", "fp16", "bf16"], (
         "weights_dtype must be one of fp32, fp16, or bf16"
@@ -546,11 +553,9 @@ def get_onnx_bytes_and_metadata(
         and not (uses_fp4 or uses_other_unsupported_quantizer)
     )
 
-    # Standardize model args and also tensorize them so they also appear in the onnx graph!
-    # Floats/ints are tensorized when they are provided, but not tensorized when they are not
-    # provided which is somewhat inconsistent (we always tensorize them!)
     named_args, _ = standardize_named_model_args(model, dummy_input)
-    named_args = {k: _to_expected_onnx_type(v) for k, v in named_args.items()}
+    if not dynamo_export:
+        named_args = {name: _to_expected_onnx_type(value) for name, value in named_args.items()}
 
     # Also standardize dummy_input again so we can use it
     dummy_input = tuple(named_args.values())
@@ -622,7 +627,13 @@ def get_onnx_bytes_and_metadata(
     conv_wq_context = _disable_fp8_conv_weight_quantizers(model) if uses_fp8 else nullcontext()
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
-        if not dynamo_export:
+        if dynamo_export:
+            from modelopt.torch.quantization._dynamo_onnx import _get_dynamo_onnx_translation_table
+
+            additional_kwargs["custom_translation_table"] = _get_dynamo_onnx_translation_table()
+            if "fallback" in inspect.signature(torch.onnx.export).parameters:
+                additional_kwargs["fallback"] = False
+        else:
             additional_kwargs["dynamic_axes"] = dynamic_axes
         torch.onnx.export(
             model,
@@ -661,11 +672,12 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
-        if uses_other_unsupported_quantizer or uses_fp8:
+    preserve_block_io_types = dynamo_export and (uses_fp4 or uses_mxfp8) and weights_dtype == "fp32"
+    if (weights_dtype in ["fp16", "bf16"] or preserve_block_io_types) and not is_bf16_fp8_noop:
+        if (dynamo_export and uses_fp4) or uses_other_unsupported_quantizer or uses_fp8:
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
-                keep_io_types=False,
+                keep_io_types=preserve_block_io_types,
                 disable_shape_infer=True,
                 check_fp16_ready=False,
                 op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
@@ -678,6 +690,9 @@ def get_onnx_bytes_and_metadata(
             # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
             # MatMul/Add layers under strongly-typed TRT parsing.
             onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            if preserve_block_io_types:
+                for initializer in onnx_opt_graph.graph.initializer:
+                    _sync_initializer_metadata(onnx_opt_graph.graph, initializer)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
