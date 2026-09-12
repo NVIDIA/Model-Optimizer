@@ -15,6 +15,7 @@
 
 """Support quantization of diffusers layers."""
 
+import inspect
 from collections.abc import Callable, Iterator
 from functools import partial
 from types import ModuleType
@@ -25,6 +26,7 @@ import onnx
 import torch
 from diffusers.models.attention_processor import Attention
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
+from diffusers.models.modeling_utils import ModelMixin
 from packaging.version import parse as parse_version
 
 if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
@@ -64,7 +66,7 @@ from ...nn import (
     TensorQuantizer,
 )
 from ...nn.modules.quant_conv import _QuantConv3d
-from ..custom import _QuantFunctionalMixin
+from ..custom import CUSTOM_MODEL_PLUGINS, _QuantFunctionalMixin
 
 onnx_dtype_map = {
     "BFloat16": onnx.TensorProto.BFLOAT16,
@@ -75,6 +77,7 @@ onnx_dtype_map = {
     "UINT8": onnx.TensorProto.UINT8,
 }
 mha_valid_precisions = {"Half", "BFloat16"}
+_QKV_PARAMETER_NAMES = (("q", "k", "v"), ("query", "key", "value"))
 
 
 class _QuantLoRACompatibleLinearConvBase(QuantLinearConvBase):
@@ -108,6 +111,26 @@ def _quantized_baddbmm(self, input, batch1, batch2, *args, **kwargs):
     return torch._baddbmm(input, self.q_bmm_quantizer(q), self.k_bmm_quantizer(k), *args, **kwargs)
 
 
+def _fp8_mha_disabled(self, query, key, value):
+    if hasattr(self, "_disable_fp8_mha") or not getattr(self, "_auto_fp8_mha", False):
+        return getattr(self, "_disable_fp8_mha", True)
+    names = ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer", "softmax_quantizer")
+    quantizers = tuple(getattr(self, name) for name in names)
+    if any(not quantizer.is_enabled or not quantizer.is_fp8 for quantizer in quantizers):
+        return True
+    high_precision = self.q_bmm_quantizer.trt_high_precision_dtype
+    if high_precision not in mha_valid_precisions or {
+        quantizer.trt_high_precision_dtype for quantizer in quantizers
+    } != {high_precision}:
+        return True
+    if any(
+        tensor.dtype != getattr(torch, high_precision.lower()) for tensor in (query, key, value)
+    ):
+        return True
+    head_dims = tuple(int(tensor.shape[-1]) for tensor in (query, key, value))
+    return len(set(head_dims)) != 1 or head_dims[0] % 16 != 0
+
+
 def _quantized_sdpa(self, *args, **kwargs):
     fp8_sdpa = FP8SDPA.apply
     parameters = [
@@ -132,11 +155,14 @@ def _quantized_sdpa(self, *args, **kwargs):
     while fp8_sdpa_args and fp8_sdpa_args[-1] is None:
         fp8_sdpa_args.pop()
     query, key, value = fp8_sdpa_args[:3]
-
-    if not torch.onnx.is_in_onnx_export():
+    exporting = torch.onnx.is_in_onnx_export()
+    if not exporting:
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
         value = self.v_bmm_quantizer(value)
+    disable_fp8_mha = _fp8_mha_disabled(self, query, key, value)
+    if exporting and getattr(self, "_auto_fp8_mha", False) and not disable_fp8_mha:
+        self._delegated_sdpa_export_calls = getattr(self, "_delegated_sdpa_export_calls", 0) + 1
 
     q_quantized_scale = self.q_bmm_quantizer._get_amax(query)
     k_quantized_scale = self.k_bmm_quantizer._get_amax(key)
@@ -155,7 +181,7 @@ def _quantized_sdpa(self, *args, **kwargs):
             self.q_bmm_quantizer.trt_high_precision_dtype
             if hasattr(self.q_bmm_quantizer, "trt_high_precision_dtype")
             else "Half",
-            self._disable_fp8_mha if hasattr(self, "_disable_fp8_mha") else True,
+            disable_fp8_mha,
         )
     )
 
@@ -209,6 +235,126 @@ if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
 
 
 original_scaled_dot_product_attention = F.scaled_dot_product_attention
+
+
+def _call_delegated_attention(self, helper, parameter_names, *args, **kwargs):
+    bound = inspect.signature(helper).bind(*args, **kwargs)
+    qkv = tuple(bound.arguments[name] for name in parameter_names)
+    if torch.onnx.is_in_onnx_export():
+        before = self._delegated_sdpa_export_calls
+        eligible = not _fp8_mha_disabled(self, *qkv)
+        output = helper(*bound.args, **bound.kwargs)
+        self._delegated_missed_sdpa |= eligible and before == self._delegated_sdpa_export_calls
+        return output
+
+    quantizers = (self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer)
+    for name, quantizer in zip(parameter_names, quantizers):
+        bound.arguments[name] = quantizer(bound.arguments[name])
+    return self.bmm2_output_quantizer(helper(*bound.args, **bound.kwargs))
+
+
+class _QuantDelegatedAttention(_QuantAttention):
+    def forward(self, *args, **kwargs):
+        self._delegated_missed_sdpa = self._delegated_sdpa_export_calls = 0
+        output = super().forward(*args, **kwargs)
+        if torch.onnx.is_in_onnx_export() and self._delegated_missed_sdpa:
+            raise RuntimeError("Eligible delegated FP8 MHA export did not reach SDPA.")
+        return output
+
+    @property
+    def functionals_to_replace(self) -> Iterator[tuple[ModuleType, str, Callable]]:
+        module, name, parameter_names = self._delegated_attention_helper
+        helper = getattr(module, name, None)
+        if not callable(helper):
+            return
+        quantized_sdpa = partial(_quantized_sdpa, self)
+        if helper is original_scaled_dot_product_attention:
+            replacement = quantized_sdpa
+        else:
+            replacement = partial(_call_delegated_attention, self, helper, parameter_names)
+        yield module, name, replacement
+        if not torch.onnx.is_in_onnx_export():
+            return
+
+        yield F, "scaled_dot_product_attention", quantized_sdpa
+        if helper is original_scaled_dot_product_attention:
+            return
+        helper = inspect.unwrap(helper)
+        helper_globals = getattr(helper, "__globals__", {})
+        helper_module = inspect.getmodule(helper)
+        code = getattr(helper, "__code__", None)
+        if code is None or not isinstance(helper_module, ModuleType):
+            return
+        if helper_module.__dict__ is helper_globals:
+            for alias in code.co_names:
+                if helper_globals.get(alias) is original_scaled_dot_product_attention:
+                    yield helper_module, alias, quantized_sdpa
+
+
+def _try_register_attention(attention_cls):
+    try:
+        forward = inspect.unwrap(attention_cls.forward)
+    except (TypeError, ValueError):
+        return
+    code = getattr(forward, "__code__", None)
+    function_globals = getattr(forward, "__globals__", {})
+    if (
+        code is None
+        or not isinstance(module := inspect.getmodule(forward), ModuleType)
+        or module.__dict__ is not function_globals
+    ):
+        return
+    candidates = []
+    for name in dict.fromkeys(code.co_names):
+        helper = function_globals.get(name)
+        if not callable(helper):
+            continue
+        try:
+            parameter_names = tuple(inspect.signature(helper).parameters)[:3]
+        except (TypeError, ValueError):
+            if helper is not original_scaled_dot_product_attention:
+                continue
+            parameter_names = _QKV_PARAMETER_NAMES[1]
+        helper_name = f"{name} {getattr(helper, '__name__', '')}".lower()
+        if parameter_names in _QKV_PARAMETER_NAMES and (
+            "attention" in helper_name or "attn" in helper_name
+        ):
+            candidates.append((module, name, parameter_names))
+    if len(candidates) != 1:
+        return
+    quantized_cls = type(
+        f"_Quant{attention_cls.__name__}",
+        (_QuantDelegatedAttention,),
+        {"_auto_fp8_mha": True, "_delegated_attention_helper": candidates[0]},
+    )
+    QuantModuleRegistry.register({attention_cls: attention_cls.__name__})(quantized_cls)
+
+
+def _register_diffusers_attentions_on_the_fly(model):
+    if not isinstance(model, ModelMixin):
+        return
+
+    seen_classes = set()
+    for module in model.modules():
+        module_type = type(module)
+        if (
+            not module_type.__name__.endswith("Attention")
+            or module_type in seen_classes
+            or module_type in QuantModuleRegistry
+            or module_type.__module__.startswith("transformers.")
+            or hasattr(module_type, "_setup")
+            or not all(isinstance(getattr(module, name, None), torch.nn.Module) for name in "qkv")
+            or any(
+                child is not module and type(child).__name__.endswith("Attention")
+                for child in module.modules()
+            )
+        ):
+            continue
+        seen_classes.add(module_type)
+        _try_register_attention(module_type)
+
+
+CUSTOM_MODEL_PLUGINS.add(_register_diffusers_attentions_on_the_fly)
 
 
 class FP8SDPA(Function):
