@@ -1,0 +1,1043 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>graph_utils &mdash; Model Optimizer 0.0.1.dev1+g2cfe65c6d</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="gs_patching" href="modelopt.onnx.quantization.gs_patching.html" />
+    <link rel="prev" title="fp8" href="modelopt.onnx.quantization.fp8.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.quantization.html">quantization</a></li>
+      <li class="breadcrumb-item active">graph_utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.quantization.graph_utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="graph-utils">
+<h1>graph_utils<a class="headerlink" href="#graph-utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.quantization.graph_utils">Provides ONNX graph related utils for QDQ placement.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.build_non_residual_input_map" title="modelopt.onnx.quantization.graph_utils.build_non_residual_input_map"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_non_residual_input_map</span></code></a></p></td>
+<td><p>Builds a map of non-residual Add input name to the Add node name from the given graph.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.cast_custom_ops" title="modelopt.onnx.quantization.graph_utils.cast_custom_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">cast_custom_ops</span></code></a></p></td>
+<td><p>Adds cast_to_fp16 nodes to the inputs and cast_to_fp32 to the outputs of a layer in the requested indices.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.classify_partially_quantized_weighted_ops" title="modelopt.onnx.quantization.graph_utils.classify_partially_quantized_weighted_ops"><code class="xref py py-obj docutils literal notranslate"><span class="pre">classify_partially_quantized_weighted_ops</span></code></a></p></td>
+<td><p>Ensures that the input of non-quantizable weighted nodes do not get quantized.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.classify_partition_nodes" title="modelopt.onnx.quantization.graph_utils.classify_partition_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">classify_partition_nodes</span></code></a></p></td>
+<td><p>We should partially quantize the partition nodes with inputs outside of the partition.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.convert_fp16_io" title="modelopt.onnx.quantization.graph_utils.convert_fp16_io"><code class="xref py py-obj docutils literal notranslate"><span class="pre">convert_fp16_io</span></code></a></p></td>
+<td><p>Convert graph I/O to FP16.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.expand_node_names_from_patterns" title="modelopt.onnx.quantization.graph_utils.expand_node_names_from_patterns"><code class="xref py py-obj docutils literal notranslate"><span class="pre">expand_node_names_from_patterns</span></code></a></p></td>
+<td><p>Expand the node names from the given patterns.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.filter_quantizable_kgen_heads" title="modelopt.onnx.quantization.graph_utils.filter_quantizable_kgen_heads"><code class="xref py py-obj docutils literal notranslate"><span class="pre">filter_quantizable_kgen_heads</span></code></a></p></td>
+<td><p>Returns the list of kgen head names if it follows a CASK partition.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_conv_to_layernorm_nodes" title="modelopt.onnx.quantization.graph_utils.find_conv_to_layernorm_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_conv_to_layernorm_nodes</span></code></a></p></td>
+<td><p>Find LayerNormalization nodes whose input comes from a CASK (Conv) partition.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_mha_partitions" title="modelopt.onnx.quantization.graph_utils.find_mha_partitions"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_mha_partitions</span></code></a></p></td>
+<td><p>Match MHA: BMM1 -&gt; .</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_convs_to_exclude" title="modelopt.onnx.quantization.graph_utils.find_nodes_from_convs_to_exclude"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_nodes_from_convs_to_exclude</span></code></a></p></td>
+<td><p>Find unsupported Conv nodes to exclude from quantization.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_matmul_to_exclude" title="modelopt.onnx.quantization.graph_utils.find_nodes_from_matmul_to_exclude"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_nodes_from_matmul_to_exclude</span></code></a></p></td>
+<td><p>Find MatMul nodes that meets gemv condition to exclude.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_mha_to_exclude" title="modelopt.onnx.quantization.graph_utils.find_nodes_from_mha_to_exclude"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_nodes_from_mha_to_exclude</span></code></a></p></td>
+<td><p>Find MatMul nodes in MHA pattern to exclude.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.find_nodes_to_exclude" title="modelopt.onnx.quantization.graph_utils.find_nodes_to_exclude"><code class="xref py py-obj docutils literal notranslate"><span class="pre">find_nodes_to_exclude</span></code></a></p></td>
+<td><p>Find the node names from the ONNX graph which matches user's exclusion patterns.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_concat_eliminated_tensors" title="modelopt.onnx.quantization.graph_utils.get_concat_eliminated_tensors"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_concat_eliminated_tensors</span></code></a></p></td>
+<td><p>Find the input tensors and output tensor of concat that will be quantized.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_extended_model_outputs" title="modelopt.onnx.quantization.graph_utils.get_extended_model_outputs"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_extended_model_outputs</span></code></a></p></td>
+<td><p>Run one inference step on an onnx model which has some intermediate tensor marked as model outputs.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_fusible_backbone" title="modelopt.onnx.quantization.graph_utils.get_fusible_backbone"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_fusible_backbone</span></code></a></p></td>
+<td><p>Returns the linear backbone node for a given node if it matches the pattern.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_input_shapes" title="modelopt.onnx.quantization.graph_utils.get_input_shapes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_input_shapes</span></code></a></p></td>
+<td><p>Returns the input shapes of the given ONNX model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_layer_info" title="modelopt.onnx.quantization.graph_utils.get_layer_info"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_layer_info</span></code></a></p></td>
+<td><p>Generate a mapping of weight tensor names to their quantization configuration.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_layer_precision_mapping" title="modelopt.onnx.quantization.graph_utils.get_layer_precision_mapping"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_layer_precision_mapping</span></code></a></p></td>
+<td><p>Generate a mapping of layer names to their quantization precision (4 bits or 8 bits) for an ONNX model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_resize_scales" title="modelopt.onnx.quantization.graph_utils.get_resize_scales"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_resize_scales</span></code></a></p></td>
+<td><p>Record Resize op's old scale value before converting to fp16.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_tensor_consumer_node_indices" title="modelopt.onnx.quantization.graph_utils.get_tensor_consumer_node_indices"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_tensor_consumer_node_indices</span></code></a></p></td>
+<td><p>Build a mapping from tensor names to the indices of nodes that use them.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_tensor_consumer_nodes" title="modelopt.onnx.quantization.graph_utils.get_tensor_consumer_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_tensor_consumer_nodes</span></code></a></p></td>
+<td><p>Returns a dictionary of tensor name and their consumer node object mapping.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_tensor_from_name" title="modelopt.onnx.quantization.graph_utils.get_tensor_from_name"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_tensor_from_name</span></code></a></p></td>
+<td><p>Returns a ValueInfoProto given a tensor name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.get_tensor_producer_nodes" title="modelopt.onnx.quantization.graph_utils.get_tensor_producer_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_tensor_producer_nodes</span></code></a></p></td>
+<td><p>Returns a dictionary of tensor name and their producer node object mapping.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.has_const_input" title="modelopt.onnx.quantization.graph_utils.has_const_input"><code class="xref py py-obj docutils literal notranslate"><span class="pre">has_const_input</span></code></a></p></td>
+<td><p>Returns whether the given node has any constant input.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.has_path_type" title="modelopt.onnx.quantization.graph_utils.has_path_type"><code class="xref py py-obj docutils literal notranslate"><span class="pre">has_path_type</span></code></a></p></td>
+<td><p>Checks if the given node is start/end of a given forward/backward path type.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.insert_fp8_mha_casts" title="modelopt.onnx.quantization.graph_utils.insert_fp8_mha_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">insert_fp8_mha_casts</span></code></a></p></td>
+<td><p>Insert three cast ops.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.insert_matmul_casts" title="modelopt.onnx.quantization.graph_utils.insert_matmul_casts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">insert_matmul_casts</span></code></a></p></td>
+<td><p>Insert three cast nodes for MatMul's two inputs and output.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.is_const_input" title="modelopt.onnx.quantization.graph_utils.is_const_input"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_const_input</span></code></a></p></td>
+<td><p>Returns whether the given tensor is an initializer or produced by const-foldable nodes.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.match_fp8_mha_pattern" title="modelopt.onnx.quantization.graph_utils.match_fp8_mha_pattern"><code class="xref py py-obj docutils literal notranslate"><span class="pre">match_fp8_mha_pattern</span></code></a></p></td>
+<td><p>Match FP8 fMHA v2 with the given softmax_op.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.print_stat" title="modelopt.onnx.quantization.graph_utils.print_stat"><code class="xref py py-obj docutils literal notranslate"><span class="pre">print_stat</span></code></a></p></td>
+<td><p>Collect and print stats of the quantized model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.remove_output_initializers" title="modelopt.onnx.quantization.graph_utils.remove_output_initializers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_output_initializers</span></code></a></p></td>
+<td><p>Remove initializers that are also listed as graph outputs.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.remove_partial_input_qdq" title="modelopt.onnx.quantization.graph_utils.remove_partial_input_qdq"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_partial_input_qdq</span></code></a></p></td>
+<td><p>Modifies the onnx model by removing QDQ nodes from the marked inputs, ex.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.remove_redundant_cast_nodes" title="modelopt.onnx.quantization.graph_utils.remove_redundant_cast_nodes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remove_redundant_cast_nodes</span></code></a></p></td>
+<td><p>Remove redundant Cast nodes from the ONNX graph to optimize model performance.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.should_quantize_to_8bit" title="modelopt.onnx.quantization.graph_utils.should_quantize_to_8bit"><code class="xref py py-obj docutils literal notranslate"><span class="pre">should_quantize_to_8bit</span></code></a></p></td>
+<td><p>Check if layer should be quantized to 8 bits.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.validate_8bit_layers" title="modelopt.onnx.quantization.graph_utils.validate_8bit_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_8bit_layers</span></code></a></p></td>
+<td><p>Validate the format of layers_8bit string.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.quantization.graph_utils.validate_op_types_spelling" title="modelopt.onnx.quantization.graph_utils.validate_op_types_spelling"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_op_types_spelling</span></code></a></p></td>
+<td><p>Validate spelling in op types.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.build_non_residual_input_map">
+<span class="sig-name descname"><span class="pre">build_non_residual_input_map</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.build_non_residual_input_map" title="Link to this definition"></a></dt>
+<dd><p>Builds a map of non-residual Add input name to the Add node name from the given graph.</p>
+<p>This assumes that the Add layer only has 2 inputs.</p>
+<p>We will refer to a subgraph which has a Convolution node with a single output that is summed (element-wise)
+with another non-constant input-tensor as a “residual-add” subgraph, because it occurs in modern
+convnets that use residual connections.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>Graph</em>) – Onnx model graph.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary of Add node names vs their non-residual input name.
+List of partially-quantizable inputs with non-quantizable input info as (src, dst, input_name)</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>dict</em>[<em>str</em>, <em>str</em>], <em>list</em>[<em>tuple</em>[<em>Node</em>, <em>Node</em>, <em>str</em>]]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.cast_custom_ops">
+<span class="sig-name descname"><span class="pre">cast_custom_ops</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ops_to_cast</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.cast_custom_ops" title="Link to this definition"></a></dt>
+<dd><p>Adds cast_to_fp16 nodes to the inputs and cast_to_fp32 to the outputs of a layer in the requested indices.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>)</p></li>
+<li><p><strong>ops_to_cast</strong> (<em>dict</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>ModelProto</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.classify_partially_quantized_weighted_ops">
+<span class="sig-name descname"><span class="pre">classify_partially_quantized_weighted_ops</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.classify_partially_quantized_weighted_ops" title="Link to this definition"></a></dt>
+<dd><p>Ensures that the input of non-quantizable weighted nodes do not get quantized.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>tuple</em>[<em>Node</em>, <em>Node</em>, <em>str</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.classify_partition_nodes">
+<span class="sig-name descname"><span class="pre">classify_partition_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">partitions</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.classify_partition_nodes" title="Link to this definition"></a></dt>
+<dd><p>We should partially quantize the partition nodes with inputs outside of the partition.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>partitions</strong> (<em>list</em><em>[</em><em>list</em><em>[</em><em>Node</em><em>]</em><em>]</em>) – Partitions created by modelopt ptq algo.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of non-quantizable nodes.
+List of quantizable nodes.
+List of partially-quantizable inputs with non-quantizable input info as (src, dst, input_name)</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>list</em>[<em>Node</em>], <em>list</em>[<em>Node</em>], <em>list</em>[<em>tuple</em>[<em>Node</em>, <em>Node</em>, <em>str</em>]]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.convert_fp16_io">
+<span class="sig-name descname"><span class="pre">convert_fp16_io</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.convert_fp16_io" title="Link to this definition"></a></dt>
+<dd><p>Convert graph I/O to FP16.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.expand_node_names_from_patterns">
+<span class="sig-name descname"><span class="pre">expand_node_names_from_patterns</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name_patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.expand_node_names_from_patterns" title="Link to this definition"></a></dt>
+<dd><p>Expand the node names from the given patterns.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>GraphProto</em><em> | </em><em>Graph</em>)</p></li>
+<li><p><strong>name_patterns</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.filter_quantizable_kgen_heads">
+<span class="sig-name descname"><span class="pre">filter_quantizable_kgen_heads</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cask_fusible_partitions</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kgen_partitions</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantizable_op_types</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.filter_quantizable_kgen_heads" title="Link to this definition"></a></dt>
+<dd><p>Returns the list of kgen head names if it follows a CASK partition.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>cask_fusible_partitions</strong> (<em>list</em><em>[</em><em>list</em><em>[</em><em>Node</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>kgen_partitions</strong> (<em>list</em><em>[</em><em>list</em><em>[</em><em>Node</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>quantizable_op_types</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>list</em>[<em>Node</em>], <em>list</em>[<em>tuple</em>[<em>Node</em>, <em>Node</em>, <em>str</em>]]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_conv_to_layernorm_nodes">
+<span class="sig-name descname"><span class="pre">find_conv_to_layernorm_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cask_fusible_partitions</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_conv_to_layernorm_nodes" title="Link to this definition"></a></dt>
+<dd><p>Find LayerNormalization nodes whose input comes from a CASK (Conv) partition.</p>
+<p>When a Conv’s output feeds into a LayerNormalization, the Conv output should be
+quantized to enable faster INT8 kernels in TRT. This function detects such patterns
+and returns the LayerNormalization nodes that should be added to the quantizable
+nodes list so that Q/DQ pairs are inserted on their input (i.e. the Conv output).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>) – ONNX model graph.</p></li>
+<li><p><strong>cask_fusible_partitions</strong> (<em>list</em><em>[</em><em>list</em><em>[</em><em>Node</em><em>]</em><em>]</em>) – List of CASK fusible partitions.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of LayerNormalization nodes that consume CASK partition outputs.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>Node</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_mha_partitions">
+<span class="sig-name descname"><span class="pre">find_mha_partitions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_mha_partitions" title="Link to this definition"></a></dt>
+<dd><p>Match MHA: BMM1 -&gt; … -&gt; Softmax -&gt; … -&gt; BMM2.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_nodes_from_convs_to_exclude">
+<span class="sig-name descname"><span class="pre">find_nodes_from_convs_to_exclude</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'int8'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_convs_to_exclude" title="Link to this definition"></a></dt>
+<dd><p>Find unsupported Conv nodes to exclude from quantization.</p>
+<ul class="simple">
+<li><p>The input and output channels should be &gt;= 16. The exception is for Conv layers in INT8 quantization mode,
+which supports it if the input or output channel % 8.</p></li>
+<li><p>The filter size for FP8 conv kernels should be less than 32.</p></li>
+<li><p>For FP8 mode, Conv nodes with input or output channels &lt;= _MIN_CHANNELS_FP8 are excluded.
+Small-channel convolutions do not benefit from FP8 quantization.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>) – Onnx model graph.</p></li>
+<li><p><strong>quantize_mode</strong> (<em>str</em>) – Quantize mode (int8 or fp8).</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of Conv nodes.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_nodes_from_matmul_to_exclude">
+<span class="sig-name descname"><span class="pre">find_nodes_from_matmul_to_exclude</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data_format</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_generated_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_data_reader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_eps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['cpu',</span> <span class="pre">'cuda:0',</span> <span class="pre">'trt']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_shapes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_matmul_to_exclude" title="Link to this definition"></a></dt>
+<dd><p>Find MatMul nodes that meets gemv condition to exclude.</p>
+<p>Either of m or n in matmul is 1, this matmul cannot utilize
+TensorCores. The perf of adding Q/DQ layers is not good in
+TRT. Thus, in this case, do not add Q/DQ layers to this matmul.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the onnx model.</p></li>
+<li><p><strong>use_external_data_format</strong> (<em>bool</em>) – If True, external data path will be used to store the
+weights of the intermediate model.</p></li>
+<li><p><strong>intermediate_generated_files</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of intermediate generated files that will be deleted after quantization.</p></li>
+<li><p><strong>calibration_data_reader</strong> (<em>CalibrationDataReader</em>) – Calibration data reader for running inference.</p></li>
+<li><p><strong>calibration_shapes</strong> (<em>str</em><em> | </em><em>dict</em><em> | </em><em>None</em>) – Model input shapes for inference. If provided, symbolic shape inference will be used
+instead of calibration_data_reader.</p></li>
+<li><p><strong>calibration_eps</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – Priority order for the execution providers (EP) to calibrate the model.
+Any subset of [‘cuda:x’, ‘cpu’, ‘trt’], where ‘x’ is the device id.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of Nodes to exclude from quantization.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_nodes_from_mha_to_exclude">
+<span class="sig-name descname"><span class="pre">find_nodes_from_mha_to_exclude</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data_format</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">disable_mha_qdq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'int8'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_generated_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_data_reader</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_eps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['cpu',</span> <span class="pre">'cuda:0',</span> <span class="pre">'trt']</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_nodes_from_mha_to_exclude" title="Link to this definition"></a></dt>
+<dd><p>Find MatMul nodes in MHA pattern to exclude.</p>
+<p>If disable_mha_qdq is set, don’t add Q/DQ layers to MatMuls in MHA pattern.
+else when quantize_mode == “fp8”, if head_size &gt; 256 or head_size &lt;= 8 or
+mha doesn’t meet fp8 fMHA v2 pattern, don’t add Q/DQ layers to MatMuls in MHA pattern.
+else when quantize_mode == “int8”, if seq_len &gt; 512, don’t add Q/DQ layers
+to MatMuls in MHA pattern.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the onnx model.</p></li>
+<li><p><strong>use_external_data_format</strong> (<em>bool</em>) – If True, external data path will be used to store the weights of the intermediate model.</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of Nodes to exclude from quantization.</p></li>
+<li><p><strong>disable_mha_qdq</strong> (<em>bool</em>) – If True, all MHA’s BMM1 and BMM2 will be added to nodes_to_exclude.
+Else, each MHA will be checked whether to enable QDQ or not when is_fp8fp16 is True.</p></li>
+<li><p><strong>quantize_mode</strong> (<em>str</em>) – Quantization mode. One of ‘int8’ (default), ‘int4’ and ‘fp8’.</p></li>
+<li><p><strong>intermediate_generated_files</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of intermediate generated files that will be deleted after quantization.</p></li>
+<li><p><strong>calibration_data_reader</strong> (<em>CalibrationDataReader</em>) – Calibration data reader for running inference.</p></li>
+<li><p><strong>calibration_eps</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – Priority list of execution providers (EP) for calibration.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of Nodes to exclude from quantization.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.find_nodes_to_exclude">
+<span class="sig-name descname"><span class="pre">find_nodes_to_exclude</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_exclude</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.find_nodes_to_exclude" title="Link to this definition"></a></dt>
+<dd><p>Find the node names from the ONNX graph which matches user’s exclusion patterns.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>op_types_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_concat_eliminated_tensors">
+<span class="sig-name descname"><span class="pre">get_concat_eliminated_tensors</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_quantize</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_concat_eliminated_tensors" title="Link to this definition"></a></dt>
+<dd><p>Find the input tensors and output tensor of concat that will be quantized.</p>
+<p>We can do some perf optimization for TRT.</p>
+<p>For example, like the below pattern:
+(t1) q1 -&gt; dq1     (t2) q2 -&gt; dq2 -&gt; concat -&gt; q4 -&gt; dq4 (t4)
+(t3) q3 -&gt; dq3 /</p>
+<p>In TRT, q4 will be propagated forward concat. It will be like:
+(t1) q1 -&gt; dq1 -&gt; q4     (t2) q2 -&gt; dq2 -&gt; q4 -&gt; concat -&gt; dq4 (t4)
+(t3) q3 -&gt; dq3 -&gt; q4 /</p>
+<p>If the scaling factor of dq1 and q4 are different, it will cause the dq-q compute latency. If
+they are the same, then the dq-q pairs can be eliminated in TRT, and no extra dq-q compute
+latency. However, it will sacrifice the accuracy.</p>
+<p>Thus, this function will collect which tensors should have the same scaling factors. For the
+above example, we want the scaling factor of dq1, dq2, dq3, q4 be the same. This function will
+return like
+{
+t1: {t1,t2,t3,t4},
+t2: {t1,t2,t3,t4},
+t3: {t1,t2,t3,t4},
+t4: {t1,t2,t3,t4},
+}
+This format is convenient for calibrator to assign the same scaling factor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>set of tensors that should share the same scaling factor}</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>{current tensor name</p>
+</dd>
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>)</p></li>
+<li><p><strong>nodes_to_quantize</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_extended_model_outputs">
+<span class="sig-name descname"><span class="pre">get_extended_model_outputs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">extended_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data_format</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_generated_files</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_data_reader</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">calibration_eps</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_extended_model_outputs" title="Link to this definition"></a></dt>
+<dd><p>Run one inference step on an onnx model which has some intermediate tensor marked as model outputs.</p>
+<p>The first calibration data is used for the dummy inference. This is useful when we want to know the shape of an
+intermediate tensor given the calibration data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the original onnx model, used for saving the extended model nearby if it is larger than 2GB.</p></li>
+<li><p><strong>extended_model</strong> (<em>ModelProto</em>) – The onnx model with some intermediate tensors marked as model outputs.</p></li>
+<li><p><strong>use_external_data_format</strong> (<em>bool</em>) – If True, external data path will be used to store the weights of the intermediate model.</p></li>
+<li><p><strong>intermediate_generated_files</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – List of intermediate generated files that will be deleted after quantization.</p></li>
+<li><p><strong>calibration_data_reader</strong> (<em>CalibrationDataReader</em>) – Calibration data reader for running inference.</p></li>
+<li><p><strong>calibration_eps</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – Priority order for the execution providers (EP) to calibrate the model.
+Any subset of [‘cuda:x’, ‘cpu’, ‘trt’], where ‘x’ is the device id.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>ndarray</em>]</p>
+</dd>
+</dl>
+<p>Returns: a map with each output name pointed to the corresponding output numpy ndarray.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_fusible_backbone">
+<span class="sig-name descname"><span class="pre">get_fusible_backbone</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_fusible_backbone" title="Link to this definition"></a></dt>
+<dd><p>Returns the linear backbone node for a given node if it matches the pattern.</p>
+<p>TensorRT fuses convolution with BN, Relu, MaxPool etc. when in some specific pattern.
+This rule tries to match some of those patterns.
+Note. BiasAdd and ConstMul are optional in path types.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node</strong> (<em>Node</em>) – Start node of the pattern.</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – ONNX model graph.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Backbone node of the given node, None if not found.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Node</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_input_shapes">
+<span class="sig-name descname"><span class="pre">get_input_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_input_shapes" title="Link to this definition"></a></dt>
+<dd><p>Returns the input shapes of the given ONNX model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>onnx_path</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_layer_info">
+<span class="sig-name descname"><span class="pre">get_layer_info</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['/lm_head']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">128</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_axis</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_layer_info" title="Link to this definition"></a></dt>
+<dd><p>Generate a mapping of weight tensor names to their quantization configuration.</p>
+<p>This function determines the quantization configuration (precision, block_size, axis) for each
+weight tensor in the ONNX model, based on the provided configuration. If mixed quantization
+is enabled, it uses the layer precision mapping; otherwise, it returns None.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>onnx.ModelProto</em>) – The ONNX model to analyze.</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of node name patterns to exclude from quantization.</p></li>
+<li><p><strong>**kwargs</strong> (<em>Any</em>) – Additional keyword arguments, such as:
+- enable_mixed_quant (bool): Whether to enable mixed quantization.
+- layers_8bit (str): Comma-separated list of layer patterns to quantize to 8 bit.
+- block_size (int): Default block size for quantization.
+- quantize_axis (int): Default quantization axis.
+- gather_block_size (int): Default block size for gather quantization.
+- gather_quantize_axis (int): Default quantization axis for gather.</p></li>
+<li><p><strong>block_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>quantize_axis</strong> (<em>int</em>)</p></li>
+<li><p><strong>**kwargs</strong></p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A mapping from weight tensor names to their quantization
+configuration (with keys: precision, block_size, axis), or None if mixed quantization is not enabled.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>dict</em>[<em>str</em>, <em>Any</em>]] | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_layer_precision_mapping">
+<span class="sig-name descname"><span class="pre">get_layer_precision_mapping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">precision_pattern_8bit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nodes_to_exclude</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">['/lm_head']</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">128</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_axis</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_layer_precision_mapping" title="Link to this definition"></a></dt>
+<dd><p>Generate a mapping of layer names to their quantization precision (4 bits or 8 bits) for an ONNX model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>onnx.ModelProto</em>) – The ONNX model to analyze.</p></li>
+<li><p><strong>precision_pattern_8bit</strong> (<em>str</em><em>, </em><em>optional</em>) – Comma-separated string of layer patterns to quantize to 8 bits.
+If None, a default set of patterns is used to select layers for 8 bits quantization.</p></li>
+<li><p><strong>nodes_to_exclude</strong> (<em>list</em><em>[</em><em>str</em><em>]</em><em>, </em><em>optional</em>) – List of node name patterns to exclude from quantization.
+Defaults to [r”/lm_head”].</p></li>
+<li><p><strong>block_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>quantize_axis</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A mapping from layer names to their quantization precision (e.g., {“layer_name”: “8”}).</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_resize_scales">
+<span class="sig-name descname"><span class="pre">get_resize_scales</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_resize_scales" title="Link to this definition"></a></dt>
+<dd><p>Record Resize op’s old scale value before converting to fp16.</p>
+<p>Because low precision scale will lead to wrong shape. For example, if 7 is
+resized to 6, fp32 scale should be 6/7 = 0.85714. After converting to fp16,
+it becomes 0.85693 but 7 * 0.85693 = 5.9985 &lt; 6.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_tensor_consumer_node_indices">
+<span class="sig-name descname"><span class="pre">get_tensor_consumer_node_indices</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_tensor_consumer_node_indices" title="Link to this definition"></a></dt>
+<dd><p>Build a mapping from tensor names to the indices of nodes that use them.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>GraphProto</em><em> | </em><em>Graph</em>) – ONNX GraphSurgeon graph to analyze</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary mapping tensor names to lists of node indices that consume them</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>int</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_tensor_consumer_nodes">
+<span class="sig-name descname"><span class="pre">get_tensor_consumer_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_tensor_consumer_nodes" title="Link to this definition"></a></dt>
+<dd><p>Returns a dictionary of tensor name and their consumer node object mapping.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>GraphProto</em>) – ONNX model graph.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary, key is tensor name and value is their consumer node object</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>NodeProto</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_tensor_from_name">
+<span class="sig-name descname"><span class="pre">get_tensor_from_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_tensor_from_name" title="Link to this definition"></a></dt>
+<dd><p>Returns a ValueInfoProto given a tensor name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>GraphProto</em>) – ONNX model graph</p></li>
+<li><p><strong>tensor_name</strong> (<em>str</em>) – String with tensor name.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>actual graph tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ValueInfoProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.get_tensor_producer_nodes">
+<span class="sig-name descname"><span class="pre">get_tensor_producer_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">get_initializer_producers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.get_tensor_producer_nodes" title="Link to this definition"></a></dt>
+<dd><p>Returns a dictionary of tensor name and their producer node object mapping.</p>
+<p>Note. we create a special Root type node as external inputs producer for ease of implementation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>GraphProto</em>) – ONNX model graph.</p></li>
+<li><p><strong>get_initializer_producers</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary, key is tensor name and value is their producer node object</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>NodeProto</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.has_const_input">
+<span class="sig-name descname"><span class="pre">has_const_input</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.has_const_input" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given node has any constant input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>node</strong> (<em>Node</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.has_path_type">
+<span class="sig-name descname"><span class="pre">has_path_type</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">path_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_forward</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wild_card_types</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">path_nodes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.has_path_type" title="Link to this definition"></a></dt>
+<dd><p>Checks if the given node is start/end of a given forward/backward path type.</p>
+<p>Note, Path can be forward or backward wrt a node depending on the next level nodes.
+Additionally, this method can work with optional nodes and collect the traversed path.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node</strong> (<em>Node</em>) – Start node of the path.</p></li>
+<li><p><strong>graph</strong> (<em>Graph</em>) – ONNX model graph.</p></li>
+<li><p><strong>path_type</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – Path types to match from the given node.</p></li>
+<li><p><strong>is_forward</strong> (<em>bool</em>) – Whether to match forward or backward path.</p></li>
+<li><p><strong>wild_card_types</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – Wild card types, these type of nodes are skipped and not matched with the path_type.</p></li>
+<li><p><strong>path_nodes</strong> (<em>list</em><em>[</em><em>Node</em><em>]</em>) – Accumulated nodes in the matched path.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Bool, whether the given node is start/end of the given forward/backward path type.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.insert_fp8_mha_casts">
+<span class="sig-name descname"><span class="pre">insert_fp8_mha_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.insert_fp8_mha_casts" title="Link to this definition"></a></dt>
+<dd><p>Insert three cast ops.</p>
+<p>The first cast will be added before the input0 of MatMul to cast fp16 to fp32.
+The second cast will be added before the input1 of MatMul to cast fp16 to fp32.
+The third cast will be added after the output of MatMul to cast fp32 back to fp16.
+The insertion of Cast ops in the FP8 MHA part actually forbids the MHAs to run
+with FP16 accumulation because the compiler only has FP32 accumulation kernels for FP8 MHAs.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.insert_matmul_casts">
+<span class="sig-name descname"><span class="pre">insert_matmul_casts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">matmul_node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.insert_matmul_casts" title="Link to this definition"></a></dt>
+<dd><p>Insert three cast nodes for MatMul’s two inputs and output.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.is_const_input">
+<span class="sig-name descname"><span class="pre">is_const_input</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tensor</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.is_const_input" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the given tensor is an initializer or produced by const-foldable nodes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>tensor</strong> (<em>Tensor</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.match_fp8_mha_pattern">
+<span class="sig-name descname"><span class="pre">match_fp8_mha_pattern</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">softmax_op</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">has_fp8_qdq</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.match_fp8_mha_pattern" title="Link to this definition"></a></dt>
+<dd><p>Match FP8 fMHA v2 with the given softmax_op.</p>
+<p>If has_fp8_qdq == True, we match this FP8 fMHA v2 pattern:
+Q -&gt; DQ -&gt; BMM1 -&gt; (Mul/Div) -&gt; (Add) -&gt; Softmax -&gt; (Cast) -&gt; Q -&gt; DQ -&gt; BMM2 -&gt; Q -&gt; DQ.
+If has_fp8_qdq == False, we match this FP8 fMHA v2 pattern:
+BMM1 -&gt; (Mul/Div) -&gt; (Add) -&gt; Softmax -&gt; (Cast) -&gt; BMM2.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>) – The graph to match FP8 MHA pattern.</p></li>
+<li><p><strong>softmax_op</strong> (<em>Node</em>) – The softmax op of FP8 MHA we want to match.</p></li>
+<li><p><strong>nodes_to_exclude</strong> – List of Nodes to exclude from quantization.</p></li>
+<li><p><strong>has_fp8_qdq</strong> (<em>bool</em>) – If True, match the FP8 MHA with Q/DQs.
+Else, match the FP8 MHA without Q/DQs.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of BMM1 node, Softmax node and BMM2 node.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>Node</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.print_stat">
+<span class="sig-name descname"><span class="pre">print_stat</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.print_stat" title="Link to this definition"></a></dt>
+<dd><p>Collect and print stats of the quantized model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>Graph</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.remove_output_initializers">
+<span class="sig-name descname"><span class="pre">remove_output_initializers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">graph_initializers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.remove_output_initializers" title="Link to this definition"></a></dt>
+<dd><p>Remove initializers that are also listed as graph outputs.</p>
+<p>Having initializers (constant tensors) that are also marked as outputs can lead to ONNX Runtime
+or conversion tool errors, particularly related to ambiguous ‘dtype’ or shape inference.
+This step ensures compatibility by detaching such initializers from the graph’s outputs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>)</p></li>
+<li><p><strong>graph_initializers</strong> (<em>list</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.remove_partial_input_qdq">
+<span class="sig-name descname"><span class="pre">remove_partial_input_qdq</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_quantize_inputs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.remove_partial_input_qdq" title="Link to this definition"></a></dt>
+<dd><p>Modifies the onnx model by removing QDQ nodes from the marked inputs, ex. non-residual inputs etc.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>graph</strong> (<em>Graph</em>) – Onnx model graph.</p></li>
+<li><p><strong>no_quantize_inputs</strong> (<em>list</em><em>[</em><em>tuple</em><em>[</em><em>Node</em><em>, </em><em>Node</em><em>, </em><em>str</em><em>]</em><em>]</em>) – List non-quantizable input info as (src, dst, input_name)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.remove_redundant_cast_nodes">
+<span class="sig-name descname"><span class="pre">remove_redundant_cast_nodes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">graph</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.remove_redundant_cast_nodes" title="Link to this definition"></a></dt>
+<dd><p>Remove redundant Cast nodes from the ONNX graph to optimize model performance.</p>
+<p>This function identifies and removes two types of redundant Cast nodes:</p>
+<ol class="arabic simple">
+<li><p>Cast nodes where input and output types are identical
+- Before: t1 (dtype=fp16) -&gt; cast (to=fp16) -&gt; t2 -&gt; Op
+- After:  t1 (dtype=fp16) -&gt; Op</p></li>
+<li><p>Cast nodes that can be fused with initializers
+- Before: (initializer) t1 (dtype=fp32) -&gt; cast (to=fp16) -&gt; t2 -&gt; Op
+- After:  (initializer) t1 (dtype=fp16) -&gt; Op</p></li>
+</ol>
+<p>The function preserves Cast nodes that:
+- Have outputs that are graph outputs
+- Are necessary for type conversion
+- Have dynamic inputs (not initializers)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>graph</strong> (<em>GraphProto</em>) – ONNX graph to optimize. The graph will be modified in-place.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ul class="simple">
+<li><p>This optimization is particularly useful for models with many Cast operations</p></li>
+<li><p>The function modifies the graph in-place</p></li>
+<li><p>All tensor consumers are updated to maintain graph connectivity</p></li>
+<li><p>Initializer data types are converted when possible to eliminate Cast nodes</p></li>
+</ul>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.should_quantize_to_8bit">
+<span class="sig-name descname"><span class="pre">should_quantize_to_8bit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layers_8bit</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.should_quantize_to_8bit" title="Link to this definition"></a></dt>
+<dd><p>Check if layer should be quantized to 8 bits.</p>
+<p>The layers_8bit list contains ONNX node names like ‘/model/layers.13/attn/qkv_proj/MatMul’.
+The layer_name argument is an ONNX initializer name like ‘model.layers.13.attn.qkv_proj.MatMul.weight’.</p>
+<dl class="simple">
+<dt>To match these, we:</dt><dd><ul class="simple">
+<li><p>Remove the leading slash from the node name.</p></li>
+<li><p>Replace all ‘/’ with ‘.’ to match the naming convention of the initializer.</p></li>
+</ul>
+</dd>
+</dl>
+<p>This allows us to correctly identify which weights should be quantized to 8 bits.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layer_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>layers_8bit</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.validate_8bit_layers">
+<span class="sig-name descname"><span class="pre">validate_8bit_layers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layers_str</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.validate_8bit_layers" title="Link to this definition"></a></dt>
+<dd><p>Validate the format of layers_8bit string.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>layers_str</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.quantization.graph_utils.validate_op_types_spelling">
+<span class="sig-name descname"><span class="pre">validate_op_types_spelling</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_quantize</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">op_types_to_exclude</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.quantization.graph_utils.validate_op_types_spelling" title="Link to this definition"></a></dt>
+<dd><p>Validate spelling in op types.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.quantization.fp8.html" class="btn btn-neutral float-left" title="fp8" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.quantization.gs_patching.html" class="btn btn-neutral float-right" title="gs_patching" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

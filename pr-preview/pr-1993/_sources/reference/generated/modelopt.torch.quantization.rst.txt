@@ -1,0 +1,106 @@
+quantization
+============
+
+.. List the submodules
+
+
+
+.. rubric:: Modules
+
+.. autosummary::
+   :toctree:
+   :recursive:
+
+
+
+   modelopt.torch.quantization.algorithms
+
+
+
+   modelopt.torch.quantization.backends
+
+
+
+   modelopt.torch.quantization.calib
+
+
+
+   modelopt.torch.quantization.compress
+
+
+
+   modelopt.torch.quantization.config
+
+
+
+   modelopt.torch.quantization.conversion
+
+
+
+   modelopt.torch.quantization.export_onnx
+
+
+
+   modelopt.torch.quantization.extensions
+
+
+
+   modelopt.torch.quantization.mode
+
+
+
+   modelopt.torch.quantization.model_calib
+
+
+
+   modelopt.torch.quantization.model_quant
+
+
+
+   modelopt.torch.quantization.nn
+
+
+
+   modelopt.torch.quantization.plugins
+
+
+
+   modelopt.torch.quantization.qtensor
+
+
+
+   modelopt.torch.quantization.tensor_quant
+
+
+
+   modelopt.torch.quantization.utils
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.quantization
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   

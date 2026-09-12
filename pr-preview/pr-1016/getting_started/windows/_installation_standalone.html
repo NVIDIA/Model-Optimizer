@@ -1,0 +1,265 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Install ModelOpt-Windows as a Standalone Toolkit &mdash; Model Optimizer 0.0.1.dev1+g498ff8d20</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=1ae7504c"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Install ModelOpt-Windows with Olive" href="_installation_with_olive.html" />
+    <link rel="prev" title="Installation for Windows" href="_installation_for_Windows.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../1_overview.html">Overview</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../2_installation.html">Installation</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="_installation_for_Windows.html">Installation for Windows</a><ul class="current">
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../2_installation.html">Installation</a></li>
+          <li class="breadcrumb-item"><a href="_installation_for_Windows.html">Installation for Windows</a></li>
+      <li class="breadcrumb-item active">Install ModelOpt-Windows as a Standalone Toolkit</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/getting_started/windows/_installation_standalone.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="install-modelopt-windows-as-a-standalone-toolkit">
+<span id="install-page-standalone-windows"></span><h1>Install ModelOpt-Windows as a Standalone Toolkit<a class="headerlink" href="#install-modelopt-windows-as-a-standalone-toolkit" title="Link to this heading"></a></h1>
+<p>The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalone toolkit for quantizing ONNX models. Below are the setup steps:</p>
+<p><strong>1. Setup Prerequisites</strong></p>
+<p>Before using ModelOpt-Windows, the following components must be installed:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>NVIDIA GPU and Graphics Driver</p></li>
+<li><p>Python version &gt;= 3.10 and &lt; 3.13</p></li>
+<li><p>Visual Studio 2022 / MSVC / C/C++ Build Tools</p></li>
+<li><p>CUDA Toolkit, CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using <cite>onnxruntime-gpu</cite> or CUDA EP)</p></li>
+</ul>
+</div></blockquote>
+<p>Update <code class="docutils literal notranslate"><span class="pre">PATH</span></code> environment variable as needed for above prerequisites.</p>
+<p><strong>2. Setup Virtual Environment (Optional but Recommended)</strong></p>
+<p>It is recommended to use a virtual environment for managing Python dependencies. Tools such as <em>conda</em> or Python’s built-in <em>venv</em> module can help create and activate a virtual environment. Example steps for using Python’s <em>venv</em> module:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>mkdir<span class="w"> </span>myEnv
+$<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.<span class="se">\m</span>yEnv
+$<span class="w"> </span>.<span class="se">\m</span>yEnv<span class="se">\S</span>cripts<span class="se">\a</span>ctivate
+</pre></div>
+</div>
+<p>In the newly created virtual environment, none of the required packages (e.g., onnx, onnxruntime, onnxruntime-directml, onnxruntime-gpu, nvidia-modelopt etc.) will be pre-installed.</p>
+<p><strong>3.  Install ModelOpt-Windows Wheel</strong></p>
+<p>To install the ONNX module of ModelOpt-Windows, run the following command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;nvidia-modelopt[onnx]&quot;</span>
+</pre></div>
+</div>
+<p>If you install ModelOpt-Windows without the extra <code class="docutils literal notranslate"><span class="pre">[onnx]</span></code> option, only the minimal core dependencies and the PyTorch module (<code class="docutils literal notranslate"><span class="pre">torch</span></code>) will be installed. Support for ONNX model quantization requires installing with <code class="docutils literal notranslate"><span class="pre">[onnx]</span></code>.</p>
+<p><strong>4. ONNX Model Quantization: Setup ONNX Runtime Execution Provider for Calibration</strong></p>
+<p>The Post-Training Quantization (PTQ) process for ONNX models usually involves running the base model with user-supplied inputs, a process called calibration. The user-supplied model inputs are referred to as calibration data. To perform calibration, the base model must be run using a suitable ONNX Execution Provider (EP), such as <em>DmlExecutionProvider</em> (DirectML EP) or <em>CUDAExecutionProvider</em> (CUDA EP). There are different ONNX Runtime packages for each EP:</p>
+<ul class="simple">
+<li><p><em>onnxruntime-directml</em> provides the DirectML EP.</p></li>
+<li><p><em>onnxruntime-trt-rtx</em> provides TensorRT-RTX EP.</p></li>
+<li><p><em>onnxruntime-gpu</em> provides the CUDA EP.</p></li>
+<li><p><em>onnxruntime</em> provides the CPU EP.</p></li>
+</ul>
+<p>By default, ModelOpt-Windows installs <em>onnxruntime-gpu</em>. The default CUDA version needed for <em>onnxruntime-gpu</em> since v1.19.0 is 12.x. The <em>onnxruntime-gpu</em> package (i.e. CUDA EP) has CUDA and cuDNN dependencies:</p>
+<ul class="simple">
+<li><dl class="simple">
+<dt>Install CUDA and cuDNN:</dt><dd><ul>
+<li><p>For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the <a class="reference external" href="https://onnxruntime.ai/docs/install/#cuda-and-cudnn/" rel="noopener noreferrer" target="_blank">CUDA Execution Provider requirements</a> for compatible versions of CUDA and cuDNN.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+<p>If you need to use any other EP for calibration, you can uninstall the existing <em>onnxruntime-gpu</em> package and install the corresponding package. For example, to use the DirectML EP, you can uninstall the existing <em>onnxruntime-gpu</em> package and install the <em>onnxruntime-directml</em> package:</p>
+<blockquote>
+<div><div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>uninstall<span class="w"> </span>onnxruntime-gpu
+pip<span class="w"> </span>install<span class="w"> </span>onnxruntime-directml
+</pre></div>
+</div>
+</div></blockquote>
+<p><strong>5. Setup GPU Acceleration Tool for Quantization</strong></p>
+<p>By default, ModelOpt-Windows utilizes the <a class="reference external" href="https://cupy.dev//" rel="noopener noreferrer" target="_blank">cupy-cuda12x</a> tool for GPU acceleration during the INT4 ONNX quantization process. This is compatible with CUDA 12.x.</p>
+<p><strong>6. Verify Installation</strong></p>
+<dl>
+<dt>Ensure the following steps are verified:</dt><dd><ul>
+<li><p><strong>Task Manager</strong>: Check that the GPU appears in the Task Manager, indicating that the graphics driver is installed and functioning.</p></li>
+<li><p><strong>Python Interpreter</strong>: Open the command line and type python. The Python interpreter should start, displaying the Python version.</p></li>
+<li><dl class="simple">
+<dt><strong>Onnxruntime Package</strong>: Ensure that exactly one of the following is installed:</dt><dd><ul class="simple">
+<li><p><em>onnxruntime-directml</em> (DirectML EP)</p></li>
+<li><p><em>onnxruntime-trt-rtx</em> (TensorRT-RTX EP)</p></li>
+<li><p><em>onnxruntime-gpu</em> (CUDA EP)</p></li>
+<li><p><em>onnxruntime</em> (CPU EP)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl>
+<dt><strong>Onnx and Onnxruntime Import</strong>: Ensure that following python command runs successfully.</dt><dd><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="o">-</span><span class="n">c</span> <span class="s2">&quot;import onnx; import onnxruntime&quot;</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</li>
+<li><p><strong>Environment Variables</strong>: For workflows using CUDA dependencies (e.g., CUDA EP-based calibration), ensure environment variables like <em>CUDA_PATH</em>, <em>CUDA_V12_4</em>, or <em>CUDA_V11_8</em> etc. are set correctly. Reopen the command-prompt if any environment variable is updated or newly created.</p></li>
+<li><p><strong>ModelOpt-Windows Import Check</strong>: Run the following command to ensure the installation is successful:</p>
+<blockquote>
+<div><div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="o">-</span><span class="n">c</span> <span class="s2">&quot;import modelopt.onnx.quantization&quot;</span>
+</pre></div>
+</div>
+</div></blockquote>
+</li>
+</ul>
+</dd>
+</dl>
+<ul class="simple">
+<li><p>If you encounter any difficulties during the installation process, please refer <a class="reference internal" href="../../support/2_faqs.html#faq-modelopt-windows"><span class="std std-ref">ModelOpt-Windows</span></a> FAQs for potential solutions and additional guidance.</p></li>
+</ul>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="_installation_for_Windows.html" class="btn btn-neutral float-left" title="Installation for Windows" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="_installation_with_olive.html" class="btn btn-neutral float-right" title="Install ModelOpt-Windows with Olive" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

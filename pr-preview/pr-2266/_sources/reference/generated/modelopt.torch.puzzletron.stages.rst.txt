@@ -1,0 +1,85 @@
+stages
+======
+
+.. List the submodules
+
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.puzzletron.stages
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   .. rubric:: Classes
+
+   .. autosummary::
+      :nosignatures:
+   
+      ArtifactChoice
+      StageSkipReason
+      StageSpec
+      StageStatus
+      StageTerminalState
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   .. rubric:: Functions
+
+   .. autosummary::
+      :nosignatures:
+   
+      configured_parent_stage_ids
+      configured_stage_ids
+      distributed_stage_ids
+      enabled_stage_ids
+      required_stage_ids
+      semantic_stage_config
+      selected_parent_stage_ids
+      stage_display_name
+      stage_ids
+      stage_is_enabled
+      stage_spec
+      stage_terminal_state
+      topological_mapping_items
+      topological_stage_ids
+      activation_stage
+      activation_diagnostic_stage
+      bypass_diagnostic_stage
+      aiperf_stage
+      build_library_stage
+      bypass_overfit_stage
+      bypass_stage
+      convert_stage
+      distillation_stage
+      distillation_overfit_stage
+      depth_stage
+      evaluation_stage
+      post_distillation_evaluation_stage
+      mip_stage
+      scoring_stage
+      sort_stage
+      sort_equivalence_stage
+      width_slice_equivalence_stage
+      vllm_stats_stage
+   
+   

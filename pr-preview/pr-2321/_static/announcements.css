@@ -1,0 +1,144 @@
+/* Scoped announcement styles using Shibuya's light and dark color tokens. */
+
+#announcements > h1,
+#announcements > p,
+.announcement-section {
+  max-width: 860px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.announcement-section {
+  width: 100%;
+}
+
+.announcement-toolbar {
+  border: 1px solid var(--sy-c-border);
+  border-radius: 4px;
+  margin: 1.5rem 0;
+  padding: 1rem;
+  background: var(--sy-c-background);
+}
+
+.announcement-search-label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.announcement-search {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--sy-c-border);
+  border-radius: 4px;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
+  font-size: 1rem;
+}
+
+.announcement-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.announcement-tag {
+  border: 1px solid var(--sy-c-border);
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+
+.announcement-tag.is-active,
+.announcement-tag:hover {
+  border-color: #76b900;
+  background: #76b900;
+  color: #111;
+}
+
+.announcement-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin: 1rem 0 1.25rem;
+}
+
+.announcement-card {
+  border-bottom: 1px solid var(--sy-c-border);
+  padding: 0 0 1rem;
+}
+
+.announcement-card:last-child {
+  border-bottom: 0;
+}
+
+.announcement-card h2 {
+  margin-top: 0.25rem;
+  font-size: 1.2rem;
+  line-height: 1.35;
+}
+
+.announcement-card p {
+  margin-bottom: 0.75rem;
+}
+
+.announcement-card-meta {
+  color: var(--sy-c-light);
+  font-size: 0.85rem;
+}
+
+.announcement-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.announcement-card-tags span {
+  border: 1px solid var(--sy-c-border);
+  border-radius: 999px;
+  color: var(--sy-c-light);
+  font-size: 0.78rem;
+  padding: 0.15rem 0.45rem;
+}
+
+.announcement-empty {
+  border-left: 4px solid #76b900;
+  padding-left: 0.75rem;
+}
+
+
+.announcement-pager {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  margin: 0 0 2rem;
+}
+
+.announcement-page-button {
+  border: 1px solid var(--sy-c-border);
+  border-radius: 4px;
+  background: var(--sy-c-background);
+  color: var(--sy-c-text);
+  cursor: pointer;
+  padding: 0.35rem 0.7rem;
+}
+
+.announcement-page-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.announcement-page-status {
+  color: var(--sy-c-light);
+  font-size: 0.9rem;
+}
+
+.toctree-wrapper.compound:empty {
+  display: none;
+}
