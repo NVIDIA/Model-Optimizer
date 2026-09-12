@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
-import copy
 import fnmatch
+import hashlib
+import json
 import math
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -476,14 +477,55 @@ def _checkpoint_state_is_compatible(state: dict[str, Any], signature: dict[str, 
     return checkpoint_signature == legacy_signature
 
 
+def _fingerprint_value(value: Any) -> Any:
+    """Convert quantizer configuration and tensor state into a stable JSON value."""
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "meta":
+            raise ValueError("Cannot fingerprint a meta-device preceding quantizer state.")
+        tensor = value.detach().contiguous().cpu()
+        raw = tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+        return {
+            "dtype": str(tensor.dtype),
+            "shape": list(tensor.shape),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if hasattr(value, "model_dump"):
+        return _fingerprint_value(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return [
+            [_fingerprint_value(key), _fingerprint_value(item)]
+            for key, item in sorted(
+                value.items(), key=lambda entry: (type(entry[0]).__qualname__, repr(entry[0]))
+            )
+        ]
+    if isinstance(value, (list, tuple)):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, (torch.dtype, torch.device)):
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"Unsupported preceding quantizer state value: {type(value).__qualname__}.")
+
+
+def _quantizer_fingerprint(module: TensorQuantizer) -> str:
+    payload = {
+        "type": f"{type(module).__module__}.{type(module).__qualname__}",
+        "properties": module.get_modelopt_state(properties_only=True),
+        "state_dict": module.state_dict(),
+    }
+    serialized = json.dumps(
+        _fingerprint_value(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
 def _preceding_quantizer_signature(model: nn.Module) -> list[dict[str, Any]]:
-    """Describe enabled non-K/V formats that affect KV sensitivity scores."""
+    """Fingerprint enabled non-K/V configuration and state that affect KV scores."""
     return sorted(
         (
             {
                 "name": name,
-                "num_bits": copy.deepcopy(module.num_bits),
-                "block_sizes": copy.deepcopy(module.block_sizes),
+                "fingerprint": _quantizer_fingerprint(module),
             }
             for name, module in model.named_modules(remove_duplicate=False)
             if isinstance(module, TensorQuantizer)
