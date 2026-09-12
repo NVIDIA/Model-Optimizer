@@ -142,3 +142,43 @@
 .toctree-wrapper.compound:empty {
   display: none;
 }
+
+/* Numbered equations: Sphinx's default `float: right` on the equation number
+   cannot share a line with MathJax's full-width display block, so the number
+   lands above the equation. Anchor it to the right of the equation instead. */
+div.math {
+  position: relative;
+}
+
+div.math span.eqno {
+  float: none;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.yue strong.local-hessian-result {
+  color: #76b900;
+  font-size: 1.15em;
+  font-weight: 900;
+}
+
+.table-header-note {
+  font-size: 0.75em;
+  font-weight: 400;
+}
+
+.table-note {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--sy-c-light);
+  margin-top: -2.25rem;
+}
+
+.table-note strong,
+.table-note code,
+.table-note .math,
+.table-note mjx-container {
+  font-size: inherit !important;
+}
