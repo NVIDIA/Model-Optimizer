@@ -16,14 +16,29 @@
 import json
 import os
 
+from ..speculation_profile import build_profile
 from .base import Metric
 
 
 class AcceptanceRate(Metric):
+    # Set once per run by run.py via set_profile_metadata(). Class-level so the
+    # MTBench/SpecBench subclasses pick it up without extra wiring, mirroring how
+    # Metric.update_directory() distributes the output path.
+    profile_metadata = None
+
     def __init__(self):
         super().__init__()
         self.prompt_ar = {}
         self.name = "acceptance_rate"
+
+    @classmethod
+    def set_profile_metadata(cls, metadata):
+        """Describe what is being measured, so a speculation_profile.json can be written.
+
+        Without this the acceptance numbers are still computed and written as before;
+        only the deployment-facing profile is skipped.
+        """
+        AcceptanceRate.profile_metadata = metadata
 
     def process_step(self, step_outputs, request_id, turn_id):
         if request_id not in self.prompt_ar:
@@ -63,6 +78,43 @@ class AcceptanceRate(Metric):
         for k, cond_ar in self.out["Conditional_Acceptance_Rate"].items():
             running_joint *= cond_ar
             self.out["Joint_Acceptance_Rate"][k] = running_joint
+        # Emitted here rather than in each process_final(): this is the single point
+        # where the acceptance distribution is final, and all three variants
+        # (AcceptanceRate / MTBench / SpecBench) route through it, so none can
+        # silently stop producing a profile.
+        self._write_speculation_profile()
+
+    def _write_speculation_profile(self):
+        """Write speculation_profile.json — the deployment-facing view of these numbers.
+
+        Skipped silently when run.py did not supply metadata (e.g. an ad-hoc run with
+        no --save_dir): the profile is only meaningful if we can say what it describes.
+        """
+        metadata = AcceptanceRate.profile_metadata
+        if not metadata or not self.directory:
+            return
+        profile = build_profile(
+            self.out,
+            per_category=self.out.get("Category_AL"),
+            **metadata,
+        )
+        path = os.path.join(self.directory, "speculation_profile.json")
+        os.makedirs(self.directory, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(profile, f, indent=2)
+        validation = profile.get("validation") or {}
+        consistency = validation.get("mean_consistency") or {}
+        if not consistency.get("passed", True):
+            # Loud, because a failure here means the vectors do not describe the
+            # measured mean — the profile is wrong in a way downstream cannot detect.
+            print(
+                "WARNING: speculation profile failed its mean-consistency check "
+                f"(implied {consistency.get('implied_mean_accept_length')} vs "
+                f"reported {consistency.get('reported_mean_accept_length')}). "
+                f"See {path}"
+            )
+        else:
+            print(f"Wrote speculation profile to {path}")
 
     def process_final(self, text_outputs):
         all_ar = []
