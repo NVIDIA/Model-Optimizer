@@ -5,8 +5,14 @@ This folder holds model-optimization recipes (e.g. PTQ recipes) tuned for a
 such as the [Hugging Face Hub](https://huggingface.co/),
 [ModelScope](https://modelscope.cn/), or similar. Unlike
 [`../huggingface/`](../huggingface/), which keys recipes by a transformers
-`model_type` (an architecture shared by many checkpoints), a recipe here mirrors
-**one checkpoint's** quantization scheme verbatim.
+`model_type` (an architecture shared by many checkpoints), an entry here is keyed
+to **one checkpoint**.
+
+An entry takes one of two forms: a **mirror**, whose body reproduces a per-layer
+scheme no portable recipe can express, or an **alias**, which records that a
+`general/` or `huggingface/<model_type>/` recipe already produces that
+checkpoint's scheme and imports it wholesale. See
+[What belongs here](#what-belongs-here) for which to write.
 
 ## Folder structure
 
@@ -46,8 +52,9 @@ applies to its mirrors, key it by that base model's id.
 Prefer the most specific entry that applies to your model:
 
 1. **`models/<org>/<model_id>/`** — if there is an entry for your **exact**
-   checkpoint. It reproduces a validated, often per-component mixed-precision
-   scheme for that release; use it to match a published quantized checkpoint.
+   checkpoint. Use it to match a published quantized checkpoint: it either
+   reproduces a validated, often per-component mixed-precision scheme for that
+   release, or aliases the portable recipe that does.
 2. **[`huggingface/<model_type>/`](../huggingface/)** — an architecture-level
    recipe that applies to every checkpoint of that `model_type`.
 3. **[`general/`](../general/)** — model-agnostic recipes; a good starting point
@@ -71,7 +78,11 @@ recipe = load_recipe("models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a
 
 ## What belongs here
 
-A recipe earns a place here only when it mirrors **one specific released (or
+Two kinds of entry, and the difference matters when you add one.
+
+### 1. Checkpoint mirrors — the recipe lives here
+
+A recipe earns a **body** here only when it mirrors **one specific released (or
 planned) checkpoint** — a hand-mapped, usually per-layer or per-component
 precision scheme tuned to match that exact release. If the tuning generalizes to
 every checkpoint of an architecture, it belongs under
@@ -79,6 +90,56 @@ every checkpoint of an architecture, it belongs under
 model-agnostic, it belongs under [`../general/`](../general/). See
 [`../ptq.md`](../ptq.md) for what each checkpoint mirror does and how it compares
 to its general baseline.
+
+### 2. Aliases — the recipe lives elsewhere, the *record* lives here
+
+Many released checkpoints use a scheme a portable recipe already produces, with no
+checkpoint-specific changes at all. Those can still get an entry here, so the recipe
+is findable at the checkpoint's own hub path — but the entry is a thin **alias**
+that delegates its whole body to that recipe:
+
+```yaml
+imports:
+  base: general/ptq/nvfp4_default-kv_fp8_cast
+
+$import: base
+metadata:
+  description: >-
+    meta-llama/Llama-3.1-8B-Instruct quantized with the general NVFP4 scheme and an
+    FP8 KV cache in cast mode, as published in nvidia/Llama-3.1-8B-Instruct-NVFP4.
+```
+
+A top-level `$import` brings in the whole imported recipe; the keys given
+alongside it override the imported ones, so the alias supplies its own
+`metadata` and inherits `quantize` — algorithm and every `quant_cfg` entry —
+unchanged. Nothing is duplicated: editing the base recipe changes every alias
+that points at it.
+
+Note what the alias does *not* say. It has no `recipe_type`, because the kind is
+whatever the imported recipe's kind is; a recipe states its kind in whichever of
+these it likes, and the loader takes the first that answers:
+
+1. a `# modelopt-schema:` comment naming its schema class,
+2. `metadata.recipe_type` — **deprecated**; still read, but new recipes should
+   leave it out,
+3. the recipe it delegates to via a top-level `$import`.
+
+Whatever a recipe does state has to be true. Declaring both a schema comment and
+a `recipe_type` is fine as long as they agree, and the same holds across a
+delegation: a recipe and the recipe it imports must be the same kind, since the
+import takes over the whole body. Any disagreement is an error, not a preference.
+
+The one thing that *is* required: **a recipe another file imports must carry the
+schema comment**, because that is what `$import` resolution needs to validate the
+imported payload. A recipe nothing imports needs nothing — so aliasing a recipe
+for the first time means adding the comment to it in the same change.
+
+**Which one to write.** Start by assuming an alias, and reach for a body here only
+once you have established that no portable recipe expresses the release's scheme —
+compare the release's own `hf_quant_config.json` (and, where the distinction matters,
+its exported scale tensors) against what the candidate recipe's `quant_cfg` would
+produce. A body duplicated from a general recipe is a maintenance liability: it stops
+tracking edits to the recipe it was copied from.
 
 ## Sharing content across recipes
 

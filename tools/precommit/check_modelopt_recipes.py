@@ -32,6 +32,7 @@ Checks performed:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +46,22 @@ _YAML_PARSE_ERROR = object()
 _SUPPORTED_RECIPE_TYPES = frozenset(
     {"ptq", "speculative_eagle", "speculative_dflash", "speculative_medusa"}
 )
+
+# A recipe usually declares its kind with a ``# modelopt-schema:`` comment naming its
+# schema class rather than with ``metadata.recipe_type`` (see modelopt/recipe/loader.py).
+# Matched here by name so the hook keeps working without importing modelopt.
+_SCHEMA_COMMENT_RE = re.compile(
+    r"^\s*#\s*modelopt-schema:\s*modelopt\.recipe\.config\.ModelOpt\w+Recipe\s*$",
+    re.MULTILINE,
+)
+
+
+def _declares_recipe_schema(path: Path) -> bool:
+    """Whether *path* names one of the recipe schema classes in its comment preamble."""
+    try:
+        return bool(_SCHEMA_COMMENT_RE.search(path.read_text(encoding="utf-8")))
+    except OSError:
+        return False
 
 
 def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
@@ -105,7 +122,7 @@ def _check_single_file_recipe(path: Path) -> list[str]:
         return []  # not a recipe file
 
     metadata = data.get("metadata")
-    if not isinstance(metadata, dict) or "recipe_type" not in metadata:
+    if not isinstance(metadata, dict) and not _declares_recipe_schema(path):
         return []  # not a recipe file
 
     if "ptq_cfg" in data:
@@ -180,6 +197,8 @@ def _is_recipe_file(path: Path) -> bool:
         return True  # let load_recipe report the parse error
     if not isinstance(data, dict):
         return False  # not a recipe file at all
+    if _declares_recipe_schema(path):
+        return True
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all

@@ -23,7 +23,6 @@ imports:
   fp8: configs/ptq/presets/model/fp8
 
 metadata:
-  recipe_type: auto_quantize
   description: Mixed NVFP4 (weight-MSE + FP8 sweep) + FP8 per-layer search at 6.0 effective bits.
 
 auto_quantize:

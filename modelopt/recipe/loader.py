@@ -24,7 +24,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
-from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.opt.config_loader import load_config, peek_declared_schema
 from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import (
@@ -92,6 +92,42 @@ def load_recipe(
       ``eagle`` (EAGLE speculative decoding), ``dflash`` (DFlash speculative
       decoding) or ``medusa`` (Medusa speculative decoding) sections. The suffix
       may be omitted and will be probed automatically.
+
+      .. _recipe-alias:
+
+      A recipe can instead **alias an existing recipe**. A top-level ``$import``
+      brings the imported recipe in whole, so the file needs nothing else::
+
+          imports:
+            base: general/ptq/nvfp4_default-kv_fp8_cast
+
+          $import: base
+
+      That resolves to exactly the imported recipe -- its body, its algorithm and
+      its metadata alike -- under a second name.
+
+      Keys given alongside the ``$import`` override the imported ones, so an alias
+      can say what it is for while inheriting everything else::
+
+          imports:
+            base: general/ptq/nvfp4_default-kv_fp8_cast
+
+          $import: base
+          metadata:
+            description: What this checkpoint uses the base recipe for.
+
+      An override replaces a top-level key outright rather than merging into it, so
+      a partial ``metadata`` supplies the whole section. Nothing needs restating in
+      either form: the recipe's kind comes from the imported recipe (see
+      :func:`_peek_recipe_type`), and the two must agree if the alias states one.
+
+      The one requirement is on the other side -- the imported recipe must carry a
+      ``# modelopt-schema:`` comment naming its schema class, as every
+      ``$import``-able file must.
+
+      This is how the checkpoint entries under ``models/<org>/<model_id>/`` record
+      that a released checkpoint is reproduced by an existing recipe without
+      duplicating it.
     * A directory containing ``metadata.yml`` and ``quantize.yml`` —
       **PTQ recipes only**. Speculative-decoding recipes are always single YAML files.
 
@@ -140,19 +176,94 @@ def _apply_dotlist(data: dict, overrides: list[str]) -> dict:
     return OmegaConf.to_container(merged, resolve=False)
 
 
-def _peek_recipe_type(recipe_file: Path | Traversable) -> RecipeType | None:
-    """Extract ``metadata.recipe_type`` from a recipe YAML without resolving $imports.
+#: Recipe schema classes by their fully-qualified path, for resolving a
+#: ``# modelopt-schema:`` comment to the recipe kind it names.
+_RECIPE_SCHEMA_PATHS: dict[str, RecipeType] = {
+    f"{cls.__module__}.{cls.__qualname__}": rtype for rtype, cls in RECIPE_TYPE_TO_CLASS.items()
+}
+
+
+def _peek_recipe_type(
+    recipe_file: Path | Traversable, _seen: frozenset[str] | None = None
+) -> RecipeType | None:
+    """Determine a recipe's kind without resolving its ``$import`` references.
 
     Needed so :func:`load_config` can be called with the correct ``schema_type`` for
-    typed-list ``$import`` resolution before the full recipe is constructed.
+    typed-list ``$import`` resolution before the full recipe is constructed -- which is
+    why this cannot simply wait for the imports to resolve.
+
+    Neither way of saying it is mandatory; a recipe just has to say it *somehow*, and
+    the three sources are checked in this order:
+
+    1. a ``# modelopt-schema:`` comment naming the recipe's schema class. Only files
+       that are **imported** by another one need this -- it is what
+       ``$import`` resolution requires of any snippet -- so a leaf recipe never has to
+       carry it;
+    2. ``metadata.recipe_type`` in the YAML body. **Deprecated** -- still read and still
+       honoured, so no existing recipe has to change, but a new one should declare its
+       schema instead. It remains the only option for a directory recipe's
+       ``metadata.yml``, which has no comment preamble to read;
+    3. the recipe this one **delegates to** via a top-level ``$import``. A checkpoint
+       alias states neither of the above: its kind is whatever its base is, and the base
+       must declare a schema to be importable at all, so the walk terminates.
+
+    When more than one source is present they must agree --
+    :class:`~modelopt.recipe.config.ModelOptRecipeBase` rejects a recipe whose
+    ``metadata.recipe_type`` contradicts its schema class.
     """
     import yaml
 
+    key = str(recipe_file)
+    _seen = (_seen or frozenset()) | {key}
+
+    try:
+        declared = peek_declared_schema(recipe_file)
+    except ValueError:  # multiple modelopt-schema comments; load_config reports it
+        declared = None
+    if declared in _RECIPE_SCHEMA_PATHS:
+        return _RECIPE_SCHEMA_PATHS[declared]
+
     try:
         raw = yaml.safe_load(recipe_file.read_text())
+    except yaml.YAMLError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    try:
         return RecipeType(raw["metadata"]["recipe_type"])
     except (TypeError, KeyError, ValueError):
-        return None
+        pass
+
+    for base in delegated_recipe_paths(raw):
+        if str(base) in _seen:
+            continue
+        rtype = _peek_recipe_type(base, _seen)
+        if rtype is not None:
+            return rtype
+    return None
+
+
+def delegated_recipe_paths(raw: dict) -> list[Path | Traversable]:
+    """Resolve the recipe files a raw recipe body delegates to via top-level ``$import``.
+
+    Returns an empty list for an ordinary recipe. Names that do not appear in the
+    ``imports`` section, or that do not resolve to a file, are skipped here and reported
+    by ``$import`` resolution itself with a better message.
+    """
+    ref = raw.get("$import")
+    imports = raw.get("imports") or {}
+    if ref is None or not isinstance(imports, dict):
+        return []
+    paths = []
+    for name in ref if isinstance(ref, list) else [ref]:
+        target = imports.get(name)
+        if not target:
+            continue
+        resolved = _resolve_recipe_path(target)
+        if resolved.is_file():
+            paths.append(resolved)
+    return paths
 
 
 def _load_recipe_from_file(
@@ -161,15 +272,40 @@ def _load_recipe_from_file(
 ) -> ModelOptRecipeBase:
     """Load a recipe from a YAML file, optionally applying dotlist overrides.
 
-    The file must contain a ``metadata`` section with at least ``recipe_type``,
-    plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
+    The file has to say what kind of recipe it is -- see :func:`_peek_recipe_type` for
+    the three ways to do that -- and to supply the matching body section (``quantize`` /
+    ``eagle`` / ``dflash`` / ``medusa``), either directly or through a top-level
+    ``$import`` of a recipe that has one.
     """
     rtype = _peek_recipe_type(recipe_file)
     if rtype is None:
-        raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
+        raise ValueError(
+            f"Recipe file {recipe_file} does not say what kind of recipe it is. Set "
+            "'metadata.recipe_type', or declare a '# modelopt-schema: "
+            "modelopt.recipe.config.ModelOpt<Kind>Recipe' comment, or delegate to a recipe "
+            "that does with a top-level '$import'."
+        )
     schema_class = RECIPE_TYPE_TO_CLASS.get(rtype)
     if schema_class is None:
         raise ValueError(f"Unsupported recipe type: {rtype!r}")
+
+    import yaml
+
+    raw = yaml.safe_load(recipe_file.read_text()) or {}
+    raw = raw if isinstance(raw, dict) else {}
+
+    # A recipe that delegates inherits the imported recipe's body wholesale, so the two
+    # have to be the same kind. Checked here, and against the *declared* kind on both
+    # sides, so a mismatch reads as a mismatch -- otherwise it surfaces as whatever
+    # pydantic makes of, say, an ``eagle`` section spliced into a PTQ schema.
+    for base in delegated_recipe_paths(raw):
+        base_type = _peek_recipe_type(base)
+        if base_type is not None and base_type != rtype:
+            raise ValueError(
+                f"Recipe file {recipe_file} is a {rtype.value!r} recipe but imports "
+                f"{base}, which is a {base_type.value!r} recipe. A top-level '$import' "
+                "takes over the whole body, so both must be the same kind."
+            )
 
     # Pre-flight check on the *raw* YAML so the user sees a clear loader-level error
     # rather than a generic pydantic missing-field error.  Speculative recipes' body
@@ -177,10 +313,12 @@ def _load_recipe_from_file(
     # semantics consistent with PTQ.
     required_section = _REQUIRED_SECTION_PER_RECIPE_TYPE.get(rtype)
     if required_section is not None:
-        import yaml
-
-        raw = yaml.safe_load(recipe_file.read_text()) or {}
-        if not isinstance(raw, dict) or required_section not in raw:
+        # A recipe may delegate its whole body to another recipe with a top-level
+        # ``$import`` and override only ``metadata`` -- see :ref:`recipe-alias`. The
+        # body section then arrives during import resolution, so it cannot be required
+        # in the raw YAML; pydantic still rejects the result if the import does not
+        # supply one.
+        if "$import" not in raw and required_section not in raw:
             # Strip only the ``speculative_`` prefix so multi-word non-speculative types
             # (e.g. ``auto_quantize``) keep their full name: AUTO_QUANTIZE, not QUANTIZE.
             kind = rtype.value.removeprefix("speculative_").upper()
@@ -233,6 +371,12 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
 
+    if metadata.recipe_type is None:
+        raise ValueError(
+            f"Recipe directory {recipe_dir}: {metadata_file} must set 'recipe_type'. A "
+            "directory recipe has no schema comment naming the recipe class, so its "
+            "metadata is the only place the kind can come from."
+        )
     if metadata.recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
         quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)

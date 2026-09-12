@@ -515,18 +515,36 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 for output projection + MLP layers, FP8 KV cache
    * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
      - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
+   * - ``general/ptq/fp8_default-kv_fp16``
+     - FP8 per-tensor W8A8, KV cache left unquantized
+   * - ``general/ptq/nvfp4_default-kv_fp16``
+     - NVFP4 W4A4, KV cache left unquantized
+   * - ``general/ptq/nvfp4_mlp_only-kv_fp16``
+     - NVFP4 for MLP layers only, KV cache left unquantized
+   * - ``general/ptq/nvfp4_experts_only-kv_fp16``
+     - NVFP4 for MoE expert layers only, KV cache left unquantized
+
+See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for the full list and for guidance on choosing between them.
 
 Model-specific recipes
 ----------------------
 
 Model-specific recipes come in two tiers: architecture recipes keyed by a
 Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
-checkpoint mirrors keyed by a model-hub path under
+checkpoint entries keyed by a model-hub path under
 ``models/<org>/<model_id>/<task>/``. See
 `modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
 and
 `modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
 for the layout conventions and recipe-lookup order.
+
+A checkpoint entry comes in two forms. A **mirror** carries its own body, because the
+release uses a per-layer scheme no portable recipe expresses. An **alias** has no body of
+its own: a general or architecture recipe already produces that scheme, so the entry
+imports that recipe wholesale and exists to make it findable from the checkpoint's hub
+path. See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
+for what each checkpoint entry does.
 
 .. list-table::
    :header-rows: 1
@@ -539,6 +557,41 @@ for the layout conventions and recipe-lookup order.
    * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
      - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
+
+Delegating to another recipe
+----------------------------
+
+A recipe can hand its whole body to another recipe with a top-level ``$import`` and keep
+only its own ``metadata``.  Keys given alongside the ``$import`` override the imported
+ones, so the body -- ``quantize``, its algorithm and every ``quant_cfg`` entry -- is
+inherited unchanged:
+
+.. code-block:: yaml
+
+   imports:
+     base: general/ptq/nvfp4_default-kv_fp8_cast
+
+   $import: base
+   metadata:
+     description: What this checkpoint uses the base recipe for.
+
+Note the missing ``recipe_type``.  A recipe states its kind in whichever of these it
+likes, and the loader takes the first that answers: a ``# modelopt-schema:`` comment
+naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
+delegates to.  ``metadata.recipe_type`` is **deprecated**: it is still read and still
+honoured, so no existing recipe needs changing, but new recipes should declare their
+schema instead.  It remains the only option for a directory-format recipe's
+``metadata.yml``, which has no comment preamble to read.
+
+Stating more than one is allowed, but they must agree, and that extends across the
+import: a recipe and the recipe it delegates to must be the same kind, since the import
+takes over the whole body.  A PTQ recipe importing an EAGLE one is rejected as a kind
+mismatch rather than left to fail on whatever the spliced sections do to the schema.
+
+What *is* required: a recipe that another file imports must carry the schema comment,
+since ``$import`` resolution needs it to validate the imported payload.  A recipe nothing
+imports needs no comment at all.  This is how the checkpoint aliases under ``models/``
+name the recipe behind a release without duplicating its body.
 
 Loading recipes
 ===============

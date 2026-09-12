@@ -152,6 +152,12 @@ of the body scheme. Quantizing the KV cache reduces memory at long context.
 - **`kv_fp8`** — FP8 E4M3 KV cache with **calibrated** per-tensor amax. The KV
   scales are measured during the calibration pass. Hopper+.
 
+- **`kv_fp16`** — the KV cache is **not** quantized; it stays at the model's
+  activation dtype (BF16/FP16). Combine with any body scheme when the deployment
+  stack does not consume an FP8 KV cache, or when long-context memory is not the
+  binding constraint. Some published checkpoints ship this way, so a body scheme
+  gains a `-kv_fp16` variant when one of them needs it.
+
 > **`kv_fp8_cast` vs `kv_fp8`:** both produce an FP8 KV cache. `_cast` uses a
 > fixed scale and skips the KV calibration step (faster, no extra data
 > dependence); plain `kv_fp8` calibrates the scale from data. The cast version
@@ -237,7 +243,7 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
-earns a place under `huggingface/<model_type>/` or
+earns a **body** under `huggingface/<model_type>/` or
 `models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
@@ -251,6 +257,15 @@ that baseline. The deviations come in four kinds:
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
+
+> **Not every `models/<org>/<checkpoint>/` folder holds a deviation.** When a
+> general (or `huggingface/<model_type>`) recipe already produces a released
+> checkpoint's scheme, the folder holds a thin **alias** that imports that recipe
+> wholesale and overrides only `metadata` — no duplicated `quant_cfg` — so the
+> recipe is reachable from the checkpoint's own hub path. [Checkpoint
+> mirrors](#checkpoint-mirrors--modelsorgcheckpoint) covers the folders that
+> genuinely deviate and aliases the ones that don't; see
+> [`models/README.md`](models/README.md) for the alias format and when to write one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
@@ -447,6 +462,25 @@ checkpoint's** quant config verbatim:
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
   the dense-MLP scope plus the vision-tower exclusion.)
 
+- **`models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
+  mirrors `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`: MoE routed and shared experts plus
+  the Mamba `mixer.in_proj` / `mixer.out_proj` quantized, **except on layers 4, 11, 18,
+  25, 32 and 41** — the Mamba layer immediately preceding each of the six attention
+  layers, which the release leaves BF16. Attention, `conv1d`, routers and `lm_head` stay
+  BF16; KV cache FP8 cast. There is deliberately no NVFP4 sibling: that release's model
+  card says quantization-aware distillation was applied after PTQ, so no PTQ recipe
+  reproduces it.
+- **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
+  mirrors `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`, the FP8 sibling of the NVFP4
+  release above: FP8 W8A8 on the routed experts, shared experts and Mamba in/out
+  projections on every Mamba layer — uniform, with no per-layer carve-out — and BF16 for
+  attention, the latent-MoE projections, `conv1d`, routers, `lm_head` and MTP.
+- **`models/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/ptq/{fp8-kv_fp8_cast,nvfp4_experts-fp8_rest-kv_fp8_cast}`**
+  mirror the omni-modal (text + vision + audio) Nemotron-H releases. The FP8 one is
+  uniform W8A8 across the decoder; the NVFP4 one is mixed — routed experts NVFP4, shared
+  experts / Mamba in-out / attention **o_proj only** FP8, q/k/v BF16. Both add explicit
+  disables for the RADIO vision tower, the Conformer sound encoder and the `mlp1` /
+  `sound_projection` modality projectors, none of which match a standard exclusion.
 *Why special:* unlike any general recipe, each is pinned to one checkpoint and
 captures a model-specific deviation a portable general recipe can't express. Most
 **mix FP8 and NVFP4 across different component types — or individual layers** —

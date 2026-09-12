@@ -53,13 +53,13 @@
 # than they are: `*.experts.*` needs a literal `.experts.`, so `mlp.shared_experts.*` does not
 # match; and `*mlp.gate_proj*` needs `mlp.gate_proj`, which the router `mlp.gate` lacks.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   nvfp4: configs/numerics/nvfp4
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     GLM-5.3-Flash: NVFP4 (W4A4) on the routed experts and on the dense MLP of layers 0-2,
     plus an FP8 KV cache in cast mode using constant amax; max calibration. Shared experts,

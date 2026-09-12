@@ -11,11 +11,11 @@
 #   - mixer.shared_experts.{up,down}_proj -> mlp.shared_experts.linear_fc{1,2}
 #   - mixer.in_proj / out_proj            -> mixer.in_proj / out_proj      (same name; W4A16)
 #   - lm_head                             -> output_layer                  (W4A16)
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
   fp8_default: configs/numerics/fp8
 metadata:
-  recipe_type: ptq
   description: >
     Lightning 3.5 W4A16 PTQ, NVFP4 four_over_six (4/6) weight scales.
     Routed MoE experts, shared experts, and lm_head; FP8 Mamba in_proj/out_proj.

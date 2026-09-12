@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16, mirroring
+# nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8.
+#
+# The Nemotron-3 Nano 30B-A3B hybrid has 52 `backbone.layers`: Mamba-2 mixer layers
+# (which own `mixer.conv1d` / `mixer.in_proj` / `mixer.out_proj`), MoE layers (which own
+# `mixer.experts.<i>.{up,down}_proj`, `mixer.shared_experts.*` and the `mixer.gate`
+# router), and six attention layers (5, 12, 19, 26, 33, 42).
+#
+# The Mamba scope is the model-specific part. `mixer.in_proj` / `mixer.out_proj` are
+# quantized on every Mamba layer EXCEPT 4, 11, 18, 25, 32 and 41 -- the Mamba layer
+# immediately preceding each of the six attention layers, which the release leaves
+# BF16. A portable recipe has no way to express that, which is why this checkpoint
+# mirror exists.
+#
+# BF16 everywhere else: all attention (`mixer.{q,k,v,o}_proj`), the `mixer.conv1d`
+# depthwise convolutions, the `mixer.gate` routers, and `lm_head`.
+#
+# `hf_quant_config.json` records `kv_cache_quant_algo: FP8` but the checkpoint ships no
+# `k_scale`/`v_scale` tensors, which is the constant-amax (cast) KV cache: a runtime
+# that finds no scale uses 1.0, exactly what `kv_fp8_cast` produces.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  description: >-
+    NVIDIA-Nemotron-3-Nano-30B-A3B: FP8 (W8A8) on the MoE routed experts, the shared
+    experts and the Mamba in/out projections -- except on the six Mamba layers that
+    precede an attention layer, which stay BF16 -- plus an FP8 KV cache in cast mode;
+    max calibration. Attention, conv1d, routers and lm_head stay BF16.
+quantize:
+  algorithm:
+    method: max
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    # MoE routed + shared experts.
+    - quantizer_name: '*mixer.experts.*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.experts.*input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.shared_experts.*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.shared_experts.*input_quantizer'
+      cfg: {$import: fp8}
+    # Mamba-2 mixer projections.
+    - quantizer_name: '*mixer.in_proj*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.in_proj*input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.out_proj*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.out_proj*input_quantizer'
+      cfg: {$import: fp8}
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # The Mamba layer before each attention layer keeps BF16 projections.
+    # MUST stay last: it undoes the broad in/out_proj enables above.
+    - {quantizer_name: '*layers.4.mixer.*_proj*', enable: false}
+    - {quantizer_name: '*layers.11.mixer.*_proj*', enable: false}
+    - {quantizer_name: '*layers.18.mixer.*_proj*', enable: false}
+    - {quantizer_name: '*layers.25.mixer.*_proj*', enable: false}
+    - {quantizer_name: '*layers.32.mixer.*_proj*', enable: false}
+    - {quantizer_name: '*layers.41.mixer.*_proj*', enable: false}

@@ -15,6 +15,7 @@
 
 # Composed PTQ recipe for NVFP4 W4A16 weight-only quantization with FP8 KV-cache cast mode.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -22,7 +23,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     NVFP4 W4A16 weight-only, BF16 activations, plus FP8 KV-cache cast mode using constant amax; uses
     max calibration. No calibration forward pass required.

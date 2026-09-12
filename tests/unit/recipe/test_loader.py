@@ -28,6 +28,7 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    RECIPE_TYPE_TO_CLASS,
     AutoQuantizeConfig,
     AutoQuantizeConstraints,
     AutoQuantizeCost,
@@ -35,10 +36,16 @@ from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
     ModelOptPTQRecipe,
+    RecipeMetadataConfig,
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
-from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
+from modelopt.torch.opt.config_loader import (
+    _MODELOPT_SCHEMA_RE,
+    _load_raw_config,
+    _schema_type,
+    peek_declared_schema,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 
@@ -182,8 +189,17 @@ def test_load_recipe_huggingface_models_backward_compat_alias():
     assert isinstance(recipe, ModelOptPTQRecipe)
 
 
+_PTQ_SCHEMA = "modelopt.recipe.config.ModelOptPTQRecipe"
+
+
 def _all_shipped_ptq_recipe_paths():
-    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list.
+
+    A recipe says it is PTQ with ``metadata.recipe_type``, with a ``# modelopt-schema:``
+    comment naming :class:`ModelOptPTQRecipe`, or -- for a checkpoint alias, which states
+    neither -- by delegating to a recipe that does. All three are picked up, so every
+    shipped recipe is swept by the tests below.
+    """
     root = files("modelopt_recipes")
     paths = []
     for path in sorted(Path(str(root)).rglob("*.yaml")):
@@ -195,7 +211,13 @@ def _all_shipped_ptq_recipe_paths():
         # List-shaped fragments (layer-pattern units) are not recipes.
         if not isinstance(raw, dict):
             continue
-        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+        declared = peek_declared_schema(path)
+        delegates = "$import" in raw  # a checkpoint alias inherits its kind from its base
+        if (
+            declared == _PTQ_SCHEMA
+            or (raw.get("metadata") or {}).get("recipe_type") == "ptq"
+            or delegates
+        ):
             paths.append(str(rel.with_suffix("")))
     return paths
 
@@ -355,6 +377,436 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     # Schema-driven validation reports the failure via the metadata schema's enum check.
     with pytest.raises(ValueError, match="recipe_type"):
         load_recipe(bad)
+
+
+# ---------------------------------------------------------------------------
+# load_recipe — whole-recipe delegation (checkpoint aliases)
+# ---------------------------------------------------------------------------
+
+
+_BASE_RECIPE_FOR_ALIAS = """\
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+metadata:
+  recipe_type: ptq
+  description: the base recipe
+quantize:
+  algorithm: max
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*weight_quantizer'
+      cfg: {num_bits: 8, axis: 0}
+"""
+
+
+def _write_alias_pair(tmp_path, alias_body: str):
+    """Write a base recipe plus an alias that delegates to it; return the alias path."""
+    (tmp_path / "base.yaml").write_text(_BASE_RECIPE_FOR_ALIAS)
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(alias_body.format(base=tmp_path / "base.yaml"))
+    return alias
+
+
+def test_load_recipe_delegates_whole_body_to_import(tmp_path):
+    """A top-level ``$import`` supplies the body; local keys override the imported ones.
+
+    This is what the checkpoint aliases under ``modelopt_recipes/models/`` rely on: they
+    name the recipe behind a published checkpoint without copying its body.
+    """
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: the alias
+""",
+    )
+    recipe = load_recipe(alias)
+    assert recipe.description == "the alias"
+    assert recipe.quantize.model_dump() == load_recipe(tmp_path / "base.yaml").quantize.model_dump()
+
+
+def test_load_recipe_delegating_alias_can_override_the_body(tmp_path):
+    """A delegating recipe may also replace an imported section outright."""
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: overridden body
+quantize:
+  algorithm: max
+  quant_cfg:
+    - quantizer_name: '*input_quantizer'
+      enable: false
+""",
+    )
+    quant_cfg = load_recipe(alias).quantize.model_dump()["quant_cfg"]
+    assert [entry["quantizer_name"] for entry in quant_cfg] == ["*input_quantizer"]
+
+
+def test_load_recipe_infers_kind_from_schema_comment(tmp_path):
+    """A recipe that declares its schema needs no ``metadata.recipe_type``."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(_BASE_RECIPE_FOR_ALIAS.replace("  recipe_type: ptq\n", ""))
+    loaded = load_recipe(recipe)
+    assert loaded.recipe_type == RecipeType.PTQ
+    assert isinstance(loaded, ModelOptPTQRecipe)
+
+
+def test_load_recipe_infers_kind_from_the_recipe_it_delegates_to(tmp_path):
+    """A pure alias states neither ``recipe_type`` nor a schema; it inherits both.
+
+    This is the shape the checkpoint aliases under ``modelopt_recipes/models/`` use, so
+    a released checkpoint's entry carries nothing but a description and the import.
+    """
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  description: nothing but a description
+""",
+    )
+    loaded = load_recipe(alias)
+    assert loaded.recipe_type == RecipeType.PTQ
+    assert loaded.description == "nothing but a description"
+
+
+def test_load_recipe_rejects_recipe_type_contradicting_its_schema(tmp_path):
+    """Stating a kind that disagrees with the schema class is an error, not a preference."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace("  recipe_type: ptq\n", "  recipe_type: speculative_eagle\n")
+    )
+    with pytest.raises(ValueError, match="recipe_type"):
+        load_recipe(recipe)
+
+
+def test_load_recipe_without_any_kind_declaration_raises(tmp_path):
+    """No schema comment, no recipe_type and no delegation: the loader cannot dispatch."""
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace(
+            "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", ""
+        ).replace("  recipe_type: ptq\n", "")
+    )
+    with pytest.raises(ValueError, match="does not say what kind of recipe it is"):
+        load_recipe(recipe)
+
+
+_EAGLE_RECIPE_FOR_ALIAS = """\
+# modelopt-schema: modelopt.recipe.config.ModelOptEagleRecipe
+metadata:
+  description: an eagle recipe
+eagle: {}
+"""
+
+
+@pytest.mark.parametrize(
+    ("declaration", "label"),
+    [
+        ("# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", "schema comment"),
+        ("", "metadata.recipe_type"),
+    ],
+)
+def test_load_recipe_rejects_delegating_to_a_different_kind(tmp_path, declaration, label):
+    """Importing a recipe of another kind is an error, however the kinds were declared.
+
+    A top-level ``$import`` takes over the whole body, so a PTQ recipe importing an
+    EAGLE one would splice an ``eagle`` section into a PTQ schema. Caught as a kind
+    mismatch rather than left to surface as whatever pydantic makes of the result.
+    """
+    (tmp_path / "base.yaml").write_text(_EAGLE_RECIPE_FOR_ALIAS)
+    alias = tmp_path / "alias.yaml"
+    metadata = "metadata:\n  description: a ptq recipe\n"
+    if not declaration:  # declare the kind the other way instead
+        metadata = "metadata:\n  recipe_type: ptq\n  description: a ptq recipe\n"
+    alias.write_text(
+        f"{declaration}imports:\n  base: {tmp_path / 'base.yaml'}\n\n$import: base\n{metadata}"
+    )
+    with pytest.raises(ValueError, match=r"is a 'ptq' recipe but imports .*'speculative_eagle'"):
+        load_recipe(alias)
+
+
+def test_load_recipe_allows_delegating_within_the_same_kind(tmp_path):
+    """The matching case still loads -- the check rejects mismatches, not delegation."""
+    alias = _write_alias_pair(
+        tmp_path,
+        """\
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base: {base}
+
+$import: base
+metadata:
+  recipe_type: ptq
+  description: agrees on every axis
+""",
+    )
+    assert load_recipe(alias).recipe_type == RecipeType.PTQ
+
+
+def test_load_recipe_reuses_a_whole_recipe_with_no_metadata(tmp_path):
+    """A recipe can be nothing but an import: two lines, everything inherited.
+
+    With no inline keys to override with, ``metadata`` arrives from the base along with
+    ``quantize`` -- so this is genuine whole-recipe reuse, not just body reuse. Useful
+    when a second path should resolve to an existing recipe verbatim; a checkpoint alias
+    keeps its own description instead, so it can say which release it stands for.
+    """
+    alias = _write_alias_pair(tmp_path, "imports:\n  base: {base}\n\n$import: base\n")
+    aliased, original = load_recipe(alias), load_recipe(tmp_path / "base.yaml")
+    assert aliased.recipe_type == RecipeType.PTQ
+    assert aliased.quantize.model_dump() == original.quantize.model_dump()
+    assert aliased.metadata.model_dump() == original.metadata.model_dump()
+    assert aliased.description == "the base recipe"
+
+
+def test_load_recipe_delegation_chain_inherits_the_kind(tmp_path):
+    """Kind resolution follows a chain of delegations, not just one hop."""
+    (tmp_path / "base.yaml").write_text(_BASE_RECIPE_FOR_ALIAS)
+    (tmp_path / "middle.yaml").write_text(
+        f"# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        f"imports:\n  base: {tmp_path / 'base.yaml'}\n\n$import: base\n"
+    )
+    leaf = tmp_path / "leaf.yaml"
+    leaf.write_text(
+        f"imports:\n  mid: {tmp_path / 'middle.yaml'}\n\n$import: mid\n"
+        "metadata:\n  description: two hops from the body\n"
+    )
+    loaded = load_recipe(leaf)
+    assert loaded.recipe_type == RecipeType.PTQ
+    assert loaded.description == "two hops from the body"
+    assert loaded.quantize.model_dump() == load_recipe(tmp_path / "base.yaml").quantize.model_dump()
+
+
+def test_load_recipe_delegation_cycle_is_reported_not_hung(tmp_path):
+    """Two recipes that delegate to each other fail cleanly instead of recursing forever.
+
+    Neither states a kind, so resolution has to walk the import to find one and would
+    loop without the cycle guard. A ``ValueError`` rather than a ``RecursionError`` is
+    the assertion that the guard is doing its job.
+    """
+    a, b = tmp_path / "a.yaml", tmp_path / "b.yaml"
+    a.write_text(f"imports:\n  other: {b}\n\n$import: other\n")
+    b.write_text(f"imports:\n  other: {a}\n\n$import: other\n")
+    with pytest.raises(ValueError, match="does not say what kind of recipe it is"):
+        load_recipe(a)
+
+
+def test_load_recipe_delegates_via_a_list_of_imports(tmp_path):
+    """``$import`` accepts a list; the kind comes from the first entry that is a recipe."""
+    (tmp_path / "base.yaml").write_text(_BASE_RECIPE_FOR_ALIAS)
+    (tmp_path / "extra.yaml").write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "metadata:\n  description: extra\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+    )
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(
+        f"imports:\n  base: {tmp_path / 'base.yaml'}\n  extra: {tmp_path / 'extra.yaml'}\n\n"
+        "$import: [base, extra]\nmetadata:\n  description: merged\n"
+    )
+    loaded = load_recipe(alias)
+    assert loaded.recipe_type == RecipeType.PTQ
+    # Later imports win, matching the dict-merge semantics of a multi-name $import.
+    assert loaded.quantize.quant_cfg == []
+
+
+def test_load_recipe_ignores_a_non_recipe_schema_comment_when_dispatching(tmp_path):
+    """A schema comment naming something that is not a recipe falls through to metadata.
+
+    Only the recipe schema classes identify a recipe kind; anything else means the file
+    is a snippet as far as dispatch is concerned, so ``metadata.recipe_type`` still has
+    to answer.
+    """
+    recipe = tmp_path / "r.yaml"
+    recipe.write_text(
+        "# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig\n"
+        "metadata:\n  recipe_type: ptq\n  description: d\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+    )
+    assert load_recipe(recipe).recipe_type == RecipeType.PTQ
+
+
+# ---------------------------------------------------------------------------
+# peek_declared_schema
+# ---------------------------------------------------------------------------
+
+
+def test_peek_declared_schema_reads_the_preamble(tmp_path):
+    """The declared schema path is returned without parsing or resolving the file."""
+    f = tmp_path / "c.yaml"
+    f.write_text(
+        "# a comment\n"
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "metadata:\n  description: d\n"
+    )
+    assert peek_declared_schema(f) == "modelopt.recipe.config.ModelOptPTQRecipe"
+
+
+def test_peek_declared_schema_returns_none_without_a_comment(tmp_path):
+    f = tmp_path / "c.yaml"
+    f.write_text("metadata:\n  recipe_type: ptq\n")
+    assert peek_declared_schema(f) is None
+
+
+def test_peek_declared_schema_ignores_a_comment_below_the_preamble(tmp_path):
+    """A comment after the first YAML line is not a declaration -- and must not look like one.
+
+    This is the shape ``test_shipped_modelopt_schema_comments_are_in_the_preamble``
+    guards the shipped recipes against.
+    """
+    f = tmp_path / "c.yaml"
+    f.write_text(
+        "metadata:\n  recipe_type: ptq\n"
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+    )
+    assert peek_declared_schema(f) is None
+
+
+def test_peek_declared_schema_rejects_two_declarations(tmp_path):
+    f = tmp_path / "c.yaml"
+    f.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "# modelopt-schema: modelopt.recipe.config.ModelOptEagleRecipe\n"
+        "metadata:\n  description: d\n"
+    )
+    with pytest.raises(ValueError, match="multiple modelopt-schema"):
+        peek_declared_schema(f)
+
+
+# ---------------------------------------------------------------------------
+# metadata.recipe_type is derived from the schema class
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_config_recipe_type_is_optional(tmp_path):
+    """``RecipeMetadataConfig`` on its own no longer requires a recipe_type."""
+    f = tmp_path / "metadata.yaml"
+    f.write_text("description: no kind stated\n")
+    metadata = load_config(f, schema_type=RecipeMetadataConfig)
+    assert metadata.recipe_type is None
+    assert metadata.description == "no kind stated"
+
+
+#: The body section each recipe class requires, so the metadata behaviour can be checked
+#: on every kind rather than only the one with the simplest body.
+_MINIMAL_BODIES: dict[RecipeType, dict] = {
+    RecipeType.PTQ: {"quantize": {"algorithm": "max", "quant_cfg": []}},
+    RecipeType.AUTO_QUANTIZE: {
+        "auto_quantize": {
+            "constraints": {"effective_bits": 4.8},
+            "candidate_formats": [
+                {"quant_cfg": [{"quantizer_name": "*", "enable": False}]},
+                {"quant_cfg": [{"quantizer_name": "*weight_quantizer", "enable": True}]},
+            ],
+        }
+    },
+    RecipeType.SPECULATIVE_EAGLE: {},  # body sections have field defaults
+    RecipeType.SPECULATIVE_DFLASH: {},
+    RecipeType.SPECULATIVE_MEDUSA: {},
+}
+
+
+@pytest.mark.parametrize(
+    ("recipe_type", "schema_class"),
+    sorted(RECIPE_TYPE_TO_CLASS.items(), key=lambda kv: kv[0].value),
+)
+def test_recipe_class_fills_in_its_own_recipe_type(recipe_type, schema_class):
+    """Every recipe class knows its kind and fills ``metadata.recipe_type`` from it."""
+    assert recipe_type == schema_class.RECIPE_TYPE
+    recipe = schema_class.model_validate(
+        {"metadata": {"description": "d"}, **_MINIMAL_BODIES[recipe_type]}
+    )
+    assert recipe.metadata.recipe_type == recipe_type
+    assert recipe.recipe_type == recipe_type
+
+
+def test_recipe_class_rejects_a_contradicting_recipe_type():
+    """Stating the wrong kind is rejected at validation, not silently overwritten."""
+    with pytest.raises(ValueError, match="recipe_type"):
+        ModelOptPTQRecipe.model_validate(
+            {
+                "metadata": {"recipe_type": "speculative_eagle", "description": "d"},
+                "quantize": {"algorithm": "max", "quant_cfg": []},
+            }
+        )
+
+
+def test_load_recipe_dir_without_recipe_type_raises(tmp_path):
+    """A directory recipe has no schema comment, so its metadata must state the kind."""
+    (tmp_path / "metadata.yml").write_text("description: no kind stated\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
+    with pytest.raises(ValueError, match="recipe_type"):
+        load_recipe(tmp_path)
+
+
+def test_shipped_modelopt_schema_comments_are_in_the_preamble():
+    """A ``modelopt-schema`` comment below the first YAML line is silently ignored.
+
+    :func:`_parse_modelopt_schema` stops at the first non-comment line, so a comment
+    placed after e.g. ``metadata:`` parses as absent -- the file looks annotated but is
+    not importable and cannot be dispatched from. Catch that here rather than at the
+    point some future recipe tries to ``$import`` it.
+    """
+    root = Path(str(files("modelopt_recipes")))
+    ignored = [
+        str(path.relative_to(root))
+        for path in sorted(root.rglob("*.yaml"))
+        # Use the parser's own pattern so this can't drift from what it accepts, and so
+        # prose that merely mentions the comment is not mistaken for one.
+        if not path.is_symlink()
+        and _MODELOPT_SCHEMA_RE.search(path.read_text(encoding="utf-8"))
+        and peek_declared_schema(path) is None
+    ]
+    assert not ignored, (
+        "These files carry a modelopt-schema comment that the parser cannot see; move it "
+        f"above the first YAML line: {ignored}"
+    )
+
+
+def test_load_recipe_delegating_alias_still_needs_a_body(tmp_path):
+    """Delegation relaxes the raw-YAML check, it does not remove the requirement."""
+    (tmp_path / "empty.yaml").write_text(
+        "# modelopt-schema: modelopt.recipe.config.RecipeMetadataConfig\n"
+        "recipe_type: ptq\ndescription: not a full recipe\n"
+    )
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(
+        f"imports:\n  base: {tmp_path / 'empty.yaml'}\n\n"
+        "$import: base\nmetadata:\n  recipe_type: ptq\n  description: alias\n"
+    )
+    with pytest.raises(ValueError, match="quantize"):
+        load_recipe(alias)
+
+
+def test_load_recipe_import_of_recipe_without_schema_raises(tmp_path):
+    """An imported recipe must declare its ``modelopt-schema``, like any snippet."""
+    (tmp_path / "base.yaml").write_text(
+        _BASE_RECIPE_FOR_ALIAS.replace(
+            "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n", ""
+        )
+    )
+    alias = tmp_path / "alias.yaml"
+    alias.write_text(
+        f"imports:\n  base: {tmp_path / 'base.yaml'}\n\n"
+        "$import: base\nmetadata:\n  recipe_type: ptq\n  description: alias\n"
+    )
+    with pytest.raises(ValueError, match="modelopt-schema"):
+        load_recipe(alias)
 
 
 # ---------------------------------------------------------------------------
