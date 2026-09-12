@@ -28,7 +28,7 @@ python quantize.py \
 
 #### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantize.py)
 
-FP4 ONNX export is supported for Flux and SDXL. SDXL uses block-16 NVFP4 for non-QKV Linear/GEMM layers and FP8 for Conv2d layers, while Q/K/V projection Linears remain in the model dtype to preserve TensorRT fusion. Add `--quantize-mha` to optionally quantize MHA with FP8. FP4 deployment requires a Blackwell GPU and TensorRT with NVFP4 support.
+FP4 ONNX export is supported for Flux and SDXL.
 
 ```sh
 python quantize.py \

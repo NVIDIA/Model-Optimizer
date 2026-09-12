@@ -23,14 +23,14 @@ import pytest
 import torch
 from torch import nn
 
-onnx = pytest.importorskip("onnx")
+pytest.importorskip("onnx")
 pytest.importorskip("onnx_graphsurgeon")
 pytest.importorskip("diffusers")
 
 import modelopt.torch.quantization as mtq
-from examples.diffusers.quantization.onnx_utils import export as diffusion_export
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.plugins.diffusion import diffusers as diffusers_plugin
 
 _QUANTIZATION_EXAMPLE = (
     Path(__file__).resolve().parents[3] / "examples" / "diffusers" / "quantization"
@@ -74,7 +74,7 @@ ModelConfig = _quantize.ModelConfig
 QuantFormat = _quantize.QuantFormat
 QuantizationConfig = _quantize.QuantizationConfig
 Quantizer = _quantize.Quantizer
-_restore_quantization_policy = _quantize._restore_quantization_policy
+_infer_restored_quantization_format = _quantize._infer_restored_quantization_format
 
 
 class _RecipeBackbone(nn.Module):
@@ -88,20 +88,21 @@ class _RecipeBackbone(nn.Module):
         self.conv = nn.Conv2d(4, 4, kernel_size=1, bias=False)
 
 
-def _quantizer(*, num_bits=(4, 3), enabled=True, calibrated=True, block_sizes=None):
+def _quantizer(*, num_bits, enabled=True, block_sizes=None):
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(num_bits=num_bits, axis=None, block_sizes=block_sizes)
     )
-    if calibrated:
-        quantizer.amax = torch.tensor(448.0)
+    quantizer.amax = torch.tensor(448.0)
     if not enabled:
         quantizer.disable()
     return quantizer
 
 
-def _add_quantizers(module, **kwargs):
-    module.input_quantizer = _quantizer(**kwargs)
-    module.weight_quantizer = _quantizer(**kwargs)
+_FP8_QUANTIZER_CONFIG = {"num_bits": (4, 3)}
+_NVFP4_QUANTIZER_CONFIG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
 
 
 @pytest.mark.parametrize("model_type", [ModelType.SDXL_BASE, ModelType.SDXL_TURBO])
@@ -129,68 +130,67 @@ def test_sdxl_fp4_recipe(model_type):
 
 
 @pytest.mark.parametrize(
-    ("scenario", "expected_format", "mha_enabled"),
+    ("format_config", "mha_config", "expected_format", "disable_fp8_mha"),
     [
-        ("mixed-fp4", QuantFormat.FP4, True),
-        ("fp8", QuantFormat.FP8, True),
-        ("int8-disabled-fp8-mha", QuantFormat.INT8, False),
+        pytest.param(
+            _NVFP4_QUANTIZER_CONFIG,
+            _FP8_QUANTIZER_CONFIG,
+            QuantFormat.FP4,
+            False,
+            id="mixed-fp4",
+        ),
+        pytest.param(
+            _FP8_QUANTIZER_CONFIG,
+            _FP8_QUANTIZER_CONFIG,
+            QuantFormat.FP8,
+            False,
+            id="fp8",
+        ),
+        pytest.param(
+            {"num_bits": 8},
+            {**_FP8_QUANTIZER_CONFIG, "enabled": False},
+            QuantFormat.INT8,
+            True,
+            id="int8-disabled-fp8",
+        ),
+        pytest.param(
+            {"num_bits": 8},
+            {"num_bits": 8},
+            QuantFormat.INT8,
+            True,
+            id="int8-mha",
+        ),
     ],
 )
-def test_restore_policy_uses_enabled_checkpoint_state(scenario, expected_format, mha_enabled):
+def test_restored_quantizer_state_drives_format_and_fp8_mha(
+    monkeypatch, format_config, mha_config, expected_format, disable_fp8_mha
+):
     backbone = nn.Module()
-    backbone.linear = nn.Linear(16, 16)
-    if scenario == "mixed-fp4":
-        _add_quantizers(
-            backbone.linear,
-            num_bits=(2, 1),
-            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-        )
-        backbone.conv = nn.Conv2d(1, 1, 1)
-        _add_quantizers(backbone.conv)
-    elif scenario == "fp8":
-        _add_quantizers(backbone.linear)
-    else:
-        _add_quantizers(backbone.linear, num_bits=8)
-
+    backbone.quantizer = _quantizer(**format_config)
     backbone.attention = nn.Module()
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
-        setattr(backbone.attention, name, _quantizer(enabled=mha_enabled))
-    quantizers = [module for module in backbone.modules() if isinstance(module, TensorQuantizer)]
-    state = {q: (q.is_enabled, q._num_bits, q._amax) for q in quantizers}
+        setattr(backbone.attention, name, _quantizer(**mha_config))
+    backbone.attention.bmm2_output_quantizer = lambda output: output
 
-    restored_format = _restore_quantization_policy([("transformer", backbone)])
+    fp8_sdpa = Mock(return_value=torch.empty(0))
+    monkeypatch.setattr(diffusers_plugin.FP8SDPA, "apply", fp8_sdpa)
+    monkeypatch.setattr(torch.onnx, "is_in_onnx_export", lambda: True)
 
-    assert restored_format == expected_format
-    assert backbone.attention._disable_fp8_mha is not mha_enabled
-    for quantizer, (enabled, num_bits, amax) in state.items():
-        assert quantizer.is_enabled is enabled
-        assert quantizer._num_bits == num_bits
-        assert quantizer._amax is amax
+    assert _infer_restored_quantization_format([("transformer", backbone)]) == expected_format
+    diffusers_plugin._quantized_sdpa(backbone.attention, *(torch.empty(1) for _ in range(3)))
+    assert fp8_sdpa.call_args.args[-1] is disable_fp8_mha
 
 
-def test_restore_defaults_reach_exports_with_checkpoint_policy(monkeypatch, tmp_path):
+def test_restore_infers_checkpoint_format_for_export(monkeypatch, tmp_path):
     backbone = nn.Module()
-    backbone.linear = nn.Linear(16, 16)
-    _add_quantizers(
-        backbone.linear,
-        num_bits=(2, 1),
-        block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-    )
-    backbone.attention = nn.Module()
-    mha_quantizers = []
-    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
-        quantizer = _quantizer()
-        setattr(backbone.attention, name, quantizer)
-        mha_quantizers.append(quantizer)
+    backbone.quantizer = _quantizer(**_NVFP4_QUANTIZER_CONFIG)
 
     pipeline_manager = Mock()
     pipeline_manager.create_pipeline.return_value = object()
-    pipeline_manager.iter_backbones.side_effect = lambda: iter([("transformer", backbone)])
+    pipeline_manager.iter_backbones.return_value = [("transformer", backbone)]
     export_manager = Mock()
     monkeypatch.setattr(_quantize, "PipelineManager", lambda *args: pipeline_manager)
     monkeypatch.setattr(_quantize, "ExportManager", lambda *args: export_manager)
-    monkeypatch.setattr(torch.nn, "RMSNorm", torch.nn.RMSNorm)
-    monkeypatch.setattr(torch.nn.modules.normalization, "RMSNorm", torch.nn.RMSNorm)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -210,29 +210,3 @@ def test_restore_defaults_reach_exports_with_checkpoint_policy(monkeypatch, tmp_
     export_manager.restore_checkpoint.assert_called_once_with()
     assert export_manager.export_onnx.call_args.args[-1] == QuantFormat.FP4
     export_manager.export_hf_ckpt.assert_called_once()
-    assert all(quantizer.is_enabled for quantizer in mha_quantizers)
-    assert backbone.attention._disable_fp8_mha is False
-
-
-def test_sdxl_fp4_export_lowers_nvfp4_at_opset_23(monkeypatch, tmp_path):
-    model = onnx.ModelProto()
-    model.opset_import.add(domain="", version=20)
-    monkeypatch.setattr(
-        diffusion_export,
-        "generate_dummy_kwargs_and_dynamic_axes_and_shapes",
-        lambda *args: ({}, {}, None),
-    )
-    monkeypatch.setattr(diffusion_export, "onnx_export", lambda *args, **kwargs: None)
-    monkeypatch.setattr(diffusion_export.onnx, "load", lambda *args, **kwargs: model)
-    process_model = Mock(side_effect=lambda current_model: current_model)
-    monkeypatch.setattr(diffusion_export.NVFP4QuantExporter, "process_model", process_model)
-    save_onnx = Mock()
-    monkeypatch.setattr(diffusion_export, "save_onnx", save_onnx)
-
-    diffusion_export.modelopt_export_sd(nn.Module(), tmp_path, "sdxl-1.0", "fp4")
-
-    process_model.assert_called_once_with(model)
-    save_onnx.assert_called_once_with(model, tmp_path / "model.onnx")
-    assert (
-        next(opset.version for opset in model.opset_import if opset.domain in {"", "ai.onnx"}) == 23
-    )

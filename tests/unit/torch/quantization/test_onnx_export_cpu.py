@@ -39,6 +39,15 @@ from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import is_quantized_linear
 
 
+def _export_to_onnx(model, sample_input, **kwargs):
+    buffer = io.BytesIO()
+    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
+        kwargs["enable_onnx_checker"] = False
+    torch.onnx.export(model, sample_input, buffer, dynamo=False, **kwargs)
+    buffer.seek(0)
+    return onnx.load_model_from_string(buffer.read())
+
+
 @pytest.mark.parametrize("model_cls", TEST_MODELS)
 @pytest.mark.parametrize(
     ("num_bits", "per_channel_quantization", "constant_folding"),
@@ -68,22 +77,7 @@ def test_fp8_conv_export_preserves_custom_qdq_and_kernel_shape():
         forward_loop=lambda quantized_model: quantized_model(sample_input),
     )
 
-    buffer = io.BytesIO()
-    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
-        kwargs = {"enable_onnx_checker": False}
-    else:
-        kwargs = {}
-    torch.onnx.export(
-        model,
-        sample_input,
-        buffer,
-        opset_version=20,
-        dynamo=False,
-        **kwargs,
-    )
-
-    buffer.seek(0)
-    exported_model = onnx.load_model_from_string(buffer.read())
+    exported_model = _export_to_onnx(model, sample_input, opset_version=20)
     producers = {output: node for node in exported_model.graph.node for output in node.output}
     conv = next(node for node in exported_model.graph.node if node.op_type == "Conv")
 
@@ -128,26 +122,14 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
             module.input_quantizer.disable()
             module.weight_quantizer._onnx_quantizer_type = "static"
 
-    buffer = io.BytesIO()
-    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
-        kwargs = {"enable_onnx_checker": False}
-    else:
-        kwargs = {}
-
-    torch.onnx.export(
+    exported_model = _export_to_onnx(
         model,
         sample_input,
-        buffer,
         input_names=["input"],
         output_names=["output"],
         export_params=True,
         opset_version=21,
-        dynamo=False,
-        **kwargs,
     )
-
-    buffer.seek(0)
-    exported_model = onnx.load_model_from_string(buffer.read())
     assert any(node.op_type == "TRT_FP4QDQ" for node in exported_model.graph.node)
 
     converted_model = NVFP4QuantExporter.process_model(exported_model)

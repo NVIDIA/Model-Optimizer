@@ -449,24 +449,12 @@ def save_onnx(onnx_model, output):
     print(f"ONNX model saved to {output}")
 
 
-def _ensure_default_opset(onnx_model, minimum_version):
-    opset_import = next(
-        (item for item in onnx_model.opset_import if item.domain in {"", "ai.onnx"}), None
-    )
-    if opset_import is None:
-        opset_import = onnx_model.opset_import.add()
-        opset_import.domain = ""
-    opset_import.version = max(opset_import.version, minimum_version)
-
-
 def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     model_file_name = "model.onnx"
     os.makedirs(f"{onnx_dir}", exist_ok=True)
     tmp_subfolder = tempfile.mkdtemp(prefix="myapp_")
     tmp_output = Path(f"{tmp_subfolder}/{model_file_name}")
     q_output = Path(f"{onnx_dir}/{model_file_name}")
-    is_sdxl_fp4 = precision == "fp4" and model_name in {"sdxl-1.0", "sdxl-turbo"}
-
     quantizer_context = (
         configure_linear_module_onnx_quantizers(backbone) if precision == "fp4" else nullcontext()
     )
@@ -537,7 +525,5 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         flux_convert_rope_weight_type(onnx_model)
     if precision == "fp4":
         onnx_model = NVFP4QuantExporter.process_model(onnx_model)
-        if is_sdxl_fp4:
-            _ensure_default_opset(onnx_model, 23)
     save_onnx(onnx_model, q_output)
     shutil.rmtree(tmp_subfolder, ignore_errors=True)

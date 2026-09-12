@@ -586,33 +586,17 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _restore_quantization_policy(
+def _infer_restored_quantization_format(
     backbones: list[tuple[str, torch.nn.Module]],
 ) -> QuantFormat:
     has_nvfp4 = False
     has_fp8 = False
 
-    for backbone_name, backbone in backbones:
+    for _, backbone in backbones:
         for module in backbone.modules():
             if isinstance(module, TensorQuantizer) and module.is_enabled:
                 has_nvfp4 |= module.is_nvfp4_dynamic or module.is_nvfp4_static
                 has_fp8 |= module.is_fp8
-
-            if backbone_name in ("video_decoder", "vae"):
-                continue
-            q_quantizer = getattr(module, "q_bmm_quantizer", None)
-            k_quantizer = getattr(module, "k_bmm_quantizer", None)
-            v_quantizer = getattr(module, "v_bmm_quantizer", None)
-            if not (
-                isinstance(q_quantizer, TensorQuantizer)
-                and isinstance(k_quantizer, TensorQuantizer)
-                and isinstance(v_quantizer, TensorQuantizer)
-            ):
-                continue
-            module._disable_fp8_mha = not all(
-                quantizer.is_enabled and quantizer.is_fp8
-                for quantizer in (q_quantizer, k_quantizer, v_quantizer)
-            )
 
     if has_nvfp4:
         return QuantFormat.FP4
@@ -708,7 +692,7 @@ def main() -> None:
 
         if export_config.restore_from:
             export_manager.restore_checkpoint()
-            quant_config.format = _restore_quantization_policy(
+            quant_config.format = _infer_restored_quantization_format(
                 list(pipeline_manager.iter_backbones())
             )
             logger.info(f"Detected restored quantization format: {quant_config.format.value}")
