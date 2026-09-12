@@ -946,6 +946,29 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
+def _validate_fp8_scale_sweep(value):
+    """Normalize and validate an optional bounded E4M3 code-offset search."""
+    if value is None or isinstance(value, bool):
+        return value
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("fp8_scale_sweep must be a bool or a two-integer tuple/list")
+    if any(isinstance(offset, bool) or not isinstance(offset, int) for offset in value):
+        raise ValueError("fp8_scale_sweep offsets must be integers, not booleans or floats")
+
+    min_offset, max_offset = value
+    if min_offset > max_offset:
+        raise ValueError("fp8_scale_sweep minimum offset must not exceed the maximum offset")
+    if not min_offset <= 0 <= max_offset:
+        raise ValueError("fp8_scale_sweep offset range must include 0")
+    if min_offset < -125 or max_offset > 125:
+        raise ValueError("fp8_scale_sweep offsets must each be between -125 and 125")
+    if max_offset - min_offset + 1 > 126:
+        raise ValueError(
+            "fp8_scale_sweep range may contain at most 126 offsets; use True for exhaustive search"
+        )
+    return (min_offset, max_offset)
+
+
 class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 
@@ -983,13 +1006,20 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description="Ending multiplier for amax search range (multiplies initial amax).",
     )
 
-    fp8_scale_sweep: bool | None = ModeloptField(
+    fp8_scale_sweep: bool | tuple[int, int] | None = ModeloptField(
         default=False,
         title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
-        description="If True, sweep all 128 FP8 E4M3 scale values instead of using multipliers. "
-        "Applies to ModelOpt static NVFP4 weight quantizers and registered custom backends with "
-        "FP8 sweep support. Other weight quantizers use the multiplier search.",
+        description="If True, sweep all 126 finite positive FP8 E4M3 scale values instead of "
+        "using multipliers. A two-integer tuple selects an inclusive range of E4M3 code offsets "
+        "around each block's max-derived scale for ModelOpt static NVFP4 weights. Registered "
+        "custom backends retain support for True only.",
     )
+
+    @field_validator("fp8_scale_sweep", mode="before")
+    @classmethod
+    def validate_fp8_scale_sweep(cls, value):
+        """Normalize and validate a bounded FP8 scale sweep."""
+        return _validate_fp8_scale_sweep(value)
 
     distributed_sync: bool | None = ModeloptField(
         default=True,
@@ -1037,13 +1067,19 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description="Ending multiplier for amax search range (multiplies initial amax).",
     )
 
-    fp8_scale_sweep: bool | None = ModeloptField(
+    fp8_scale_sweep: bool | tuple[int, int] | None = ModeloptField(
         default=True,
         title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
-        description="If True, sweep over all 128 possible FP8 E4M3 scale values "
-        "for NVFP4 per-block quantization instead of using multipliers. "
-        "This is the recommended setting for NVFP4 quantization.",
+        description="If True, sweep all 126 finite positive FP8 E4M3 scale values. A two-integer "
+        "tuple selects an inclusive range of E4M3 code offsets around each block's max-derived "
+        "scale. If False, use the multiplier search.",
     )
+
+    @field_validator("fp8_scale_sweep", mode="before")
+    @classmethod
+    def validate_fp8_scale_sweep(cls, value):
+        """Normalize and validate a bounded FP8 scale sweep."""
+        return _validate_fp8_scale_sweep(value)
 
     block_size: int | None = ModeloptField(
         default=16,

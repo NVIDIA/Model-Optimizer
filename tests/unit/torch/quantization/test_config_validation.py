@@ -675,6 +675,23 @@ class TestLayerwiseNestedConfig:
         assert cfg.layerwise.calib_mutates_weights is False
 
 
+class TestFP8ScaleSweepRange:
+    @pytest.mark.parametrize("cfg_cls", [MseCalibConfig, LocalHessianCalibConfig])
+    def test_list_is_normalized_and_json_serializable(self, cfg_cls):
+        cfg = cfg_cls(fp8_scale_sweep=[-8, 8])
+        assert cfg.fp8_scale_sweep == (-8, 8)
+        assert '"fp8_scale_sweep":[-8,8]' in cfg.model_dump_json(exclude_unset=True)
+
+    @pytest.mark.parametrize("cfg_cls", [MseCalibConfig, LocalHessianCalibConfig])
+    @pytest.mark.parametrize(
+        "value",
+        [(-126, 0), (0, 126), (-63, 63), (1, 2), (-2, -1), (2, 1), (False, 1), (-1.0, 1)],
+    )
+    def test_invalid_ranges_are_rejected(self, cfg_cls, value):
+        with pytest.raises(ValidationError, match="fp8_scale_sweep"):
+            cfg_cls(fp8_scale_sweep=value)
+
+
 class TestFourOverSixBlockSizes:
     """`four_over_six` is an accepted block_sizes key for NVFP4 4/6 adaptive weight scaling.
 
