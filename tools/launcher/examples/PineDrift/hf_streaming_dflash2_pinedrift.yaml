@@ -86,14 +86,23 @@ pipeline:
       - data.chat_template=/hf-local/pinedrift-templates/chat_template_train_xhigh.jinja
       - training.output_dir=/scratchspace/dflash2
       - training.num_train_epochs=5
-      - training.per_device_train_batch_size=1
+      # global batch 64 = 8 per device x 8 GPUs on the single trainer node.
+      # The first run used 1 (gbatch 8 = 24,576 tokens), which is 8x smaller than
+      # comparable drafter runs and left the accuracy trace visibly noisy.
+      - training.per_device_train_batch_size=8
       - training.training_seq_len=3072
       - training.save_steps=500
       - training.logging_steps=20
       - training.answer_only_loss=true
       # No tensorboard in the serve container.
       - training.report_to=none
-      # No base model in-process, so AR validation cannot run.
+      # Left OFF on purpose. on_log's est_ar would be harmless (it only chains the
+      # logged accuracies), but estimate_ar also arms the ar_validate_steps path,
+      # which calls pseudo_speculative_generate outside Trainer's autocast and, with
+      # dflash_fp32_master_weights on, raises at the first validation boundary --
+      # possibly hours in (see _require_autocast_for_promoted_draft). The expected
+      # accepted length is computed offline from the per-position accuracies by
+      # tools/pinedrift_curve.py instead.
       - training.estimate_ar=false
       - training.ar_validate_steps=0
     environment:

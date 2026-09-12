@@ -148,8 +148,8 @@ class HFDFlash2Model(HFDFlashModel):
 
         Reuses ``HFDFlashModel._compute_loss`` for the backbone term, then rebuilds
         the same target/weight alignment for the selector term. Reported accuracy
-        stays the backbone's top-1, so DFlash and DFlash2 runs remain comparable;
-        the selector's own accuracy is logged separately.
+        stays the backbone's top-1 PER BLOCK POSITION, so DFlash and DFlash2 runs
+        remain comparable; the selector's own accuracy is logged separately.
         """
         loss, accuracy = super()._compute_loss(
             logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits

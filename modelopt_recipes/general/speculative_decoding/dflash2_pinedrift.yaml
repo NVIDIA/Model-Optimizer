@@ -72,7 +72,10 @@ training:
   report_to: tensorboard
 
 dflash:
-  dflash_block_size: 16
+  # 8, not 16. With block 16 the reported top-1 is averaged over 15 predicted
+  # positions per anchor, and the far ones are near-hopeless, so the headline
+  # number is dominated by positions that never get accepted anyway.
+  dflash_block_size: 8
   dflash_num_anchors: 256
   dflash_use_torch_compile: false
   dflash_self_logit_distillation: false

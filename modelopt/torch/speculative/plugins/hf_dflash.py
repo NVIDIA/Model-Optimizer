@@ -1059,11 +1059,23 @@ class HFDFlashModel(DFlashModel):
             with torch.no_grad():
                 preds = flat_logits.argmax(dim=-1)
                 correct = (preds == flat_targets) & (binary_eval_mask > 0.5)
-                accuracy = correct.sum().float() / (binary_eval_mask.sum() + 1e-6)
-                accuracy = accuracy.item()
+                # Per block POSITION, not just the mean over them. The mean is what
+                # the drafter's own loss sees, but what decides accepted length is the
+                # accuracy of positions 1, 2, 3 ... -- a mean of 0.10 is a healthy
+                # 0.45-at-position-1 decaying away, or a flat 0.10 everywhere, and
+                # those two mean completely different things. Slot 0 is the anchor
+                # (already excluded by weight_mask), so it reports 0.
+                c = correct.view(bsz, n_blocks, block_size).float().sum(dim=(0, 1))
+                d = (binary_eval_mask > 0.5).view(bsz, n_blocks, block_size).float().sum(dim=(0, 1))
+                # Drop slot 0: it is the anchor, always given, and the AR estimate in
+                # eagle_utils.on_log chains these as a cumulative product -- a leading
+                # 0.0 would zero the whole chain, and a leading 1.0 would look exactly
+                # like the empty-loss-mask failure signature. So index 0 of the reported
+                # vector is block position 1, the first token the draft has to guess.
+                accuracy = (c / (d + 1e-6))[1:].tolist()
         else:
             loss = flat_logits.sum() * 0.0
-            accuracy = 0.0
+            accuracy = [0.0] * max(block_size - 1, 1)
 
         return loss, accuracy
 
@@ -1215,7 +1227,10 @@ class HFDFlashModel(DFlashModel):
                 ),
                 torch.zeros((), device=device),
             )
-            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
+            return ModelOutput(
+                loss=dummy, logits=base_outputs.logits,
+                train_acc=[[0.0] * max(self.dflash_block_size - 1, 1)],
+            )
 
         # 4. Build draft inputs
         noise_embedding = self._build_noise_embedding(
@@ -1256,7 +1271,7 @@ class HFDFlashModel(DFlashModel):
         return ModelOutput(
             loss=loss,
             logits=base_outputs.logits,
-            train_acc=[[accuracy]],
+            train_acc=[accuracy],
         )
 
     @torch.no_grad()
