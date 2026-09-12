@@ -16,6 +16,8 @@
 """Code that export quantized Hugging Face models for deployment."""
 
 import contextlib
+import copy
+import importlib
 import json
 import re
 import shutil
@@ -24,6 +26,7 @@ import warnings
 from builtins import ValueError
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,8 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+from modelopt.torch.models import hf_model_type, is_moe
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -53,18 +58,23 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-from torch.distributed.fsdp import FSDPModule
 
+from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
+from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.quantization.utils import (
+    fsdp2_aware_weight_update,
+    module_name_maps,
+    quantizer_attr_names,
+)
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -74,14 +84,15 @@ except ImportError:
 # Importing the built-in handlers installs their entries in the two registries.
 from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
 from .convert_hf_config import convert_hf_quant_config_format
-from .layer_utils import (
-    get_experts_list,
-    is_layernorm,
-    is_moe,
-    is_quantlinear,
-    sync_moe_gate_up_amax,
+from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
+from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
+from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
+from .quant_aware_conversion import (
+    build_reverse_name_mapper,
+    revert_quant_config_names,
+    revert_weight_conversion_quant_aware,
 )
-from .model_config import (
+from .quant_format import (
     FUSION_FREE_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
@@ -95,14 +106,8 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
-from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
-from .quant_aware_conversion import (
-    build_reverse_name_mapper,
-    revert_quant_config_names,
-    revert_weight_conversion_quant_aware,
-)
 from .quant_utils import (
+    _get_kv_cache_postprocess_config,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -358,6 +363,7 @@ def _fuse_shared_input_modules(
     qkv_only: bool = False,
     fuse_layernorms: bool = False,
     quantization_format: str | None = None,
+    names=None,
 ) -> dict[str, list[str]]:
     """Fuse modules that share the same input.
 
@@ -374,6 +380,8 @@ def _fuse_shared_input_modules(
     Returns:
         Dict mapping first module name to list of all fused module names.
     """
+    if names is None:
+        names = module_name_maps(model)
     fused_linears = {}
     fused_count = 0
 
@@ -403,7 +411,7 @@ def _fuse_shared_input_modules(
                             print(f"  Fused QKV group: {module_names}")
             else:
                 # Fuse all modules that have the same input (LLM models)
-                with fsdp2_aware_weight_update(model, modules):
+                with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules)
                 fused_linears[modules[0].name] = [module.name for module in modules]
                 fused_count += 1
@@ -417,7 +425,7 @@ def _fuse_shared_input_modules(
                 and "awq" in group_quant_format
                 and tensor in output_to_layernorm
             ):
-                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):
+                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor], names=names):
                     fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
 
     if qkv_only:
@@ -429,12 +437,28 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
+def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=None):
+    """Gather the modules only when the fusion will actually write a weight.
+
+    ``preprocess_linear_fusion`` writes weights only in its ``pre_quant_scale`` resmooth branch;
+    otherwise it unifies amax / global_amax, which are buffers and so are never FSDP-sharded.
+    Gathering for those costs a full-unit all-gather + FSDPParam rebuild + reshard for nothing.
+    """
+    quantizer = getattr(modules[0], "input_quantizer", None)
+    if getattr(quantizer, "pre_quant_scale", None) is None:
+        return nullcontext()
+    return fsdp2_aware_weight_update(model, modules, names=names)
+
+
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
     model_type = type(model).__name__.lower()
+    model_hf_type = hf_model_type(model)
     module_names = set()
+    # Built once: every fusion below resolves module names through it.
+    names = module_name_maps(model)
 
     # NVFP4 SVDQuant does not need pre-quant scale fusion (either into previous linear or layernorm) because
     # 1) its kernel handles pre-quant scale.
@@ -442,21 +466,21 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     #    the later gate up fusion.
     # Fuse pre_quant_scale to the linear weights if possible
     if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
-        fuse_prequant_to_linear(model)
+        fuse_prequant_to_linear(model, model_type=model_hf_type)
 
     # Pre-process MoE experts
     for name, module in model.named_modules():
         module_names.add(name)
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and (
+        if is_moe(module, model_hf_type) and (
             quantization_format is not QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
-            grouped_experts = get_experts_list(module, model_type)
+            grouped_experts = get_experts_list(module, model_hf_type)
             for modules in grouped_experts:
-                with fsdp2_aware_weight_update(model, modules):
+                with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
     # Define the dummy forward function for LLM
@@ -514,6 +538,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         qkv_only=False,
         fuse_layernorms=True,
         quantization_format=quantization_format,
+        names=names,
     )
 
     # The dummy forward may not be able to activate all the experts.
@@ -535,7 +560,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                     assert new_expert_name in module_names
                     new_expert_modules.append(model.get_submodule(new_expert_name))
 
-                with fsdp2_aware_weight_update(model, new_expert_modules):
+                with _fusion_update_context(model, new_expert_modules, names):
                     preprocess_linear_fusion(new_expert_modules)
 
                 expert_id += 1
@@ -806,7 +831,7 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
-    torch.cuda.empty_cache()
+    maybe_clear_cuda_cache()
 
 
 def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContext) -> None:
@@ -843,15 +868,26 @@ def _prepare_moe_inputs(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool,
+    model_type: str | None = None,
 ) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
+
+    ``model_type`` is the root model's HF model type. Callers that pass a sub-tree
+    rather than the root model (layerwise export passes one decoder layer) must supply
+    it, since a decoder layer carries no reliable ``config.model_type`` of its own and
+    the expert-naming lookup would otherwise fail to resolve.
     """
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    prepare_ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=model_type if model_type is not None else hf_model_type(model),
+    )
     for name, sub_module in model.named_modules():
-        if is_moe(sub_module) and hasattr(sub_module, "experts"):
+        if is_moe(sub_module, prepare_ctx.model_type) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
             if handler is None:
                 # Unsupported MoE model structure
@@ -911,48 +947,27 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    fsdp_module_to_reshard = None
+    # The handlers pack whatever weight they are handed, and nothing here materializes a shard --
+    # FSDP2 models go through collect_export_tensors instead, which packs inside a gather window.
+    assert not is_fsdp2_model(model), (
+        "_process_quantized_modules cannot pack a sharded model; use collect_export_tensors"
+    )
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
 
     for name, sub_module in model.named_modules():
-        # Optimization to perform resharding only once per decoder layer to avoid extra communication overhead
-        if isinstance(sub_module, FSDPModule):
-            # Every time we encounter a new FSDPModule, the previous decoder layer is fully processed.
-            # We need to reshard the previous FSDPModule to prevent potential OOM.
-            # This hack reduces the number of unshard reshard operations, to avoid unnecessary communication.
-            if fsdp_module_to_reshard is not None:
-                fsdp_module_to_reshard.reshard()
-
-            fsdp_module_to_reshard = sub_module
-
         _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _export_transformers_checkpoint(
-    model: nn.Module,
-    dtype: torch.dtype | None = None,
-    is_modelopt_qlora: bool = False,
-    **kwargs,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Exports the torch model to the packed checkpoint with original HF naming.
+def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
+    """Run the shared export setup. Packing the weights is a separate step.
 
-    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
-
-    Builds the whole quantized state dict in memory, so it requires every weight to be
-    resident. Models with accelerate CPU/disk offload are rejected here and handled by
-    :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
-    time; :func:`export_hf_checkpoint` picks between the two.
-
-    Args:
-        model: the full torch model to export. The actual quantized model may be a submodule.
-        dtype: the weights data type to export the unquantized layers or the default model data type if None.
-
-    Returns:
-        post_state_dict: Dict containing quantized weights
-        quant_config: config information to export hf_quant_cfg.json
-
-    Raises:
-        NotImplementedError: if the model has accelerate offload hooks.
+    Both export paths call this so they cannot drift. Returns the dtype, the tied-weight map and
+    the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
@@ -995,30 +1010,77 @@ def _export_transformers_checkpoint(
             f"{synced_input} tied module group(s)"
         )
 
-    # Process all quantized modules and export weights
+    return dtype, tied_map, quant_config
+
+
+def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
+    """Quantize every module's weight in place, then rebuild the fused MoE linears."""
+    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
+    # scope, and transformers is an optional extra -- importing it here keeps
+    # ``import modelopt.torch.export`` working without it.
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
 
+
+def _export_transformers_checkpoint(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    **kwargs,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Exports the torch model to the packed checkpoint with original HF naming.
+
+    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
+
+    Builds the whole quantized state dict in memory, so it requires every weight to be
+    resident. Models with accelerate CPU/disk offload are rejected here and handled by
+    :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
+    time; :func:`export_hf_checkpoint` picks between the two.
+
+    Under FSDP2 the shards are gathered to rank 0: **every rank must call this**, since the
+    gather is a collective, but only rank 0 comes back with the weights -- the others get an
+    empty dict. Callers that write the result must therefore write from rank 0 only, and rank 0
+    must have room for the whole model. :func:`export_hf_checkpoint` never takes this path for
+    FSDP2; it streams each rank's own share to disk instead.
+
+    Args:
+        model: the full torch model to export. The actual quantized model may be a submodule.
+        dtype: the weights data type to export the unquantized layers or the default model data type if None.
+
+    Returns:
+        post_state_dict: Dict containing quantized weights. Under FSDP2 this is populated on
+            rank 0 only; every other rank gets an empty dict.
+        quant_config: config information to export hf_quant_cfg.json
+
+    Raises:
+        NotImplementedError: if the model has accelerate offload hooks.
+    """
+    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+
     if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        # Imported here rather than at module scope: the streaming exporter imports the
+        # shared prep helpers from this module, so a top-level import would be circular.
+        from .unified_export_hf_streaming import collect_export_tensors
+
+        # Packs each unit once it has been gathered, and keeps every unit on rank 0 -- which
+        # therefore holds the whole model, so this needs the checkpoint to fit in host RAM.
+        quantized_state_dict = dict(
+            collect_export_tensors(model, dtype, is_modelopt_qlora, owner="rank0")
         )
     else:
-        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
+        pack_quantized_weights(model, dtype, is_modelopt_qlora)
         quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,
         kv_cache_max_bound,
-        kv_cache_format,
+        kv_cache_postprocess_config,
         is_modelopt_qlora,
         tied_map=tied_map,
     )
@@ -1403,8 +1465,6 @@ def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
 
 def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
     """Try to patch revert_weight_conversion in a single module."""
-    import importlib
-
     try:
         mod = importlib.import_module(mod_path)
         if hasattr(mod, "revert_weight_conversion"):
@@ -1519,6 +1579,32 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
+def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+    """Return a name-reverted copy, leaving the input untouched if mapping fails."""
+    mapped_quant_config = copy.deepcopy(hf_quant_config)
+    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    return mapped_quant_config
+
+
+def _revert_quant_config_names_best_effort(
+    model: nn.Module, hf_quant_config: dict | None
+) -> dict | None:
+    """Rename the quant config's modules back to their original checkpoint names.
+
+    On failure it warns and keeps the current names, so the config still matches the weights.
+    """
+    try:
+        name_mapper = build_reverse_name_mapper(model)
+        if name_mapper is not None and hf_quant_config:
+            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
+    except Exception as exc:
+        warnings.warn(
+            f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+            "names may not match the original HF hub checkpoint."
+        )
+    return hf_quant_config
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1579,11 +1665,13 @@ def export_hf_checkpoint(
         )
         return
 
-    is_distributed = (
+    is_fsdp2_sharded = (
         torch.distributed.is_available()
         and torch.distributed.is_initialized()
         and is_fsdp2_model(model)
     )
+    # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
+    rank = torch.distributed.get_rank() if is_fsdp2_sharded else 0
     # Offloaded models take the streaming path: it materializes one layer at a time and
     # writes each straight to a shard file, so peak memory is one layer plus one shard
     # buffer instead of the whole quantized state dict.
@@ -1610,72 +1698,87 @@ def export_hf_checkpoint(
             )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
+            hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
+        elif is_fsdp2_sharded:
+            # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
+            # a rank buffers its own share of the model rather than the whole checkpoint, and the
+            # writes run concurrently. Every rank must call this -- it unshards collectively.
+            from .unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+
+            _, hf_quant_config = _export_fsdp2_checkpoint_streaming(
+                model,
+                dtype,
+                export_dir=export_dir,
+                max_shard_size=max_shard_size,
+                extra_state_dict=extra_state_dict,
+                **kwargs,
+            )
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
+            if rank == 0:
+                if save_modelopt_state and ModeloptStateManager.is_converted(model):
+                    torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
+                hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
+        else:
+            post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+                model, dtype, **kwargs
+            )
+
+            # Remove hf_quantizer from model so post_state_dict can be exported.
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
+
+            # extra_state_dict holds tensors the model never had (e.g. MTP weights).
+            export_state_dict = dict(post_state_dict)
+            if extra_state_dict:
+                export_state_dict.update(extra_state_dict)
+
+            # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
+            # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
+            # differ from the original hub checkpoint. Reverse it quantization-aware so exported
+            # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
+            # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
+            # do it here. The same rename is applied to the quant-config module references
+            # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
+            # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
+            # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
+            # transformers API drift, unexpected shapes) falls back to the in-memory names for
+            # both weights and config so they stay mutually consistent.
             try:
                 name_mapper = build_reverse_name_mapper(model)
+                mapped_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
-                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+                    mapped_quant_config = _revert_hf_quant_config_names(
+                        hf_quant_config, name_mapper
+                    )
+                export_state_dict = mapped_state_dict
+                hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
                     f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                     "names may not match the original HF hub checkpoint."
                 )
+
+            _sanitize_generation_config_for_save(model)
+
+            # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+            # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+            # scale tensors). Patch both the source and importing module since modeling_utils does
+            # `from core_model_loading import revert_weight_conversion`.
+            _patches = _patch_revert_weight_conversion()
+            try:
+                model.save_pretrained(
+                    export_dir,
+                    state_dict=export_state_dict,
+                    save_modelopt_state=save_modelopt_state,
+                    max_shard_size=max_shard_size,
+                )
+            finally:
+                _unpatch_revert_weight_conversion(_patches)
+
+        if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
-            return
-
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
-
-        # Remove hf_quantizer from model so post_state_dict can be exported.
-        if getattr(model, "hf_quantizer", None) is not None:
-            model.hf_quantizer = None
-
-        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
-
-        # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
-        # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
-        # differ from the original hub checkpoint. Reverse it quantization-aware so exported
-        # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
-        # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
-        # do it here. The same rename is applied to the quant-config module references
-        # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
-        # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
-        # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
-        # transformers API drift, unexpected shapes) falls back to the in-memory names for BOTH
-        # weights and config so they stay mutually consistent.
-        try:
-            name_mapper = build_reverse_name_mapper(model)
-            export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
-            if name_mapper is not None and hf_quant_config:
-                revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
-        except Exception as exc:
-            warnings.warn(
-                f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                "names may not match the original HF hub checkpoint."
-            )
-
-        # Under torch.distributed only rank 0 writes; others sync at the finally barrier.
-        if is_distributed and torch.distributed.get_rank() != 0:
-            return
-
-        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
-        # scale tensors). Patch both the source and importing module since modeling_utils does
-        # `from core_model_loading import revert_weight_conversion`.
-        _patches = _patch_revert_weight_conversion()
-
-        _sanitize_generation_config_for_save(model)
-
-        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
-        try:
-            model.save_pretrained(
-                export_dir,
-                state_dict=export_state_dict,
-                save_modelopt_state=save_modelopt_state,
-                max_shard_size=max_shard_size,
-            )
-        finally:
-            _unpatch_revert_weight_conversion(_patches)
-
-        _write_hf_export_config(model, hf_quant_config, export_dir)
 
     except Exception as e:
         warnings.warn(
@@ -1684,5 +1787,5 @@ def export_hf_checkpoint(
         )
         raise e
     finally:
-        if is_distributed:
+        if is_fsdp2_sharded:
             torch.distributed.barrier()

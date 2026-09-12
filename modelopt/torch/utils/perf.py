@@ -29,6 +29,7 @@ __all__ = [
     "clear_cuda_cache",
     "get_cuda_memory_stats",
     "get_used_gpu_mem_fraction",
+    "maybe_clear_cuda_cache",
     "report_memory",
 ]
 
@@ -36,6 +37,30 @@ __all__ = [
 def clear_cuda_cache():
     """Clear the CUDA cache."""
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+_EMPTY_CACHE_CHECK_EVERY = 64
+_empty_cache_calls = 0
+
+
+def maybe_clear_cuda_cache(slack_bytes: int = 4 * 1024**3) -> None:
+    """Clear the CUDA cache every ``_EMPTY_CACHE_CHECK_EVERY`` calls, if there is slack to reclaim.
+
+    ``empty_cache()`` syncs the device and hands cached blocks back to the driver, so calling it
+    after every packed weight costs more than it saves. The counter restarts on each check, so the
+    interval is measured from the last one rather than from process start. A caller that makes
+    fewer than ``_EMPTY_CACHE_CHECK_EVERY`` calls may not reclaim at all -- use
+    :func:`clear_cuda_cache` if you need a guaranteed one.
+    """
+    global _empty_cache_calls
+    _empty_cache_calls += 1
+    if _empty_cache_calls < _EMPTY_CACHE_CHECK_EVERY:
+        return
+    _empty_cache_calls = 0
+    if not torch.cuda.is_available():
+        return
+    if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
         torch.cuda.empty_cache()
 
 

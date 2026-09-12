@@ -193,6 +193,11 @@ with its own `run_id`, copying the shared `services:` block.
   alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
   the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back
   to the canonical host.
+- **ModelOpt provenance.** Same rule as SKILL.md Step 4: if the served checkpoint holds a
+  `.experiment.json`, use its `experiment_name` verbatim and add its quoted
+  `run_name`/`run_id`/`run_url` as `modelopt_run_*` tags, skipping any imported value
+  containing `${` — `experiment_name` included, since the same pass resolves the block. Keep `tracking_uri` as `${MLFLOW_TRACKING_URI}` — cross-server, the inherited name
+  makes a same-named experiment here and `modelopt_run_url` is the only route back.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
