@@ -43,6 +43,7 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
     ONNXQuantExporter,
 )
+from modelopt.onnx.export.base_exporter import _sync_initializer_metadata
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     change_casts_to_fp16,
@@ -671,11 +672,12 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
-        if uses_other_unsupported_quantizer or uses_fp8:
+    preserve_block_io_types = dynamo_export and (uses_fp4 or uses_mxfp8) and weights_dtype == "fp32"
+    if (weights_dtype in ["fp16", "bf16"] or preserve_block_io_types) and not is_bf16_fp8_noop:
+        if (dynamo_export and uses_fp4) or uses_other_unsupported_quantizer or uses_fp8:
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
-                keep_io_types=False,
+                keep_io_types=preserve_block_io_types,
                 disable_shape_infer=True,
                 check_fp16_ready=False,
                 op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
@@ -688,6 +690,9 @@ def get_onnx_bytes_and_metadata(
             # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
             # MatMul/Add layers under strongly-typed TRT parsing.
             onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            if preserve_block_io_types:
+                for initializer in onnx_opt_graph.graph.initializer:
+                    _sync_initializer_metadata(onnx_opt_graph.graph, initializer)
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
