@@ -6,8 +6,8 @@
 # Launch with torchrun, scaling ``--fsdp.dp_size`` to your GPU count:
 #
 #   torchrun --nproc-per-node=<gpus> \
-#       examples/diffusers/fastgen/dmd2_finetune.py \
-#       --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml \
+#       examples/diffusers/fastgen/dmd2/finetune.py \
+#       --config examples/diffusers/fastgen/dmd2/configs/qwen_image.yaml \
 #       --step_scheduler.max_steps=5000
 #
 # The data.* and checkpoint.* paths below are placeholders — point them at your
@@ -43,7 +43,7 @@ step_scheduler:
   max_steps: 5000
 
 # ─── DMD2 block ─────────────────────────────────────────────────────────────────
-# ``recipe_path`` is required by ``_resolve_dmd_config`` in dmd2_recipe.py.
+# ``recipe_path`` is required by ``_resolve_dmd_config`` in ``dmd2/recipe.py``.
 # Every actual DMDConfig knob is explicitly pinned below so this YAML is the
 # single source of truth for the formal run — the recipe defaults at
 # ``modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`` are NOT
@@ -86,7 +86,7 @@ dmd2:
   # ── 4-step student timestep schedule ──
   # Exact ``torch.linspace(max_t=0.999, 0.0, 5).tolist()``, which is also the
   # inference pipeline's default schedule when no t_list is passed (see
-  # ``inference_dmd2_qwen_image.py:259``). Training draws t uniformly from
+  # ``dmd2/inference_qwen_image.py:259``). Training draws t uniformly from
   # t_list[:-1], so the 4 trained timesteps exactly match the 4 inference
   # sample points. The earlier ``[0.999, 0.75, 0.5, 0.25, 0.0]`` was
   # ``linspace(1.0, 0, 5)`` with t=1 shaved to 0.999, leaving a silent ~0.3%
@@ -149,12 +149,13 @@ data:
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: /path/to/preprocessed/qwen_image_1024p
+    # Referenced files must stay beneath this root.
     base_resolution: [1024, 1024]
     batch_size: 1
     drop_last: false
     shuffle: true
     num_workers: 0
-    negative_prompt_embedding_path: /path/to/preprocessed/qwen_image_1024p/negative_prompt_embedding.pt
+    negative_prompt_embedding_path: negative_prompt_embedding.pt
 
 # Inference-loadable safetensors saves so checkpoints are usable without a
 # secondary export pass.

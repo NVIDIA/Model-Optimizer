@@ -15,6 +15,10 @@ Changelog
 
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
 
+*Misc*
+
+- Add Parallel Decoding Distillation (PDD) to ``modelopt.torch.fastgen`` with Qwen-Image training, distributed-checkpoint export, and PDD-2/4/8 inference. AutoModel remains an unmodified pinned runtime dependency.
+
 **Backward Breaking Changes**
 
 - Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
