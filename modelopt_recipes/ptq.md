@@ -385,6 +385,16 @@ checkpoint's** quant config verbatim:
   `examples/deepseek/deepseek_v4/ptq.py` and the cast through
   `quantize_to_nvfp4.py --cast_mxfp4_to_nvfp4`, rather than the in-memory
   `hf_ptq.py` flow.
+- **`models/moonshotai/Kimi-K3/ptq/nvfp4_experts-kv_fp8_layerwise_export`** mirrors no
+  checkpoint — unlike `nvfp4_experts-fp8_pb_attention` above it does not reproduce
+  `nvidia/Kimi-K3-NVFP4`, and it sits in this tier only for the narrower expert scope.
+  NVFP4 W4A4 on the routed experts with an FP8 KV cache, calibrated and **exported one
+  decoder layer at a time**, so a run that outlasts its GPU session resumes without
+  recalibrating or re-exporting finished layers. It scopes experts as `*.experts.*`
+  rather than the general recipes' `*block_sparse_moe*`, which on K3 also matches
+  `shared_experts.*` and `routed_expert_*` -- 552 modules the vendor left unquantized.
+  Pair it with `--offload_folder` and per-device memory budgets; nothing in the recipe
+  itself configures offload.
 - **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
