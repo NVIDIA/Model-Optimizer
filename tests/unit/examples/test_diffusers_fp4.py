@@ -28,6 +28,7 @@ pytest.importorskip("onnx_graphsurgeon")
 pytest.importorskip("diffusers")
 
 import modelopt.torch.quantization as mtq
+from examples.diffusers.quantization.onnx_utils import export as diffusion_export
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.diffusion import diffusers as diffusers_plugin
@@ -210,3 +211,24 @@ def test_restore_infers_checkpoint_format_for_export(monkeypatch, tmp_path):
     export_manager.restore_checkpoint.assert_called_once_with()
     assert export_manager.export_onnx.call_args.args[-1] == QuantFormat.FP4
     export_manager.export_hf_ckpt.assert_called_once()
+
+
+def test_flux_fp8_export_saves_converted_rope_graph(monkeypatch, tmp_path):
+    original_model = Mock()
+    converted_model = Mock()
+    monkeypatch.setattr(
+        diffusion_export,
+        "generate_dummy_kwargs_and_dynamic_axes_and_shapes",
+        lambda *args: ({}, {}, None),
+    )
+    monkeypatch.setattr(diffusion_export, "onnx_export", lambda *args, **kwargs: None)
+    monkeypatch.setattr(diffusion_export.onnx, "load", lambda *args, **kwargs: original_model)
+    convert_rope_weight_type = Mock(return_value=converted_model)
+    monkeypatch.setattr(diffusion_export, "flux_convert_rope_weight_type", convert_rope_weight_type)
+    save_onnx = Mock()
+    monkeypatch.setattr(diffusion_export, "save_onnx", save_onnx)
+
+    diffusion_export.modelopt_export_sd(nn.Module(), tmp_path, "flux-dev", "fp8")
+
+    convert_rope_weight_type.assert_called_once_with(original_model)
+    save_onnx.assert_called_once_with(converted_model, tmp_path / "model.onnx")

@@ -522,7 +522,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     print(f"Saved at {tmp_output}")
     onnx_model = onnx.load(str(tmp_output), load_external_data=True)
     if precision == "fp8" and model_name.startswith("flux"):
-        flux_convert_rope_weight_type(onnx_model)
+        onnx_model = flux_convert_rope_weight_type(onnx_model)
     if precision == "fp4":
         onnx_model = NVFP4QuantExporter.process_model(onnx_model)
     save_onnx(onnx_model, q_output)
