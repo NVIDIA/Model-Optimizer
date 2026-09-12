@@ -75,6 +75,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import os
+
 import torch
 import torch.nn.functional as F
 import transformers
@@ -201,6 +203,14 @@ def _dpace_position_weights(
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
+
+def _sweep_print(msg):
+    """Print once per node from rank 0 (this file has no logging helper of its own)."""
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        print(msg, flush=True)
+    elif torch.distributed.get_rank() == 0:
+        print(msg, flush=True)
+
 
 def _top1_id_and_prob(logits):
     """Argmax token id and its softmax probability, without keeping the softmax around.
@@ -1014,6 +1024,41 @@ class HFDFlashModel(DFlashModel):
             probs.append(piece_probs)
         return torch.cat(ids), torch.cat(probs)
 
+    def _teacher_sweep(self, base_outputs, input_ids, loss_mask):
+        """One-off diagnostic: is each sequence's streamed hidden paired with ITS OWN tokens?
+
+        Printed under DFLASH_TEACHER_SWEEP=1 only. The reconstructed teacher distribution is
+        properly peaked (mean top-1 probability 0.80, against 0.85 measured straight off the
+        serve) yet its argmax matches the corpus about 1% of the time. A sharp-but-wrong
+        distribution is a real hidden state belonging to the wrong tokens, so this cross-checks
+        every (hidden i, tokens j) pair in the batch: a bright off-diagonal means the connector
+        pairs them up wrongly, an all-dark matrix means the hidden predates this batch entirely.
+        """
+        if getattr(self, "_teacher_sweep_done", 0) >= 1:
+            return
+        self._teacher_sweep_done = 1
+        hidden = base_outputs.base_hidden
+        if hidden is None:
+            _sweep_print("=== PAIRING SWEEP: no base_hidden, nothing to check ===")
+            return
+
+        bsz = input_ids.shape[0]
+        n_probe = 192  # supervised positions per pair; enough to separate 0.9 from 0.01
+
+        def score(i_hidden, j_tokens):
+            pos = (loss_mask[j_tokens] > 0.5).nonzero(as_tuple=True)[0]
+            pos = pos[pos > 0][:n_probe]
+            if pos.numel() == 0:
+                return float("nan")
+            rows = hidden[i_hidden].index_select(0, pos - 1)
+            ids, _ = _top1_id_and_prob(self._base_model_lm_head(rows))
+            return (ids == input_ids[j_tokens].index_select(0, pos)).float().mean().item()
+
+        _sweep_print(f"=== PAIRING SWEEP (rows = hidden, cols = tokens, bsz {bsz}) ===")
+        for i in range(bsz):
+            _sweep_print("  " + " ".join(f"{score(i, j):.3f}" for j in range(bsz)))
+        _sweep_print("=== END PAIRING SWEEP ===")
+
     def _compute_loss(
         self,
         logits,
@@ -1151,6 +1196,8 @@ class HFDFlashModel(DFlashModel):
                 t_ids, t_probs = self._teacher_top1(
                     base_logits, base_outputs, (safe_label_indices - 1).clamp(min=0)
                 )
+                if os.environ.get("DFLASH_TEACHER_SWEEP") and base_outputs is not None:
+                    self._teacher_sweep(base_outputs, input_ids, loss_mask)
                 if t_ids is not None:
                     keep = binary_eval_mask > 0.5
                     eval_count = keep.sum().float() + 1e-6

@@ -1,0 +1,182 @@
+# DFlash2 drafter for PineDrift-820B-A42B-NVFP4, trained by streaming against a
+# vLLM TP8 serve of the base, on AWS PDX (B300, 8 GPU/node).
+#
+# SHAPE: 4 nodes = 3 serve replicas (TP8 each) + 1 trainer. The trainer count is
+# nodes - SERVE_NODES. Submitted with interactive QOS on the batch_long PARTITION:
+# interactive is capped at 4 nodes/user but is priority 700 and starts immediately
+# at this size, while `batch` would reject the 23:50 walltime (MaxTime 04:00:00)
+# and normal@batch_long estimated a start three days out.
+#
+# `~/pinedrift_dflash2.sh smoke` runs the same yaml through sed into a 2-node,
+# 1-serve, 8-shard, 1-epoch copy. Overriding these from the command line does NOT
+# work: nemo_run's arg parser rejects list-index paths like
+# `pipeline.task_0.environment.2.SERVE_NODES=3` with "Invalid index '2' for 2".
+#
+# PineDrift specifics this yaml encodes (each is a silent failure mode):
+#   * --language-model-only: the base is an omni model (vision tower + audio
+#     perception in a separate shard). Without it vLLM builds the perception
+#     stack for a text-only job. It is the ONLY serve flag we add, deliberately:
+#     SERVE_EXTRA_ARGS is exported unquoted, so its value must be space-free.
+#     --enable-expert-parallel and --tokenizer-mode hf are omitted for that
+#     reason and because neither is required for correctness (plain TP8 shards
+#     the 256 experts fine; tokenizer-mode auto resolves to the same fast
+#     tokenizer). Add a dedicated knob, as SERVE_BLOCK_SIZE did, if EP is wanted.
+#   * EAGLE_CAPTURE_IDS = the recipe's target_layer_ids + 1 (the script takes
+#     1-based ids), plus 62 = the true final layer. All five aux ids sit on
+#     PineDrift's [SWA2048 x3, global+NoPE] block boundaries; see the recipe.
+#   * TRITON_CACHE_DIR must be NODE-LOCAL: the recipe turns on
+#     dflash_use_flex_attention, which compiles Triton templates on the first
+#     backward. Ranks sharing a lustre cache die with "OSError: [Errno 14] Bad
+#     address". /raid/scratch is the only user-writable node-local NVMe on PDX.
+#   * NIXL: this image ships no nixl at all, so it is pip-installed per job, and
+#     the AWS rdma-core set is grafted in so the LIBFABRIC plugin can load. That
+#     gives EFA RDMA for the hidden-state transfer, which is what every other
+#     production streaming run on PDX uses. NCCL still gets NCCL_IB_DISABLE=1:
+#     that is about NCCL's own ibverbs path for DDP, not about NIXL.
+#   * report_to=none: the serve container has no tensorboard, and the trainer
+#     runs in that same container.
+#   * The corpus is the xhigh self-synthesis, split into reasoning/content by
+#     tools/pinedrift_split_harmony.py. It must NOT be fed raw: its assistant
+#     `content` is a whole Harmony stream, and the stock template both re-wraps it
+#     in its own to=user header AND runs it through esc(), which shatters every
+#     control token into ordinary BPE pieces. See README "Corpus".
+#
+# The MuseSpark base needs no serve-side patch: MuseSpark1xOmniForCausalLM is
+# native in this container's vLLM and carries the aux-capture mixin. The
+# trainer-side handling (final norm, embedding norm, metap multiplier, logit
+# soft cap) lives in modelopt's modeling_fakebase.py / modeling_final_norm.py.
+#
+# Run ON the PDX login node:
+#   cd tools/launcher
+#   SLURM_HOST=$(hostname) SLURM_ACCOUNT=coreai_dlalgo_modelopt \
+#   SLURM_PARTITION=batch SLURM_QOS=interactive \
+#   SLURM_HF_LOCAL=$HOME/lustre/hf-local \
+#   SLURM_JOB_DIR=$HOME/lustre/pinedrift-experiments NEMORUN_HOME=$PWD \
+#   uv run launch.py --yaml examples/PineDrift/hf_streaming_dflash2_pinedrift.yaml \
+#     identity=$HOME/.ssh/id_ed25519 detach=True --yes
+
+job_name: PineDrift_820B_DFlash2_streaming_smoke_smoke
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/pinedrift-820b-a42b-nvfp4_vv3
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash2_pinedrift.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - model.trust_remote_code=false
+      # The xhigh SELF-synthesis (PineDrift generating with its own weights), split
+      # into reasoning/content by tools/pinedrift_split_harmony.py. It must NOT be
+      # fed raw -- see README "Corpus". A directory: eagle_utils expands it to its
+      # sorted *.jsonl. (Inlined rather than a global_vars entry -- global_vars keys
+      # must name real launch() parameters, and only hf_model does.)
+      - data.data_path=/hf-local/pinedrift-xhigh-split-smoke8
+      # A copy of the model's own template whose ONLY change is reasoning_effort
+      # default 'medium' -> 'xhigh'. The synthesis ran at xhigh ("Reasoning
+      # strength: 512" in the system turn) and the trainer does not pass
+      # reasoning_effort, so the stock template would condition the drafter on a
+      # system prompt that never produced these replies.
+      # {% generation %}/{% endgeneration %} are already in the stock template.
+      - data.chat_template=/hf-local/pinedrift-templates/chat_template_train_xhigh.jinja
+      - training.output_dir=/scratchspace/dflash2
+      - training.num_train_epochs=1
+      # global batch 64 = 8 per device x 8 GPUs on the single trainer node.
+      # The first run used 1 (gbatch 8 = 24,576 tokens), which is 8x smaller than
+      # comparable drafter runs and left the accuracy trace visibly noisy.
+      - training.per_device_train_batch_size=8
+      - training.training_seq_len=3072
+      - training.save_steps=500
+      - training.logging_steps=20
+      - training.answer_only_loss=true
+      # No tensorboard in the serve container.
+      - training.report_to=none
+      # Left OFF on purpose. on_log's est_ar would be harmless (it only chains the
+      # logged accuracies), but estimate_ar also arms the ar_validate_steps path,
+      # which calls pseudo_speculative_generate outside Trainer's autocast and, with
+      # dflash_fp32_master_weights on, raises at the first validation boundary --
+      # possibly hours in (see _require_autocast_for_promoted_draft). The expected
+      # accepted length is computed offline from the per-position accuracies by
+      # tools/pinedrift_curve.py instead.
+      - training.estimate_ar=false
+      - training.ar_validate_steps=0
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # recipe target_layer_ids [3,19,31,47,59] -> +1 -> [4,20,32,48,60], plus
+      # 62 = layer 61 = the true final hidden (1-based, post-layer convention).
+      - EAGLE_CAPTURE_IDS: "[4,20,32,48,60,62]"
+      - SERVE_NODES: "1"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      - SERVE_EXTRA_ARGS: "--language-model-only"
+      # training_seq_len 3072 + the draft block; keep small so KV does not eat the
+      # headroom the 496 GiB of weights leaves (62 GiB/GPU used of 269).
+      - SERVE_MAX_MODEL_LEN: "4096"
+      - SERVE_MAX_NUM_SEQS: "32"
+      # Required, not optional: vLLM pads the hidden-state pseudo-page up to the
+      # attention page, and asserts if it does not fit. The constraint works out
+      # to block_size >= 32 * len(EAGLE_CAPTURE_IDS) for this model -- see the
+      # derivation in README. 6 capture ids -> >= 192 -> take the next power of 2.
+      # Measured failures: 16 (job 405516) and 32 (job 405733) both assert.
+      - SERVE_BLOCK_SIZE: "256"
+      # Job 405564 died with OSError 98 on the script default 8765: another user's
+      # vllm held it on the node we drew. 8765/18999 are the modelopt streaming
+      # defaults, so everyone on PDX collides on them. Use a private pair.
+      - SERVE_PORT: "27650"
+      - HS_SIDECAR_PORT: "27651"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      # Cold start measured at 450 s with CUDA graphs + autotune; this path runs
+      # --enforce-eager --no-enable-flashinfer-autotune, so it should be well under.
+      - SERVE_READY_TIMEOUT: "3600"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # This image ships no nixl (it is a serving image), so the serve dies at
+      # connector init with ModuleNotFoundError. 1.3.0 is the version validated
+      # on PDX; the wheel bundles its own UCX.
+      # NOTE: the package to install is plain `nixl`, not `nixl-cu13`. nixl-cu13
+      # installs the module as `nixl_cu13`, and the connector imports `nixl`.
+      - PIP_EXTRA_PACKAGES: "nixl==1.3.0"
+      # Transport: EFA RDMA via NIXL's LIBFABRIC plugin. This is what every
+      # production streaming run on PDX uses (all the M3 yamls, and every K3
+      # k3_causal_*/k3_cmhcfg_*/k3_nativevllm_* run). It needs EFA_GRAFT_DIR
+      # below -- without the graft createBackend returns NIXL_ERR_NOT_FOUND and
+      # the only working alternative is UCX over plain TCP.
+      - DFLASH_TEACHER_SWEEP: "1"
+      - NIXL_BACKENDS: "LIBFABRIC"
+      - FI_PROVIDER: "efa"
+      # Where the AWS rdma-core set lives; the wrapper copies it into the image
+      # and re-runs ldconfig. See the graft block in train_eagle_streaming.sh.
+      - EFA_GRAFT_DIR: "/efa-rdma-core"
+      - NCCL_IB_DISABLE: "1"
+      # Node-local, per the FlexAttention note in the header.
+      - TRITON_CACHE_DIR: "/raid/scratch/haoguo-triton"
+      # 583 shards go through load_dataset -> Arrow before step 1. The default
+      # cache is the container's /root (node-local overlay, unknown size);
+      # /raid is the 28 TB node-local NVMe. Deliberately not lustre: it is 94%
+      # full and is already streaming the 496 GiB of weights.
+      - HF_DATASETS_CACHE: "/raid/scratch/haoguo-hfds"
+      - HF_HOME: "/raid/scratch/haoguo-hf"
+      # Editable install of modelopt happens per job; keep its cache off $HOME.
+      - PIP_CACHE_DIR: "/home/haoguo/lustre/.cache/pip-pinedrift"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # Walltime must be set explicitly: the launcher asks for 4 h otherwise and a
+      # long run dies as a bare Slurm TIMEOUT with no traceback.
+      time: "01:50:00"
+      container: /home/haoguo/lustre/containers/vllm-pinedrift-x86-20260911-bda0fc.sqsh
+      # container_mounts REPLACES the default, it does not extend it. The default
+      # is exactly ["$SLURM_HF_LOCAL:/hf-local"] (slurm_config.py), and the Slurm
+      # executor never re-adds it -- so listing only the EFA dir here silently
+      # unmounts the model, and vLLM then treats /hf-local/... as a Hub repo id
+      # and dies in huggingface_hub's validate_repo_id (job 406717).
+      container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
+        - /home/haoguo/lustre/efa-rdma-core:/efa-rdma-core
