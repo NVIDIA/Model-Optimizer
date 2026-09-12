@@ -18,6 +18,7 @@
 import pytest
 import torch
 
+from modelopt.torch.quantization.calib.bias import compute_bias
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
@@ -81,3 +82,12 @@ class TestAffineBMMQuantizer:
             )
         elif type == "static":
             assert kv_quantizer.bias.shape == expected_bias_shape
+
+
+def test_compute_bias_rejects_unknown_method():
+    """``compute_bias`` must fail fast like its ``collect``/``compute_dynamic_bias`` siblings.
+
+    It previously fell through to ``max_min`` for any string other than ``"mean"``.
+    """
+    with pytest.raises(ValueError, match="Unsupported bias method"):
+        compute_bias(torch.randn(4), None, method="median")
