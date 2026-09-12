@@ -716,7 +716,8 @@ def test_needs_activation_forward_for_static_bias_calibrator():
 
 def test_max_calib_config_skip_is_opt_in():
     """The flag is opt-in (default False) so it does not change behavior for direct callers."""
-    assert MaxCalibConfig().skip_forward_without_activation_calib is False
+    default_config = MaxCalibConfig()
+    assert default_config.skip_forward_without_activation_calib is False
     assert MaxCalibConfig(
         skip_forward_without_activation_calib=True
     ).skip_forward_without_activation_calib

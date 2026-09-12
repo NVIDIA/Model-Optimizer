@@ -35,6 +35,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _OutsideQuantizerCalibrator,
     _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -2086,6 +2087,20 @@ def layerwise_calibrate(
             "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
+    outside_calibrator = _OutsideQuantizerCalibrator(
+        model,
+        transformer_layers,
+        forward_loop,
+        calib_func,
+        calib_kwargs,
+        qdq_from_prev,
+    )
+    if export_dir is not None and outside_calibrator.enabled:
+        raise ValueError(
+            "Layerwise export does not support enabled quantizers outside transformer layers. "
+            "Calibrate without export_dir, then export the completed model separately."
+        )
+
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
@@ -2116,6 +2131,7 @@ def layerwise_calibrate(
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers
     ):
+        outside_calibrator.calibrate()
         warn_rank_0(
             f"Layerwise export: every layer shard in {exporter.export_dir} is already "
             f"written.{finalize_hint}"
@@ -2216,6 +2232,8 @@ def layerwise_calibrate(
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    outside_calibrator.calibrate()
 
     if exporter is not None:
         warn_rank_0(
