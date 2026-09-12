@@ -517,10 +517,16 @@ def get_onnx_bytes_and_metadata(
         ModelMetadata: The model's meta data.
 
     Raises:
-        ValueError: If model is not an nn.Module or the requested precision conversion is unsupported.
+        ValueError: If model is not an nn.Module or the requested export configuration is unsupported.
+        NotImplementedError: If Dynamo export is requested with dynamic axes.
     """
     if not isinstance(model, nn.Module):
         raise ValueError("Only PyTorch model compilation is supported.")
+
+    if dynamo_export and onnx_opset < 21:
+        raise ValueError("Dynamo ONNX export requires opset 21 or newer.")
+    if dynamo_export and dynamic_axes:
+        raise NotImplementedError("Dynamo ONNX export does not support dynamic_axes yet.")
 
     assert weights_dtype in ["fp32", "fp16", "bf16"], (
         "weights_dtype must be one of fp32, fp16, or bf16"
@@ -546,11 +552,9 @@ def get_onnx_bytes_and_metadata(
         and not (uses_fp4 or uses_other_unsupported_quantizer)
     )
 
-    # Standardize model args and also tensorize them so they also appear in the onnx graph!
-    # Floats/ints are tensorized when they are provided, but not tensorized when they are not
-    # provided which is somewhat inconsistent (we always tensorize them!)
     named_args, _ = standardize_named_model_args(model, dummy_input)
-    named_args = {k: _to_expected_onnx_type(v) for k, v in named_args.items()}
+    if not dynamo_export:
+        named_args = {name: _to_expected_onnx_type(value) for name, value in named_args.items()}
 
     # Also standardize dummy_input again so we can use it
     dummy_input = tuple(named_args.values())
@@ -622,7 +626,13 @@ def get_onnx_bytes_and_metadata(
     conv_wq_context = _disable_fp8_conv_weight_quantizers(model) if uses_fp8 else nullcontext()
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
-        if not dynamo_export:
+        if dynamo_export:
+            from modelopt.torch.quantization._dynamo_onnx import _get_dynamo_onnx_translation_table
+
+            additional_kwargs["custom_translation_table"] = _get_dynamo_onnx_translation_table()
+            if "fallback" in inspect.signature(torch.onnx.export).parameters:
+                additional_kwargs["fallback"] = False
+        else:
             additional_kwargs["dynamic_axes"] = dynamic_axes
         torch.onnx.export(
             model,
