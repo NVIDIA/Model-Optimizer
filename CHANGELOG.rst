@@ -14,6 +14,7 @@ Changelog
 *Misc*
 
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
+- Add an experimental GDN DASC state-sparsity API that derives whole-head decay policies and selects a checkpoint-specific recovery window from caller-supplied quality and storage measurements. The first release exports restorable policy metadata only; serving runtimes must implement checkpoint packing and DASC-NR or DASC-WR recovery.
 
 **Backward Breaking Changes**
 
