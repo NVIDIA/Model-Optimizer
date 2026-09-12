@@ -31,6 +31,9 @@ NVFP4_DEFAULT_CONFIG = load_config(
 NVFP4_FP8_MHA_CONFIG = load_config(
     "configs/ptq/presets/diffusers/nvfp4_fp8_mha", schema_type=QuantizeConfig
 ).model_dump(exclude_unset=True)
+NVFP4_FP8_CONV_CONFIG = load_config(
+    "configs/ptq/presets/diffusers/nvfp4_fp8_conv", schema_type=QuantizeConfig
+).model_dump(exclude_unset=True)
 
 
 def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **kwargs):

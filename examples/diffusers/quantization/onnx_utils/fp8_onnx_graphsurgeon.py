@@ -97,29 +97,6 @@ def insert_cast(graph, input_tensor, attrs):
                 next_node.inputs[idx] = output_tensor
 
 
-def convert_zp_fp8(onnx_graph):
-    """
-    Convert Q/DQ zero datatype from INT8 to FP8.
-    We use this WAR because FP8 Conv cannot be exported to ONNX directly.
-    The workaround is to first convert the FP8 QDQs into INT8 QDQs,
-    then modify the ONNX model afterward to change those INT8 QDQs back into FP8 QDQs.
-    """
-    # Find all zero constant nodes
-    qdq_zero_nodes = set()
-    for node in onnx_graph.graph.node:
-        if node.op_type == "QuantizeLinear" and len(node.input) > 2:
-            qdq_zero_nodes.add(node.input[2])
-
-    print(f"[WAR], found {len(qdq_zero_nodes)} INT8 QDQ pairs, you can ignore this message..")
-
-    # Convert zero point datatype from INT8 to FP8.
-    for node in onnx_graph.graph.node:
-        if node.output[0] in qdq_zero_nodes:
-            node.attribute[0].t.data_type = onnx.TensorProto.FLOAT8E4M3FN
-
-    return onnx_graph
-
-
 def cast_resize_io(graph):
     """
     After all activations and weights are converted to fp16, we will
