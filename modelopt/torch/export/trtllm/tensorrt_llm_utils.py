@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 
 from modelopt import __version__
 
+from ..quant_format import QUANTIZATION_NONE
 from .model_config import (
     LAYERNORM_DEFAULT,
     LAYERNORM_RMS,
-    QUANTIZATION_NONE,
     DecoderLayerConfig,
     MLPConfig,
     ModelConfig,

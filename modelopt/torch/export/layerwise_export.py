@@ -25,19 +25,26 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
+    module_name_maps,
     requires_weight_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 
-from .layer_utils import is_moe, sync_moe_gate_up_amax
-from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
+from .layer_utils import sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
-from .quant_utils import _postprocess_single_tensor, get_quant_config, get_quantization_format
+from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
+from .quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    get_quant_config,
+    get_quantization_format,
+)
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
     _add_mtp_exclusions,
@@ -210,9 +217,10 @@ class LayerwiseExporter:
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
+        model_type = hf_model_type(model)
         for _, sub_module in model.named_modules():
             if (
-                is_moe(sub_module)
+                is_moe(sub_module, model_type)
                 and hasattr(sub_module, "experts")
                 and PrepareMoEInputsRegistry.match(sub_module.experts) is None
             ):
@@ -241,12 +249,17 @@ class LayerwiseExporter:
             if idx is not None:
                 self._layer_names[idx] = name
 
-        self._ctx = ExportContext(model=model, dtype=_resolve_export_dtype(model, self._dtype))
+        # model_type is threaded in so the per-model spec lookups resolve: this path hands
+        # single decoder layers to helpers that would otherwise try to read config.model_type
+        # off them.
+        self._ctx = ExportContext(
+            model=model, dtype=_resolve_export_dtype(model, self._dtype), model_type=model_type
+        )
         # get_quant_config reports on the quantizer modules, which export_layer replaces as
         # it goes, so by finalize() the model would look unquantized.
         self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
-        self._kv_cache_format = self._quant_config["quantization"]["kv_cache_quant_algo"]
+        self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
 
         self._name_mapper = None
         try:
@@ -291,7 +304,9 @@ class LayerwiseExporter:
 
         # Order matters at both seams: scales derive from amax, so they must be final
         # before packing, and the restack consumes packed per-expert tensors.
-        _prepare_moe_inputs(layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora)
+        _prepare_moe_inputs(
+            layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora, self._ctx.model_type
+        )
         self._unify_shared_quantization_params(layer_module, layer_inputs)
 
         for sub_name, sub_mod in layer_module.named_modules():
@@ -318,7 +333,7 @@ class LayerwiseExporter:
         # FP8-attention/NVFP4-expert layer would report fp8 and skip fusing entirely.
         if _module_formats(layer_module) - FUSION_FREE_FORMATS:
             self._fuse_shared_input_scales(layer_module, layer_inputs)
-        sync_moe_gate_up_amax(layer_module)
+        sync_moe_gate_up_amax(layer_module, self._ctx.model_type)
 
     def _fuse_shared_input_scales(self, layer_module: nn.Module, layer_inputs: list | None) -> None:
         """Rediscover the groups that share an input, on real activations, and fuse them."""
@@ -365,7 +380,7 @@ class LayerwiseExporter:
             with contextlib.suppress(Exception):
                 revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
 
-        name_to_module = dict(model.named_modules())
+        names = module_name_maps(model)
         # Recomputed, not snapshotted in __init__: calibration adds modules inside the
         # layers (SharedQuantState), and a stale set would leave them to the tail pass.
         decoder_owned_ids = {id(m) for layer in self._layers for m in layer.modules()}
@@ -381,9 +396,9 @@ class LayerwiseExporter:
         for name, module in model.named_modules():
             if id(module) in decoder_owned_ids:
                 continue
-            if not requires_weight_materialization(module, model, name_to_module):
+            if not requires_weight_materialization(module, model, names):
                 continue
-            with enable_weight_access_and_writeback(module, model, name_to_module, writeback=False):
+            with enable_weight_access_and_writeback(module, model, names, writeback=False):
                 for sub_name, sub_mod in module.named_modules():
                     full_name = f"{name}.{sub_name}" if sub_name else name
                     _dispatch_export_handler(full_name, sub_mod, self._ctx)

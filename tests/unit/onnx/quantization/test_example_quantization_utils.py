@@ -214,3 +214,21 @@ def test_quantize_vovnet_preserves_source_model(tmp_path, monkeypatch):
     assert weights_path.read_bytes() == weight_bytes
     assert not temporary_paths[0].exists()
     assert (tmp_path / "quantized.onnx").read_bytes() == b"quantized"
+
+
+def test_quantize_vovnet_rejects_source_as_output(tmp_path, monkeypatch):
+    model_path = tmp_path / "model.onnx"
+    model_path.touch()
+    monkeypatch.setattr(
+        quantize_vovnet,
+        "parse_args",
+        lambda: SimpleNamespace(
+            onnx_path=str(model_path),
+            calibration_dir=tmp_path,
+            precision="int8",
+            output=str(model_path),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Output path must differ"):
+        quantize_vovnet.main()

@@ -779,7 +779,6 @@ def quantize(
         )
 
     if calibration_data_reader is None:
-        # Use random scales if calibration data is not supplied
         if calibration_data is None:
             calibration_data_reader = RandomDataProvider(onnx_path, calibration_shapes)
         else:

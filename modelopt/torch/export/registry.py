@@ -54,6 +54,10 @@ class ExportContext:
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
+    model_type: str | None = None
+    """The model's HF model type (``model.config.model_type``), used to resolve the
+    model's spec in ``modelopt.torch.models``. ``None`` means unknown: spec lookups then
+    fail loudly instead of guessing."""
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
