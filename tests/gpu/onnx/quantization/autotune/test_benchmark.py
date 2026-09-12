@@ -193,7 +193,7 @@ def test_trtexec_run_returns_parsed_latency(trtexec_bench, tmp_path):
 
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = "[I] Latency: min = 2.50 ms, max = 4.00 ms, median = 3.14 ms"
+    mock_result.stdout = "[I] GPU Compute Time: min = 2.50 ms, max = 4.00 ms, median = 3.14 ms"
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):
@@ -211,7 +211,7 @@ def test_trtexec_run_returns_inf_when_binary_not_found(trtexec_bench, tmp_path):
 def test_trtexec_run_accepts_bytes_input(trtexec_bench):
     mock_result = MagicMock()
     mock_result.returncode = 0
-    mock_result.stdout = "[I] Latency: min = 4.00 ms, max = 6.00 ms, median = 5.00 ms"
+    mock_result.stdout = "[I] GPU Compute Time: min = 4.00 ms, max = 6.00 ms, median = 5.00 ms"
     mock_result.stderr = ""
 
     with patch("subprocess.run", return_value=mock_result):

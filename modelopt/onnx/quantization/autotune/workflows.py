@@ -88,6 +88,8 @@ def init_benchmark_instance(
     warmup_runs: int = 5,
     timing_runs: int = 20,
     trtexec_args: list[str] | None = None,
+    network_timeout_minutes: int = 10,
+    remote_engine_path: str | None = None,
 ):
     """Initialize global TensorRT benchmark instance for model performance measurement.
 
@@ -104,6 +106,11 @@ def init_benchmark_instance(
                     Higher values give more stable median (default: 20)
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
+        network_timeout_minutes: Timeout for network commands in minutes, e.g. scp uploads.
+        remote_engine_path: Path on the remote device for the temporary TRT engine used during
+                           remote autotuning. If None (default), a unique per-run filename is
+                           generated automatically to avoid collisions when multiple users share
+                           the same remote device.
     """
     global _benchmark_instance
     try:
@@ -114,6 +121,8 @@ def init_benchmark_instance(
                 timing_runs=timing_runs,
                 plugin_libraries=plugin_libraries,
                 trtexec_args=trtexec_args,
+                network_timeout_seconds=network_timeout_minutes * 60,
+                remote_engine_path=remote_engine_path,
             )
             logger.info("Trtexec benchmark initialized")
         else:
