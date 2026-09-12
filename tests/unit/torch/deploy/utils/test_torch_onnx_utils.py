@@ -67,6 +67,11 @@ class _FP8ModelWithBuffer(nn.Sequential):
         return super().forward(inputs) + self.fp32_buffer
 
 
+class _PythonScalarArgs(nn.Module):
+    def forward(self, x, flag: bool = True, count: int = 2, scale: float = 1.5):
+        return x * scale + count if flag else x / scale - count
+
+
 def _make_fp8_model(source_dtype, kind="fp8"):
     if kind == "format":
         model = nn.Sequential(*(nn.Linear(128, 128, bias=False) for _ in range(2)))
@@ -130,7 +135,9 @@ def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
         args = model.get_args()
 
         with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
-            onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
+            onnx_bytes, _ = get_onnx_bytes_and_metadata(
+                model, args, dynamo_export=True, onnx_opset=21
+            )
             onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
             model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
 
@@ -139,6 +146,25 @@ def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
 
         assert model_bytes != b""
         assert onnx.load_model_from_string(model_bytes)
+
+
+def test_onnx_export_explicit_python_scalars():
+    payload, _ = get_onnx_bytes_and_metadata(
+        _PythonScalarArgs().eval(),
+        (torch.ones(1), False, 3, 2.5),
+        dynamo_export=True,
+        onnx_opset=21,
+    )
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+
+    onnx.checker.check_model(exported)
+    assert [value.name for value in exported.graph.input] == ["x"]
+    assert [node.op_type for node in exported.graph.node if node.op_type in {"Div", "Sub"}] == [
+        "Div",
+        "Sub",
+    ]
 
 
 @pytest.mark.parametrize("model", deploy_benchmark_all.values(), ids=deploy_benchmark_all.keys())
