@@ -146,7 +146,7 @@ pipeline:
       # k3_causal_*/k3_cmhcfg_*/k3_nativevllm_* run). It needs EFA_GRAFT_DIR
       # below -- without the graft createBackend returns NIXL_ERR_NOT_FOUND and
       # the only working alternative is UCX over plain TCP.
-      - DFLASH_TEACHER_SWEEP: "1"
+      - CUDA_LAUNCH_BLOCKING: "1"
       - NIXL_BACKENDS: "LIBFABRIC"
       - FI_PROVIDER: "efa"
       # Where the AWS rdma-core set lives; the wrapper copies it into the image

@@ -262,7 +262,9 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._slot_gen: dict[int, int] = {}
         self._accum_finished: set[str] = set()
         self._oversize_warned = False  # one-shot guard against log spam on oversized prompts
-        self._slotcheck_left = 8  # bounded host-side validation of derived slots
+        self._num_blocks = 0
+        self._firstcap_dumped = False
+        self._slotcheck_left = 8  # bounded deep validation; the cheap bound check is always on
         self._lock = threading.Lock()
         # scheduler state
         self._slot_ctr = 0
@@ -321,6 +323,25 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
         self._planes_dim = planes_dim(kv, n_planes)
         self._cache_block_size = kv.shape[2] if self._planes_dim == 1 else kv.shape[1]
+        self._num_blocks = kv.shape[0]
+        # The block ids we address with come from the scheduler, per kv-cache group. If the
+        # group we picked is not this cache's, its ids index a different (usually much
+        # larger) pool -- and because every group starts allocating from low ids, the first
+        # requests can look fine and only later requests run off the end. Dump what we
+        # resolved so that mismatch is visible at startup rather than as an assert later.
+        for i, g in enumerate(getattr(self._kv_cache_config, "kv_cache_groups", None) or []):
+            spec = g.kv_cache_spec
+            print(
+                f"[HSCONN] kv-cache group {i}: spec={type(spec).__name__} "
+                f"layers={len(g.layer_names)} spec_block_size={getattr(spec, 'block_size', '?')}"
+                f"{'  <-- capturing from this one' if i == self._hs_group else ''}",
+                flush=True,
+            )
+        print(
+            f"[HSCONN] capture cache view {tuple(kv.shape)} planes_dim={self._planes_dim} "
+            f"blocks={self._num_blocks} block_size={self._cache_block_size}",
+            flush=True,
+        )
         self._feat_shape = (
             (kv.shape[1], kv.shape[3]) if self._planes_dim == 1 else tuple(kv.shape[2:])
         )
@@ -457,26 +478,38 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                     f"batch's slot_mapping by position instead would silently read another "
                     f"request's hidden states."
                 )
-            blocks = torch.as_tensor(req.block_ids, dtype=torch.long, device=device)
-            pos = torch.arange(n, device=device)
-            rsm = blocks[pos // block_size] * block_size + (pos % block_size)
-            if self._slotcheck_left > 0:
-                # Every slot derived here must be one the batch is actually writing this
-                # step. Verified on the host for the first few captures so a wrong block
-                # table fails with its numbers attached, rather than as a device-side
-                # assert surfacing inside an unrelated kernel several launches later.
-                # Bounded because torch.isin over the whole batch is not free per step.
-                self._slotcheck_left -= 1
-                if not bool(torch.isin(rsm, slot_mapping).all()):
-                    raise RuntimeError(
-                        f"RdmaHiddenStatesConnector: block-derived slots for {req.req_id} are "
-                        f"not in this step's slot_mapping (n={n}, block_size={block_size}, "
-                        f"blocks={len(req.block_ids)}, first={req.block_ids[:4]}, "
-                        f"slot_mapping[:4]={slot_mapping[:4].tolist()}, "
-                        f"len={slot_mapping.shape[0]}). The hidden-state cache group or its "
-                        f"slot encoding is not what this connector assumes."
-                    )
+            hi = max(req.block_ids)
+            if hi >= self._num_blocks:
+                raise RuntimeError(
+                    f"RdmaHiddenStatesConnector: request {req.req_id} references block {hi} "
+                    f"but the capture cache only has {self._num_blocks} blocks "
+                    f"(group {self._hs_group}, block_size {block_size}, n={n}). The block "
+                    f"ids being handed out are not this cache's."
+                )
             with torch.cuda.stream(cs):
+                # Built HERE, on the stream that consumes them. Built on the default stream
+                # instead they are a cross-stream hazard: nothing orders cs against the
+                # allocation, so the caching allocator can hand their memory to someone else
+                # while cs is still reading, and the resulting garbage indices surface as an
+                # out-of-bounds assert inside whatever kernel happens to run next -- minutes
+                # into a run, not reproducibly, and never pointing at this line. The code
+                # this replaced was safe only incidentally: it sliced vLLM's long-lived
+                # slot_mapping rather than allocating anything.
+                blocks = torch.as_tensor(req.block_ids, dtype=torch.long, device=device)
+                pos = torch.arange(n, device=device)
+                rsm = blocks[pos // block_size] * block_size + (pos % block_size)
+                if self._slotcheck_left > 0:
+                    # Bounded deep check: every derived slot must be one this step actually
+                    # writes. torch.isin over the batch is not free, so only the first few.
+                    self._slotcheck_left -= 1
+                    if not bool(torch.isin(rsm, slot_mapping).all()):
+                        raise RuntimeError(
+                            f"RdmaHiddenStatesConnector: block-derived slots for "
+                            f"{req.req_id} are not in this step's slot_mapping (n={n}, "
+                            f"block_size={block_size}, blocks={len(req.block_ids)}). The "
+                            f"hidden-state cache group or its slot encoding is not what "
+                            f"this connector assumes."
+                        )
                 hs_gpu = extract_from_kv_cache(kv_layer, rsm, n, self._planes_dim)  # [n, *feat]
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
