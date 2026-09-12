@@ -80,7 +80,7 @@ Available skills:
 |---|---|---|
 | `/review-logs` | After job completion/failure | Analyze logs, diagnose failures, JUnit XML |
 | `/wait-for-jobs` | After detached submission | Poll experiment status |
-| `/eagle3-new-model` | Adding a new EAGLE3 model | Generate pipeline YAML |
+| `/speculative-decoding` | Draft-model pipeline work (EAGLE3, DFlash, …) | Configure a new model, review logs, triage, validate |
 
 ## CI Integration
 
