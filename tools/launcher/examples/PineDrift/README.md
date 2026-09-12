@@ -60,7 +60,7 @@ The fp32 gap is half an ulp — `_SoftCappedLMHead` computes in fp32 and casts b
 the head dtype on purpose, so a `[seq, 202048]` fp32 logit tensor does not dominate
 activation memory.
 
-## The capture bug this harness was built blind to (fixed 2026-09-12, `33bea53ac`)
+## The capture bug this harness was built blind to (fixed 2026-09-12, `33bea53ac` + `18a650988`)
 
 For every run before this commit, the drafter trained on hidden states belonging to
 **other requests**. `save_kv_layer` walked the batch's `slot_mapping` with a running
@@ -92,6 +92,55 @@ Three things worth keeping:
 - **`teacher_top1_match` is what surfaced this.** Without a target-side ceiling to read
   the draft against, the only symptom is "accuracy seems a bit low", which looks exactly
   like a hyperparameter problem. Loss goes down the whole time.
+
+### The second bug, introduced by the first fix (`18a650988`)
+
+Addressing each request's own blocks means building index tensors. The first version
+built them on the default stream and consumed them inside `with torch.cuda.stream(cs)`.
+Nothing orders the copy stream against that allocation, so the caching allocator is free
+to hand the memory to another consumer while the copy stream is still reading it. The
+garbage indices then trip an out-of-bounds assert **inside whatever kernel runs next** —
+tens of minutes into a run, not reproducibly, and never pointing at the line responsible.
+
+Two submissions died this way. What identified it was setting `CUDA_LAUNCH_BLOCKING=1`,
+which serialises the streams: the same code then ran clean for 45 minutes. Building the
+tensors inside the stream context fixes it.
+
+The code this replaced was safe only incidentally — it sliced vLLM's long-lived
+`slot_mapping` instead of allocating anything of its own.
+
+### `logger.info` from this connector goes nowhere
+
+vLLM never configures this module's logger. Every `logger.info` in
+`rdma_hidden_states_connector.py` has always been invisible, including the line that
+reports the cache layout. Three debugging rounds were spent reasoning about numbers that
+were being printed to nobody. The diagnostics now use `print(..., flush=True)`.
+
+The first thing they revealed, which no amount of reading had:
+
+    [HSCONN] kv-cache group 0: spec=SlidingWindowSpec   layers=16 spec_block_size=256
+    [HSCONN] kv-cache group 1: spec=SlidingWindowSpec   layers=15 spec_block_size=256
+    [HSCONN] kv-cache group 2: spec=SlidingWindowSpec   layers=15 spec_block_size=256
+    [HSCONN] kv-cache group 3: spec=FullAttentionSpec   layers=16 spec_block_size=256
+    [HSCONN] kv-cache group 4: spec=HiddenStateCacheSpec layers=1 spec_block_size=1  <-- ours
+    [HSCONN] capture cache view (76920, 6, 1, 8192) planes_dim=1 blocks=76920 block_size=1
+
+**The capture cache has `block_size=1`** — one block per token, so a slot id *is* a block
+id. That also rules out the group-mismatch theory this was chasing at the time: there is
+exactly one `HiddenStateCacheSpec` group and it is the one being used.
+
+### What the drafter was actually worth, before the fix
+
+The `ckpt33500` export was served under vLLM (`num_speculative_tokens=4`, 1129 drafts):
+
+    ACCEPTANCE LENGTH        1.8131
+    per-position acceptance  0.4632 / 0.2037 / 0.1001 / 0.0461
+
+Two calibration facts fall out. The training per-position accuracy tracks the served
+acceptance from position 2 on, so it is a usable proxy. But the "implied AL" read off it
+(1 + the running product of the marginals) gives 1.26 against a measured 1.81: the
+selector, not the backbone argmax, picks the token at serve time, and acceptance at
+successive positions is positively correlated. Treat implied AL as a lower bound.
 
 ## Teacher-side diagnostics
 
