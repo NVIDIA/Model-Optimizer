@@ -15,6 +15,7 @@
 
 import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
@@ -2746,3 +2747,83 @@ def test_loop_subgraph_high_precision_capture(
     )
     onnx.checker.check_model(converted_model)
     onnx.shape_inference.infer_shapes(converted_model, strict_mode=True, check_type=True)
+
+
+def test_dynamic_rope_shapes_do_not_alias():
+    """AutoCast must not alias unrelated unknown dimensions with one symbolic name."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 2, "sequence", 64])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 2, "sequence", 64])
+
+    def int64_initializer(name, values):
+        return numpy_helper.from_array(np.array(values, dtype=np.int64), name=name)
+
+    initializers = [
+        int64_initializer("width_index", 3),
+        int64_initializer("two", 2),
+        int64_initializer("unsqueeze_axis", [0]),
+        int64_initializer("zero", [0]),
+        int64_initializer("slice_axis", [3]),
+        numpy_helper.from_array(np.ones((1, 1, 1, 64), dtype=np.float32), name="scale"),
+    ]
+    nodes = [
+        helper.make_node("Shape", ["X"], ["shape"], name="shape"),
+        helper.make_node("Gather", ["shape", "width_index"], ["width"], name="gather_width"),
+        helper.make_node("Div", ["width", "two"], ["half_width"], name="half_width"),
+        helper.make_node("Unsqueeze", ["width", "unsqueeze_axis"], ["width_1d"], name="width_1d"),
+        helper.make_node(
+            "Unsqueeze",
+            ["half_width", "unsqueeze_axis"],
+            ["half_width_1d"],
+            name="half_width_1d",
+        ),
+        helper.make_node(
+            "Slice",
+            ["X", "half_width_1d", "width_1d", "slice_axis"],
+            ["upper_half"],
+            name="slice_upper_half",
+        ),
+        helper.make_node(
+            "Slice",
+            ["X", "zero", "half_width_1d", "slice_axis"],
+            ["lower_half"],
+            name="slice_lower_half",
+        ),
+        helper.make_node("Neg", ["upper_half"], ["negated_half"], name="negate"),
+        helper.make_node(
+            "Concat",
+            ["negated_half", "lower_half"],
+            ["rotated"],
+            name="rotate_half",
+            axis=3,
+        ),
+        helper.make_node("Mul", ["rotated", "scale"], ["Y"], name="rope_mul"),
+    ]
+    value_info = [
+        helper.make_tensor_value_info(name, TensorProto.FLOAT, ["batch", 2, "sequence", width])
+        for name, width in [
+            ("upper_half", 32),
+            ("lower_half", 32),
+            ("negated_half", 32),
+            ("rotated", 64),
+        ]
+    ]
+    graph = helper.make_graph(nodes, "dynamic_rope", [x], [y], initializers, value_info=value_info)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
+
+    converted_model = convert_to_f16(model, keep_io_types=True)
+
+    onnx.checker.check_model(converted_model)
+    assert all(
+        dim.dim_param != "unk"
+        for value in [*converted_model.graph.value_info, *converted_model.graph.output]
+        for dim in value.type.tensor_type.shape.dim
+    )
+    session = ort.InferenceSession(
+        converted_model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    output = session.run(None, {"X": np.ones((1, 2, 5, 64), dtype=np.float32)})[0]
+
+    assert output.shape == (1, 2, 5, 64)
+    np.testing.assert_array_equal(output[..., :32], -1)
+    np.testing.assert_array_equal(output[..., 32:], 1)
