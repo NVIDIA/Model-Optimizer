@@ -37,7 +37,7 @@ Requirements
 Apply Post Training Quantization (PTQ)
 ======================================
 
-PTQ should be done with a calibration dataset. If calibration dataset is not provided, ModelOpt will use random scales for the QDQ nodes.
+PTQ should be done with a calibration dataset. Random calibration inputs are used when no calibration dataset is provided.
 
 Prepare calibration dataset
 ---------------------------

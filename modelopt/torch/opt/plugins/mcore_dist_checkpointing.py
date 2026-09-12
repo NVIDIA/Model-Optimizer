@@ -181,6 +181,10 @@ def _load_extra_state_from_sharded_checkpoint(
             module, "modelopt_set_extra_state_callbacks"
         ):
             module.set_extra_state(extra_state_dict_no_prefix[key])
+    for module in model.modules():
+        post_load_extra_state = getattr(module, "modelopt_post_load_extra_state", None)
+        if callable(post_load_extra_state):
+            post_load_extra_state()
 
 
 def restore_sharded_modelopt_state(

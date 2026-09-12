@@ -55,7 +55,18 @@ def test_autocast_quantize_int8(tmp_path, keep_io_types, bias_add):
     assert os.path.isfile(output_onnx_path)
 
     # Load the output model and check QDQ node placements
-    graph = gs.import_onnx(onnx.load(output_onnx_path))
+    quantized_model = onnx.load(output_onnx_path)
+    graph = gs.import_onnx(quantized_model)
+
+    activation_scale_names = {
+        node.input[1] for node in quantized_model.graph.node if node.op_type == "QuantizeLinear"
+    }
+    activation_scale_types = {
+        initializer.data_type
+        for initializer in quantized_model.graph.initializer
+        if initializer.name in activation_scale_names
+    }
+    assert activation_scale_types == {onnx.TensorProto.FLOAT16}
 
     # Check that all MatMul nodes are quantized
     mm_nodes = [n for n in graph.nodes if n.op == "MatMul"]

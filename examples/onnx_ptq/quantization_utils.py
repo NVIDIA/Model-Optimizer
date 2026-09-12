@@ -13,14 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import onnx
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
-__all__ = ["NpzCalibrationReader", "NpzCalibrationWriter", "find_vovnet_nodes_to_exclude"]
+__all__ = [
+    "NpzCalibrationReader",
+    "NpzCalibrationWriter",
+    "find_vovnet_nodes_to_exclude",
+    "temporary_onnx_copy",
+]
+
+
+@contextlib.contextmanager
+def temporary_onnx_copy(onnx_path):
+    """Yield a sibling copy so relative external-data paths remain valid."""
+    onnx_path = Path(onnx_path)
+    temporary_file = tempfile.NamedTemporaryFile(
+        dir=onnx_path.parent,
+        prefix=f".{onnx_path.stem}.",
+        suffix=onnx_path.suffix,
+        delete=False,
+    )
+    temporary_path = Path(temporary_file.name)
+    temporary_file.close()
+    try:
+        shutil.copyfile(onnx_path, temporary_path)
+        yield temporary_path
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _onnx_input_specs(onnx_path):
