@@ -28,7 +28,7 @@ NVFP4 represents each group of 16 weights with FP4 values and an FP8 block
 scale [1]_. This block scale is used to scale the per-block values so to NVFP4 E2M1 range (-6.0, 6.0).
 The default way is to set the block scale based on the per-block maximum value (max scaling) [1]_.
 
-As shown, originally in 'Four-Over-Six' paper [3]_, this block scale can be selected based on other 
+As shown, originally in 'Four-Over-Six' paper [2]_, this block scale can be selected based on other 
 critieria like per-block error. While 'Four-Over-Six' selects the per-block scale from  2 candidates while 
 `Model-Optimizer Mean Square Error (MSE) <https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.mse_calibrate>`_ algorithm sets this based on exhuastive sweep over all positive and non-zero FP8 
 scales (126 values).
@@ -157,7 +157,7 @@ weight and activation quantization (W4A4).
 Local-Hessian + GPTQ Accuracy
 =============================
 
-Local Hessian changes scales; GPTQ [2]_ changes weight rounding to
+Local Hessian changes scales; GPTQ [3]_ changes weight rounding to
 minimize per-layer output error. The two are orthogonal, so they
 compose: Local Hessian rounds to nearest (RTN) by default, and GPTQ can
 replace that rounding step once the scales are set. In Table 2, we show
@@ -221,7 +221,14 @@ To use it in your own configuration, set the ``algorithm`` field:
 
    config = {
        "quant_cfg": [...],  # quantizer configuration
-       "algorithm": {"method": "local_hessian", "fp8_scale_sweep": True},
+       "algorithm": {
+           "method": "local_hessian",
+           "fp8_scale_sweep": True,
+           "layerwise": {
+               "enable": True,
+               "get_qdq_activations_from_prev_layer": True,
+           },
+       },
    }
 
    model = mtq.quantize(model, config, forward_loop)
@@ -241,8 +248,19 @@ To reproduce the published Qwen3.8-27B checkpoint end to end:
        --batch_size 1 \
        --export_path <export_dir>
 
-Batch size 1 keeps padding tokens from polluting the output error
-statistics used by Local Hessian and GPTQ.
+.. note::
+
+   We use layerwise calibration: layers are calibrated one at a time.
+   The first layer is quantized and calibrated, its outputs are then
+   collected with fake quantization applied, and those activations feed
+   the next layer. Each layer therefore calibrates on the input
+   distribution it will actually see at deployment.
+
+.. note::
+
+   We set batch size 1 for calibration that depends on activation
+   statistics -- Local Hessian, GPTQ and similar -- so that padding
+   tokens do not contaminate those statistics.
 
 
 Next steps
@@ -251,31 +269,6 @@ Next steps
 - **Adapt Local Hessian for sparse MoEs.** Many experts in a sparse MoE
   see very little calibration data. Local-Hessian workflow needs to be adapted to that
   low-data regime.
-
-Bitter Lesson: Best Method - It Depends!
-****************************************************************
-
-We, the Model Optimizer team, have quantized over 80 models, all available in
-the `Inference Optimized Checkpoints (with Model Optimizer)
-<https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer>`_
-collection.
-
-Building checkpoints for various models and evaluating them teaches this
-bitter lesson: the best algorithm can change with the model, the
-calibration dataset, and sometimes the evaluation.
-
-Local Hessian gives the best accuracy recovery overall in our internal
-evaluations on small dense models. However, the winning
-algorithm/combination might change depending on the model. On
-Qwen3.5-9B, Local Hessian + GPTQ came out ahead; on Qwen3.8-27B, plain
-RTN rounding beat GPTQ on top of the same scales. Scale selection is the
-reliable part; what you pair it with is not.
-
-What matters more than any single algorithm is a place to build
-quantized checkpoints, evaluate them (see our agentic skills for
-frontier evaluation), and iterate quickly. Model Optimizer is that
-one-stop shop for inference optimization, and Local Hessian is one more
-useful lever in the loop.
 
 .. _local-hessian-references:
 
@@ -286,10 +279,10 @@ References
    and K. Aubrey. `Introducing NVFP4 for Efficient and Accurate Low-Precision
    Inference <https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/>`_.
    NVIDIA Technical Blog, 2025.
-.. [2] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh. `GPTQ: Accurate
-   Post-Training Quantization for Generative Pre-trained Transformers
-   <https://arxiv.org/abs/2210.17323>`_. ICLR, 2023.
-.. [3] J. Cook, J. Guo, G. Xiao, Y. Lin, K. Wyss, M. Nazemi, A. Mishra,
+.. [2] J. Cook, J. Guo, G. Xiao, Y. Lin, K. Wyss, M. Nazemi, A. Mishra,
    C. del Mundo, T. Blankevoort, and S. Han. `Four Over Six: More Accurate
    NVFP4 Quantization with Adaptive Block Scaling
    <https://arxiv.org/abs/2512.02010>`_. arXiv:2512.02010, 2025.
+.. [3] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh. `GPTQ: Accurate
+   Post-Training Quantization for Generative Pre-trained Transformers
+   <https://arxiv.org/abs/2210.17323>`_. ICLR, 2023.
