@@ -4,16 +4,34 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-The general fakequant example is tested with vLLM 0.9.0, 0.19.1, and 0.26.0. The compact
-NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
+The general fakequant example is tested with vLLM 0.9.0, 0.19.1, 0.26.0, and 0.28.0. The
+compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment
 
-Follow the following instruction to build a docker environment, or install vllm with pip.
+Use the Dockerfile to build an environment with vLLM 0.28.0:
 
 ```bash
-docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt .
+docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.28.0 .
 ```
+
+To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
+
+```bash
+docker build --build-arg VLLM_VERSION=0.26.0 \
+  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.26.0 .
+```
+
+For a direct installation from the ModelOpt repository root, install the tested vLLM
+release and the ModelOpt extras used by this example:
+
+```bash
+python3 -m pip install "vllm==0.28.0"
+python3 -m pip install -e ".[all,mlflow]"
+```
+
+See the [ModelOpt installation guide](../../docs/source/getting_started/_installation_for_Linux.rst)
+for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
@@ -38,6 +56,18 @@ Step 2: Run the following command, with all supported flag as `vllm serve`:
 ```bash
 python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
+
+Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0 and
+0.28.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
+
+```bash
+KV_QUANT_CFG=NVFP4_KV_CFG QUANT_CALIB_SIZE=512 \
+  python vllm_serve_fakequant.py <nemotron3_nano_model_path> -tp 8 \
+  --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000
+```
+
+Calibration uses dedicated scratch KV-cache blocks, so reducing `--max-num-batched-tokens`
+is not required to avoid NaNs.
 
 For vLLM versions that expose `--moe-backend`, this launcher defaults to `--moe-backend triton`.
 ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are visible during
