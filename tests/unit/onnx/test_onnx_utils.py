@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import os
+import subprocess
 import sys
+import textwrap
 from unittest.mock import Mock
 
 import numpy as np
@@ -36,6 +38,7 @@ import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.quantization.gs_patching import _export_tensor_proto, _export_value_info_proto
 from modelopt.onnx.trt_utils import load_onnx_model
 from modelopt.onnx.utils import (
+    check_model,
     clear_stale_value_info,
     get_input_names_from_bytes,
     get_output_names_from_bytes,
@@ -733,24 +736,70 @@ def test_ir_version_support(tmp_path):
     )
 
 
-@pytest.mark.parametrize("use_external_data_format", [False, True])
-def test_load_onnx_model_with_ort_legacy_op(tmp_path, caplog, use_external_data_format):
+def test_ort_legacy_schema_registration_is_lazy():
+    script = textwrap.dedent(
+        """
+        import onnx
+        from onnx.helper import (
+            make_graph,
+            make_model,
+            make_node,
+            make_opsetid,
+            make_tensor_value_info,
+        )
+
+        import modelopt.onnx.utils as onnx_utils
+
+        assert onnx_utils._ORT_LEGACY_ONNX_DOMAIN_OPS is None
+        assert not onnx.defs.has("SimplifiedLayerNormalization", 21, "")
+
+        node = make_node("Relu", ["X"], ["Y"])
+        input_value = make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1])
+        output_value = make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1])
+        graph = make_graph([node], "standard_graph", [input_value], [output_value])
+        model = make_model(graph, opset_imports=[make_opsetid("", 21)], ir_version=10)
+
+        onnx_utils.check_model(model)
+
+        assert onnx_utils._ORT_LEGACY_ONNX_DOMAIN_OPS is not None
+        assert onnx.defs.has("SimplifiedLayerNormalization", 21, "")
+        """
+    )
+
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def _make_ort_legacy_op_model(following_nodes=None):
     node = make_node(
         "SimplifiedLayerNormalization",
         ["X", "scale"],
-        ["Y"],
+        ["normalized"],
         name="simplified_layer_norm",
     )
+    following_nodes = following_nodes or []
+    output_name = following_nodes[-1].output[0] if following_nodes else "normalized"
     graph = make_graph(
-        [node],
+        [node, *following_nodes],
         "ort_legacy_op_graph",
         [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])],
-        [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])],
-        [make_tensor("scale", onnx.TensorProto.FLOAT, [4], [1.0] * 4)],
+        [make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, [1, 4])],
+        [onnx.numpy_helper.from_array(np.ones(4, dtype=np.float32), name="scale")],
     )
-    model = make_model(graph, opset_imports=[make_opsetid("", 21)], ir_version=10)
+    return make_model(graph, opset_imports=[make_opsetid("", 21)], ir_version=10)
+
+
+@pytest.mark.parametrize("use_external_data_format", [False, True])
+def test_load_onnx_model_with_ort_legacy_op(tmp_path, caplog, use_external_data_format):
+    model = _make_ort_legacy_op_model()
     model_path = os.path.join(tmp_path, "ort_legacy_op.onnx")
-    onnx.save(model, model_path)
+    onnx.save_model(
+        model,
+        model_path,
+        save_as_external_data=use_external_data_format,
+        all_tensors_to_one_file=True,
+        location="ort_legacy_op.data",
+        size_threshold=0,
+    )
 
     loaded_model, _, _, _, _ = load_onnx_model(
         model_path, use_external_data_format=use_external_data_format
@@ -758,7 +807,59 @@ def test_load_onnx_model_with_ort_legacy_op(tmp_path, caplog, use_external_data_
 
     assert loaded_model.graph.node[0].op_type == "SimplifiedLayerNormalization"
     assert loaded_model.graph.node[0].domain == ""
-    assert "ONNX Runtime legacy operator(s)" in caplog.text
+    assert "Model uses ONNX Runtime legacy operator(s)" in caplog.text
+    assert onnx.defs.has("SimplifiedLayerNormalization", 21, "")
+
+
+def test_ort_legacy_op_schema_is_checked():
+    model = _make_ort_legacy_op_model()
+    model.graph.node[0].input.pop()
+
+    with pytest.raises(onnx.checker.ValidationError, match="SimplifiedLayerNormalization"):
+        check_model(model)
+
+    assert onnx.defs.has("SimplifiedLayerNormalization", 21, "")
+
+
+@pytest.mark.parametrize("use_model_path", [False, True])
+def test_ort_legacy_op_does_not_hide_other_validation_errors(tmp_path, use_model_path):
+    invalid_relu = make_node("Relu", ["normalized", "scale"], ["Y"], name="invalid_relu")
+    model = _make_ort_legacy_op_model([invalid_relu])
+    model_path = os.path.join(tmp_path, "invalid_ort_legacy_op.onnx")
+    onnx.save(model, model_path)
+
+    with pytest.raises(onnx.checker.ValidationError, match="Relu"):
+        check_model(model, model_path if use_model_path else None)
+
+    assert model.graph.node[0].domain == ""
+
+
+def test_unknown_default_domain_op_fails_validation():
+    model = _make_ort_legacy_op_model()
+    model.graph.node[0].op_type = "UnknownModelOptOp"
+
+    with pytest.raises(onnx.checker.ValidationError, match="No Op registered"):
+        check_model(model)
+
+
+def test_ort_legacy_op_does_not_hide_missing_external_data(tmp_path):
+    model = _make_ort_legacy_op_model()
+    model_path = os.path.join(tmp_path, "missing_external_data.onnx")
+    data_name = "missing_external_data.bin"
+    onnx.save_model(
+        model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=data_name,
+        size_threshold=0,
+    )
+    os.remove(os.path.join(tmp_path, data_name))
+
+    with pytest.raises(onnx.checker.ValidationError):
+        check_model(model, model_path)
+
+    assert os.listdir(tmp_path) == ["missing_external_data.onnx"]
 
 
 def _make_cast_model(cast_to, output_elem_type, with_value_info=False):

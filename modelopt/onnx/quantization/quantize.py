@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Any
 
 import onnx
-import onnx.onnx_cpp2py_export.checker as C
 import onnx_graphsurgeon as gs
 import onnxslim
 from onnxruntime.quantization.calibrate import CalibrationDataReader
@@ -76,6 +75,7 @@ from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag, load_o
 from modelopt.onnx.utils import (
     BASE_MIN_OPSET,
     QDQ_PRECISION_MIN_OPSET,
+    check_model,
     clear_stale_value_info,
     duplicate_shared_constants,
     get_opset_version,
@@ -960,8 +960,8 @@ def quantize(
     # Check if the quantized model is valid
     try:
         logger.info("Validating quantized model")
-        onnx.checker.check_model(output_path)
-    except C.ValidationError as e:
+        check_model(onnx_model, output_path)
+    except onnx.checker.ValidationError as e:
         logger.warning("ONNX model checker failed, check your deployment status")
         logger.warning(e)
 
