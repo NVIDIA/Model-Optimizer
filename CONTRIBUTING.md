@@ -264,11 +264,8 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 ## Submitting your code
 
 - Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
-- Pull requests from forks require validation before workflows can run on NVIDIA's runners. After reviewing the
-  exact head commit for safe execution, an authorized vetter can start testing by commenting
-  `/ok to test <full-head-sha>` on the pull request. See the copy-PR guidance for
-  [contributors](https://docs.gha-runners.nvidia.com/cpr/contributors) and
-  [vetters](https://docs.gha-runners.nvidia.com/cpr/vetters).
+- Pull requests from forks require approval before running on NVIDIA infrastructure. An authorized vetter can
+  approve the current commit by commenting `/ok to test <full-head-sha>`.
 - If any CI/CD checks fail, fix the issues and push again.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
 - If your PR is a bug fix that should also land in an ongoing release branch, add the
