@@ -109,7 +109,9 @@ def export_onnx(graph: gs.Graph, **kwargs) -> onnx.ModelProto:
             if value_info.name in tensors:
                 exported_graph.value_info.remove(value_info)
     return model
-# Populated permanently by the first call to check_model.
+
+
+# Populated permanently by the first legacy-schema registration.
 _ORT_LEGACY_ONNX_DOMAIN_OPS: frozenset[str] | None = None
 
 
@@ -163,8 +165,8 @@ def _convert_ort_schema(ort_schema: Any) -> onnx.defs.OpSchema:
     )
 
 
-def _register_ort_legacy_schemas() -> frozenset[str]:
-    """Register ORT-only default-domain schemas on the first model check."""
+def register_ort_legacy_schemas() -> frozenset[str]:
+    """Register ORT-only default-domain schemas and return their operator names."""
     global _ORT_LEGACY_ONNX_DOMAIN_OPS
     if _ORT_LEGACY_ONNX_DOMAIN_OPS is not None:
         return _ORT_LEGACY_ONNX_DOMAIN_OPS
@@ -791,8 +793,19 @@ def is_model_too_large_for_protobuf(model: onnx.ModelProto) -> bool:
 
 
 def check_model(model: onnx.ModelProto, model_path: str | None = None) -> None:
-    """Check model structure, including ONNX Runtime legacy operators."""
-    ort_legacy_ops = _register_ort_legacy_schemas()
+    """Check whether a model is structurally valid.
+
+    ONNX Runtime legacy operators registered in the default ONNX domain are
+    accepted by this initial guard. Whether they can execute remains the
+    responsibility of the selected backend.
+
+    Args:
+        model: Loaded in-memory ONNX model. Used for validation unless
+            model_path is supplied and for detecting legacy operators.
+        model_path: Optional file-backed copy to validate. Use this for models
+            with external data or models too large for protobuf serialization.
+    """
+    ort_legacy_ops = register_ort_legacy_schemas()
     legacy_ops = sorted(
         {
             node.op_type

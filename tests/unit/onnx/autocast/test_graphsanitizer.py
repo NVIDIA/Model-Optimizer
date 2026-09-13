@@ -24,6 +24,28 @@ import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 
 
+def test_find_custom_nodes_treats_ort_legacy_op_as_known():
+    """ORT legacy operators should not be treated as TensorRT plugins."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 4])
+    scale = numpy_helper.from_array(np.ones(4, dtype=np.float32), name="scale")
+    node = helper.make_node(
+        "SimplifiedLayerNormalization",
+        ["X", "scale"],
+        ["Y"],
+        name="layer_norm",
+    )
+    graph = helper.make_graph([node], "legacy_op_test", [x], [y], [scale])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    sanitizer = GraphSanitizer(model)
+
+    sanitizer.find_custom_nodes()
+
+    assert sanitizer.custom_ops == set()
+    assert sanitizer.model.graph.node[0].domain == ""
+    assert all(opset.domain != "trt.plugins" for opset in sanitizer.model.opset_import)
+
+
 def create_layernorm_model(input_shape, epsilon=1e-5, axis=-1, add_scale=True, add_bias=True):
     """Helper function to create an ONNX model with a decomposed LayerNorm pattern"""
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, input_shape)

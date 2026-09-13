@@ -61,6 +61,7 @@ class GraphSanitizer:
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.standard_ops = {schema.name for schema in onnx.defs.get_all_schemas()}
+        self.ort_legacy_ops = onnx_utils.register_ort_legacy_schemas()
         self.custom_ops = None
         self.trt_plugin_ops: set[str] = set()
         self.custom_ops_low_precision_nodes = []
@@ -128,7 +129,10 @@ class GraphSanitizer:
         that are not part of the standard ONNX operator set.
         """
         self.custom_ops = {
-            node.op_type for node in self.model.graph.node if node.op_type not in self.standard_ops
+            node.op_type
+            for node in self.model.graph.node
+            if node.op_type not in self.standard_ops
+            and not (not node.domain and node.op_type in self.ort_legacy_ops)
         }
         self.trt_plugin_ops = set()
         if self.custom_ops:
