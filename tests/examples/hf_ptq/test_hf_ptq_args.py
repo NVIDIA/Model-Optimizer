@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import getpass
 import importlib
 import json
@@ -817,3 +818,52 @@ def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp
         pass
 
     assert not (tmp_path / ".experiment.json").exists()
+
+
+# --- flags that --recipe supersedes -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--qformat", "nvfp4"), ("--kv_cache_qformat", "nvfp4")],
+)
+def test_recipe_superseded_flag_warns_when_passed(monkeypatch, flag, value):
+    """Passing one of these must say so; they are slated for removal in favour of --recipe."""
+    with pytest.warns(DeprecationWarning, match=f"{flag} is deprecated"):
+        _, args = _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", flag, value
+        )
+    assert getattr(args, flag.lstrip("-")) == value
+
+
+def test_recipe_superseded_flags_are_silent_when_defaulted(monkeypatch, recwarn):
+    """The defaults quantize (--qformat fp8, --kv_cache_qformat fp8_cast), so warning on every
+    run -- including runs that correctly pass --recipe -- would be pure noise. argparse only
+    invokes an action for options actually present, which is what keeps this quiet."""
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    deprecations = [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+    assert not [w for w in deprecations if "is deprecated" in str(w.message)]
+    # and the defaults themselves are untouched by the deprecation wiring
+    assert args.qformat == "fp8"
+    assert args.kv_cache_qformat == "fp8_cast"
+
+
+def test_recipe_superseded_action_is_wired_to_both_flags(monkeypatch):
+    """Guards against a future edit dropping the action while leaving the help text."""
+    from modelopt.recipe.presets import RecipeSupersededAction
+
+    assert issubclass(RecipeSupersededAction, argparse.Action)
+
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--pyt_ckpt_path", "/models/Qwen3-0.6B"])
+    parser = argparse.ArgumentParser()
+    # rebuild by introspecting the real parser hf_ptq.parse_args() constructs
+    import inspect
+
+    src = inspect.getsource(hf_ptq.parse_args)
+    for flag in ("--qformat", "--kv_cache_qformat"):
+        block = src[src.index(f'"{flag}",') :]
+        assert "action=RecipeSupersededAction" in block[: block.index(")\n")], (
+            f"{flag} lost its deprecation action"
+        )
+    del parser
