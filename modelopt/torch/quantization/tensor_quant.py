@@ -320,7 +320,7 @@ class FakeTensorQuantFunction(Function):
     """Fake version of TensorQuantFunction use CUDA extension."""
 
     @staticmethod
-    @symbolic_helper.parse_args("v", "t", "t", "i", "b", "b", "s", "b", "i", "i")
+    @symbolic_helper.parse_args("v", "t", "t", "i", "b", "b", "s", "b", "i", "i", "s")
     def symbolic(
         g,
         inputs,
@@ -333,6 +333,7 @@ class FakeTensorQuantFunction(Function):
         pass_through_bwd=False,
         block_size=None,
         axis=None,
+        onnx_quantizer_type=None,
     ):
         """ONNX symbolic function."""
         from .export_onnx import export_int4, export_int8
@@ -343,7 +344,14 @@ class FakeTensorQuantFunction(Function):
             )
 
         return export_int8(
-            g, inputs, amax, num_bits, unsigned, narrow_range, trt_high_precision_dtype
+            g,
+            inputs,
+            amax,
+            num_bits,
+            unsigned,
+            narrow_range,
+            trt_high_precision_dtype,
+            onnx_quantizer_type=onnx_quantizer_type,
         )
 
     @staticmethod
@@ -359,6 +367,7 @@ class FakeTensorQuantFunction(Function):
         pass_through_bwd=False,
         block_size=None,
         axis=None,
+        onnx_quantizer_type=None,
     ):
         """Forward method."""
         if bias is not None:
@@ -396,7 +405,7 @@ class FakeTensorQuantFunction(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=10)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=11)
 
 
 class ScaledE4M3Function(Function):
