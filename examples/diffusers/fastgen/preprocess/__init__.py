@@ -34,7 +34,7 @@ try:
     )
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
-        "fastgen preprocessing requires a stock nemo_automodel>=0.4.0,<1.0 install providing "
+        "fastgen preprocessing requires a stock nemo_automodel==0.5.0 install providing "
         "nemo_automodel.components.datasets.diffusion.multi_tier_bucketing. Install the example "
         "dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt\n"

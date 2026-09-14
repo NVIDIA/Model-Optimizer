@@ -18,7 +18,7 @@
 Builds the VAE + text-embed ``.pt`` cache that the DMD2 training dataloader reads, using only
 stock ``nemo_automodel`` (no dependency on the un-packaged AutoModel ``tools/`` tree).
 
-Mirrors ``dmd2_finetune.py``: it puts this example directory on ``sys.path`` so the
+Mirrors ``dmd2/finetune.py``: it puts this example directory on ``sys.path`` so the
 ``preprocess`` package imports cleanly from a source checkout, then dispatches to the vendored
 driver's ``main`` (argparse with ``image`` / ``video`` subcommands; this example uses ``image``
 with ``--processor qwen_image``).
@@ -36,7 +36,7 @@ import os
 import sys
 
 # Make the ``preprocess`` package importable as a top-level package regardless of the current
-# working directory (same seam as dmd2_finetune.py).
+# working directory (same seam as ``dmd2/finetune.py``).
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)

@@ -15,10 +15,9 @@
 
 """Pydantic configuration classes for the fastgen distillation pipelines.
 
-Configurations are layered so a method-specific config (e.g. :class:`DMDConfig`) inherits
-shared diffusion-distillation hyperparameters from :class:`DistillationConfig`. All classes
-inherit :class:`modelopt.torch.opt.config.ModeloptBaseConfig`, which provides torch-safe
-serialization and dict-like iteration.
+Configurations inherit :class:`modelopt.torch.opt.config.ModeloptBaseConfig`, which provides
+torch-safe serialization and dict-like iteration. DMD builds on shared diffusion-distillation
+settings, while PDD exposes only its fixed-grid method settings.
 
 The default values in :class:`DMDConfig` mirror the FastGen Wan 2.2 5B experiment at
 ``FastGen/fastgen/configs/experiments/WanT2V/config_dmd2_wan22_5b.py``.
@@ -26,11 +25,14 @@ The default values in :class:`DMDConfig` mirror the FastGen Wan 2.2 5B experimen
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+
+from .flow_matching import make_shifted_flow_grid
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,6 +41,7 @@ __all__ = [
     "DMDConfig",
     "DistillationConfig",
     "EMAConfig",
+    "PDDConfig",
     "SampleTimestepConfig",
 ]
 
@@ -170,8 +173,7 @@ class EMAConfig(ModeloptBaseConfig):
 class DistillationConfig(ModeloptBaseConfig):
     """Shared hyperparameters for diffusion step-distillation methods.
 
-    Concrete methods subclass this config to add method-specific fields
-    (see :class:`DMDConfig`).
+    DMD subclasses this config to add method-specific fields.
     """
 
     pred_type: PredType = ModeloptField(
@@ -216,6 +218,121 @@ class DistillationConfig(ModeloptBaseConfig):
             " Leave ``None`` when the model wrapper already handles the rescaling internally."
         ),
     )
+
+
+class PDDConfig(ModeloptBaseConfig):
+    """Hyperparameters for Parallel Decoding Distillation (PDD).
+
+    PDD trains one velocity head per interval on a fixed shifted rectified-flow
+    grid. The explicit inference block schedule partitions that same grid; it does
+    not define a second timestep schedule.
+    """
+
+    guidance_scale: float | None = ModeloptField(
+        default=None,
+        title="CFG scale",
+        description="Teacher classifier-free guidance scale. If ``None``, CFG is disabled.",
+    )
+    grid_size: int = ModeloptField(
+        default=128,
+        title="PDD grid size",
+        description="Number of rectified-flow intervals and student output heads.",
+    )
+    grid_max_t: float = ModeloptField(
+        default=0.999,
+        title="PDD grid maximum time",
+        description="Maximum rectified-flow time used to construct the fixed PDD grid.",
+    )
+    flow_shift: float = ModeloptField(
+        default=5.0,
+        title="Rectified-flow grid shift",
+        description="Shift applied to the fixed decreasing rectified-flow grid.",
+    )
+    block_size_min: int = ModeloptField(
+        default=4,
+        title="Minimum training block alignment",
+        description="Alignment of sampled training start indices.",
+    )
+    block_size_max: int = ModeloptField(
+        default=64,
+        title="Maximum trained block size",
+        description="Largest target span sampled during training.",
+    )
+    teacher_integrator: Literal["euler", "midpoint"] = ModeloptField(
+        default="euler",
+        title="Teacher target integrator",
+        description="Integrator used to estimate the teacher mean velocity for an interval.",
+    )
+    inference_blocks: tuple[int, ...] = ModeloptField(
+        default=(32, 32, 32, 32),
+        title="Fused inference block schedule",
+        description="Contiguous interval counts that partition the complete PDD grid.",
+    )
+    data_free: bool = ModeloptField(
+        default=False,
+        title="Data-free training",
+        description=(
+            "Carry student-generated trajectories from fresh noise instead of noising real latents."
+        ),
+    )
+
+    @field_validator("grid_max_t", mode="before")
+    @classmethod
+    def _check_grid_max_t_type(cls, value: object) -> object:
+        if type(value) is not float:
+            raise ValueError(f"grid_max_t must be a float, got {value!r}.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_pdd(self) -> PDDConfig:
+        if self.grid_size <= 0:
+            raise ValueError(f"grid_size must be > 0, got {self.grid_size}.")
+        if not math.isfinite(self.grid_max_t) or not 0.0 < self.grid_max_t <= 1.0:
+            raise ValueError(
+                "grid_max_t must be finite and satisfy 0 < grid_max_t <= 1, got "
+                f"{self.grid_max_t!r}."
+            )
+        if not math.isfinite(self.flow_shift) or self.flow_shift < 1.0:
+            raise ValueError(f"flow_shift must be finite and >= 1, got {self.flow_shift}.")
+        if not 0 < self.block_size_min <= self.block_size_max <= self.grid_size:
+            raise ValueError(
+                "require 0 < block_size_min <= block_size_max <= grid_size, got "
+                f"{self.block_size_min}, {self.block_size_max}, {self.grid_size}."
+            )
+        if self.grid_size % self.block_size_min != 0:
+            raise ValueError(
+                f"grid_size={self.grid_size} must be divisible by "
+                f"block_size_min={self.block_size_min}."
+            )
+        if not self.inference_blocks:
+            raise ValueError("inference_blocks must contain at least one block.")
+        for index, block in enumerate(self.inference_blocks):
+            if block <= 0:
+                raise ValueError(f"inference_blocks[{index}] must be > 0, got {block}.")
+        if sum(self.inference_blocks) != self.grid_size:
+            raise ValueError(
+                f"inference_blocks must sum to grid_size={self.grid_size}, got "
+                f"{sum(self.inference_blocks)}."
+            )
+        try:
+            make_shifted_flow_grid(
+                self.grid_size,
+                self.flow_shift,
+                max_t=self.grid_max_t,
+            )
+        except RuntimeError as error:
+            raise ValueError(
+                "grid_size, grid_max_t, and flow_shift must produce a strictly decreasing "
+                "float32 timestep grid."
+            ) from error
+        return self
+
+    @classmethod
+    def from_yaml(cls, config_file: str | Path) -> PDDConfig:
+        """Construct a :class:`PDDConfig` from a filesystem or built-in YAML file."""
+        from .loader import load_pdd_config
+
+        return load_pdd_config(config_file)
 
 
 class DMDConfig(DistillationConfig):
@@ -305,8 +422,8 @@ class DMDConfig(DistillationConfig):
         """Construct a :class:`DMDConfig` from a YAML file.
 
         Thin wrapper around :func:`modelopt.torch.fastgen.loader.load_dmd_config`.
-        The resolver searches the built-in ``modelopt_recipes/`` package first, then
-        the filesystem. Suffixes (``.yml`` / ``.yaml``) may be omitted.
+        The resolver searches the filesystem first, then the built-in
+        ``modelopt_recipes/`` package. Suffixes (``.yml`` / ``.yaml``) may be omitted.
         """
         # Imported lazily to avoid a circular import between this module and
         # ``modelopt.torch.fastgen.loader`` (which imports :class:`DMDConfig`).

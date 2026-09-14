@@ -40,8 +40,8 @@ from types import SimpleNamespace
 
 import pytest
 
-# Put the example dir on sys.path so ``dmd2_recipe`` imports as a top-level module,
-# exactly as dmd2_finetune.py does (mirrors test_vendored_migration.py).
+# Put the FastGen directory on sys.path so ``dmd2.recipe`` and shared ``fastgen_data`` imports
+# resolve exactly as ``dmd2/finetune.py`` configures them.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
@@ -52,7 +52,7 @@ if str(_FASTGEN_DIR) not in sys.path:
 pytest.importorskip("torch")
 _sampler_mod = pytest.importorskip("nemo_automodel.components.datasets.diffusion.sampler")
 _stateful_dataloader_mod = pytest.importorskip("torchdata.stateful_dataloader")
-dmd2_recipe = pytest.importorskip("dmd2_recipe")
+dmd2_recipe = pytest.importorskip("dmd2.recipe")
 
 SequentialBucketSampler = _sampler_mod.SequentialBucketSampler
 StatefulDataLoader = _stateful_dataloader_mod.StatefulDataLoader
@@ -76,6 +76,12 @@ class _Dataset:
         return int(i)  # identity: the served value IS the global sample index
 
 
+class _RecordingSampler(SequentialBucketSampler):
+    def load_state_dict(self, state_dict):
+        self.loaded_state = dict(state_dict)
+        super().load_state_dict(state_dict)
+
+
 def _build(n, sampler_cls, loader_cls):
     """A real sampler + StatefulDataLoader over one shared synthetic dataset."""
     ds = _Dataset(n)
@@ -91,7 +97,12 @@ def _build(n, sampler_cls, loader_cls):
         num_replicas=1,
         rank=0,
     )
-    loader = loader_cls(ds, batch_sampler=sampler, collate_fn=lambda b: b, num_workers=0)
+    loader = loader_cls(
+        ds,
+        batch_sampler=sampler,
+        collate_fn=lambda b: b,
+        num_workers=0,
+    )
     return sampler, loader
 
 
@@ -129,18 +140,15 @@ def test_resume_rebuild_serves_clean_run_position(monkeypatch, epoch_len, grad_a
 
     # Mid-epoch, epoch-boundary, and cross-epoch resume points (in optimizer steps).
     for global_step in resume_points:
-        sampler, loader = _build(n, SequentialBucketSampler, StatefulDataLoader)
-        # Use a REAL recipe instance (object.__new__ skips __init__) so BaseRecipe.__setattr__
-        # state-tracking is exercised: ``dataloader`` is registered as a tracked key here and the
-        # reset re-assigns it. A plain stub (no __setattr__) misses the "State key 'dataloader'
-        # is already tracked" guard that crashed the real run on resume.
+        sampler, loader = _build(n, _RecordingSampler, StatefulDataLoader)
+        # Use a real recipe instance (object.__new__ skips __init__) so public BaseRecipe state
+        # untracking and normal reassignment are exercised.
         recipe = object.__new__(dmd2_recipe.DMD2DiffusionRecipe)
         recipe.sampler = sampler
         recipe.step_scheduler = SimpleNamespace(
             epoch_len=epoch_len, grad_acc_steps=grad_acc, epoch=0
         )
-        recipe.dataloader = loader  # registers "dataloader" in __state_tracked
-        assert "dataloader" in recipe.__dict__["__state_tracked"]
+        recipe.dataloader = loader
 
         recipe._rebuild_dataloader_for_resume(global_step)  # must not raise "already tracked"
 
@@ -149,11 +157,14 @@ def test_resume_rebuild_serves_clean_run_position(monkeypatch, epoch_len, grad_a
         cur_epoch = global_step // epoch_len
         skip_batches = (global_step % epoch_len) * grad_acc
         assert recipe.step_scheduler.epoch == cur_epoch
-        assert recipe.sampler._batches_to_skip == skip_batches
-        assert "dataloader" in recipe.__dict__["__state_tracked"]  # still tracked after rebuild
+        assert recipe.sampler.loaded_state == {
+            "epoch": cur_epoch,
+            "batches_yielded": skip_batches,
+        }
+        assert recipe.step_scheduler.dataloader is recipe.dataloader
 
         # The real training loop calls ``set_epoch(cur_epoch)`` AFTER the rebuild and BEFORE the
-        # first ``__iter__`` (dmd2_recipe.py). The fix relies on ``set_epoch`` NOT clearing
+        # first ``__iter__`` (``dmd2/recipe.py``). The fix relies on ``set_epoch`` NOT clearing
         # ``_batches_to_skip``; replicate that call here so a future sampler that reset the skip
         # in ``set_epoch`` (silently re-serving from the epoch start) would fail this test.
         recipe.sampler.set_epoch(cur_epoch)
@@ -178,5 +189,5 @@ def test_resume_reset_is_noop_on_fresh_start(monkeypatch):
     recipe._rebuild_dataloader_for_resume(0)
 
     assert recipe.dataloader is loader, "fresh start must not rebuild the dataloader"
-    assert getattr(recipe.sampler, "_batches_to_skip", 0) == 0
+    assert recipe.sampler.state_dict() == {"epoch": 0, "batches_yielded": 0}
     assert recipe.step_scheduler.epoch == 0
