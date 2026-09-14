@@ -158,6 +158,20 @@ div.math span.eqno {
   transform: translateY(-50%);
 }
 
+/* Display equations: shibuya gives `.yue .math-wrapper` a 2rem margin top and
+   bottom, and MathJax adds its own margin on the container inside it. The
+   wrapper sets `overflow-x: auto`, so none of it collapses with the
+   neighbouring paragraph margins and the gap around every equation ends up
+   oversized. Drop the MathJax margin and set the spacing on the wrapper. */
+.yue .math-wrapper {
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+
+.yue .math-wrapper mjx-container[display="true"] {
+  margin: 0;
+}
+
 .yue strong.local-hessian-result {
   color: #76b900;
   font-size: 1.15em;
@@ -173,7 +187,15 @@ div.math span.eqno {
   font-size: 0.75rem;
   line-height: 1.4;
   color: var(--sy-c-light);
-  margin-top: -2.25rem;
+}
+
+/* A `.table-note` right after a table is that table's caption, so pull it up
+   against the table. Shibuya gives `.table-wrapper` a 2rem bottom margin; this
+   margin collapses with the note's own, so the negative value here nets out to
+   a small gap. The `.yue .table-wrapper +` prefix is needed to outrank the
+   theme's paragraph spacing, and keeps figure captions on default spacing. */
+.yue .table-wrapper + p.table-note {
+  margin-top: -1.75rem;
 }
 
 .table-note strong,
