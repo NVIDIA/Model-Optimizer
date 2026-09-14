@@ -234,7 +234,9 @@ Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidi
 > **Two benchmarks need a second model endpoint besides the one under test.** AA-LCR scores answers
 > with a judge (`NS_JUDGE_URL` / `LCR_JUDGE_MODEL_ID`); tau2-bench drives a simulated user
 > (`TAU2_ENDPOINT_URL` / `TAU2_USER_MODEL_ID`). Both read `INFERENCE_API_KEY`, and neither can
-> produce its metric without that endpoint. tau2-bench additionally needs its own **deployment** —
+> produce its metric without that endpoint. Point both at `https://` URLs for the final endpoint:
+> the key rides every request, and a redirect can downgrade it to `http` or send it to another
+> origin. tau2-bench additionally needs its own **deployment** —
 > `--enable-auto-tool-choice --tool-call-parser qwen3_coder` and `--max-num-seqs 16` — which is why
 > it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
 > the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
