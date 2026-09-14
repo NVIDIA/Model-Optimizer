@@ -18,6 +18,7 @@
 import copy
 import fnmatch
 import gc
+import math
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -1089,6 +1090,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)
+                if not math.isfinite(score):
+                    raise ValueError(
+                        f"AutoQuantize: non-finite sensitivity score {score} for '{name}' "
+                        f"with recipe {recipe}. Check the model outputs and gradients during "
+                        "score estimation before retrying the search."
+                    )
                 cost = hparam.get_cost(recipe)
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
