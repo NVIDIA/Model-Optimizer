@@ -111,6 +111,13 @@ class RecipeSupersededAction(argparse.Action):
 
     Handles both value-taking flags and ``store_true`` ones; for the latter pass
     ``nargs=0, const=True``.
+
+    The warning is a ``FutureWarning``, not a ``DeprecationWarning``. Python ignores
+    ``DeprecationWarning`` by default everywhere except ``__main__``, and argparse calls this action
+    from its own module, so the attributed frame is ``argparse`` and the default filters would drop
+    it -- the flag would go on working with nothing said, which defeats the point. ``FutureWarning``
+    is the category Python documents for deprecations aimed at end users, and it is shown by
+    default. (Test suites enable all warnings, so this is invisible in tests either way.)
     """
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -120,7 +127,7 @@ class RecipeSupersededAction(argparse.Action):
             "--recipe with a YAML recipe instead: a recipe carries the quantization config, the "
             "calibration algorithm and the KV-cache setting together, so they cannot drift apart. "
             "See modelopt_recipes/general/ptq/ and modelopt.recipe.",
-            DeprecationWarning,
+            FutureWarning,
             stacklevel=2,
         )
         setattr(namespace, self.dest, self.const if self.nargs == 0 else values)

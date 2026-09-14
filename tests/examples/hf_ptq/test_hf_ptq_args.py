@@ -16,8 +16,10 @@
 import argparse
 import getpass
 import importlib
+import inspect
 import json
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,7 +30,7 @@ from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
-from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 
@@ -829,7 +831,7 @@ def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp
 )
 def test_recipe_superseded_flag_warns_when_passed(monkeypatch, flag, value):
     """Passing one of these must say so; they are slated for removal in favour of --recipe."""
-    with pytest.warns(DeprecationWarning, match=f"{flag} is deprecated"):
+    with pytest.warns(FutureWarning, match=f"{flag} is deprecated"):
         _, args = _parse_hf_ptq_args(
             monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", flag, value
         )
@@ -841,25 +843,69 @@ def test_recipe_superseded_flags_are_silent_when_defaulted(monkeypatch, recwarn)
     run -- including runs that correctly pass --recipe -- would be pure noise. argparse only
     invokes an action for options actually present, which is what keeps this quiet."""
     _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
-    deprecations = [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+    deprecations = [w for w in recwarn if issubclass(w.category, FutureWarning)]
     assert not [w for w in deprecations if "is deprecated" in str(w.message)]
     # and the defaults themselves are untouched by the deprecation wiring
     assert args.qformat == "fp8"
     assert args.kv_cache_qformat == "fp8_cast"
 
 
+def test_superseded_flag_warning_survives_pythons_default_filters(monkeypatch):
+    """The warning has to reach a real CLI user, not just a test run.
+
+    pytest enables every warning, so a category CPython suppresses looks fine here and says nothing
+    in production. ``DeprecationWarning`` is suppressed outside ``__main__``, and argparse invokes
+    the action from its own module -- so this reproduces CPython's default filters and asserts the
+    warning still gets through.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.resetwarnings()
+        # CPython's defaults for the deprecation categories.
+        warnings.filterwarnings("default", category=DeprecationWarning, module="__main__")
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--qformat", "nvfp4"
+        )
+
+    assert [w for w in caught if "--qformat is deprecated" in str(w.message)], (
+        "the deprecation warning is filtered out under Python's default filters, so a CLI user "
+        "would never see it"
+    )
+
+
+def _superseded_flag_parser(**kwargs):
+    """A parser with one flag wired to the action, so the contract is tested where it lives."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--weight_only", action=RecipeSupersededAction, **kwargs)
+    return parser
+
+
+def test_store_true_style_flag_defaults_without_warning():
+    """``nargs=0`` flags default to False and must stay silent -- argparse skips absent options."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args = _superseded_flag_parser(nargs=0, const=True, default=False).parse_args([])
+    assert args.weight_only is False
+    assert not caught
+
+
+def test_store_true_style_flag_stores_const_and_warns():
+    """A ``nargs=0`` flag takes no value, so the action must store ``const``, not ``[]``."""
+    parser = _superseded_flag_parser(nargs=0, const=True, default=False)
+    with pytest.warns(FutureWarning, match="--weight_only is deprecated"):
+        args = parser.parse_args(["--weight_only"])
+    assert args.weight_only is True
+
+
 def test_recipe_superseded_action_is_wired_to_both_flags(monkeypatch):
     """Guards against a future edit dropping the action while leaving the help text."""
-    from modelopt.recipe.presets import RecipeSupersededAction
-
     assert issubclass(RecipeSupersededAction, argparse.Action)
 
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--pyt_ckpt_path", "/models/Qwen3-0.6B"])
     parser = argparse.ArgumentParser()
     # rebuild by introspecting the real parser hf_ptq.parse_args() constructs
-    import inspect
-
     src = inspect.getsource(hf_ptq.parse_args)
     for flag in ("--qformat", "--kv_cache_qformat"):
         block = src[src.index(f'"{flag}",') :]
