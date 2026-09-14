@@ -93,7 +93,9 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
                         "to the new prefix -- the deprecated one will be removed in a future "
                         "release.",
                         FutureWarning,
-                        stacklevel=2,
+                        # Point at the caller of the public ``load_recipe`` (one internal frame
+                        # above this one), the common entry point through which a path arrives.
+                        stacklevel=3,
                     )
                 return candidate
         return Path(rp_str)
