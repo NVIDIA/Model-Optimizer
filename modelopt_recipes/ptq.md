@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 25 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 26 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -38,6 +38,7 @@ supported combinations.
 | `nvfp4_default-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | max |
 | `nvfp4_act_headroom-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | nvfp4_act_headroom |
 | `nvfp4_default-kv_nvfp4_cast` | NVFP4 W4A4, all linears | NVFP4 (constant amax) | max |
+| `nvfp4_default-kv_none-local_hessian` | NVFP4 W4A4 (static W), all linears | none | local Hessian + FP8 sweep |
 | `nvfp4_default-kv_none-gptq` | NVFP4 W4A4 (static W), all linears | none | GPTQ (layerwise) |
 | `nvfp4_mlp_only-kv_fp8` | NVFP4 W4A4, MLP + MoE experts | FP8 (calibrated) | max |
 | `nvfp4_mlp_only-novit-kv_fp8` | NVFP4 W4A4, MLP + MoE experts (VL vision tower excluded) | FP8 (calibrated) | max |
@@ -171,6 +172,11 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   (amax) calibrated as in the default recipes. Costs more calibration time but
   recovers accuracy NVFP4 W4A4 can lose under plain max. Reach for it when a
   `max` recipe regresses.
+- **`local_hessian`** (`nvfp4_default-kv_none-local_hessian`) — searches static
+  NVFP4 weight scales by minimizing output reconstruction error using a local
+  Hessian approximation, with an FP8-scale sweep. It can recover accuracy when
+  plain max calibration regresses, but currently supports only single-rank
+  calibration.
 - **`input_scale1`** (`nvfp4_experts_only_input_scale1-kv_fp8_cast`) — pins the
   expert **activation** per-tensor amax to a constant `2688.0`
   (= E2M1_MAX × E4M3_MAX = 6 × 448) via `constant_amax`, so the exported NVFP4
@@ -389,6 +395,12 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
+- **`models/Qwen/Qwen3.8-27B/ptq/local_hessian_nvfp4_w4a4_mlp_fp8_attn`**
+  reproduces the 5.5-bit NVFP4-max AutoQuantize assignment for `Qwen/Qwen3.8-27B`:
+  MLP projections and `lm_head` use NVFP4 W4A4, self-attention and the large
+  linear-attention projections use FP8 W8A8, and the vision tower, MTP layers,
+  KV cache, and `linear_attn.in_proj_a/b` remain unquantized. Static NVFP4 weight
+  scales use local-Hessian calibration with an FP8-scale sweep.
 - **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
