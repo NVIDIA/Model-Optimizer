@@ -1,0 +1,205 @@
+# DFlash online speculative decoding training for Cosmos3 Nano (multimodal).
+#
+# Unlike the text-only DFlash examples, the draft here is trained on image and
+# video conversations, so the pipeline first synthesizes its own training data.
+#
+# 6-step pipeline:
+#   task_0..2: Prepare prompt shards for three sources (download + reshape)
+#   task_3:    Generate target completions for those shards
+#   task_4:    Merge + deduplicate into one training JSONL
+#   task_5:    Online DFlash training (exports every checkpoint)
+#   task_6:    vLLM smoke test with DFlash speculative decoding
+#
+# Data sources — DFlash learns from the target model's own completions, not from
+# human-written answers, so every source contributes prompts that are replayed
+# through the target:
+#   PAI-Understanding  — representative video usage
+#   VQA v2             — image visual reasoning
+#   Multilingual       — high-quality text prompts
+#   Curated text       — set CURATED_TEXT to a reviewed conversations JSONL to
+#                        add a fourth source (see the recipes README).
+#
+# Cluster-neutral: node counts, container tags and /hf-local paths below are
+# defaults, not requirements. Override per cluster on the command line.
+#
+# Usage:
+#   uv run launch.py --yaml examples/nvidia/Cosmos3-Nano/hf_online_dflash_multimodal.yaml --yes
+
+job_name: Cosmos3-Nano_DFlash_online_multimodal
+pipeline:
+  global_vars:
+    hf_model: /hf-local/nvidia/Cosmos3-Nano
+    data_root: /scratchspace/data
+    train_jsonl: /scratchspace/data/cosmos3_nano_dflash_train.jsonl
+    output_dir: /scratchspace/dflash_cosmos3_nano
+
+  # Steps 1-3: prepare prompt shards. These only download and reshape data — no
+  # GPU work — so they take the smallest allocation the partition allows.
+  task_0:
+    script: common/specdec/multimodal_prepare_shards.sh
+    args:
+      - --dataset pai_understanding
+      - --shard-path <<global_vars.data_root>>/pai_shards
+    environment:
+      - DATA_ROOT: <<global_vars.data_root>>
+      # PAI is sampled by whole shards so task_3 can split them evenly per node.
+      - NUM_GENERATION_SHARDS: "5"
+      - LINES_PER_SHARD: "128"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  task_1:
+    script: common/specdec/multimodal_prepare_shards.sh
+    args:
+      - --dataset vqa_v2
+      - --shard-path <<global_vars.data_root>>/vqa_shards
+    environment:
+      - DATA_ROOT: <<global_vars.data_root>>
+      - NUM_SAMPLES: "20000"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  task_2:
+    script: common/specdec/multimodal_prepare_shards.sh
+    args:
+      - --dataset specdec_multilingual_prompt
+      - --shard-path <<global_vars.data_root>>/text_shards
+    environment:
+      - DATA_ROOT: <<global_vars.data_root>>
+      - LINES_PER_SHARD: "1024"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 4: generate target completions. Shards are split across the allocated
+  # nodes automatically; each node serves the target locally.
+  #
+  # SGLANG_TP_SIZE=1 runs one server per GPU, one temperature each, so a node
+  # sweeps NUM_TEMPERATURES in parallel. Raise TP (and drop NUM_TEMPERATURES to
+  # match) only if the target does not fit on a single GPU.
+  #
+  # Media sources need SGLang's native image/video client; text uses vLLM. Run
+  # this task once per source, overriding --dataset/--shard-path/--output-path
+  # (and --media-root for the media sources).
+  task_3:
+    script: common/specdec/multimodal_synthetic_generation.sh
+    args:
+      - --dataset vqa_v2
+      - --shard-path <<global_vars.data_root>>/vqa_shards
+      - --output-path <<global_vars.data_root>>/vqa_outputs
+      - --media-root <<global_vars.data_root>>/vqa_v2/images
+    environment:
+      - MODEL_PATH: <<global_vars.hf_model>>
+      - SGLANG_TP_SIZE: "1"
+      - NUM_TEMPERATURES: "8"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: lmsysorg/sglang:v0.5.3-cu129
+
+  # Step 5: merge. Media paths are resolved to absolute here, which is why
+  # training below can pass data.vlm_img_dir=/. The temperature sweep emits many
+  # near-identical completions per prompt, so dedup runs over the merged set.
+  task_4:
+    script: common/specdec/merge_dflash_datasets.sh
+    args:
+      - --source pai_understanding=<<global_vars.data_root>>/pai_outputs
+      - --source vqa_v2=<<global_vars.data_root>>/vqa_outputs
+      - --source specdec_multilingual_prompt=<<global_vars.data_root>>/text_outputs
+      - --media-root pai_understanding=<<global_vars.data_root>>/pai_understanding
+      - --media-root vqa_v2=<<global_vars.data_root>>/vqa_v2/images
+      - --output <<global_vars.train_jsonl>>
+      - --jobs 8
+      - --word-overlap 0.90
+      - --overwrite
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 6: online DFlash training. The VLM_* limits below cap text and visual
+  # token growth *before* tokenization; without them a high-resolution video can
+  # expand past training_seq_len, which the collator rejects rather than
+  # silently truncating.
+  task_5:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      # Cosmos3 Nano ships custom modeling code.
+      - model.trust_remote_code=true
+      - data.data_path=<<global_vars.train_jsonl>>
+      # Setting vlm_processor is what selects the multimodal collator.
+      - data.vlm_processor=<<global_vars.hf_model>>
+      # Merge already wrote absolute media paths.
+      - data.vlm_img_dir=/
+      - training.output_dir=<<global_vars.output_dir>>
+      - training.num_train_epochs=25
+      - training.per_device_train_batch_size=1
+      - training.gradient_accumulation_steps=2
+      - training.training_seq_len=16384
+      - training.answer_only_loss=true
+      - training.save_steps=1000
+      - training.save_total_limit=10
+      - training.logging_steps=10
+      - training.dataloader_num_workers=2
+      - training.dataloader_prefetch_factor=2
+      - training.ddp_find_unused_parameters=false
+      # dflash.yaml defaults to tensorboard, which hard-fails if it is absent.
+      - training.report_to=none
+      # training_seq_len must be divisible by dflash_block_size (16384 / 8).
+      - dflash.dflash_block_size=8
+      - dflash.dflash_num_anchors=128
+      - dflash.dflash_loss_objective=decay
+      - dflash.dflash_loss_decay_factor=4
+      # Qwen3-family tokenizer has no mask token; use a reserved vocab slot.
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+      - dflash.dflash_architecture_config.num_attention_heads=32
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.head_dim=128
+      - dflash.dflash_architecture_config.intermediate_size=12288
+      - dflash.dflash_architecture_config.max_position_embeddings=262144
+      - dflash.dflash_architecture_config.rms_norm_eps=1e-06
+      - dflash.dflash_architecture_config.rope_theta=5000000
+    environment:
+      # Per-image and per-video pixel bounds handed to the HF processor.
+      - VLM_MIN_PIXELS: "50176"
+      - VLM_MAX_PIXELS: "802816"
+      - VLM_VIDEO_MIN_PIXELS: "100352"
+      - VLM_VIDEO_MAX_PIXELS: "2097152"
+      # Text caps applied before media placeholders expand into tokens.
+      - VLM_MAX_PROMPT_TOKENS: "8192"
+      - VLM_MAX_ASSISTANT_TOKENS: "2048"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 7: smoke test the exported draft under vLLM.
+  task_6:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: <<global_vars.output_dir>>
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - MIN_ACCEPTANCE_LENGTH: "1.2"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: "vllm/vllm-openai:nightly"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
