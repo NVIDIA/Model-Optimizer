@@ -20,6 +20,72 @@ from abc import ABC, abstractmethod
 import onnx
 
 
+def _sync_initializer_metadata(graph: onnx.GraphProto, tensor: onnx.TensorProto) -> None:
+    """Synchronize declarations for an initializer after changing its type or shape."""
+    tensor_type = onnx.helper.make_tensor_value_info(
+        tensor.name, tensor.data_type, tensor.dims
+    ).type
+    for value_info in (*graph.input, *graph.value_info, *graph.output):
+        if value_info.name == tensor.name:
+            value_info.type.CopyFrom(tensor_type)
+
+
+def _replace_initializer(graph: onnx.GraphProto, tensor: onnx.TensorProto) -> None:
+    """Replace an initializer and synchronize any existing type declarations."""
+    existing = next((item for item in graph.initializer if item.name == tensor.name), None)
+    if existing is None:
+        graph.initializer.append(tensor)
+    else:
+        existing.CopyFrom(tensor)
+
+    _sync_initializer_metadata(graph, tensor)
+
+
+def _materialize_initializer_input(
+    graph: onnx.GraphProto,
+    node: onnx.NodeProto,
+    input_index: int,
+    tensor: onnx.TensorProto,
+) -> None:
+    """Materialize a constant input, splitting shared values per quantized weight."""
+    input_name = node.input[input_index]
+    consumers = [candidate for candidate in graph.node if input_name in candidate.input]
+    producer = next((candidate for candidate in graph.node if input_name in candidate.output), None)
+
+    if len(consumers) > 1:
+        tensor.name = f"{tensor.name}_{node.output[0]}"
+    elif producer is not None and producer.op_type == "Constant":
+        graph.node.remove(producer)
+
+    node.input[input_index] = tensor.name
+    _replace_initializer(graph, tensor)
+
+
+def _single_consumer(consumers, name: str, weight_name: str) -> onnx.NodeProto:
+    matches = consumers.get(name, [])
+    if len(matches) != 1:
+        raise NotImplementedError(
+            f"Unsupported Dynamo quantized weight topology for '{weight_name}': "
+            f"expected one consumer; found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _validate_linear_weight_path(consumers, marker: onnx.NodeProto) -> None:
+    """Require a straight marker-to-MatMul/Gemm weight path."""
+    _single_consumer(consumers, marker.input[0], marker.input[0])
+    value_name = marker.output[0]
+    consumer = _single_consumer(consumers, value_name, marker.input[0])
+    while consumer.op_type in {"Cast", "Transpose"}:
+        value_name = consumer.output[0]
+        consumer = _single_consumer(consumers, value_name, marker.input[0])
+    if consumer.op_type not in {"MatMul", "Gemm"} or consumer.input[1] != value_name:
+        raise NotImplementedError(
+            f"Unsupported Dynamo quantized weight topology for '{marker.input[0]}': "
+            "expected terminal MatMul/Gemm at input 1."
+        )
+
+
 class ONNXQuantExporter(ABC):
     """Base class for ONNX quantizer exporters."""
 

@@ -22,7 +22,15 @@ import torch
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
-def export_to_onnx(model, input_shape, onnx_save_path, device, weights_dtype="fp32"):
+def export_to_onnx(
+    model,
+    input_shape,
+    onnx_save_path,
+    device,
+    weights_dtype="fp32",
+    dynamo_export=False,
+    onnx_opset=20,
+):
     """Export the torch model to ONNX format."""
     # Create input tensor with same precision as model's first parameter
     input_dtype = model.parameters().__next__().dtype
@@ -34,6 +42,8 @@ def export_to_onnx(model, input_shape, onnx_save_path, device, weights_dtype="fp
         dummy_input=(input_tensor,),
         weights_dtype=weights_dtype,
         model_name=model_name,
+        dynamo_export=dynamo_export,
+        onnx_opset=onnx_opset,
     )
     onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
 

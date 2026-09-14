@@ -61,7 +61,7 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
 
-> *Opset 20 is used to export the torch models to ONNX.*
+> *The legacy exporter uses opset 20 by default. Dynamo export requires opset 21 or newer.*
 
 ### Usage
 
@@ -75,6 +75,18 @@ python torch_quant_to_onnx.py \
 Without `--recipe`, `--qformat` selects a quantization preset. Pass a built-in recipe name or YAML
 path to `--recipe` to use a PTQ or AutoQuantize recipe instead. The recipe is authoritative when
 provided, so `--qformat` is ignored.
+
+Opt in to the `torch.export`-based ONNX exporter with opset 21 or newer:
+
+```bash
+python torch_quant_to_onnx.py \
+    --timm_model_name=vit_base_patch16_224 \
+    --qformat=fp8 --onnx_save_path=vit_base_patch16_224.fp8.onnx \
+    --dynamo_export --onnx_opset=24
+```
+
+Dynamo export is limited to canonical Linear, MatMul, or Gemm weight paths. Models containing INT4
+AWQ weights, including AutoQuant selections, must omit `--trt_build`.
 
 Convolutional architectures such as ResNet support only FP8 and INT8 quantization. MXFP8, NVFP4,
 INT4_AWQ, and AutoQuantize are not supported for these models because TensorRT does not provide

@@ -31,7 +31,7 @@ from modelopt.onnx.quantization.quant_utils import (
 )
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
-from .base_exporter import ONNXQuantExporter
+from .base_exporter import ONNXQuantExporter, _validate_linear_weight_path
 
 
 def _cast_fp4(array: np.ndarray) -> np.ndarray:
@@ -138,7 +138,6 @@ def _replace_fp4qdq_with_2dq(
     sw_f32_per_tensor_proto = onnx.numpy_helper.from_array(
         sw_f32_per_tensor, sw_f32_per_tensor_name
     )
-    sw_f8_per_block_proto = onnx.numpy_helper.from_array(sw_f8_per_block, sw_f8_per_block_name)
     sw_f8_per_block_proto = onnx.helper.make_tensor(
         name=sw_f8_per_block_name,
         data_type=onnx_dtype_map["Float8"],
@@ -175,6 +174,7 @@ def _replace_fp4qdq_with_2dq(
         name=weight_name + "_DequantizeLinear_1",
         axis=-1,
         block_size=block_size,
+        domain="trt",
     )
 
     # Add value_info for sw_f32
@@ -205,10 +205,14 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def pre_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-        """Pre-processes the ONNX model for NVFP4 quantization.
+        """Rejects ambiguous weight and marker-output fanout."""
+        tensor_consumers = get_tensor_consumer_nodes(onnx_model.graph)
+        for node in onnx_model.graph.node:
+            if node.op_type != "TRT_FP4QDQ":
+                continue
 
-        This is a no-op for NVFP4 quantization as no pre-processing is needed.
-        """
+            _validate_linear_weight_path(tensor_consumers, node)
+
         return onnx_model
 
     @staticmethod
@@ -351,8 +355,10 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 assert maybe_matmul.op_type == "MatMul"
                 node = maybe_matmul
 
-            # Create Cast nodes for each input of the target node except bias
-            for i, input_name in enumerate(node.input[:2]):
+            # Create Cast nodes for each input of the target node
+            for i, input_name in enumerate(node.input):
+                if not input_name:
+                    continue
                 cast_output_name = cast_output_cache.get((input_name, precision_dtype))
                 if cast_output_name is None:
                     cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
@@ -427,6 +433,10 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.ClearField("initializer")
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
+
+        if fp4_qdq_nodes and not any(opset.domain == "trt" for opset in onnx_model.opset_import):
+            onnx_model.opset_import.append(onnx.helper.make_opsetid("trt", 1))
+            logger.info("Added TensorRT opset import")
 
         utils.topologically_sort_graph_nodes(graph)
 

@@ -20,12 +20,20 @@ import onnx
 from onnx import numpy_helper
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import get_tensor_producer_nodes
+from modelopt.onnx.quantization.graph_utils import (
+    get_tensor_consumer_nodes,
+    get_tensor_producer_nodes,
+)
 from modelopt.onnx.quantization.qdq_utils import _cast_fp8, onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import compute_e8m0, get_amax
 from modelopt.onnx.utils import get_attribute, has_attribute
 
-from .base_exporter import ONNXQuantExporter
+from .base_exporter import (
+    ONNXQuantExporter,
+    _materialize_initializer_input,
+    _replace_initializer,
+    _validate_linear_weight_path,
+)
 
 E8_M0_BIAS = 127
 DEFAULT_BLOCK_SIZE = 32
@@ -34,11 +42,11 @@ DEFAULT_QUANT_AXIS = -1
 
 def _get_weight_dq_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
     """Get weight DequantizeLinear nodes from the graph."""
+    initializer_names = {initializer.name for initializer in graph.initializer}
     return [
         node
         for node in graph.node
-        if node.op_type == "TRT_MXFP8DequantizeLinear"
-        and any(".weight" in inp for inp in node.input)
+        if node.op_type == "TRT_MXFP8DequantizeLinear" and node.input[0] in initializer_names
     ]
 
 
@@ -70,6 +78,10 @@ class MXFP8QuantExporter(ONNXQuantExporter):
     @staticmethod
     def pre_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Pre-processes the ONNX model for MXFP8 quantization."""
+        graph = onnx_model.graph
+        consumer_map = get_tensor_consumer_nodes(graph)
+        for node in _get_weight_dq_nodes(graph):
+            _validate_linear_weight_path(consumer_map, node)
         return onnx_model
 
     @staticmethod
@@ -92,17 +104,16 @@ class MXFP8QuantExporter(ONNXQuantExporter):
             se8m0_fp32 = compute_e8m0(amax, weight.shape, quant_axis, block_size)
             se8m0 = se8m0_fp32.astype(np.uint8)
 
-            # Remove scale producer if it's a Constant node
             scale_name = node.input[1]
-            scale_producer = tensor_producer_map[scale_name]
-            if scale_producer.op_type == "Constant":
-                graph.node.remove(scale_producer)
-
-            # Create and add new scale tensor
-            scale_name_new = scale_name.replace("Constant_output_0", "scale")
-            scale_tensor = onnx.numpy_helper.from_array(se8m0, scale_name_new)
-            graph.initializer.append(scale_tensor)
-            node.input[1] = scale_name_new
+            if scale_name not in initializer_map:
+                scale_producer = tensor_producer_map.get(scale_name)
+                if scale_producer is None or scale_producer.op_type != "Constant":
+                    raise NotImplementedError(
+                        f"Unsupported Dynamo MXFP8 weight '{weight_name}': scale must be constant."
+                    )
+                scale_name = scale_name.replace("Constant_output_0", "scale")
+            scale_tensor = onnx.numpy_helper.from_array(se8m0, scale_name)
+            _materialize_initializer_input(graph, node, 1, scale_tensor)
 
         return onnx_model
 
@@ -137,7 +148,7 @@ class MXFP8QuantExporter(ONNXQuantExporter):
                 vals=_cast_fp8(scaled_weight).tobytes(),
                 raw=True,
             )
-            initializer_map[weight_name].CopyFrom(weights_e4m3)
+            _replace_initializer(graph, weights_e4m3)
             logger.debug(f"Converted {weight_name} to MXFP8")
 
         return onnx_model

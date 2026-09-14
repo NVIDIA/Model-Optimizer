@@ -40,6 +40,7 @@ Changelog
 
 *Quantization*
 
+- Add opt-in Dynamo ONNX export through ``get_onnx_bytes_and_metadata(..., dynamo_export=True, onnx_opset=21)`` for FP8, INT8, INT4 AWQ, MXFP8, NVFP4, and mixed AutoQuant PyTorch models with canonical Linear, MatMul, or Gemm weight paths. The legacy exporter remains the default.
 - ONNX quantization with Autotune now benchmarks placements in the requested runtime precision and retains calibrated INT8/FP8 Q/DQ only when it meets the configured TensorRT speedup threshold (1.02x by default); otherwise it saves the high-precision no-Q/DQ model.
 - Add a Muse Glimmer AutoQuantize recipe that searches language-model MLP projections, self-attention projections, and ``lm_head`` over W4A16 NVFP4 Four-Over-Six, FP8, and BF16 fallback at 5.5 effective bits while leaving the vision tower unquantized.
 - Add ``examples/alpamayo/qad.py``, which runs quantization-aware distillation on the quantized Alpamayo checkpoint produced by ``examples/alpamayo/quantize.py``. It distills the quantized VLM against the original FP16 VLM with ``QADTrainer``, supports FSDP2 for multi-GPU runs, and ``--export`` reassembles the trained VLM into a full AlpamayoR1 checkpoint that ``AlpamayoR1.from_pretrained`` can reload.
