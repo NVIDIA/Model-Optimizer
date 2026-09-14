@@ -72,6 +72,7 @@ from modelopt.torch.quantization.utils import (
     quantizer_attr_names,
 )
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 from modelopt.torch.utils.perf import maybe_clear_cuda_cache
@@ -898,22 +899,6 @@ def _prepare_moe_inputs(
             handler(name, sub_module, prepare_ctx)
 
 
-def _add_mtp_exclusions(model: nn.Module, quant_config: dict) -> None:
-    """Add MTP layer prefixes to exclude_modules if they were excluded from quantization.
-
-    This ensures they appear in ``quantization_config["ignore"]`` in ``config.json``.
-    """
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if mtp_layer_prefixes:
-        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
-        for prefix in mtp_layer_prefixes:
-            # Add wildcard pattern to exclude all submodules under this MTP layer
-            pattern = f"{prefix}*"
-            if pattern not in exclude_modules:
-                exclude_modules.append(pattern)
-                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
-
-
 def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
     """Safety net for gate/up weight quantizer amaxes that resmoothing did not reach.
 
@@ -996,8 +981,6 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
         pass  # no accelerate installed → no offload hooks exist to remove
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
-
-    _add_mtp_exclusions(model, quant_config)
 
     _warn_on_unsynced_moe_gate_up(model)
 
@@ -1605,6 +1588,71 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
+def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Read back checkpoint weights the model never loaded, so the export stays complete.
+
+    A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
+    tower -- which means quantization never sees them and they would be missing from the exported
+    checkpoint unless they are copied across verbatim. ``parallel_load_and_prepare_fsdp2`` records
+    which keys those were (:attr:`_modelopt_unplaced_source_keys`) and where they came from; this
+    reads them on demand rather than holding them in memory from load to export.
+
+    Deliberately architecture-agnostic: the question asked at load time was "does the model have a
+    parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
+    load is carried through. Returns an empty dict when the model was not loaded that way.
+
+    Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
+    the rest of the weights are already correct.
+    """
+    keys = getattr(model, "_modelopt_unplaced_source_keys", None)
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
+    try:
+        from safetensors import safe_open
+
+        from modelopt.torch.utils.plugins.model_load_utils import (
+            unplaced_source_keys,
+            weight_map_for,
+        )
+
+        if keys is None:
+            # Not loaded by the sharded loader (plain from_pretrained, or a caller-built model), so
+            # nothing was recorded. Fall back to the model's own provenance and ask the same
+            # question directly. `keys is None` rather than `not keys`: a loader that recorded an
+            # EMPTY list has already answered, and re-deriving would be wasted work.
+            ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
+            if not ckpt or not Path(ckpt).is_dir():
+                # A hub id rather than a local path, or no provenance at all -- nothing to read.
+                return {}
+            keys = unplaced_source_keys(model, ckpt)
+        if not keys or not ckpt:
+            return {}
+
+        weight_map = weight_map_for(ckpt)
+        by_file: dict[str, list[str]] = {}
+        for k in keys:
+            shard = weight_map.get(k)
+            if shard is not None:
+                by_file.setdefault(shard, []).append(k)
+
+        out: dict[str, torch.Tensor] = {}
+        for shard, shard_keys in by_file.items():
+            with safe_open(str(Path(ckpt) / shard), framework="pt") as f:
+                for k in shard_keys:
+                    out[k] = f.get_tensor(k)
+    except Exception as exc:
+        warnings.warn(
+            f"Could not copy {len(keys)} unplaced source weight(s) into the export ({exc}); "
+            "the checkpoint will be missing them."
+        )
+        return {}
+    if out:
+        print_rank_0(
+            f"Carrying {len(out)} source weight(s) the model never loaded into the export "
+            f"(e.g. {min(out)})"
+        )
+    return out
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1664,6 +1712,14 @@ def export_hf_checkpoint(
             **kwargs,
         )
         return
+
+    # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
+    # source so the exported checkpoint is the complete model. Merged here, ahead of the path
+    # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
+    # wins on conflict: the caller asked for that tensor by name.
+    _carried = _carry_over_unplaced_source_weights(model)
+    if _carried:
+        extra_state_dict = {**_carried, **(extra_state_dict or {})}
 
     is_fsdp2_sharded = (
         torch.distributed.is_available()

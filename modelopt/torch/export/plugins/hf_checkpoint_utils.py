@@ -18,6 +18,7 @@
 import fnmatch
 import json
 import os
+import re
 import shutil
 import warnings
 from collections.abc import Iterable
@@ -42,20 +43,6 @@ def _as_nonnegative_int(value: Any) -> int | None:
     return None
 
 
-def _count_mtp_layer_prefixes(prefixes: list[Any] | tuple[Any, ...]) -> int | None:
-    """Count actual MTP layer prefixes, excluding broad prefixes like ``mtp``."""
-    layer_prefixes = {
-        prefix
-        for prefix in prefixes
-        if isinstance(prefix, str)
-        and (parts := prefix.split("."))
-        and len(parts) >= 2
-        and parts[-2] == "layers"
-        and parts[-1].isdigit()
-    }
-    return len(layer_prefixes) or None
-
-
 def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> int | None:
     """Get the number of next-token-prediction layers from config metadata."""
     num_nextn_predict_layers = _as_nonnegative_int(config_data.get("num_nextn_predict_layers"))
@@ -69,10 +56,6 @@ def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> in
         )
         if num_nextn_predict_layers is not None:
             return num_nextn_predict_layers
-
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if isinstance(mtp_layer_prefixes, (list, tuple)):
-        return _count_mtp_layer_prefixes(mtp_layer_prefixes)
 
     return None
 
@@ -305,6 +288,10 @@ def load_multimodal_components(
 
 def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(file_name, pattern) for pattern in patterns)
+
+
+# Standard HF weight-file names: ``model.safetensors`` or ``model-00001-of-00005.safetensors``.
+_IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
 
 
 def copy_non_safetensor_files_from_ckpt(
