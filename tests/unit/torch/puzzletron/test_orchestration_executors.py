@@ -1570,6 +1570,11 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
+    assert [attempt.command.env["PUZZLETRON_WORKER_WORLD_SIZE"] for attempt in attempts] == [
+        "4",
+        "4",
+    ]
+    assert all("WORLD_SIZE" not in attempt.command.env for attempt in attempts)
     assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
         "++replacement_scoring.automodel.lm_head_backend=streaming",
         "++replacement_scoring.automodel.lm_head_backend=streaming",

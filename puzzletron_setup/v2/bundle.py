@@ -334,6 +334,24 @@ def render_runner_v2(state: WizardState, budget: str) -> dict[str, Any]:
     return _render_runner_v2(resolve_campaign_config(state), budget)
 
 
+def _stage_instances(
+    stage_id: str,
+    strategy: str,
+    configured_instances: int,
+    experiment: Mapping[str, Any],
+    budget: str,
+) -> int:
+    instances = 1 if budget == "smoke" else configured_instances
+    embedding = _mapping(experiment.get("embedding_pruning"))
+    if (
+        stage_id == "replacement_scoring"
+        and strategy == "persistent_pool"
+        and embedding.get("enabled")
+    ):
+        instances = max(instances, len(embedding.get("widths") or ()))
+    return instances
+
+
 def _render_execution_v2(
     config: ResolvedCampaignConfig,
     budget: str,
@@ -347,7 +365,13 @@ def _render_execution_v2(
     for stage_id, resource in config.stage_resources.items():
         entry = {
             "strategy": resource.strategy,
-            "instances": min(resource.instances, 1) if budget == "smoke" else resource.instances,
+            "instances": _stage_instances(
+                stage_id,
+                resource.strategy,
+                resource.instances,
+                experiment,
+                budget,
+            ),
             "resource": resource.resource,
             "gpus_per_node": (
                 resource.gpus_per_node if resource.gpus_per_node is not None else default_gpus

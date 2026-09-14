@@ -1225,6 +1225,11 @@ class CampaignController:
                 for handle_id, entry in self._active.items()
                 if entry[1].startswith(f"{node.stage_id}:")
             ]
+            stage_logs = [
+                path
+                for _handle_id, (_handle, work_id, _attempt_id) in stage_entries
+                for path in active_logs.get(work_id, ())
+            ]
             active_states = [
                 self._last_states.get(handle_id, JobState.UNKNOWN)
                 for handle_id, _entry in stage_entries
@@ -1255,11 +1260,6 @@ class CampaignController:
                     if any(state is JobState.RUNNING for state in active_states)
                     else "pending"
                 )
-                stage_logs = [
-                    path
-                    for _handle_id, (_handle, work_id, _attempt_id) in stage_entries
-                    for path in active_logs.get(work_id, ())
-                ]
                 progress = summarize_stage_artifacts(
                     self.plan.puzzle_dir,
                     node.stage_id,

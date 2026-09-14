@@ -291,7 +291,7 @@ class PersistentPoolAdapter(WorkAdapter):
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
-                "WORLD_SIZE": str(node.gpus_per_instance),
+                "PUZZLETRON_WORKER_WORLD_SIZE": str(node.gpus_per_instance),
                 "NPROC_PER_NODE": str(topology.gpus_per_task),
                 "WORKER_COUNT": str(worker_count),
             }
@@ -365,7 +365,7 @@ class PersistentPoolAdapter(WorkAdapter):
             "CAMPAIGN_DIR": str(campaign_dir),
             "CONFIG_PATH": plan.experiment_config_path,
             "PUZZLE_DIR": str(replacement_puzzle_dir),
-            "WORLD_SIZE": str(node.gpus_per_instance),
+            "PUZZLETRON_WORKER_WORLD_SIZE": str(node.gpus_per_instance),
             "WORKER_ID": str(item.metadata.get("worker_id", 0)),
             "WORKER_COUNT": str(node.instances),
         }

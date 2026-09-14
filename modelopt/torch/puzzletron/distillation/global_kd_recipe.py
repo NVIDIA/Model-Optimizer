@@ -302,14 +302,19 @@ def _align_dtensor_to_module_mesh(value, module):
         return value
     target_mesh = weight.device_mesh
     if not isinstance(value, DTensor):
+        target_names = tuple(getattr(target_mesh, "mesh_dim_names", ()) or ())
+        # FSDP-only heads accept rank-local activations and gather their sharded
+        # parameters internally. Treating distinct DP batches as replicated
+        # DTensors would give them incorrect global semantics.
+        if "tp" not in target_names:
+            return value
         # Hidden states captured from TP modules can be materialized as local
         # tensors even though the saved LM-head projection owns DTensor
         # parameters. The head's colwise TP contract consumes replicated hidden
         # states, so restore that layout without communication before dispatch.
-        target_names = tuple(getattr(target_mesh, "mesh_dim_names", ()) or ())
         if target_names != ("tp",):
             raise RuntimeError(
-                "Cannot infer replicated hidden-state placement for a non-TP-only "
+                "Cannot infer replicated hidden-state placement for a mixed "
                 f"LM-head mesh: names={target_names}"
             )
         if int(value.shape[-1]) != int(weight.shape[-1]):
@@ -355,6 +360,18 @@ def _project_teacher_hidden_on_reference_mesh(hidden, teacher_head, reference_lo
     projection = getattr(teacher_head, "_puzzletron_projection_forward", None)
     if not isinstance(weight, DTensor):
         return projection(hidden) if projection is not None else teacher_head(hidden)
+    mesh_names = tuple(getattr(weight.device_mesh, "mesh_dim_names", ()) or ())
+    if "tp" not in mesh_names:
+        if projection is None:
+            return teacher_head(hidden)
+        passthrough = teacher_head.forward
+        teacher_head.forward = projection
+        try:
+            # Invoke Module.__call__ so composable FSDP can all-gather the
+            # sharded LM-head parameters before the saved projection runs.
+            return teacher_head(hidden)
+        finally:
+            teacher_head.forward = passthrough
 
     # TP may shard the captured hidden width. Preserve the DTensor so operator
     # dispatch retains its global shape and placements; projecting local shards

@@ -227,6 +227,30 @@ def _write_configs(tmp_path: Path):
     return experiment, runner, execution
 
 
+def test_failed_active_stage_view_preserves_worker_logs(tmp_path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+    executor = _FakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    handle = JobHandle(
+        backend="fake",
+        handle_id="active-worker",
+        attempt_id="attempt-1",
+        metadata={"log_paths": ("worker.log",)},
+    )
+    controller._active[handle.handle_id] = (handle, "vllm_stats:0", handle.attempt_id)
+    controller._failed_stages.add("vllm_stats")
+
+    view = next(item for item in controller._stage_views() if item.stage_id == "vllm_stats")
+
+    assert view.status == "failed"
+    assert view.log_paths == ("worker.log",)
+
+
 def _write_sanity_drain_configs(tmp_path: Path):
     run_dir = tmp_path / "run"
     experiment = tmp_path / "experiment.yaml"

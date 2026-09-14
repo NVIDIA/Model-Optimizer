@@ -557,6 +557,25 @@ def test_execution_uses_resolved_stage_resource_and_parallel_profile(tmp_path: P
     }
 
 
+def test_replacement_pool_reserves_one_instance_per_embedding_width(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    resources = deepcopy(state.collection("stage_resources"))
+    resources["replacement_scoring"] = {
+        "strategy": "persistent_pool",
+        "instances": 1,
+        "resource": "gpu",
+        "gpus_per_node": 8,
+        "profile_name": "model",
+    }
+    state.set_collection("stage_resources", resources)
+
+    smoke = render_execution_v2(state, "smoke")
+    production = render_execution_v2(state, "production")
+
+    assert smoke["execution"]["stages"]["replacement_scoring"]["instances"] == 2
+    assert production["execution"]["stages"]["replacement_scoring"]["instances"] == 2
+
+
 def test_execution_strips_model_runtime_fields_from_inline_parallel_mesh(tmp_path: Path) -> None:
     state = _campaign_state(tmp_path)
     resources = deepcopy(state.collection("stage_resources"))

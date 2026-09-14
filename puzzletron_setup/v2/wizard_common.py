@@ -244,11 +244,11 @@ def _depth_granularity_choices(inventory: Any) -> list[tuple[str, str]]:
 def _default_axis_values(axis: Any) -> list[int]:
     legal_values = tuple(int(value) for value in axis.values)
     teacher = int(axis.teacher_value)
-    half = min(
+    target = min(
         legal_values,
-        key=lambda value: (abs(value - teacher // 2), -value),
+        key=lambda value: (abs(value - teacher * 3 // 4), -value),
     )
-    return list(dict.fromkeys((teacher, half)))
+    return list(dict.fromkeys((teacher, target)))
 
 
 def _text_field(

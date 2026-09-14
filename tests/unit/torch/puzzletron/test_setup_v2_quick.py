@@ -45,6 +45,7 @@ from puzzletron_setup.v2.wizard import (
     data_section,
     infrastructure_section,
 )
+from puzzletron_setup.v2.wizard_common import _default_axis_values
 
 _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
@@ -69,6 +70,18 @@ def test_only_cpu_slurm_integer_defaults_accept_null() -> None:
 
 
 # Public facade and guided-profile defaults
+
+
+def test_default_axis_values_target_75_percent_of_teacher() -> None:
+    axis = AxisInventory(
+        axis_id="heads",
+        label="Heads",
+        teacher_value=16,
+        values=(16, 12, 8),
+        alignment=1,
+    )
+
+    assert _default_axis_values(axis) == [16, 12]
 
 
 def test_guided_profile_defaults_are_selected_by_model_family(tmp_path):

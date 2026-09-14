@@ -363,3 +363,51 @@ def _tp_teacher_projection_job(_rank: int, _size: int) -> None:
 
 def test_tp_teacher_projection_redistributes_hidden_and_rewraps_logits():
     spawn_multiprocess_job(size=2, job=_tp_teacher_projection_job, backend="gloo")
+
+
+def _dp_shard_hidden_alignment_job(_rank: int, _size: int) -> None:
+    class HookedHead(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, 4))
+            self.hook_active = False
+
+        def forward(self, value):
+            assert self.hook_active
+            return value + 1
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = HookedHead()
+
+    mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("dp_shard_cp",))
+    head = torch.nn.Linear(4, 8, bias=False)
+    head.weight = torch.nn.Parameter(distribute_tensor(head.weight.detach(), mesh, (Shard(0),)))
+    hidden = torch.randn(3, 4)
+
+    assert _align_dtensor_to_module_mesh(hidden, head) is hidden
+
+    teacher = Model()
+    teacher.lm_head.weight = torch.nn.Parameter(
+        distribute_tensor(teacher.lm_head.weight.detach(), mesh, (Shard(0),))
+    )
+    assert _install_distillation_head_passthrough([teacher]) == 1
+    teacher.lm_head.register_forward_pre_hook(
+        lambda module, _args: setattr(module, "hook_active", True)
+    )
+    teacher.lm_head.register_forward_hook(
+        lambda module, _args, _output: setattr(module, "hook_active", False)
+    )
+
+    projected = _project_teacher_hidden_on_reference_mesh(
+        hidden,
+        teacher.lm_head,
+        torch.empty_like(hidden),
+    )
+    torch.testing.assert_close(projected, hidden + 1)
+    assert not teacher.lm_head.hook_active
+
+
+def test_dp_shard_teacher_projection_preserves_rank_local_hidden():
+    spawn_multiprocess_job(size=2, job=_dp_shard_hidden_alignment_job, backend="gloo")
