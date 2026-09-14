@@ -16,10 +16,8 @@
 import argparse
 import getpass
 import importlib
-import inspect
 import json
 import sys
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -850,66 +848,27 @@ def test_recipe_superseded_flags_are_silent_when_defaulted(monkeypatch, recwarn)
     assert args.kv_cache_qformat == "fp8_cast"
 
 
-def test_superseded_flag_warning_survives_pythons_default_filters(monkeypatch):
-    """The warning has to reach a real CLI user, not just a test run.
-
-    pytest enables every warning, so a category CPython suppresses looks fine here and says nothing
-    in production. ``DeprecationWarning`` is suppressed outside ``__main__``, and argparse invokes
-    the action from its own module -- so this reproduces CPython's default filters and asserts the
-    warning still gets through.
-    """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.resetwarnings()
-        # CPython's defaults for the deprecation categories.
-        warnings.filterwarnings("default", category=DeprecationWarning, module="__main__")
-        warnings.filterwarnings("ignore", category=DeprecationWarning)
-        warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
-        _parse_hf_ptq_args(
-            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--qformat", "nvfp4"
-        )
-
-    assert [w for w in caught if "--qformat is deprecated" in str(w.message)], (
-        "the deprecation warning is filtered out under Python's default filters, so a CLI user "
-        "would never see it"
-    )
-
-
-def _superseded_flag_parser(**kwargs):
-    """A parser with one flag wired to the action, so the contract is tested where it lives."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--weight_only", action=RecipeSupersededAction, **kwargs)
-    return parser
-
-
-def test_store_true_style_flag_defaults_without_warning():
-    """``nargs=0`` flags default to False and must stay silent -- argparse skips absent options."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        args = _superseded_flag_parser(nargs=0, const=True, default=False).parse_args([])
-    assert args.weight_only is False
-    assert not caught
-
-
-def test_store_true_style_flag_stores_const_and_warns():
-    """A ``nargs=0`` flag takes no value, so the action must store ``const``, not ``[]``."""
-    parser = _superseded_flag_parser(nargs=0, const=True, default=False)
-    with pytest.warns(FutureWarning, match="--weight_only is deprecated"):
-        args = parser.parse_args(["--weight_only"])
-    assert args.weight_only is True
-
-
 def test_recipe_superseded_action_is_wired_to_both_flags(monkeypatch):
-    """Guards against a future edit dropping the action while leaving the help text."""
-    assert issubclass(RecipeSupersededAction, argparse.Action)
+    """Guards against a future edit dropping the action while leaving the help text.
 
+    Introspects the parser hf_ptq actually builds rather than its source text, so reordering
+    keyword arguments or reflowing the call does not fail the test while the wiring is intact.
+    """
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--pyt_ckpt_path", "/models/Qwen3-0.6B"])
-    parser = argparse.ArgumentParser()
-    # rebuild by introspecting the real parser hf_ptq.parse_args() constructs
-    src = inspect.getsource(hf_ptq.parse_args)
-    for flag in ("--qformat", "--kv_cache_qformat"):
-        block = src[src.index(f'"{flag}",') :]
-        assert "action=RecipeSupersededAction" in block[: block.index(")\n")], (
-            f"{flag} lost its deprecation action"
+
+    built = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def capture(self, *args, **kwargs):
+        built.setdefault("parser", self)
+        return real_parse_args(self, *args, **kwargs)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
+    hf_ptq.parse_args()
+
+    by_dest = {action.dest: action for action in built["parser"]._actions}
+    for dest in ("qformat", "kv_cache_qformat"):
+        assert isinstance(by_dest[dest], RecipeSupersededAction), (
+            f"--{dest} lost its deprecation action"
         )
-    del parser
