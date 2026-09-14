@@ -22,7 +22,6 @@ uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not porta
 across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
-import contextlib
 import types
 
 import pytest
@@ -50,9 +49,15 @@ def _set_scope_attr(transform, name, value):
     carry it. Production ``_scope_prefixes`` reads it via ``getattr(..., None)``, so skipping
     the assignment where the slot is absent is equivalent — and lets these tests run across
     the whole supported transformers range instead of ``AttributeError``-ing on the setattr.
+
+    The suppression is scoped to that one known version-dependent slot: a setattr failure for
+    any other name (a typo or a future rename) still raises instead of silently no-op-ing.
     """
-    with contextlib.suppress(AttributeError):
+    try:
         setattr(transform, name, value)
+    except AttributeError:
+        if name != "base_model_prefix":
+            raise
 
 
 # Tiny Mixtral shaped to match the synthetic expert tensors built by ``_nvfp4_linear`` below.

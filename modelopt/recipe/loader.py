@@ -61,25 +61,28 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         # Backward-compat aliases for the recipe-library restructure. A source checkout keeps
         # ``huggingface`` -> ``model_type`` (and the nested ``model_type/models`` -> ``../models``)
         # symlinks, but symlinks don't survive into built wheels, so the deprecated tier
-        # prefixes are rewritten (see ``_alias_builtin_recipe_prefix``) before the built-in
-        # lookup — that keeps saved ``--recipe huggingface/...`` paths working for pip-installed
-        # users, not just source checkouts. The rewrite is applied to built-in candidates only;
-        # the filesystem fallback below probes the path exactly as given first, so a user's own
-        # local ``huggingface/`` recipe tree still loads by its natural relative name.
+        # prefixes are rewritten (see ``_alias_builtin_recipe_prefix``) for the built-in lookup,
+        # keeping saved ``--recipe huggingface/...`` paths working for pip-installed users.
         aliased = _alias_builtin_recipe_prefix(rp_str)
 
         def _suffixes(s: str) -> list[str]:
             return [""] if s.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
 
-        for suffix in _suffixes(aliased):
-            candidate = BUILTIN_RECIPES_LIB.joinpath(aliased + suffix)
-            if candidate.is_file() or candidate.is_dir():
-                return candidate
+        # Filesystem first, probing the path exactly as given (then its aliased form), so a
+        # user's own local recipe tree overrides a built-in of the same name -- the same
+        # precedence as ``config_loader._resolve_config_path``. A local ``huggingface/<type>/...``
+        # file therefore still wins even when ``<type>`` collides with a shipped ``model_type``.
         for probe in dict.fromkeys((rp_str, aliased)):
             for suffix in _suffixes(probe):
                 fs_candidate = Path(probe + suffix)
                 if fs_candidate.is_file() or fs_candidate.is_dir():
                     return fs_candidate
+        # Then the built-in library, using the aliased (renamed-tier) form so old
+        # ``huggingface/...`` paths resolve from wheels where the compat symlink is gone.
+        for suffix in _suffixes(aliased):
+            candidate = BUILTIN_RECIPES_LIB.joinpath(aliased + suffix)
+            if candidate.is_file() or candidate.is_dir():
+                return candidate
         return Path(rp_str)
     return recipe_path
 
