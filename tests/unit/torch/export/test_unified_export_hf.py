@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
+from safetensors.torch import save_file
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_utils import (
@@ -35,7 +36,10 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
-from modelopt.torch.export.unified_export_hf import _resolve_export_dtype
+from modelopt.torch.export.unified_export_hf import (
+    _carry_over_unplaced_source_weights,
+    _resolve_export_dtype,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -571,3 +575,76 @@ def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
     for module in modules:
         assert not hasattr(module.input_quantizer, "_pre_quant_scale")
         assert module.fused_with_prequant
+
+
+# --- carrying over weights the loader could not place --------------------------------------------
+
+
+class _ProvenanceModel(torch.nn.Module):
+    """A model carrying only what the carry-over reads: recorded keys and a source path."""
+
+    def __init__(self, keys=None, ckpt=None, name_or_path=None):
+        super().__init__()
+        self.lin = torch.nn.Linear(2, 2)
+        if keys is not None:
+            self._modelopt_unplaced_source_keys = keys
+        if ckpt is not None:
+            self._modelopt_source_checkpoint = str(ckpt)
+        if name_or_path is not None:
+            self.config = SimpleNamespace(_name_or_path=str(name_or_path))
+
+
+def test_carry_over_returns_nothing_when_the_loader_placed_everything():
+    """A recorded empty list means the question was asked and answered -- do not re-derive."""
+    model = _ProvenanceModel(keys=[], ckpt="/anywhere")
+    assert _carry_over_unplaced_source_weights(model) == {}
+
+
+def test_carry_over_returns_nothing_without_provenance():
+    assert _carry_over_unplaced_source_weights(_ProvenanceModel()) == {}
+
+
+def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
+    """``_name_or_path`` is often a hub id; there is nothing on disk to re-read."""
+    assert (
+        _carry_over_unplaced_source_weights(_ProvenanceModel(name_or_path="org/Some-Model")) == {}
+    )
+
+
+def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
+    save_file(
+        {"kept.weight": torch.arange(4, dtype=torch.float32), "other.weight": torch.zeros(2)},
+        str(tmp_path / "model.safetensors"),
+    )
+    model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path)
+
+    carried = _carry_over_unplaced_source_weights(model)
+
+    assert list(carried) == ["kept.weight"]
+    assert torch.equal(carried["kept.weight"], torch.arange(4, dtype=torch.float32))
+
+
+def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unreadable(tmp_path):
+    """Best-effort: the rest of the weights are already correct, so this must not abort the export."""
+    model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path / "does-not-exist")
+    with pytest.warns(UserWarning, match="Could not copy"):
+        assert _carry_over_unplaced_source_weights(model) == {}
+
+
+def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path, monkeypatch):
+    """The failure can land while ``keys`` is still None, and the handler must not throw itself.
+
+    Nothing was recorded here, so the keys are derived from provenance -- and that derivation is
+    what fails. Counting the keys unconditionally in the warning would raise TypeError from inside
+    the very handler that exists to keep the export standing.
+    """
+    from modelopt.torch.utils.plugins import model_load_utils
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("cannot read the index")
+
+    monkeypatch.setattr(model_load_utils, "unplaced_source_keys", _boom)
+    model = _ProvenanceModel(name_or_path=tmp_path)  # a real directory, so it gets that far
+
+    with pytest.warns(UserWarning, match="Could not copy"):
+        assert _carry_over_unplaced_source_weights(model) == {}

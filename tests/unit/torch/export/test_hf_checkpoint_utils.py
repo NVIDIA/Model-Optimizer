@@ -302,3 +302,105 @@ def test_sanitize_hf_config_for_deployment_keeps_unexplained_layer_type_mismatch
         "extra_a",
         "extra_b",
     ]
+
+
+# --- off-index safetensors: files model loading never opens --------------------------------------
+
+
+def _shard(path, name):
+    (path / name).write_text("tensors")
+
+
+def test_no_index_means_only_model_safetensors_is_read(tmp_path):
+    _shard(tmp_path, "model.safetensors")
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == []
+
+
+def test_a_standalone_sidecar_is_off_index(tmp_path):
+    """GLM-4.7 ships its MTP head as mtp.safetensors, which the loader never opens."""
+    _shard(tmp_path, "model.safetensors")
+    _shard(tmp_path, "mtp.safetensors")
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == ["mtp.safetensors"]
+
+
+def test_indexed_shards_are_read_and_sidecars_are_not(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a": "model-00001-of-00002.safetensors",'
+        ' "b": "model-00002-of-00002.safetensors"}}'
+    )
+    for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+        _shard(tmp_path, name)
+    _shard(tmp_path, "mtp.safetensors")
+
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == ["mtp.safetensors"]
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        '{"weight_map": {}}',
+        "{}",
+        '{"weight_map": {"a": "model-00001-of-00002.safetensors"}}',
+    ],
+    ids=["empty-map", "no-map-key", "partial-map"],
+)
+def test_main_weight_shards_are_never_off_index_whatever_the_index_says(tmp_path, index):
+    """An empty, partial or malformed index must not make the real weights look like sidecars.
+
+    Copying those into an export would leave the unquantized source weights sitting beside the
+    quantized ones -- a checkpoint that loads and is silently wrong.
+    """
+    (tmp_path / "model.safetensors.index.json").write_text(index)
+    for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+        _shard(tmp_path, name)
+
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == []
+
+
+def test_unsharded_main_weights_are_never_off_index(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
+    _shard(tmp_path, "model.safetensors")
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == []
+
+
+def test_results_are_sorted(tmp_path):
+    _shard(tmp_path, "model.safetensors")
+    for name in ("zeta.safetensors", "alpha.safetensors", "mtp.safetensors"):
+        _shard(tmp_path, name)
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path) == [
+        "alpha.safetensors",
+        "mtp.safetensors",
+        "zeta.safetensors",
+    ]
+
+
+def test_a_missing_directory_is_not_an_error(tmp_path):
+    assert hf_checkpoint_utils.off_index_safetensors_files(tmp_path / "nope") == []
+
+
+def test_copy_moves_only_the_sidecars_and_preserves_bytes(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a": "model-00001-of-00001.safetensors"}}'
+    )
+    _shard(src, "model-00001-of-00001.safetensors")
+    (src / "mtp.safetensors").write_text("mtp-bytes")
+
+    assert hf_checkpoint_utils.copy_off_index_safetensors(src, dst) == ["mtp.safetensors"]
+    assert (dst / "mtp.safetensors").read_text() == "mtp-bytes"
+    # the real weights are the export's job, not a verbatim copy
+    assert not (dst / "model-00001-of-00001.safetensors").exists()
+
+
+def test_copy_does_not_overwrite_what_the_export_already_wrote(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    _shard(src, "model.safetensors")
+    (src / "mtp.safetensors").write_text("source")
+    (dst / "mtp.safetensors").write_text("already exported")
+
+    assert hf_checkpoint_utils.copy_off_index_safetensors(src, dst) == []
+    assert (dst / "mtp.safetensors").read_text() == "already exported"
