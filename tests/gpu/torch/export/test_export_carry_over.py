@@ -79,6 +79,7 @@ _SCALE_SUFFIXES = (
 _QUANTIZED_DTYPES = {"F8_E4M3", "U8", "I8"}
 _PACKED_DTYPES = {"U8"}
 
+
 @pytest.mark.timeout(600)
 def _safetensors_meta(directory: Path) -> dict[str, tuple[str, tuple[int, ...]]]:
     """``{tensor_name: (dtype, shape)}`` across every ``*.safetensors`` in ``directory``.
@@ -95,8 +96,10 @@ def _safetensors_meta(directory: Path) -> dict[str, tuple[str, tuple[int, ...]]]
                 out[name] = (spec["dtype"], tuple(spec["shape"]))
     return out
 
+
 def _is_scale(key: str) -> bool:
     return key.endswith(_SCALE_SUFFIXES)
+
 
 def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwargs):
     """Load the tiny model on every rank, FSDP2-shard it, PTQ it, and export."""
@@ -195,7 +198,9 @@ def _ptq_language_model_and_export(rank, size, *, src_dir, export_dir):
     from transformers import AutoModelForImageTextToText
 
     with patch_fsdp_mp_dtypes():
-        model = AutoModelForImageTextToText.from_pretrained(src_dir, dtype=torch.bfloat16).to("cuda")
+        model = AutoModelForImageTextToText.from_pretrained(src_dir, dtype=torch.bfloat16).to(
+            "cuda"
+        )
         model.eval()
         fsdp2_wrap(model)
         assert is_fsdp2_model(model), "fsdp2_wrap did not shard the VLM"

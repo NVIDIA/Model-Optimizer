@@ -1400,7 +1400,6 @@ def quantize_main(
                     KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
 
-
         # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
         # still in it, two --export_path values would share one checkpoint dir.
         if args.layerwise_export:

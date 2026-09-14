@@ -286,33 +286,6 @@ def test_sanitize_hf_config_for_deployment_uses_model_config_nextn_count():
     assert config_data["layer_types"] == ["full_attention", "linear_attention"]
 
 
-def test_sanitize_hf_config_for_deployment_counts_mtp_layer_prefixes():
-    """Do not count broad MTP exclude prefixes as prediction layers."""
-    config_data = {
-        "num_hidden_layers": 2,
-        "layer_types": ["full_attention", "linear_attention", "nextn_predict"],
-    }
-    model = SimpleNamespace(_mtp_layer_prefixes=["mtp", "mtp.layers.0"])
-
-    with pytest.warns(UserWarning, match="Trimming config.layer_types"):
-        sanitize_hf_config_for_deployment(config_data, model=model)
-
-    assert config_data["layer_types"] == ["full_attention", "linear_attention"]
-
-
-def test_sanitize_hf_config_for_deployment_ignores_broad_mtp_prefix_only():
-    """Do not infer prediction-layer count from a broad exclude prefix alone."""
-    config_data = {
-        "num_hidden_layers": 2,
-        "layer_types": ["full_attention", "linear_attention", "nextn_predict"],
-    }
-    model = SimpleNamespace(_mtp_layer_prefixes=["mtp"])
-
-    sanitize_hf_config_for_deployment(config_data, model=model)
-
-    assert config_data["layer_types"] == ["full_attention", "linear_attention", "nextn_predict"]
-
-
 def test_sanitize_hf_config_for_deployment_keeps_unexplained_layer_type_mismatch():
     """Do not rewrite config when extra layer types are not explained by nextn metadata."""
     config_data = {

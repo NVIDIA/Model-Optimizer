@@ -614,9 +614,7 @@ def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
     replay to avoid mistaking a renamed key for an unplaced one.
     """
-    model, loading_info = auto_class.from_pretrained(
-        ckpt_path, output_loading_info=True, **kwargs
-    )
+    model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
     unexpected = loading_info.get("unexpected_keys") or []
     record_unplaced_source_keys(model, ckpt_path, unexpected)
     if unexpected:

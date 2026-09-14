@@ -140,8 +140,11 @@ def test_two_layouts_at_once(ckpt, tmp_path):
     mechanism, and neither by both -- a tensor carried *and* copied would be exported twice."""
     inlined = f"model.layers.{NUM_HIDDEN_LAYERS}.input_layernorm.weight"
     _add_to_main_shard(ckpt, {inlined: torch.zeros(32)})
-    save_file({"mtp.fc.weight": torch.zeros(32, 32)}, str(ckpt / "mtp.safetensors"),
-              metadata={"format": "pt"})
+    save_file(
+        {"mtp.fc.weight": torch.zeros(32, 32)},
+        str(ckpt / "mtp.safetensors"),
+        metadata={"format": "pt"},
+    )
 
     export = tmp_path / "export"
     export.mkdir()
@@ -163,7 +166,9 @@ def test_clean_checkpoint_records_nothing(ckpt):
 
 def test_recorded_keys_are_sorted_and_deduplicated(ckpt):
     """The two sources can overlap; the export wants a stable, duplicate-free list."""
-    _add_to_main_shard(ckpt, {"zzz_orphan.weight": torch.zeros(4), "aaa_orphan.weight": torch.zeros(4)})
+    _add_to_main_shard(
+        ckpt, {"zzz_orphan.weight": torch.zeros(4), "aaa_orphan.weight": torch.zeros(4)}
+    )
 
     keys = _recorded(ckpt)
     assert keys == sorted(keys) and len(keys) == len(set(keys))
