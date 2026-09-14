@@ -2129,7 +2129,6 @@ def layerwise_calibrate(
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers
     ):
-        outside_calibrator.calibrate()
         warn_rank_0(
             f"Layerwise export: every layer shard in {exporter.export_dir} is already "
             f"written.{finalize_hint}"
