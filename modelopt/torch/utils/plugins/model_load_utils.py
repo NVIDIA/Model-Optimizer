@@ -335,7 +335,9 @@ def record_unplaced_source_keys(
     unlike re-deriving the set afterwards, which has to replay the conversion plan to avoid
     mistaking a renamed key for an unplaced one.
 
-    Covers only keys the loader read and rejected.
+    Covers only keys the loader read and rejected. Tensors in safetensors files it never
+    opened are handled by :func:`~modelopt.torch.export.plugins.hf_checkpoint_utils.copy_off_index_safetensors`,
+    which copies those files whole rather than paying host memory to re-serialise them.
 
     Prefer this over :func:`unplaced_source_keys` whenever the loading info is available.
     """

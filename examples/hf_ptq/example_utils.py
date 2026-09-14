@@ -47,7 +47,10 @@ from transformers import (
 
 from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
+from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+    copy_non_safetensor_files_from_ckpt,
+    copy_off_index_safetensors,
+)
 from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
 try:
@@ -1021,6 +1024,14 @@ def copy_custom_model_files(
         exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
     )
 
+    # Safetensors the loader never opens are sidecars too: untouched by quantization and absent
+    # from the export, so copy them rather than leave them behind. Skipped by the call above,
+    # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
+    copied_weights = copy_off_index_safetensors(source_dir, export_dir)
+    for file_name in copied_weights:
+        print(f"Copied checkpoint sidecar file (not read by model loading): {file_name}")
+
+    copied_files = [*copied_files, *copied_weights]
     if copied_files:
         for file_name in copied_files:
             print(f"Copied checkpoint sidecar file: {file_name}")
