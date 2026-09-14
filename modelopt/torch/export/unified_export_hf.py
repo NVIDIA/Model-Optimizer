@@ -1640,8 +1640,12 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
                 for k in shard_keys:
                     out[k] = f.get_tensor(k)
     except Exception as exc:
+        # ``keys`` can still be None here -- the failure may land before it is resolved (a failed
+        # import, or unplaced_source_keys itself raising). Counting it unconditionally would throw
+        # from inside the handler whose whole job is to leave the export standing.
+        count = f"{len(keys)} " if keys is not None else ""
         warnings.warn(
-            f"Could not copy {len(keys)} unplaced source weight(s) into the export ({exc}); "
+            f"Could not copy {count}unplaced source weight(s) into the export ({exc}); "
             "the checkpoint will be missing them."
         )
         return {}
