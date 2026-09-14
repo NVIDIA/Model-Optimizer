@@ -385,6 +385,60 @@ class TestQuantFusedExperts:
 # ---------------------------------------------------------------------------
 # Tests for export
 # ---------------------------------------------------------------------------
+class TestIterWeightQuantizersForCalibration:
+    """The quantizer-only iterator must agree with the weight iterator and never index a weight.
+
+    Indexing the fused 3-D weight is what dispatches a redistribute collective per expert under
+    FSDP2, so callers that only read quantizer state go through the quantizer-only path.
+    """
+
+    @staticmethod
+    def _convert(model):
+        expert_type = type(model.moe.experts)
+        TestQuantFusedExperts._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+        converted = QuantModuleRegistry.convert(model.moe.experts)
+        TestQuantFusedExperts._cleanup_registry(expert_type)
+        return converted
+
+    @pytest.mark.parametrize(
+        "model_cls", [_TinyMoEModel, _TinyNonGatedMoEModel], ids=["gated", "non_gated"]
+    )
+    def test_yields_the_same_quantizers_in_the_same_order(self, model_cls):
+        experts = self._convert(model_cls())
+
+        from_weights = [q for _, q in experts.iter_weights_for_calibration()]
+        quantizers_only = list(experts.iter_weight_quantizers_for_calibration())
+
+        assert quantizers_only, "expected per-expert weight quantizers"
+        assert [id(q) for q in quantizers_only] == [id(q) for q in from_weights]
+
+    @pytest.mark.parametrize(
+        "model_cls", [_TinyMoEModel, _TinyNonGatedMoEModel], ids=["gated", "non_gated"]
+    )
+    def test_does_not_index_the_fused_weight(self, model_cls):
+        """The point of the override: no ``weight[idx]``, which is the per-expert collective."""
+        experts = self._convert(model_cls())
+
+        class _NoIndexing(torch.Tensor):
+            @staticmethod
+            def __new__(cls, data):
+                return torch.Tensor._make_subclass(cls, data, False)
+
+            def __getitem__(self, item):
+                raise AssertionError("iter_weight_quantizers_for_calibration indexed the weight")
+
+        for name in (experts._first_proj_attr, "down_proj"):
+            weight = getattr(experts, name)
+            setattr(experts, name, nn.Parameter(_NoIndexing(weight.data), requires_grad=False))
+
+        assert list(experts.iter_weight_quantizers_for_calibration())
+        # The weight iterator is the expensive one; it must still slice, or the guard above is
+        # not actually testing anything.
+        with pytest.raises(AssertionError, match="indexed the weight"):
+            list(experts.iter_weights_for_calibration())
+
+
 class TestExportFusedExperts:
     @staticmethod
     def _cleanup_registry(mod_type):

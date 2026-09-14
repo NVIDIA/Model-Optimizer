@@ -192,7 +192,7 @@ jobs:
         # so they run in their own lightweight job rather than the main unit lane.
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
-          pip install pytest
+          pip install pytest "tomli; python_version < '3.11'"
           python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped

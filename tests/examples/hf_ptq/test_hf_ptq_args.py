@@ -15,16 +15,20 @@
 
 import getpass
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
+from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -55,6 +59,19 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        hf_ptq.parse_args()
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "weight AutoQuantize recipes use their kv_cache setting" in help_text
+    assert "KV-cache AutoQuantize recipes select per-layer K/V formats" in help_text
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
@@ -81,6 +98,190 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     # Candidates resolve to the exact preset dicts mtq expects (preset identity preserved).
     assert inputs["quantization_formats"][0] == QUANT_CFG_CHOICES["nvfp4"]
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
+
+
+def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "fp8_cast"
+    )
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["search_domain"] == "kv_cache"
+    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "kv_cache"}
+    assert inputs["method"] == "kl_div"
+    assert [config["effective_bits"] for config in inputs["quantization_formats"]] == [8.0, 4.5]
+    assert aq.cost_excluded_layers == []
+    assert "*mtp*" in inputs["disabled_layers"]
+    assert "kv_cache_quant_cfg" not in inputs
+
+
+def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
+    """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
+    )
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        kv_cache_qformat="none",
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+
+    hf_ptq.auto_quantize(args, model, data, aq, full_model=model)
+
+    attention = model.model.layers[0].self_attn
+    assert attention.k_bmm_quantizer.num_bits == (2, 1)
+    assert attention.v_bmm_quantizer.num_bits == (2, 1)
+    assert attention.k_bmm_quantizer.amax == 448.0
+    assert attention.v_bmm_quantizer.amax == 448.0
+
+
+def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    logits = torch.arange(2 * 4 * 3).reshape(2, 4, 3)
+    attention_mask = torch.tensor([[1, 1, 0, 0], [0, 1, 1, 0]])
+
+    selected = hf_ptq._select_unpadded_logits(logits, {"attention_mask": attention_mask})
+
+    assert torch.equal(selected, logits[attention_mask.bool()])
+
+
+def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    with pytest.raises(ValueError, match="matching token dimensions"):
+        hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
+
+
+@pytest.mark.parametrize(
+    ("search_domain", "expected_shape"),
+    [("weight", (2, 4, 3)), ("kv_cache", (4, 3))],
+)
+def test_kl_padding_exclusion_is_scoped_to_kv_autoquant(monkeypatch, search_domain, expected_shape):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    inputs = {
+        "search_domain": search_domain,
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [],
+        "fixed_quantization_config": None,
+        "module_search_spaces": [],
+        "disabled_layers": [],
+        "kv_cache_quant_cfg": None,
+        "method": "kl_div",
+        "score_size": 1,
+    }
+    monkeypatch.setattr(
+        hf_ptq, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
+    )
+    logits = torch.arange(2 * 4 * 3).reshape(2, 4, 3).float()
+    batch = {
+        "input_ids": torch.ones(2, 4, dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 0, 0], [0, 1, 1, 0]]),
+    }
+
+    class Model(torch.nn.Module):
+        def forward(self, **_kwargs):
+            return SimpleNamespace(logits=logits, loss=torch.tensor(0.0))
+
+    observed = {}
+
+    def fake_auto_quantize(search_model, **kwargs):
+        observed["shape"] = tuple(kwargs["forward_step"](search_model, batch).shape)
+        return search_model, {}
+
+    monkeypatch.setattr(hf_ptq.mtq, "auto_quantize", fake_auto_quantize)
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+    model = Model()
+
+    hf_ptq.auto_quantize(args, model, [batch], SimpleNamespace(), full_model=model)
+
+    assert observed["shape"] == expected_shape
+
+
+def test_kv_autoquant_rejects_fsdp2(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        hf_ptq,
+        "_mtq_inputs_from_auto_quantize_config",
+        lambda *_args, **_kwargs: {"search_domain": "kv_cache"},
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+    )
+
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
+        hf_ptq.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
+
+
+def test_weight_autoquant_retains_fsdp2_warning(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    model = torch.nn.Module()
+    inputs = {
+        "search_domain": "weight",
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [],
+        "fixed_quantization_config": None,
+        "module_search_spaces": [],
+        "disabled_layers": [],
+        "kv_cache_quant_cfg": None,
+        "method": "gradient",
+        "score_size": 1,
+    }
+    monkeypatch.setattr(
+        hf_ptq, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
+    )
+    monkeypatch.setattr(
+        hf_ptq.mtq, "auto_quantize", lambda search_model, **_kwargs: (search_model, {})
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+
+    with pytest.warns(UserWarning, match="use at your own risk"):
+        assert hf_ptq.auto_quantize(args, model, [], SimpleNamespace()) is model
+
+
+def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
+    monkeypatch.setattr(
+        hf_ptq.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+    )
+
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
+        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+
+
+def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    assert hf_ptq._recipe_is_kv_auto_quantize(
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+    )
+    assert not hf_ptq._recipe_is_kv_auto_quantize("general/auto_quantize/nvfp4_fp8_at_5p4bits")
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
@@ -402,3 +603,217 @@ def test_mlflow_checkpoint_tag_is_absolute(monkeypatch, example_utils):
     )
 
     assert Path(example_utils._mlflow_run_tags(args)["checkpoint_path"]).is_absolute()
+
+
+class FakeMlflow:
+    """Stand-in for the mlflow module, so these tests need no server and no dependency."""
+
+    def __init__(self):
+        self.status = None
+        self.run_name = None
+        self.texts = {}
+        self.artifacts = {}
+
+    def set_tracking_uri(self, uri):
+        self.tracking_uri = uri
+
+    def set_experiment(self, name):
+        self.experiment = name
+
+    def start_run(self, run_name=None):
+        self.run_name = run_name
+        return SimpleNamespace(info=SimpleNamespace(experiment_id="7", run_id="deadbeef"))
+
+    def log_params(self, params):
+        pass
+
+    def set_tags(self, tags):
+        pass
+
+    def log_text(self, text, artifact_file):
+        self.texts[artifact_file] = text
+
+    def log_artifact(self, local_path, artifact_path=None):
+        self.artifacts[Path(local_path).name] = artifact_path
+
+    def log_metrics(self, metrics):
+        pass
+
+    def end_run(self, status=None):
+        self.status = status
+
+
+@pytest.fixture
+def fake_mlflow(monkeypatch):
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    return fake
+
+
+def _tracked_run(monkeypatch, export_path, *extra):
+    """Args for a run that tracks to a fake server and exports to *export_path*."""
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    _, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--export_path",
+        str(export_path),
+        "--mlflow",
+        "https://mlflow.example.com",
+        *extra,
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    return args
+
+
+def _exported(args):
+    """Stand in for export_quantized having written a checkpoint."""
+    args.checkpoint_exported = True
+
+
+def test_experiment_json_lands_in_the_checkpoint_and_on_the_server(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """The tags point run -> checkpoint; this file points checkpoint -> run."""
+    args = _tracked_run(monkeypatch, tmp_path)
+
+    with example_utils.mlflow_run(args):
+        _exported(args)
+
+    written = json.loads((tmp_path / ".experiment.json").read_text())
+    assert written["experiment_name"] == "tester/hf_ptq/Qwen3-0.6B-fp8"
+    assert written["run_id"] == "deadbeef"
+    assert written["run_url"] == "https://mlflow.example.com/#/experiments/7/runs/deadbeef"
+    # Uploaded without the leading dot, and while the run is still open.
+    assert json.loads(fake_mlflow.texts["experiment.json"]) == written
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_experiment_json_is_written_when_a_run_fails_after_exporting(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """The checkpoint is on disk and this run wrote it, so it gets the pointer even though
+    the run went on to fail."""
+    args = _tracked_run(monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError), example_utils.mlflow_run(args):
+        _exported(args)
+        raise RuntimeError("crashed while cleaning up")
+
+    assert json.loads((tmp_path / ".experiment.json").read_text())["run_id"] == "deadbeef"
+    assert fake_mlflow.status == "FAILED"
+
+
+def test_no_local_pointer_when_the_export_never_completed(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """print_quant_summary creates --export_path before quantization, and the directory may
+    already hold a valid checkpoint from an earlier attempt. Neither is evidence that this
+    run wrote the weights, so a run that fails before export must not claim them."""
+    args = _tracked_run(monkeypatch, tmp_path)
+    (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers found in model\n")
+    previous = tmp_path / ".experiment.json"
+    previous.write_text('{"run_id": "the-run-that-really-wrote-this"}\n')
+
+    with pytest.raises(RuntimeError), example_utils.mlflow_run(args):
+        raise RuntimeError("OOM during calibration")
+
+    assert json.loads(previous.read_text())["run_id"] == "the-run-that-really-wrote-this"
+    # Still traceable from the server side: the run opened, it just produced no checkpoint.
+    assert json.loads(fake_mlflow.texts["experiment.json"])["run_id"] == "deadbeef"
+    assert fake_mlflow.status == "FAILED"
+
+
+def test_no_experiment_json_when_optional_tracking_fails(
+    monkeypatch, example_utils, fake_mlflow, tmp_path
+):
+    """A URI from $MLFLOW_TRACKING_URI is best-effort: an unreachable server disables
+    tracking from inside the block, and the run must not drop a contentless file on top of
+    a previous run's pointer in a reused --export_path."""
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com")
+
+    def explode(name):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.set_experiment = explode
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    previous = tmp_path / ".experiment.json"
+    previous.write_text('{"run_id": "from-an-earlier-run"}\n')
+
+    with example_utils.mlflow_run(args):
+        _exported(args)
+
+    assert args.mlflow_required is False
+    assert json.loads(previous.read_text())["run_id"] == "from-an-earlier-run"
+
+
+def test_untracked_export_drops_a_pointer_it_would_otherwise_inherit(
+    monkeypatch, example_utils, tmp_path
+):
+    """An untracked export into a reused path, or one quantized from a tracked source
+    checkpoint, must not keep a pointer naming a run that did not write these weights."""
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    inherited = tmp_path / ".experiment.json"
+    inherited.write_text('{"run_id": "a-run-that-quantized-something-else"}\n')
+
+    with example_utils.mlflow_run(args):
+        _exported(args)
+
+    assert not inherited.exists()
+
+
+def test_untracked_failure_leaves_an_existing_pointer_alone(monkeypatch, example_utils, tmp_path):
+    """Nothing was rewritten, so the checkpoint already there keeps its provenance."""
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    previous = tmp_path / ".experiment.json"
+    previous.write_text('{"run_id": "still-valid"}\n')
+
+    with pytest.raises(RuntimeError), example_utils.mlflow_run(args):
+        raise RuntimeError("died before export")
+
+    assert json.loads(previous.read_text())["run_id"] == "still-valid"
+
+
+def test_only_the_main_rank_clears_an_inherited_pointer(monkeypatch, example_utils, tmp_path):
+    """Every rank runs the untracked path, so the unlink has to be rank-guarded like the
+    other shared file writes."""
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=False, world_size=8)
+    inherited = tmp_path / ".experiment.json"
+    inherited.write_text('{"run_id": "a-run-that-quantized-something-else"}\n')
+
+    with example_utils.mlflow_run(args):
+        _exported(args)
+
+    assert inherited.exists()
+
+
+def test_experiment_json_is_export_owned(example_utils):
+    """copy_custom_model_files copies source sidecars including dotfiles, so without this
+    the source checkpoint's pointer would follow it into every derived checkpoint."""
+    assert example_utils._EXPERIMENT_JSON in example_utils._HF_PTQ_EXPORT_OWNED_FILES
+
+
+def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+
+    with example_utils.mlflow_run(args):
+        pass
+
+    assert not (tmp_path / ".experiment.json").exists()

@@ -55,6 +55,8 @@ class FakeMlflow:
         self.metrics = {}
         self.artifacts = []
         self.artifact_text = {}
+        # What the server says the run is called, which need not be what was requested.
+        self.server_run_name = None
 
     def set_tracking_uri(self, uri):
         self.tracking_uri = uri
@@ -64,7 +66,13 @@ class FakeMlflow:
 
     def start_run(self, run_name=None):
         self.run_name = run_name
-        return SimpleNamespace(info=SimpleNamespace(experiment_id="7", run_id="deadbeef"))
+        return SimpleNamespace(
+            info=SimpleNamespace(
+                experiment_id="7",
+                run_id="deadbeef",
+                run_name=self.server_run_name or run_name,
+            )
+        )
 
     def log_params(self, params):
         self.params.update(params)
@@ -291,6 +299,51 @@ def test_run_name_defaults_to_the_utc_timestamp(fake_mlflow):
     logger.finish("FINISHED")
 
     assert len(fake_mlflow.run_name) == 15 and fake_mlflow.run_name[8] == "-"
+
+
+def test_run_info_identifies_the_run_on_the_server(fake_mlflow, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger(run_name="unit-test")
+
+    assert logger.run_info == {}
+    with logger.track():
+        assert logger.run_info == {
+            "tracking_uri": URI,
+            "experiment_name": "tester/hf_ptq/model-nvfp4",
+            "experiment_id": "7",
+            "run_id": "deadbeef",
+            "run_name": "unit-test",
+            "run_url": f"{URI}/#/experiments/7/runs/deadbeef",
+        }
+
+
+def test_run_info_reports_the_defaulted_run_name(fake_mlflow, monkeypatch):
+    """The name is settled when the run opens, so it is not left blank here."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+
+    with logger.track():
+        assert logger.run_info["run_name"] == fake_mlflow.run_name
+
+
+def test_run_info_reports_the_name_the_server_returned(fake_mlflow, monkeypatch):
+    """MLflow can resolve a run other than the one asked for -- resuming $MLFLOW_RUN_ID, say
+    -- so the identity is read off what came back, not off what was requested."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    fake_mlflow.server_run_name = "resumed-run"
+    logger = _logger(run_name="requested-run")
+
+    with logger.track():
+        assert logger.run_info["run_name"] == "resumed-run"
+
+
+def test_run_info_masks_credentials(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = MlflowRunLogger(CREDS_URI, "tester/hf_ptq/model-nvfp4")
+
+    with logger.track():
+        assert logger.run_info["tracking_uri"] == "https://***@mlflow.example.com"
 
 
 def test_command_flags_the_invisible_torchrun_wrapper(fake_mlflow, monkeypatch):

@@ -43,6 +43,7 @@ model_type/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 |-----------|-----------------|
 | `general/` | **Model-agnostic** recipes — a good starting point for any model. PTQ combos, speculative-decoding training, and distillation. |
 | `model_type/<model_type>/` | **Architecture-specific** recipes keyed by a HF `model_type`; one recipe covers every checkpoint of that architecture. |
+| `timm/<architecture>/` | **Architecture-specific** recipes for timm models. |
 | `models/<org>/<model_id>/` | **Checkpoint-specific** recipes that mirror a particular published checkpoint, keyed by its model-hub path (e.g. `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`). |
 | `configs/` | Shared building blocks (`numerics/`, `ptq/units/`, `ptq/presets/`) that recipes compose from via `$import`. Not run directly. |
 
@@ -53,9 +54,9 @@ model_type/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 > flags.
 
 **Choosing where to look:** check `models/<org>/<model_id>/` for your exact
-checkpoint first, then `model_type/<model_type>/` for its architecture; if
-neither has an entry, fall back to `general/`. The presence of a model folder
-signals a recommended, tuned recipe.
+checkpoint first, then `model_type/<model_type>/` for its architecture or
+`timm/<architecture>/` for a timm model; if none has an entry, fall back to
+`general/`. The presence of a model folder signals a recommended, tuned recipe.
 
 ---
 
@@ -100,6 +101,7 @@ convention.
 - **Tuned for a HF architecture** → `model_type/<model_type>/<task>/`, with a
   `README.md` documenting the delta from the generic preset. Verify the exact
   `model_type` against the checkpoint's `config.json` before placing it.
+- **Tuned for a timm architecture** → `timm/<architecture>/<task>/`.
 - **Mirrors a specific released checkpoint** → `models/<org>/<model_id>/` (its model-hub path).
 - Share reused bodies via a `# modelopt-schema:`-tagged snippet and `$import`
   it; keep recipe wrappers thin.

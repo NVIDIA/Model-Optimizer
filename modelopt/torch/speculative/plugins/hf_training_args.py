@@ -44,6 +44,11 @@ class ModelArguments(BaseModel):
     model_name_or_path: str | None = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     use_fake_base_for_offline: bool = False
     trust_remote_code: bool = False
+    # Optional config field overrides applied to the loaded model config (and its
+    # text_config) before instantiation. Needed for checkpoints whose config doesn't
+    # round-trip cleanly through transformers (e.g. Cosmos3's Qwen3-VL text tower,
+    # where intermediate_size/num_key_value_heads don't propagate from text_config).
+    config_overrides: dict | None = None
 
 
 class DataArguments(BaseModel):

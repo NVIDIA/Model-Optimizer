@@ -192,6 +192,10 @@ export:
   # SAME edit, or MLflow will misreport the run.
   mlflow:
     tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical frontier-evals host; NOT the -nemo-evaluator alias)
+    # If the checkpoint holds a .experiment.json, use ITS experiment_name verbatim here so
+    # evals group under the run that quantized it -- unless it contains ${, which OmegaConf
+    # would resolve. Cross-server, that makes a same-named experiment here and only
+    # modelopt_run_url reaches the PTQ run (Step 4).
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
     description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
     log_logs: true
@@ -204,3 +208,9 @@ export:
       temperature: '1.0'
       top_p: '0.95'
       max_new_tokens: '65536'
+      # From the checkpoint's .experiment.json when present; drop when absent. Keep the
+      # quotes (a bare 20260910 becomes a date) and skip any value containing ${ -- quoting
+      # does not stop OmegaConf resolving it.
+      #modelopt_run_name: 'CHANGEME-from-.experiment.json'
+      #modelopt_run_id: 'CHANGEME-from-.experiment.json'
+      #modelopt_run_url: 'CHANGEME-from-.experiment.json'

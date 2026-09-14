@@ -1040,6 +1040,7 @@ def get_extended_model_outputs(
     calibration_data_reader: CalibrationDataReader,
     calibration_eps: list[str],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ) -> dict[str, np.ndarray]:
     """Run one inference step on an onnx model which has some intermediate tensor marked as model outputs.
 
@@ -1072,11 +1073,14 @@ def get_extended_model_outputs(
         save_onnx(extended_model, extended_onnx_path, save_as_external_data=True)
         intermediate_generated_files.append(extended_onnx_path)
         session = create_inference_session(
-            extended_onnx_path, calibration_eps, input_shapes_profile
+            extended_onnx_path, calibration_eps, input_shapes_profile, trt_rtx_backend
         )
     else:
         session = create_inference_session(
-            extended_model.SerializeToString(), calibration_eps, input_shapes_profile
+            extended_model.SerializeToString(),
+            calibration_eps,
+            input_shapes_profile,
+            trt_rtx_backend,
         )
 
     # Run extended model's inference.
@@ -1095,6 +1099,7 @@ def find_nodes_from_matmul_to_exclude(
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     calibration_shapes: str | dict | None = None,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ) -> list[str]:
     """Find MatMul nodes that meet gemv or small-gemm conditions and should be excluded.
 
@@ -1147,6 +1152,7 @@ def find_nodes_from_matmul_to_exclude(
             calibration_data_reader,
             calibration_eps,
             input_shapes_profile,
+            trt_rtx_backend,
         )
 
     logger.debug(f"Matmul nodes to exclude: {nodes_to_exclude}")
@@ -1365,6 +1371,7 @@ def _exclude_matmuls_by_inference(
     calibration_data_reader: CalibrationDataReader,
     calibration_eps: list[str],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ) -> list[str]:
     """Use actual inference to find MatMuls with dimension 1 or small K/N."""
     # Add matmul outputs and second-input outputs to model outputs
@@ -1389,6 +1396,7 @@ def _exclude_matmuls_by_inference(
         calibration_data_reader,
         calibration_eps,
         input_shapes_profile,
+        trt_rtx_backend,
     )
 
     nodes_to_exclude = []
@@ -1432,6 +1440,7 @@ def find_nodes_from_mha_to_exclude(
     calibration_data_reader: CalibrationDataReader = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ) -> list[str]:
     """Find MatMul nodes in MHA pattern to exclude.
 
@@ -1493,6 +1502,7 @@ def find_nodes_from_mha_to_exclude(
             calibration_data_reader,
             calibration_eps,
             input_shapes_profile,
+            trt_rtx_backend,
         )
 
         # For each MHA block,

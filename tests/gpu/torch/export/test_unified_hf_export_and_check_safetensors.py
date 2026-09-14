@@ -84,7 +84,14 @@ def test_unified_hf_export_and_check_safetensors(
     elif expected_suffix.startswith("tiny_gpt_oss"):
         tiny_model_dir = create_tiny_gpt_oss_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
     else:
-        tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
+        model_dims = (
+            {"hidden_size": 128, "intermediate_size": 128}
+            if qformat in {"int4_awq", "w4a8_awq_beta"}
+            else {}
+        )
+        tiny_model_dir = create_tiny_llama_dir(
+            tmp_path, with_tokenizer=True, num_hidden_layers=1, **model_dims
+        )
 
     # Create an output directory in tmp_path
     # We'll replicate the naming convention, e.g. "tiny_llama-fp8"

@@ -284,6 +284,27 @@ class MlflowRunLogger:
         uri = _redact(self.tracking_uri)
         return f"{uri}/#/experiments/{info.experiment_id}/runs/{info.run_id}"
 
+    @property
+    def run_info(self) -> dict[str, str]:
+        """Identity of this run on the server, or ``{}`` before it is open.
+
+        Enough for a consumer holding only this run's outputs to find it again: ``run_id``
+        is MLflow's own identifier for the run, a uuid4 hex, unique across experiments.
+        Every field is read back off the run the server returned rather than off what was
+        requested, so a run MLflow resolved differently is reported as it really is.
+        """
+        if self._run is None:
+            return {}
+        info = self._run.info
+        return {
+            "tracking_uri": _redact(self.tracking_uri),
+            "experiment_name": self.experiment_name,
+            "experiment_id": str(info.experiment_id),
+            "run_id": str(info.run_id),
+            "run_name": getattr(info, "run_name", None) or self.run_name or "",
+            "run_url": self.run_url,
+        }
+
     def start(
         self,
         params: dict[str, Any] | None = None,
@@ -434,9 +455,10 @@ class MlflowRunLogger:
         self._mlflow = mlflow
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
-        self._run = mlflow.start_run(
-            run_name=self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        )
+        # Settled here rather than passed straight through, so run_info reports the name the
+        # run actually carries.
+        self.run_name = self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        self._run = mlflow.start_run(run_name=self.run_name)
         print(f"[mlflow] experiment: {self.experiment_name}\n[mlflow] run: {self.run_url}")
 
     def _log_inputs(self, params, tags, texts) -> None:
