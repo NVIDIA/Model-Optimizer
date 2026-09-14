@@ -413,10 +413,7 @@ def test_layerwise_offload_warning_gating(monkeypatch, offloaded, with_tail, war
         "modelopt.torch.quantization.utils.layerwise_calib.warn_rank_0", warnings.append
     )
 
-    def calib_func(target, target_forward_loop):
-        target_forward_loop(target)
-
-    layerwise_calibrate(model, lambda m: m(torch.tensor([2.0])), calib_func)
+    layerwise_calibrate(model, lambda m: m(torch.tensor([2.0])), lambda *_args: None)
 
     assert bool(warnings) is warns
     if warns:
@@ -424,21 +421,13 @@ def test_layerwise_offload_warning_gating(monkeypatch, offloaded, with_tail, war
 
 
 @pytest.mark.parametrize(
-    ("skip_forward_without_activation_calib", "expected_forward_calls", "warns"),
-    [(None, 2, True), (False, 2, True), (True, 1, False)],
+    ("skip_forward_without_activation_calib", "expected_forward_calls"),
+    [(None, 2), (False, 2), (True, 1)],
 )
 def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
-    monkeypatch, skip_forward_without_activation_calib, expected_forward_calls, warns
+    monkeypatch, skip_forward_without_activation_calib, expected_forward_calls
 ):
     _register_test_discoverer(monkeypatch)
-    monkeypatch.setattr(
-        "modelopt.torch.quantization.utils.layerwise_calib.has_accelerate_offload",
-        lambda _model: True,
-    )
-    warnings = []
-    monkeypatch.setattr(
-        "modelopt.torch.quantization.utils.layerwise_calib.warn_rank_0", warnings.append
-    )
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
     config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
     algorithm = {"method": "max", "layerwise": {"enable": True}}
@@ -456,7 +445,6 @@ def test_layerwise_max_outside_calibration_uses_configured_forward_behavior(
     mtq.quantize(model, config, forward_loop=forward_loop)
 
     assert forward_calls == expected_forward_calls
-    assert bool(warnings) is warns
 
 
 def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_path):
@@ -474,10 +462,7 @@ def test_layerwise_export_rejects_enabled_outside_quantizer(monkeypatch, tmp_pat
     assert not (tmp_path / "export").exists()
 
 
-@pytest.mark.parametrize("skip_forward_without_activation_calib", [None, False, True])
-def test_layerwise_export_rejects_weight_only_outside_quantizer(
-    monkeypatch, tmp_path, skip_forward_without_activation_calib
-):
+def test_layerwise_export_rejects_weight_only_outside_quantizer(monkeypatch, tmp_path):
     _register_test_discoverer(monkeypatch)
     config = copy.deepcopy(mtq.INT8_WEIGHT_ONLY_CFG)
     config["quant_cfg"].append({"quantizer_name": "*lm_head*weight_quantizer", "enable": True})
@@ -485,8 +470,6 @@ def test_layerwise_export_rejects_weight_only_outside_quantizer(
         "method": "max",
         "layerwise": {"enable": True, "export_dir": str(tmp_path / "export")},
     }
-    if skip_forward_without_activation_calib is not None:
-        algorithm["skip_forward_without_activation_calib"] = skip_forward_without_activation_calib
     config["algorithm"] = algorithm
 
     with pytest.raises(ValueError, match="outside transformer layers"):

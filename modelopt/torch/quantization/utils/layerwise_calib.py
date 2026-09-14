@@ -162,25 +162,16 @@ class _OutsideQuantizerCalibrator:
         if not self.enabled:
             return
 
-        has_offload = has_accelerate_offload(self.model)
-        warned_for_offload = False
-
-        def forward_loop(model):
-            nonlocal warned_for_offload
-            if not warned_for_offload:
-                warned_for_offload = True
-                if has_offload:
-                    warn_rank_0(
-                        "Layerwise calibration found enabled quantizers outside transformer "
-                        "layers. The required full-model calibration pass may be slow because "
-                        "CPU- or disk-offloaded decoder weights can be transferred for every "
-                        "batch."
-                    )
-            return self.forward_loop(model)
+        if has_accelerate_offload(self.model):
+            warn_rank_0(
+                "Layerwise calibration found enabled quantizers outside transformer layers. "
+                "Calibrating them may be slow because CPU- or disk-offloaded decoder weights "
+                "can be transferred for every batch."
+            )
 
         with _hide_modules_from_traversal(self.transformer_layer_slots):
             if self.qdq_from_prev:
-                self.calib_func(self.model, forward_loop, **self.calib_kwargs)
+                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
                 return
 
             # Inline import breaks conversion -> utils -> layerwise_calib import cycle.
@@ -193,7 +184,7 @@ class _OutsideQuantizerCalibrator:
                             layer, [{"quantizer_name": "*", "enable": False}]
                         )
                     )
-                self.calib_func(self.model, forward_loop, **self.calib_kwargs)
+                self.calib_func(self.model, self.forward_loop, **self.calib_kwargs)
 
 
 class LayerActivationCollector:
