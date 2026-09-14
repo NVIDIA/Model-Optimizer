@@ -15,6 +15,7 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+import importlib.util
 from types import SimpleNamespace
 
 import pytest
@@ -580,6 +581,16 @@ def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
 # --- carrying over weights the loader could not place --------------------------------------------
 
 
+# ``_carry_over_unplaced_source_weights`` imports model_load_utils inside its try block, before it
+# looks at the recorded keys, and model_load_utils imports accelerate at module scope. With
+# accelerate absent every call raises ImportError, gets caught, warns and returns {} -- so these
+# tests would still "pass" while exercising none of the logic they name.
+requires_accelerate = pytest.mark.skipif(
+    importlib.util.find_spec("accelerate") is None,
+    reason="carry-over goes through model_load_utils, which requires accelerate",
+)
+
+
 class _ProvenanceModel(torch.nn.Module):
     """A model carrying only what the carry-over reads: recorded keys and a source path."""
 
@@ -594,16 +605,19 @@ class _ProvenanceModel(torch.nn.Module):
             self.config = SimpleNamespace(_name_or_path=str(name_or_path))
 
 
+@requires_accelerate
 def test_carry_over_returns_nothing_when_the_loader_placed_everything():
     """A recorded empty list means the question was asked and answered -- do not re-derive."""
     model = _ProvenanceModel(keys=[], ckpt="/anywhere")
     assert _carry_over_unplaced_source_weights(model) == {}
 
 
+@requires_accelerate
 def test_carry_over_returns_nothing_without_provenance():
     assert _carry_over_unplaced_source_weights(_ProvenanceModel()) == {}
 
 
+@requires_accelerate
 def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
     """``_name_or_path`` is often a hub id; there is nothing on disk to re-read."""
     assert (
@@ -611,6 +625,7 @@ def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
     )
 
 
+@requires_accelerate
 def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
     save_file(
         {"kept.weight": torch.arange(4, dtype=torch.float32), "other.weight": torch.zeros(2)},
@@ -624,6 +639,7 @@ def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
     assert torch.equal(carried["kept.weight"], torch.arange(4, dtype=torch.float32))
 
 
+@requires_accelerate
 def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unreadable(tmp_path):
     """Best-effort: the rest of the weights are already correct, so this must not abort the export."""
     model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path / "does-not-exist")
@@ -631,6 +647,7 @@ def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unre
         assert _carry_over_unplaced_source_weights(model) == {}
 
 
+@requires_accelerate
 def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path, monkeypatch):
     """The failure can land while ``keys`` is still None, and the handler must not throw itself.
 
