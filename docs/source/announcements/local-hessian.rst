@@ -229,7 +229,7 @@ Scale Selection Reshapes Distribution
 
 Figure 2 plots the scaled weights :math:`W/s` -- the values handed to the
 E2M1 cast. Max scaling piles the mass up near 6.0, the largest E2M1 value,
-while MSE and Local-Hessian both cluster it on the representable grid
+while MSE and Local-Hessian both cluster it on the representable E2M1 grid
 values. Grid alignment is not the whole story, though: among the scales
 that do align, Local-Hessian picks the ones that hold up better on
 evaluation.
