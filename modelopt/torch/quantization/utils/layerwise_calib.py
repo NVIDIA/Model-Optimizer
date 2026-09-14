@@ -70,17 +70,18 @@ class _LayerCalibState:
 
 
 class _SkipLayer(nn.Module):
-    """Parameter-free stand-in for a fully calibrated decoder layer.
+    """Parameter-free stand-in that skips or forwards through a decoder layer.
 
     Replaces the real layer in the ModuleList so that framework hooks
     (accelerate, FSDP2, etc.) have no parameters to transfer. Holds a
     reference to the original layer for restoration during cleanup.
     """
 
-    def __init__(self, original: nn.Module):
+    def __init__(self, original: nn.Module, *, forward_original: bool = False):
         super().__init__()
         # Bypass nn.Module.__setattr__ to avoid registering original as a submodule.
         object.__setattr__(self, "_original", original)
+        self._forward_original = forward_original
         self._layerwise_calib = _LayerCalibState(mode="skip")
 
     _PROXY_BLOCKLIST = frozenset({"_hf_hook", "_old_forward"})
@@ -99,36 +100,17 @@ class _SkipLayer(nn.Module):
             return getattr(object.__getattribute__(self, "_original"), name)
 
     def forward(self, *args, **kwargs):
+        if self._forward_original:
+            return self._original(*args, **kwargs)
         return LayerActivationCollector._zeros_from_meta(
             self._original._layerwise_calib.output_meta
         )
 
 
-class _ForwardOnlyLayer(nn.Module):
-    """Preserve forward execution while hiding a layer's modules, parameters, and buffers."""
-
-    _PROXY_BLOCKLIST = _SkipLayer._PROXY_BLOCKLIST
-
-    def __init__(self, original: nn.Module):
-        super().__init__()
-        object.__setattr__(self, "_original", original)
-
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            if name in self._PROXY_BLOCKLIST:
-                raise
-            return getattr(object.__getattribute__(self, "_original"), name)
-
-    def forward(self, *args, **kwargs):
-        return self._original(*args, **kwargs)
-
-
 @contextmanager
 def _hide_modules_from_traversal(slots: Sequence[tuple[nn.Module, str, nn.Module]]):
     """Retain forward behavior while hiding registered modules from traversal and state dicts."""
-    proxies = {id(child): _ForwardOnlyLayer(child) for _, _, child in slots}
+    proxies = {id(child): _SkipLayer(child, forward_original=True) for _, _, child in slots}
 
     try:
         for parent, child_name, child in slots:

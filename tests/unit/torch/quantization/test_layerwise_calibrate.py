@@ -28,7 +28,6 @@ from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
-    _ForwardOnlyLayer,
     _OutsideQuantizerCalibrator,
     _SkipLayer,
 )
@@ -307,7 +306,7 @@ def test_outside_calibrator_hides_and_restores_layer_aliases(raises):
     model.layer_alias = original
 
     def calib_func(target, _forward_loop):
-        assert isinstance(target.layers[0], _ForwardOnlyLayer)
+        assert isinstance(target.layers[0], _SkipLayer)
         assert target.layers_alias[0] is target.layers[0]
         assert target.layer_alias is target.layers[0]
         assert original not in target.modules()
