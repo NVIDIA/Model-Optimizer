@@ -716,3 +716,32 @@ class TestFourOverSixBlockSizes:
     def test_nvfp4_four_over_six_cfg_needs_calibration(self):
         """The 4/6 preset is statically calibrated, so it requires calibration."""
         assert need_calibration(mtq.NVFP4_FOUR_OVER_SIX_CFG)
+
+
+class TestBiasValidation:
+    """The ``bias`` field's schema: int keys are the reduction axes, plus ``type``/``method``."""
+
+    @pytest.mark.parametrize(
+        "bias_cfg",
+        [
+            {"enable": True, "type": "static", "axis": -1},
+            {"enable": True, "type": "dynamic", "axis": (-1, -3)},
+            {"axis": -1},
+        ],
+    )
+    def test_unknown_bias_string_key_is_named_in_the_error(self, bias_cfg):
+        """An unsupported string key is reported as such, not mislabelled as a bad axis type."""
+        with pytest.raises(ValidationError) as exc_info:
+            QuantizerAttributeConfig(num_bits=8, bias=bias_cfg)
+
+        message = str(exc_info.value)
+        unknown_key = next(k for k in bias_cfg if k not in ("type", "method"))
+        assert "Unsupported bias key" in message
+        assert repr(unknown_key) in message
+        # The old message reported the type of the whole key list instead of the offending key.
+        assert "<class 'list'>" not in message
+
+    def test_bias_axis_keys_are_accepted(self):
+        """Int keys are the reduction axes and must keep validating."""
+        cfg = QuantizerAttributeConfig(bias={-1: None, -3: None, "type": "static"})
+        assert cfg.bias == {-1: None, -3: None, "type": "static"}
