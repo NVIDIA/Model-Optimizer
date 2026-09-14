@@ -15,6 +15,8 @@
 
 """Recipe loading utilities."""
 
+import warnings
+
 try:
     from importlib.resources.abc import Traversable
 except ImportError:  # Python < 3.11
@@ -50,7 +52,7 @@ _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
 
 
 def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traversable:
-    """Resolve a recipe path, checking the built-in library first then the filesystem.
+    """Resolve a recipe path, checking the filesystem first then the built-in library.
 
     Returns the resolved path (file or directory).
     """
@@ -79,9 +81,20 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
                     return fs_candidate
         # Then the built-in library, using the aliased (renamed-tier) form so old
         # ``huggingface/...`` paths resolve from wheels where the compat symlink is gone.
+        # Resolving via a rewritten prefix means the user passed a deprecated tier name, so
+        # nudge them off it (only here, not when a local file above already won by its own name).
         for suffix in _suffixes(aliased):
             candidate = BUILTIN_RECIPES_LIB.joinpath(aliased + suffix)
             if candidate.is_file() or candidate.is_dir():
+                if aliased != rp_str:
+                    warnings.warn(
+                        f"Recipe path {rp_str!r} uses a deprecated recipe-tier prefix; it "
+                        f"resolved to the built-in {aliased!r}. Update saved ``--recipe`` paths "
+                        "to the new prefix -- the deprecated one will be removed in a future "
+                        "release.",
+                        FutureWarning,
+                        stacklevel=2,
+                    )
                 return candidate
         return Path(rp_str)
     return recipe_path

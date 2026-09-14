@@ -199,8 +199,9 @@ def test_load_recipe_huggingface_arch_backward_compat_alias():
     new_path = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
     old_path = "huggingface/" + new_path[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
 
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(old_path)
     assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
-    recipe = load_recipe(old_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
 
@@ -222,8 +223,9 @@ def test_load_recipe_huggingface_models_backward_compat_alias():
     new_path = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
     old_path = "huggingface/" + new_path  # huggingface/models/<org>/<model>/ptq/<file>
 
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(old_path)
     assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
-    recipe = load_recipe(old_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
 
@@ -240,8 +242,9 @@ def test_load_recipe_model_type_models_alias_resolves_like_wheel():
     canonical = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
     aliased = "model_type/" + canonical  # model_type/models/<org>/<model>/ptq/<file>
 
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(aliased)
     assert str(_resolve_recipe_path(aliased)) == str(_resolve_recipe_path(canonical))
-    recipe = load_recipe(aliased)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
 

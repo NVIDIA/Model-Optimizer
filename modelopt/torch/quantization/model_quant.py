@@ -214,7 +214,7 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
         "The quantization config asks for weight quantization but no weight quantizer is "
         f"enabled, so nothing would be quantized. These patterns asked for it:\n  {patterns}\n"
         "Either the patterns do not match this architecture's module names (check the "
-        "model-specific recipes under modelopt_recipes/huggingface/<model_type>/), or the "
+        "model-specific recipes under modelopt_recipes/model_type/<model_type>/), or the "
         "modules holding the weights were never converted to quantized modules (an "
         "unsupported custom module, e.g. a trust_remote_code MoE layout).\n"
         "Under pipeline parallelism, a rank whose local stage genuinely has none of the "
