@@ -100,6 +100,25 @@ class _AutoQuantMoeModel(torch.nn.Module):
         return torch.randn(1, 4, 32)
 
 
+def test_auto_quantize_rejects_nonfinite_sensitivity():
+    model = torch.nn.Sequential(torch.nn.Linear(32, 32))
+
+    def loss_func(output, data):
+        return (output * float("nan")).sum()
+
+    with pytest.raises(ValueError, match=r"non-finite sensitivity score.*0\.quant_recipe"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG, None],
+            data_loader=[torch.randn(1, 4, 32)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=loss_func,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+
 class _ScoredMoeExpert(torch.nn.Module):
     def __init__(self):
         super().__init__()
