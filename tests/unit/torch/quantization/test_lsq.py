@@ -121,17 +121,17 @@ class TestLSQConfig:
             LSQConfig(scale_algorithm={"method": "smoothquant"})
 
     def test_scale_algorithm_preserves_sparse_dict(self, monkeypatch):
-        cfg = LSQConfig(scale_algorithm={"method": "mse", "fp8_scale_sweep": True})
+        cfg = LSQConfig(scale_algorithm={"method": "mse", "fp8_scale_sweep": [-8, 8]})
         assert cfg.model_dump()["scale_algorithm"] == {
             "method": "mse",
-            "fp8_scale_sweep": True,
+            "fp8_scale_sweep": (-8, 8),
         }
 
         calibrate = create_autospec(model_calib_module.mse_calibrate)
         monkeypatch.setattr(model_calib_module, "mse_calibrate", calibrate)
         model = Mock()
         model_calib_module._run_weight_scale_calibration(model, None, cfg.scale_algorithm)
-        calibrate.assert_called_once_with(model, forward_loop=None, fp8_scale_sweep=True)
+        calibrate.assert_called_once_with(model, forward_loop=None, fp8_scale_sweep=(-8, 8))
 
     @pytest.mark.parametrize(
         ("learnable_amax", "tied_amax"),

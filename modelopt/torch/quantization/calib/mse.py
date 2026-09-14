@@ -154,7 +154,14 @@ class MseCalibrator(_Calibrator):
         losses = torch.stack(losses)
         best_indices = torch.argmin(losses, dim=0)
         assert self._candidates is not None
-        best_candidates = self._candidates[best_indices]
+        if self._candidates.ndim == 1:
+            best_candidates = self._candidates[best_indices]
+        else:
+            best_candidates = torch.gather(
+                self._candidates.reshape(self._num_steps, -1),
+                0,
+                best_indices.reshape(1, -1),
+            ).reshape(best_indices.shape)
         self._amax = self._compute_candidate_amax(best_candidates)
 
         if verbose:
@@ -175,8 +182,8 @@ class MseCalibrator(_Calibrator):
 class NVFP4MSECalibrator(MseCalibrator):
     """Per-block FP8 scale sweep calibrator for NVFP4 static quantization.
 
-    ``collect`` dispatches to one of two fused Triton fast paths, else the reference 126-step
-    Python sweep. Both fast paths require the input on CUDA in the blocked
+    ``collect`` dispatches to one of two fused Triton fast paths, else the reference exhaustive
+    or bounded Python sweep. Both fast paths require the input on CUDA in the blocked
     ``[n_blocks, block_size]`` layout with Triton + the kernel package importable:
 
     - **Hessian-weighted** (local_hessian): taken when ``hessian is not None`` — minimizes
@@ -196,16 +203,23 @@ class NVFP4MSECalibrator(MseCalibrator):
         quant_func: Callable | None = None,
         error_func: Callable | None = None,
         hessian: torch.Tensor | None = None,
+        fp8_scale_sweep: bool | tuple[int, int] = True,
+        fp8_max_for_normalization: float = 448.0,
     ):
         """Initialize NVFP4 MSE calibrator with per-block and global amax.
 
         ``hessian`` (per-cin-block ``[cin // block_size, block_size, block_size]``) enables
         the Hessian-weighted Triton fast path (local_hessian); ``error_func`` carries the
         same metric for the reference fallback when the fast path is unavailable.
+        ``fp8_scale_sweep`` is True for the exhaustive search or an inclusive E4M3
+        code-offset tuple for a bounded per-block search.
+        ``fp8_max_for_normalization`` is 256 for 4/6 mode and 448 otherwise.
         """
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax.to(dtype=torch.float32)
         self._hessian = hessian
+        self._fp8_scale_sweep = fp8_scale_sweep
+        self._fp8_max_for_normalization = fp8_max_for_normalization
         # Set by collect() after either sweep path; consumed by compute_amax.
         self._best_amax: torch.Tensor | None = None
 
@@ -217,11 +231,19 @@ class NVFP4MSECalibrator(MseCalibrator):
         )
 
     def _generate_candidates(self, device: torch.device) -> torch.Tensor:
-        """Generate the 126 valid FP8 E4M3 scale candidates."""
+        """Generate exhaustive or bounded per-block FP8 E4M3 scale candidates."""
         from modelopt.torch.kernels.quantization.gemm._fp8_scale_candidates import (
             fp8_scale_candidates,
+            fp8_scale_offset_candidates,
         )
 
+        if isinstance(self._fp8_scale_sweep, tuple):
+            return fp8_scale_offset_candidates(
+                self._initial_amax,
+                self._global_amax,
+                self._fp8_scale_sweep,
+                self._fp8_max_for_normalization,
+            )
         return fp8_scale_candidates(device)
 
     def _triton_sweep_eligible(self, x: torch.Tensor) -> bool:
@@ -265,14 +287,31 @@ class NVFP4MSECalibrator(MseCalibrator):
             from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep_hessian
 
             best_flat = nvfp4_fp8_scale_sweep_hessian(
-                x.detach(), self._global_amax, self._hessian, block_size=x.shape[-1]
+                x.detach(),
+                self._global_amax,
+                self._hessian,
+                block_size=x.shape[-1],
+                offset_range=(
+                    self._fp8_scale_sweep if isinstance(self._fp8_scale_sweep, tuple) else None
+                ),
+                initial_amax=self._initial_amax,
+                fp8_max_for_normalization=self._fp8_max_for_normalization,
             )
             self._best_amax = best_flat.reshape(self._initial_amax.shape).to(dtype=torch.float32)
             return
         if self._can_use_triton_fast_path(x):
             from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep
 
-            best_flat = nvfp4_fp8_scale_sweep(x.detach(), self._global_amax, block_size=x.shape[-1])
+            best_flat = nvfp4_fp8_scale_sweep(
+                x.detach(),
+                self._global_amax,
+                block_size=x.shape[-1],
+                offset_range=(
+                    self._fp8_scale_sweep if isinstance(self._fp8_scale_sweep, tuple) else None
+                ),
+                initial_amax=self._initial_amax,
+                fp8_max_for_normalization=self._fp8_max_for_normalization,
+            )
             # Store the selected amax in fp32; the fake-quant kernel still returns
             # tensors in the requested output dtype.
             self._best_amax = best_flat.reshape(self._initial_amax.shape).to(dtype=torch.float32)

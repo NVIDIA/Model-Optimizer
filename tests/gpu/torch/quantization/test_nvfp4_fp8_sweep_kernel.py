@@ -45,7 +45,7 @@ from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.model_calib import _LocalHessianAccumulator
 from modelopt.torch.quantization.tensor_quant import static_blockwise_fp4_fake_quant
-from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
+from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX, E4M3_MAX_46
 
 BLOCK_SIZE = 16
 
@@ -66,34 +66,59 @@ def _force_sweep_path(triton_enabled: bool):
             os.environ[key] = prev
 
 
-def _reference_quant_func(global_amax):
+def _reference_quant_func(global_amax, fp8_max_for_normalization=E4M3_MAX):
     """Reference NVFP4 fake-quant matching what ``mse_calibrate`` plumbs in."""
 
     def quant_func(x, amax):
-        return static_blockwise_fp4_fake_quant(x, amax, global_amax)
+        return static_blockwise_fp4_fake_quant(
+            x, amax, global_amax, True, fp8_max_for_normalization
+        )
 
     return quant_func
 
 
-def _make_calibrator(per_block_amax, global_amax):
+def _make_calibrator(
+    per_block_amax,
+    global_amax,
+    fp8_scale_sweep=True,
+    fp8_max_for_normalization=E4M3_MAX,
+):
     return NVFP4MSECalibrator(
         amax=per_block_amax,
         axis=0,
         global_amax=global_amax,
-        quant_func=_reference_quant_func(global_amax),
+        quant_func=_reference_quant_func(global_amax, fp8_max_for_normalization),
+        fp8_scale_sweep=fp8_scale_sweep,
+        fp8_max_for_normalization=fp8_max_for_normalization,
     )
 
 
-def _run_reference(x, per_block_amax, global_amax):
+def _run_reference(
+    x,
+    per_block_amax,
+    global_amax,
+    fp8_scale_sweep=True,
+    fp8_max_for_normalization=E4M3_MAX,
+):
     with _force_sweep_path(triton_enabled=False):
-        cal = _make_calibrator(per_block_amax, global_amax)
+        cal = _make_calibrator(
+            per_block_amax, global_amax, fp8_scale_sweep, fp8_max_for_normalization
+        )
         cal.collect(x)
         return cal.compute_amax()
 
 
-def _run_triton(x, per_block_amax, global_amax):
+def _run_triton(
+    x,
+    per_block_amax,
+    global_amax,
+    fp8_scale_sweep=True,
+    fp8_max_for_normalization=E4M3_MAX,
+):
     with _force_sweep_path(triton_enabled=True):
-        cal = _make_calibrator(per_block_amax, global_amax)
+        cal = _make_calibrator(
+            per_block_amax, global_amax, fp8_scale_sweep, fp8_max_for_normalization
+        )
         cal.collect(x)
         return cal.compute_amax()
 
@@ -123,6 +148,24 @@ def test_parity_random_weights(seed, num_blocks, dtype):
         f"{(ref - tri).abs().max().item():.3e}, "
         f"differing blocks = {(ref != tri).sum().item()} / {num_blocks}"
     )
+
+
+@requires_triton
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("offset_range", [(0, 0), (-2, 6), (-8, 8)])
+def test_bounded_parity_including_code_boundaries_and_zero_blocks(dtype, offset_range):
+    torch.manual_seed(2)
+    x = torch.randn(64, BLOCK_SIZE, device="cuda", dtype=dtype)
+    x[0].zero_()
+    x[1].mul_(2**-16)
+    x[2].mul_(2**8)
+    per_block_amax = x.float().abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    ref = _run_reference(x, per_block_amax, global_amax, offset_range)
+    tri = _run_triton(x, per_block_amax, global_amax, offset_range)
+
+    assert torch.equal(ref, tri)
 
 
 @requires_triton
@@ -282,8 +325,9 @@ def test_dispatch_cpu_path_excluded():
 
 @requires_triton
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
-    """End-to-end: the ``mse``/``fp8_scale_sweep=True`` path produces the same quantized
+@pytest.mark.parametrize("fp8_scale_sweep", [True, (-2, 6)])
+def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype, fp8_scale_sweep):
+    """End-to-end: exhaustive and bounded ``mse`` paths produce the same quantized
     weights with the fast path on (default) and off (``MODELOPT_NVFP4_TRITON_SWEEP=0``),
     and stores/restores NVFP4 static amax in fp32 for fp32 and bf16 model forwards."""
     if get_cuda_ext_mx() is None:
@@ -302,7 +346,7 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
             },
             {"quantizer_name": "*input_quantizer", "enable": False},
         ],
-        "algorithm": {"method": "mse", "fp8_scale_sweep": True},
+        "algorithm": {"method": "mse", "fp8_scale_sweep": fp8_scale_sweep},
     }
 
     def _run_calibrated(env_value, label):
@@ -324,7 +368,8 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
         amax_dtypes = nvfp4_static_amax_dtypes(model)
         assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, label)
 
-        ckpt_path = tmp_path / f"mse_calibrate_{label}_{str(dtype).rpartition('.')[-1]}.pt"
+        mode = "full" if fp8_scale_sweep is True else "bounded"
+        ckpt_path = tmp_path / f"mse_calibrate_{label}_{mode}_{str(dtype).rpartition('.')[-1]}.pt"
         mto.save(model, ckpt_path)
         restored_model = mto.restore(SimpleLinear(dtype=dtype).cuda(), ckpt_path)
         restored_amax_dtypes = nvfp4_static_amax_dtypes(restored_model)
@@ -371,29 +416,47 @@ def _build_hessian_accumulator(cout, cin, hessian_input, block_size=BLOCK_SIZE):
     return acc
 
 
-def _run_hessian_reference(x_blocks, per_block_amax, global_amax, acc):
+def _run_hessian_reference(
+    x_blocks,
+    per_block_amax,
+    global_amax,
+    acc,
+    fp8_scale_sweep=True,
+    fp8_max_for_normalization=E4M3_MAX,
+):
     """Reference 126-step sweep using the Hessian-weighted ``error_func`` (Triton off)."""
     with _force_sweep_path(triton_enabled=False):
         cal = NVFP4MSECalibrator(
             amax=per_block_amax,
             axis=0,
             global_amax=global_amax,
-            quant_func=_reference_quant_func(global_amax),
+            quant_func=_reference_quant_func(global_amax, fp8_max_for_normalization),
             error_func=acc.build_error_func(keep_buffer=True),
+            fp8_scale_sweep=fp8_scale_sweep,
+            fp8_max_for_normalization=fp8_max_for_normalization,
         )
         cal.collect(x_blocks)
         return cal.compute_amax()
 
 
-def _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc):
+def _run_hessian_triton(
+    x_blocks,
+    per_block_amax,
+    global_amax,
+    acc,
+    fp8_scale_sweep=True,
+    fp8_max_for_normalization=E4M3_MAX,
+):
     """Hessian-weighted Triton fast path (same metric as a raw per-cin-block tensor)."""
     with _force_sweep_path(triton_enabled=True):
         cal = NVFP4MSECalibrator(
             amax=per_block_amax,
             axis=0,
             global_amax=global_amax,
-            quant_func=_reference_quant_func(global_amax),
+            quant_func=_reference_quant_func(global_amax, fp8_max_for_normalization),
             hessian=acc.normalized_hessian(),
+            fp8_scale_sweep=fp8_scale_sweep,
+            fp8_max_for_normalization=fp8_max_for_normalization,
         )
         cal.collect(x_blocks)
         return cal.compute_amax()
@@ -466,6 +529,71 @@ def test_hessian_parity_random_weights(seed, cout, cin, dtype):
         f"aggregate Hessian-loss gap {rel_gap:.3e} too large "
         f"({n_diff}/{n_blocks} boundary blocks flipped, dtype={dtype})"
     )
+
+
+@requires_triton
+@pytest.mark.parametrize("offset_range", [(0, 0), (-2, 6), (-8, 8)])
+def test_hessian_bounded_parity(offset_range):
+    torch.manual_seed(3)
+    cout, cin = 8, 64
+    weight = torch.randn(cout, cin, device="cuda", dtype=torch.float32)
+    weight[0].zero_()
+    acc = _build_hessian_accumulator(
+        cout, cin, torch.randn(128, cin, device="cuda", dtype=torch.float32)
+    )
+    x_blocks = weight.reshape(-1, BLOCK_SIZE)
+    per_block_amax = x_blocks.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    ref = _run_hessian_reference(x_blocks, per_block_amax, global_amax, acc, offset_range)
+    tri = _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc, offset_range)
+
+    assert torch.equal(ref, tri)
+
+
+@requires_triton
+def test_bounded_four_over_six_parity_for_both_losses():
+    torch.manual_seed(4)
+    cout, cin = 8, 64
+    x_blocks = torch.randn(cout * cin // BLOCK_SIZE, BLOCK_SIZE, device="cuda")
+    per_block_amax = x_blocks.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+    offset_range = (-2, 6)
+
+    ref = _run_reference(x_blocks, per_block_amax, global_amax, offset_range, E4M3_MAX_46)
+    tri = _run_triton(x_blocks, per_block_amax, global_amax, offset_range, E4M3_MAX_46)
+    assert torch.equal(ref, tri)
+
+    acc = _build_hessian_accumulator(
+        cout, cin, torch.randn(128, cin, device="cuda", dtype=torch.float32)
+    )
+    ref = _run_hessian_reference(
+        x_blocks, per_block_amax, global_amax, acc, offset_range, E4M3_MAX_46
+    )
+    tri = _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc, offset_range, E4M3_MAX_46)
+    assert torch.equal(ref, tri)
+
+
+@requires_triton
+def test_bounded_all_zero_tensor_is_deterministic_for_both_losses():
+    cout, cin = 4, 64
+    x_blocks = torch.zeros(cout * cin // BLOCK_SIZE, BLOCK_SIZE, device="cuda")
+    per_block_amax = x_blocks.abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+    offset_range = (-8, 8)
+
+    ref = _run_reference(x_blocks, per_block_amax, global_amax, offset_range)
+    tri = _run_triton(x_blocks, per_block_amax, global_amax, offset_range)
+    assert torch.equal(ref, tri)
+    assert torch.count_nonzero(tri) == 0
+
+    acc = _build_hessian_accumulator(
+        cout, cin, torch.randn(64, cin, device="cuda", dtype=torch.float32)
+    )
+    ref = _run_hessian_reference(x_blocks, per_block_amax, global_amax, acc, offset_range)
+    tri = _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc, offset_range)
+    assert torch.equal(ref, tri)
+    assert torch.count_nonzero(tri) == 0
 
 
 @requires_triton
