@@ -96,7 +96,7 @@ from the scored config.
 ```yaml
 proxy:
   request_timeout: 3600
-  extra_body: {skip_special_tokens: false}   # add model-card sampling extras if the card sets them
+  extra_body: {skip_special_tokens: false}   # generation extras follow SKILL Step 3's provenance/precedence policy
   model_traffic: {capture_request_body: true}   # FEA-224; adds the upstream request body to the traffic capture that is ALREADY ON by default
   interceptors:
     # - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}   # canary only

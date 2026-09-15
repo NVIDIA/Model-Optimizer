@@ -41,10 +41,14 @@ services:
     container_mounts:                # source dirs MUST pre-exist (pyxis won't create them): ssh <login> 'mkdir -p <lustre>/<user>/.cache/{vllm,huggingface}'
       - ???:/cache/vllm
       - ???:/cache/huggingface
-    generation: {temperature: 1.0, top_p: 0.95}   # from model card (reasoning mode); adjust per card — mandatory lookup (references/model-card-research.md), same as 0.2.6
+    # Add generation fields for explicit user/task requirements first; otherwise
+    # only for model-card settings explicitly used for evaluation/benchmarking.
+    # Preserve checkpoint/vLLM defaults absent that evidence. Omission can still
+    # activate evaluator/agent defaults; inspect requests. null is not omission.
+    generation: {}                    # see SKILL Step 3; mirror explicit values in tags
     proxy:
       request_timeout: 3600                      # canonical; MUST be >= benchmarks[].solver.agent_kwargs.llm_kwargs.timeout
-      extra_body: {skip_special_tokens: false}   # add model-card sampling extras here if the card specifies them; mirror them in the export tags below
+      extra_body: {skip_special_tokens: false}   # add only requirement- or evaluation-provenanced generation extras; mirror in tags
       interceptors:
         - name: drop_params                        # agents send max_tokens; many servers reject it
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
@@ -108,6 +112,7 @@ output:
       log_config_params: true
       copy_logs: true
       exclude_patterns: ["shard*", "model_traffic.jsonl"]   # captured request bodies (FEA-224) stay in the run dir
-      description: ???               # '<model> | T=1.0 top_p=0.95 | <benchmark> (timeout_strategy=…) | r8'
-      # model/checkpoint_path/benchmark drive dashboard attribution (engine logs only a generic metric key); temperature/top_p mirror generation above.
-      tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", temperature: '1.0', top_p: '0.95'}
+      description: ???               # '<model> | verified effective sampling + sources | <benchmark> (timeout_strategy=…) | r8'
+      # model/checkpoint_path/benchmark drive dashboard attribution. Sampling tags
+      # mirror explicit generation fields; 'omitted' does NOT assert effective defaults.
+      tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", temperature: 'omitted', top_p: 'omitted'}

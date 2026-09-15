@@ -2,38 +2,32 @@
 
 Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it carefully, the FULL text, the devil is in the details. Extract ALL relevant configurations:
 
-- Sampling params (`temperature`, `top_p`)
-  - **Only trust a sentence that ties the values to the benchmarks** ("Benchmarked
-    with…", "…were evaluated with…", "We evaluate the model using…") or a
-    "Recommended Sampling" row. The `SamplingParams(temperature=0.8, top_p=0.95)`
-    in a card's TensorRT-LLM/vLLM quickstart snippet is boilerplate copied
-    verbatim across unrelated models — **never** read eval settings out of it.
-  - **Then cross-check `nvfp4-modelcard-sampling.md`** — published
-    `temperature` / `top_p` / `max_num_tokens` for the 2026 NVFP4 checkpoints
-    under `huggingface.co/nvidia` that disclose them, grouped by family.
-    Required for any NVFP4 checkpoint or same-family sibling; it is also the
-    best source of a default when the card is silent. Pre-2026 releases are out
-    of scope there — read their cards.
-- Context length (`deployment.extra_args: "--max-model-len <value>"`)
-- **Output length (`max_new_tokens`) — mandatory extraction.** Scan the
-  card for any `max_tokens` / `max_new_tokens` / "output length"
-  recommendation. Cards often list two values (e.g., Qwen3.x: `32768`
-  thinking-general + `81920` math/coding). **Pick the highest value** and
-  apply at the top level (no per-task overrides). If the card is genuinely
-  silent on output length, note that explicitly and fall back to the
-  generic default (64K reasoning / 16K non-reasoning) — never write a
-  config with "card not yet checked" + generic default. Check
-  `nvfp4-modelcard-sampling.md` for the model or its family before falling
-  back; a same-family published cap beats the generic default. See SKILL.md
-  Step 3 "`max_new_tokens` — pick a single top-level value" for the full
-  rule.
+- **Generation params (`temperature`, `top_p`, `max_new_tokens`, etc.).**
+  Explicit user/task requirements take precedence. Derive model-card overrides
+  only from statements tying each value to evaluation/benchmarking ("Benchmarked
+  with…", "…were evaluated with…"). General "Recommended Sampling" rows,
+  quickstarts, and supported output/context limits are not evaluation evidence.
+  Cite the statement and scope each override to the stated benchmark/mode;
+  never choose the highest value across unrelated scenarios.
+  - Cross-check `nvfp4-modelcard-sampling.md` against the exact card, per field.
+    Do not fill gaps from the table or same-family models.
+  - If evidence is absent or ambiguous, preserve `config.json`,
+    `generation_config.json`, and vLLM defaults; no generic token-budget fallback.
+    Omitting client fields can still activate evaluator/task defaults. Inspect
+    resolved configs and canary requests, and remove unintended overrides or
+    carry verified checkpoint/server values through the supported harness path.
+    Do not substitute `null` for omission without verifying its semantics.
+    See SKILL.md Step 3 "Generation parameters — provenance and precedence".
+- Context length (vLLM `--max-model-len`): preserve the checkpoint/server default
+  unless the task or verified deployment recipe requires an override; check
+  prompt + output capacity separately from generation limits.
 - TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)
 - Reasoning config (if applicable):
   - reasoning on/off: use either:
     - `adapter_config.custom_system_prompt` (like `/think`, `/no_think`) and no `adapter_config.params_to_add` (leave `params_to_add` unrelated to reasoning untouched)
     - `adapter_config.params_to_add` for payload modifier (like `"chat_template_kwargs": {"enable_thinking": true/false}`) and no `adapter_config.custom_system_prompt` and `adapter_config.use_system_prompt: false` (leave `custom_system_prompt` and `use_system_prompt` unrelated to reasoning untouched).
   - **The `chat_template_kwargs` toggle key drifts across model generations — read the card / `chat_template.jinja`, don't extrapolate, and set only the one key the model uses.** Known: `enable_thinking` (Qwen3.5/3.6, GLM 5.1 — note GLM-4.x used `thinking`+`/nothink`); `thinking` (Kimi K2.6 — renamed from K2.5's `enable_thinking`; DeepSeek V3.2/V4 — Python encoder, not Jinja, so an unused kwarg can error rather than be ignored).
-  - reasoning effort/budget (if configurable, e.g. DeepSeek V4 `reasoning_effort`): **default to `max`** (the highest effort the card documents), honoring any tied requirement (e.g. V4 Think Max needs `--max-model-len >= 393216`). AskUserQuestion only if the user signals a cost/latency preference.
+  - reasoning effort/budget: apply the generation-parameter provenance policy above, not the highest documented effort by default. Honor tied deployment requirements (e.g. DeepSeek V4 Think Max needs `--max-model-len >= 393216`).
   - etc.
 - Deployment-specific `extra_args` for vLLM/SGLang (look for the vLLM/SGLang deployment command)
 - Deployment-specific vLLM/SGLang versions (by default we use latest docker images, but you can control it with `deployment.image` e.g. vLLM above `vllm/vllm-openai:v0.11.0` stopped supporting `rope-scaling` arg used by Qwen models)

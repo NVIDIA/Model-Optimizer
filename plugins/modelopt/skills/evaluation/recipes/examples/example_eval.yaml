@@ -99,6 +99,8 @@ deployment:
   # model as `/checkpoint` and eval requests 404 ("model does not exist").
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
+  # Preserve checkpoint/vLLM context defaults unless a task or verified deployment
+  # recipe requires --max-model-len; confirm the model supports that context.
   # `--model-loader-extra-config` enables multithreaded checkpoint loading (on by
   # default below) — cuts large-checkpoint load from tens of minutes to a few;
   # tune num_threads to the checkpoint size / shared-FS read bandwidth.
@@ -112,7 +114,6 @@ deployment:
     --port ${deployment.port}
     --tensor-parallel-size 1
     --data-parallel-size 1
-    --max-model-len 131072
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'
     --max-num-batched-tokens 8192
     --enable-chunked-prefill
@@ -132,9 +133,12 @@ evaluation:
         parallelism: ???  # Number of concurrent requests per each benchmark
         request_timeout: 3600
         max_retries: 10
-        max_new_tokens: 65536  # 64K for reasoning models; use 16384 (16K) for non-reasoning; prefer model card value
-        temperature: 1.0       # from model card (reasoning mode); adjust per card
-        top_p: 0.95            # from model card (reasoning mode); adjust per card
+        # Add generation overrides for explicit user/task requirements first.
+        # Otherwise use model-card values ONLY when explicitly used for evaluation/
+        # benchmarking of the applicable task/mode (cite the statement).
+        # Without that evidence, preserve config.json/generation_config.json/vLLM
+        # defaults. Omission can still activate evaluator defaults: inspect resolved
+        # configs and canary requests (SKILL Step 3). null is not omission.
     target:
       api_endpoint:
         api_key_name: DUMMY_API_KEY
@@ -162,7 +166,8 @@ evaluation:
               thinking: true
               enable_thinking: true
               # DeepSeek V4 only: reasoning-effort axis (high|max). "max" needs
-              # --max-model-len >= 393216. Uncomment for DeepSeek V4.
+              # --max-model-len >= 393216. Uncomment only for an explicit requirement
+              # or an applicable, evaluation-provenanced model-card setting.
               # reasoning_effort: max
   tasks:
   # Reasoning (chat endpoint, short). nemo-skills GPQA on the AA 4-choice MCQ
@@ -187,9 +192,10 @@ export:
   # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
   # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
   # run params), so keep them — but because they can't be interpolated, they MUST be
-  # kept EQUAL to evaluation.nemo_evaluator_config.config.params above. When you
-  # change the sampling params (or served_model_name), update these literals in the
-  # SAME edit, or MLflow will misreport the run.
+  # kept EQUAL to explicit config.params values above. 'omitted' means no client
+  # override here, NOT a verified server default; record effective values and
+  # per-task differences in the description after checking resolved requests.
+  # Update params and tags in the SAME edit, or MLflow will misreport the run.
   mlflow:
     tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical frontier-evals host; NOT the -nemo-evaluator alias)
     # If the checkpoint holds a .experiment.json, use ITS experiment_name verbatim here so
@@ -197,7 +203,7 @@ export:
     # would resolve. Cross-server, that makes a same-named experiment here and only
     # modelopt_run_url reaches the PTQ run (Step 4).
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
-    description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
+    description: 'CHANGEME-served-model-name | generation overrides omitted; verify effective settings'
     log_logs: true
     log_artifacts: true
     only_required: false
@@ -205,9 +211,9 @@ export:
     tags:
       framework: vllm
       model: CHANGEME-served-model-name
-      temperature: '1.0'
-      top_p: '0.95'
-      max_new_tokens: '65536'
+      temperature: 'omitted'
+      top_p: 'omitted'
+      max_new_tokens: 'omitted'
       # From the checkpoint's .experiment.json when present; drop when absent. Keep the
       # quotes (a bare 20260910 becomes a date) and skip any value containing ${ -- quoting
       # does not stop OmegaConf resolving it.

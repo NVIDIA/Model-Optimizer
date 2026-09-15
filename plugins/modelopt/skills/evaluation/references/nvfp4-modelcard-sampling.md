@@ -9,56 +9,35 @@ those whose cards disclose nothing usable, and **speculative-decoding variants
 not change its output distribution, so those checkpoints share their base
 checkpoint's row. A miss here means "read the card", not "not yet checked".
 
-Use it to reproduce a published NVFP4 number, and as the cross-check when a card
-is silent or ambiguous. It does not replace reading the card — see
-`model-card-research.md`.
+Use this dated snapshot to cross-check published settings, not to fill gaps in
+silent or ambiguous cards. Read the exact card and verify each field's evaluation
+provenance — see `model-card-research.md`.
 
 ## Lookup
 
-**The card is the source of truth; this table is a reference, not a constraint.**
-Use it to confirm what you read, to fill a gap when the card is silent, and as a
-sanity check when you are unsure — never to override a value the card states.
+**Explicit user/task requirements take precedence over model-card settings.**
 
-1. **Exact row, resolved per field.** `eval` → use it, cite the row. `rec` → use
-   it, but note in the config comment that it is recommended sampling, not a
-   stated eval setting; if a same-family `eval` row disagrees, surface both.
-   `—` → that field is unpublished; resolve **it alone** via step 2.
-   `max_num_tokens` is the card's *headline* cap — where a note names a higher
-   per-task cap (GLM-5.2 GPQA `100000`, Qwen3.5-397B-V2 τ²-Telecom `128000`,
-   Kimi-K3 uncapped for Terminal-Bench) and that task is in your suite, SKILL.md
-   Step 3's take-the-highest rule governs the single top-level value, not the
-   column.
-2. **No row** (new or unreleased variant, non-NVIDIA baseline, pre-2026) → take
-   the nearest same-family rows as the expected value.
-3. **Card vs. table.** Agree → proceed. Card silent + family consistent → adopt
-   the family value and cite this file in a line comment; that beats SKILL.md
-   Step 3's generic 65536 / 16384. **Card disagrees → the card wins**, but
-   surface it — defaults shift between generations, so a mismatch means re-read,
-   not auto-correct.
-4. **Baseline and candidate share one setting.** Cards report both precisions
-   measured under the single setting listed; use the NVFP4 row for both.
+1. **Exact row, resolved per field.** `eval` → verify the card explicitly ties
+   that field to evaluation/benchmarking for the applicable task/mode, then cite
+   the statement. A row can mix evaluation settings and general recommendations
+   in its notes; the row label does not authorize every value. `rec` and `—` do
+   not justify overrides.
+2. **Missing or ambiguous evidence** → preserve `config.json`,
+   `generation_config.json`, and vLLM defaults. No same-family inference or
+   generic fallback. Verify evaluator defaults and actual requests as described
+   in SKILL.md Step 3; omission and explicit `null` are not interchangeable.
+3. **Card vs. table** → re-read the card and surface discrepancies; only verified
+   evaluation settings qualify. Quickstarts, supported limits, and general
+   "Recommended Sampling" rows do not qualify without an explicit evaluation tie.
+4. **Scope overrides to the stated tasks/modes**, including output caps. Do not
+   promote a task-specific or headline maximum to a suite-wide value. Apply
+   verified settings consistently to baseline and candidate when reproducing
+   their published comparison; otherwise confirm effective config parity.
 
-**Per-task sampling is precedent, not mandate.** Some notes record a
-benchmark-specific `temperature` / `top_p` (Qwen3.6 SciCode `0.6`; Qwen3.6-27B
-τ²-Bench Telecom `0.0` / `top_p=1.0`; Kimi-K3 `top_p=1.0` agentic). Engineers do
-tune sampling per benchmark, so **follow the card you are working from** and use
-these as the cross-check. Where the two disagree, **escalate to the user on a
-regime change, not a nudge** — greedy (`temperature ≤ 0.1` or `top_p ≤ 1e-4`)
-versus sampled flips the regime and materially moves both score and variance;
-`0.95` vs `1.0` does not. NEL accepts per-task `temperature` / `top_p` under
-`evaluation.tasks.*.nemo_evaluator_config`; only `max_new_tokens` is barred
-(SKILL.md Step 3).
-
-> **Never take sampling from a card's quickstart snippet.**
-> `SamplingParams(temperature=0.8, top_p=0.95)` and `max_tokens=32` are
-> boilerplate, repeated verbatim across unrelated models. Only *Benchmarked
-> with…* / *evaluated with…* / *We evaluate the model using…* sentences,
-> "Recommended Sampling" rows, and footnotes under the accuracy table count.
-
-`provenance` — **`eval`** (20 rows): card ties the values to its accuracy table,
-authoritative. **`rec`** (5 rows): card recommends them for inference without
-that tie. `max_num_tokens` is the max generation length, i.e.
-`nemo_evaluator_config.config.params.max_new_tokens`.
+`provenance` — **`eval`** (20 rows): recorded as tied to evaluation; verify each
+field against the card. **`rec`** (5 rows): inference recommendations only, not
+an override source. `max_num_tokens` records generation length, corresponding
+to `nemo_evaluator_config.config.params.max_new_tokens`, not context length.
 
 | Model card ID | temp | top_p | max_num_tokens | prov | notes |
 | --- | --- | --- | --- | --- | --- |
@@ -87,26 +66,6 @@ that tie. `max_num_tokens` is the max generation length, i.e.
 | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 1.0 | 0.95 | — | rec | card: use across **all** tasks and serving backends |
 | `nvidia/NVIDIA-Nemotron-Labs-3-Elastic-30B-A3B-NVFP4` | 1.0 | 1.0 | — | rec | reasoning tasks |
 | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4` | 0.6 think / 0.2 instruct | 0.95 think / — | 20480 think / 1024 instruct | rec | think adds `reasoning_budget=16384`, `grace_period=1024`; instruct sets `top_k=1` |
-
-## Priors (verify against the card)
-
-- **`1.0 / 0.95` is the house default** — GLM 4.7–5.2, Kimi K2.6–K3, MiniMax
-  M2.5–M3, Gemma 4, Nemotron 3/3.5, Qwen3.6. Best guess when a recent card is
-  silent.
-- **DeepSeek is carved out of it** — its row uses `top_p=1.0`, not `0.95`.
-  Never carry the house default onto an unlisted DeepSeek variant.
-- **Qwen splits by variant** — thinking `0.6 / 0.95` at Qwen3.5, raised to `1.0`
-  at Qwen3.6; instruct/coder near-greedy `0 / 1e-5` with `16384`.
-- **GLM** — `1.0 / 0.95` throughout; cap fell from 131072 (4.7, 5) to 64000
-  (5.1, 5.2).
-- **Caps cluster at 64000 / 65536 / 81920 / 128000 / 131072**, 64000 most
-  common. `16384` appears only with greedy instruct Qwen; DeepSeek-V4-Flash's
-  `384000` is a long-context outlier.
-- **Per-task overrides are narrow** — SciCode (lower temperature), τ²-Bench
-  Telecom (greedy or larger cap), GPQA Diamond (larger cap), Terminal-Bench
-  (uncapped). SKILL.md Step 3 forbids per-task `max_new_tokens`, so when a card
-  lists two caps **take the maximum** as the single top-level value and note the
-  split in a comment.
 
 ## Refreshing
 
