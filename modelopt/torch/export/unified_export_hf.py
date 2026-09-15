@@ -1606,6 +1606,30 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
     """
     keys = getattr(model, "_modelopt_unplaced_source_keys", None)
     ckpt = getattr(model, "_modelopt_source_checkpoint", None)
+
+    if keys is None:
+        # Not loaded by the sharded loader (plain from_pretrained, or a caller-built model), so
+        # nothing was recorded. Fall back to the model's own provenance and ask the same question
+        # directly. `keys is None` rather than `not keys`: a loader that recorded an EMPTY list has
+        # already answered, and re-deriving would be wasted work.
+        #
+        # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
+        # there is nothing to carry must not depend on an optional import succeeding. safetensors
+        # is absent in the partial-install environments, and letting that ImportError fall into the
+        # handler would emit the very "will be missing them" warning this guard exists to avoid.
+        ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
+        if not ckpt or not Path(ckpt).is_dir():
+            # A hub id rather than a local path, or no provenance at all -- nothing to read.
+            return {}
+        # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can
+        # read. Returning quietly is right: there is nothing to carry, so warning about weights
+        # "missing" from the export would be alarming and wrong.
+        if (
+            not (Path(ckpt) / "model.safetensors.index.json").exists()
+            and not (Path(ckpt) / "model.safetensors").exists()
+        ):
+            return {}
+
     try:
         from safetensors import safe_open
 
@@ -1615,22 +1639,6 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
         )
 
         if keys is None:
-            # Not loaded by the sharded loader (plain from_pretrained, or a caller-built model), so
-            # nothing was recorded. Fall back to the model's own provenance and ask the same
-            # question directly. `keys is None` rather than `not keys`: a loader that recorded an
-            # EMPTY list has already answered, and re-deriving would be wasted work.
-            ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
-            if not ckpt or not Path(ckpt).is_dir():
-                # A hub id rather than a local path, or no provenance at all -- nothing to read.
-                return {}
-            # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can
-            # read. Returning quietly is right: there is nothing to carry, so warning about weights
-            # "missing" from the export would be alarming and wrong.
-            if (
-                not (Path(ckpt) / "model.safetensors.index.json").exists()
-                and not (Path(ckpt) / "model.safetensors").exists()
-            ):
-                return {}
             keys = unplaced_source_keys(model, ckpt)
         if not keys or not ckpt:
             return {}

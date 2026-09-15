@@ -681,3 +681,20 @@ def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recw
 
     assert _carry_over_unplaced_source_weights(model) == {}
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
+
+
+def test_carry_over_is_quiet_without_safetensors_installed(tmp_path, monkeypatch, recwarn):
+    """The quiet path must not depend on safetensors being importable.
+
+    The partial-install CI environments have no safetensors, so if the short-circuit sat below
+    the import, the ImportError would land in the handler and emit the very "will be missing
+    them" warning the short-circuit exists to avoid.
+    """
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "safetensors", None)  # makes `from safetensors import` raise
+    (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
+    model = _ProvenanceModel(name_or_path=tmp_path)
+
+    assert _carry_over_unplaced_source_weights(model) == {}
+    assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
