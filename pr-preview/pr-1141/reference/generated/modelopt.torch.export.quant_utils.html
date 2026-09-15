@@ -1,0 +1,687 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>quant_utils &mdash; Model Optimizer 0.0.1.dev1+gd4ff37a72</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="tensorrt_llm_type" href="modelopt.torch.export.tensorrt_llm_type.html" />
+    <link rel="prev" title="postprocess" href="modelopt.torch.export.postprocess.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.export.html">export</a></li>
+      <li class="breadcrumb-item active">quant_utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.export.quant_utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="quant-utils">
+<h1>quant_utils<a class="headerlink" href="#quant-utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.export.quant_utils">Utils for quantization including scaling factors adjustments.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.adjust_attn_amax_values" title="modelopt.torch.export.quant_utils.adjust_attn_amax_values"><code class="xref py py-obj docutils literal notranslate"><span class="pre">adjust_attn_amax_values</span></code></a></p></td>
+<td><p>Adjusts the amax values for the attention layers.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.all_items_same" title="modelopt.torch.export.quant_utils.all_items_same"><code class="xref py py-obj docutils literal notranslate"><span class="pre">all_items_same</span></code></a></p></td>
+<td><p>Checks if all elements in the provided list are the same.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.from_quantized_weight" title="modelopt.torch.export.quant_utils.from_quantized_weight"><code class="xref py py-obj docutils literal notranslate"><span class="pre">from_quantized_weight</span></code></a></p></td>
+<td><p>Converts the quantized weight to the target torch_dtype format.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.fuse_prequant_layernorm" title="modelopt.torch.export.quant_utils.fuse_prequant_layernorm"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fuse_prequant_layernorm</span></code></a></p></td>
+<td><p>Scales layernorm weights with avg_pre_quant_scale of the modules list and sets pre_quant_scales to be deleted.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.fuse_prequant_to_linear" title="modelopt.torch.export.quant_utils.fuse_prequant_to_linear"><code class="xref py py-obj docutils literal notranslate"><span class="pre">fuse_prequant_to_linear</span></code></a></p></td>
+<td><p>Fuse pre_quant_scale to the linear weights if possible.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_activation_scaling_factor" title="modelopt.torch.export.quant_utils.get_activation_scaling_factor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_activation_scaling_factor</span></code></a></p></td>
+<td><p>Returns the activation scaling factor.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_kv_cache_bias" title="modelopt.torch.export.quant_utils.get_kv_cache_bias"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_kv_cache_bias</span></code></a></p></td>
+<td><p>Returns the kv_cache bias if _bias_value is set.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_kv_cache_dtype" title="modelopt.torch.export.quant_utils.get_kv_cache_dtype"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_kv_cache_dtype</span></code></a></p></td>
+<td><p>Returns the kv_cache dtype.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_kv_cache_scaling_factor" title="modelopt.torch.export.quant_utils.get_kv_cache_scaling_factor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_kv_cache_scaling_factor</span></code></a></p></td>
+<td><p>Get the K and V BMM scaling factors for the self attention module.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_prequant_scaling_factor" title="modelopt.torch.export.quant_utils.get_prequant_scaling_factor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_prequant_scaling_factor</span></code></a></p></td>
+<td><p>Returns the prequant scaling factor.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_quant_config" title="modelopt.torch.export.quant_utils.get_quant_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quant_config</span></code></a></p></td>
+<td><p>Generate quantization config for a model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_quantization_format" title="modelopt.torch.export.quant_utils.get_quantization_format"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_quantization_format</span></code></a></p></td>
+<td><p>Gets the quantization string.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_scaling_factor" title="modelopt.torch.export.quant_utils.get_scaling_factor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_scaling_factor</span></code></a></p></td>
+<td><p>Returns scaling factor from the quantizer as torch.Tensor.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_scaling_factor_from_weight" title="modelopt.torch.export.quant_utils.get_scaling_factor_from_weight"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_scaling_factor_from_weight</span></code></a></p></td>
+<td><p>Calculate the weight scaling factor for a given group size.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_weight_block_size" title="modelopt.torch.export.quant_utils.get_weight_block_size"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_weight_block_size</span></code></a></p></td>
+<td><p>Returns the weight block size.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_weight_scaling_factor" title="modelopt.torch.export.quant_utils.get_weight_scaling_factor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_weight_scaling_factor</span></code></a></p></td>
+<td><p>Returns the weight scaling factor.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.get_weight_scaling_factor_2" title="modelopt.torch.export.quant_utils.get_weight_scaling_factor_2"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_weight_scaling_factor_2</span></code></a></p></td>
+<td><p>Returns the secondary weight scaling factor.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.has_quantized_modules" title="modelopt.torch.export.quant_utils.has_quantized_modules"><code class="xref py py-obj docutils literal notranslate"><span class="pre">has_quantized_modules</span></code></a></p></td>
+<td><p>Check if a model has any quantized modules.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.maybe_transpose_expert_weight_dimensions" title="modelopt.torch.export.quant_utils.maybe_transpose_expert_weight_dimensions"><code class="xref py py-obj docutils literal notranslate"><span class="pre">maybe_transpose_expert_weight_dimensions</span></code></a></p></td>
+<td><p>Transpose the last two dimensions of expert weights.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.pack_int4_in_uint8" title="modelopt.torch.export.quant_utils.pack_int4_in_uint8"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pack_int4_in_uint8</span></code></a></p></td>
+<td><p>Packs the INT4 weights into uint8 tensor.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.postprocess_state_dict" title="modelopt.torch.export.quant_utils.postprocess_state_dict"><code class="xref py py-obj docutils literal notranslate"><span class="pre">postprocess_state_dict</span></code></a></p></td>
+<td><p>Filters out keys related to weight quantizers and updates KV cache related keys.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.preprocess_linear_fusion" title="modelopt.torch.export.quant_utils.preprocess_linear_fusion"><code class="xref py py-obj docutils literal notranslate"><span class="pre">preprocess_linear_fusion</span></code></a></p></td>
+<td><p>Preprocess the quantized linears that we plan to fuse.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.process_layer_quant_config" title="modelopt.torch.export.quant_utils.process_layer_quant_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">process_layer_quant_config</span></code></a></p></td>
+<td><p>Processes per layer quantization information for TRTLLM export to quant_cfg.json.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.resmooth_and_get_scale" title="modelopt.torch.export.quant_utils.resmooth_and_get_scale"><code class="xref py py-obj docutils literal notranslate"><span class="pre">resmooth_and_get_scale</span></code></a></p></td>
+<td><p>Resmooths weights from a single or multiple ranks and get scaling factors and amax.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.quant_utils.to_quantized_weight" title="modelopt.torch.export.quant_utils.to_quantized_weight"><code class="xref py py-obj docutils literal notranslate"><span class="pre">to_quantized_weight</span></code></a></p></td>
+<td><p>Converts the weight to the quantized (packed) format.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.adjust_attn_amax_values">
+<span class="sig-name descname"><span class="pre">adjust_attn_amax_values</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.adjust_attn_amax_values" title="Link to this definition"></a></dt>
+<dd><p>Adjusts the amax values for the attention layers.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.all_items_same">
+<span class="sig-name descname"><span class="pre">all_items_same</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">item_list</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.all_items_same" title="Link to this definition"></a></dt>
+<dd><p>Checks if all elements in the provided list are the same.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.from_quantized_weight">
+<span class="sig-name descname"><span class="pre">from_quantized_weight</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights_scaling_factor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantization</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">torch_dtype</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.from_quantized_weight" title="Link to this definition"></a></dt>
+<dd><p>Converts the quantized weight to the target torch_dtype format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>weights_scaling_factor</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>quantization</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.fuse_prequant_layernorm">
+<span class="sig-name descname"><span class="pre">fuse_prequant_layernorm</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layernorm_module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">modules</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.fuse_prequant_layernorm" title="Link to this definition"></a></dt>
+<dd><p>Scales layernorm weights with avg_pre_quant_scale of the modules list and sets pre_quant_scales to be deleted.</p>
+<dl class="simple">
+<dt>original:</dt><dd><p>layernorm_output = (normalization(input) * weight) + bias
+layernorm_output_scaled = layernorm_output * pre_quant_scale</p>
+</dd>
+<dt>fused:</dt><dd><p>fused_weight = weight * avg_pre_quant_scale
+fused_bias = bias * avg_pre_quant_scale
+layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias</p>
+</dd>
+</dl>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layernorm_module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>modules</strong> (<em>list</em><em>[</em><em>Tensor</em><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.fuse_prequant_to_linear">
+<span class="sig-name descname"><span class="pre">fuse_prequant_to_linear</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fuse_grouped_heads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.fuse_prequant_to_linear" title="Link to this definition"></a></dt>
+<dd><p>Fuse pre_quant_scale to the linear weights if possible.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – The model to fuse pre_quant_scale to.</p></li>
+<li><p><strong>fuse_grouped_heads</strong> – If True, fuse the pre_quant_scale even if dimension between pre_quant_scale
+and linear weights is not the same.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of modules of which pre_quant_scale is fused to the previous linear layer.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>fused_modules</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_activation_scaling_factor">
+<span class="sig-name descname"><span class="pre">get_activation_scaling_factor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_quantizer_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'input_quantizer'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_activation_scaling_factor" title="Link to this definition"></a></dt>
+<dd><p>Returns the activation scaling factor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>input_quantizer_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_kv_cache_bias">
+<span class="sig-name descname"><span class="pre">get_kv_cache_bias</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">kv_module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_kv_cache_bias" title="Link to this definition"></a></dt>
+<dd><p>Returns the kv_cache bias if _bias_value is set. Else returns None.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>kv_module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_kv_cache_dtype">
+<span class="sig-name descname"><span class="pre">get_kv_cache_dtype</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modules</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_kv_cache_dtype" title="Link to this definition"></a></dt>
+<dd><p>Returns the kv_cache dtype.</p>
+<p>If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
+otherwise returns None.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>modules</strong> (<em>list</em><em>[</em><em>Module</em><em>] </em><em>| </em><em>Module</em>) – The module or list of modules to inspect.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The kv_cache dtype.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>str</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_kv_cache_scaling_factor">
+<span class="sig-name descname"><span class="pre">get_kv_cache_scaling_factor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self_attention_module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_kv_cache_scaling_factor" title="Link to this definition"></a></dt>
+<dd><p>Get the K and V BMM scaling factors for the self attention module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>self_attention_module</strong> (<em>Module</em>) – The self attention module to get the K and V BMM scaling factors from.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The K and V BMM scaling factors.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>list</em>[<em>Tensor</em> | <em>None</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_prequant_scaling_factor">
+<span class="sig-name descname"><span class="pre">get_prequant_scaling_factor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_prequant_scaling_factor" title="Link to this definition"></a></dt>
+<dd><p>Returns the prequant scaling factor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_quant_config">
+<span class="sig-name descname"><span class="pre">get_quant_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_modelopt_qlora</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_quant_config" title="Link to this definition"></a></dt>
+<dd><p>Generate quantization config for a model.</p>
+<p>The model should be the root model. It can be fully quantized, partially quantized or
+mixed-precision quantized.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – The PyTorch model to make config for.</p></li>
+<li><p><strong>is_modelopt_qlora</strong> (<em>bool</em>) – Whether the model is a modelopt-trained QLoRA model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary containing the quantization configuration</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_quantization_format">
+<span class="sig-name descname"><span class="pre">get_quantization_format</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_quantization_format" title="Link to this definition"></a></dt>
+<dd><p>Gets the quantization string.</p>
+<p>Gets the quantization string by iterating through the module and its children.
+The first non-None quantization string is returned.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>str</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_scaling_factor">
+<span class="sig-name descname"><span class="pre">get_scaling_factor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quantizer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_scaling_factor" title="Link to this definition"></a></dt>
+<dd><p>Returns scaling factor from the quantizer as torch.Tensor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>quantizer</strong> (<a class="reference internal" href="modelopt.torch.quantization.nn.modules.tensor_quantizer.html#modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer" title="modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer"><em>TensorQuantizer</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_scaling_factor_from_weight">
+<span class="sig-name descname"><span class="pre">get_scaling_factor_from_weight</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_scaling_factor_from_weight" title="Link to this definition"></a></dt>
+<dd><p>Calculate the weight scaling factor for a given group size.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_weight_block_size">
+<span class="sig-name descname"><span class="pre">get_weight_block_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_weight_block_size" title="Link to this definition"></a></dt>
+<dd><p>Returns the weight block size.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>weight_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_weight_scaling_factor">
+<span class="sig-name descname"><span class="pre">get_weight_scaling_factor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_weight_scaling_factor" title="Link to this definition"></a></dt>
+<dd><p>Returns the weight scaling factor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>weight_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.get_weight_scaling_factor_2">
+<span class="sig-name descname"><span class="pre">get_weight_scaling_factor_2</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'weight'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.get_weight_scaling_factor_2" title="Link to this definition"></a></dt>
+<dd><p>Returns the secondary weight scaling factor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>weight_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.has_quantized_modules">
+<span class="sig-name descname"><span class="pre">has_quantized_modules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.has_quantized_modules" title="Link to this definition"></a></dt>
+<dd><p>Check if a model has any quantized modules.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>) – The model to check.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if the model contains quantized modules, False otherwise.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.maybe_transpose_expert_weight_dimensions">
+<span class="sig-name descname"><span class="pre">maybe_transpose_expert_weight_dimensions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weight_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_bmm_expert_weight</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.maybe_transpose_expert_weight_dimensions" title="Link to this definition"></a></dt>
+<dd><p>Transpose the last two dimensions of expert weights.</p>
+<p>This function transposes expert weights between the two layouts:
+- (num_experts, input_dim, output_dim) ↔ (num_experts, output_dim, input_dim)</p>
+<p>Since transpose(-2, -1) is self-inverse, this function can be used for both
+forward and backward transformations. This is needed for quantization functions
+that expect the last dimension to be the input dimension for block quantization.
+Specifically used for bmm-style expert weights in models like llama4 and gpt-oss.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>weight</strong> (<em>Tensor</em>) – The weight tensor to transpose. Expected shape for experts: (num_experts, dim1, dim2)</p></li>
+<li><p><strong>weight_scale</strong> (<em>Tensor</em><em> | </em><em>None</em>) – Optional weight scaling factor tensor to transpose alongside weight</p></li>
+<li><p><strong>is_bmm_expert_weight</strong> (<em>bool</em>) – Whether this is an expert weight (3D tensor) that needs transposition</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Tuple of (transposed_weight, transposed_weight_scale)</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>Tensor</em>, <em>Tensor</em> | <em>None</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.pack_int4_in_uint8">
+<span class="sig-name descname"><span class="pre">pack_int4_in_uint8</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights_scaling_factor</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.pack_int4_in_uint8" title="Link to this definition"></a></dt>
+<dd><p>Packs the INT4 weights into uint8 tensor.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.postprocess_state_dict">
+<span class="sig-name descname"><span class="pre">postprocess_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">maxbound</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantization</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_modelopt_qlora</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.postprocess_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Filters out keys related to weight quantizers and updates KV cache related keys.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>state_dict</strong> (<em>dict</em>) – The full model state_dict.</p></li>
+<li><p><strong>maxbound</strong> (<em>float</em>) – The maximum bound value for the output quantizer.</p></li>
+<li><p><strong>quantization</strong> (<em>str</em><em> | </em><em>None</em>) – The KV cache quantization format.</p></li>
+<li><p><strong>is_modelopt_qlora</strong> (<em>bool</em>) – Whether the model is a modelopt-trained QLoRA model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The filtered state_dict without unnecessary keys like ‘_amax’ and non KV cache output quantizers.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.preprocess_linear_fusion">
+<span class="sig-name descname"><span class="pre">preprocess_linear_fusion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">resmooth_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.preprocess_linear_fusion" title="Link to this definition"></a></dt>
+<dd><p>Preprocess the quantized linears that we plan to fuse.</p>
+<p>Use resmooth_only for MOE experts as each individual expert is not fused.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>modules</strong> (<em>list</em><em>[</em><em>Module</em><em>]</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.process_layer_quant_config">
+<span class="sig-name descname"><span class="pre">process_layer_quant_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_config_dict</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.process_layer_quant_config" title="Link to this definition"></a></dt>
+<dd><p>Processes per layer quantization information for TRTLLM export to quant_cfg.json.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.resmooth_and_get_scale">
+<span class="sig-name descname"><span class="pre">resmooth_and_get_scale</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">merged_weights</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pre_quant_scales</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ranks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">group_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">new_pre_quant_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantization</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.resmooth_and_get_scale" title="Link to this definition"></a></dt>
+<dd><p>Resmooths weights from a single or multiple ranks and get scaling factors and amax.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>merged_weights</strong> (<em>Tensor</em>) – Merged weights from ranks.</p></li>
+<li><p><strong>pre_quant_scales</strong> (<em>list</em><em>[</em><em>Tensor</em><em>]</em>) – List of pre-quantization scales for each rank.</p></li>
+<li><p><strong>ranks</strong> (<em>int</em>) – Number of ranks.</p></li>
+<li><p><strong>group_size</strong> (<em>int</em>) – Group size of the quantization block.</p></li>
+<li><p><strong>new_pre_quant_scale</strong> (<em>optional</em>) – If not provided, weights will be resmoothed using
+the average of pre_quant_scales.</p></li>
+<li><p><strong>quantization</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Resmoothed weights.
+weight_scaling_factors: Resmoothed scaling factors.
+avg_pre_quant_scale: Calculated average of the quantization scale.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>weights</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.quant_utils.to_quantized_weight">
+<span class="sig-name descname"><span class="pre">to_quantized_weight</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">weight</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights_scaling_factor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantization</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights_scaling_factor2</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.quant_utils.to_quantized_weight" title="Link to this definition"></a></dt>
+<dd><p>Converts the weight to the quantized (packed) format.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>weight</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>weights_scaling_factor</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>quantization</strong> (<em>str</em>)</p></li>
+<li><p><strong>weights_scaling_factor2</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>block_size</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.export.postprocess.html" class="btn btn-neutral float-left" title="postprocess" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.export.tensorrt_llm_type.html" class="btn btn-neutral float-right" title="tensorrt_llm_type" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

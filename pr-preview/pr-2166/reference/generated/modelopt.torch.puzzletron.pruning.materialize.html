@@ -1,0 +1,496 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>materialize &mdash; Model Optimizer 0.0.1.dev1+g4d52367ca</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="moe_mamba_pruning_mixin" href="modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.html" />
+    <link rel="prev" title="mamba2_surgery" href="modelopt.torch.puzzletron.pruning.mamba2_surgery.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+      <li class="breadcrumb-item active">materialize</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.pruning.materialize.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="materialize">
+<h1>materialize<a class="headerlink" href="#materialize" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.puzzletron.pruning.materialize">Materialize a pruned variant from the sorted teacher — slice/merge, no realized checkpoints.</p>
+<p>This is the realize-side counterpart of <a class="reference internal" href="modelopt.torch.puzzletron.pruning.sorted_teacher.html#modelopt.torch.puzzletron.pruning.sorted_teacher.sort_state_dict" title="modelopt.torch.puzzletron.pruning.sorted_teacher.sort_state_dict"><code class="xref py py-func docutils literal notranslate"><span class="pre">sorted_teacher.sort_state_dict()</span></code></a> and the static
+twin of the dynamic prune (<a class="reference internal" href="modelopt.torch.puzzletron.pruning.dynamic_block_prune.html#module-modelopt.torch.puzzletron.pruning.dynamic_block_prune" title="modelopt.torch.puzzletron.pruning.dynamic_block_prune"><code class="xref py py-mod docutils literal notranslate"><span class="pre">dynamic_block_prune</span></code></a>): given the sorted teacher’s state dict and a
+per-layer target <code class="docutils literal notranslate"><span class="pre">(ffn</span> <span class="pre">K</span> <span class="pre">/</span> <span class="pre">attn</span> <span class="pre">(q,</span> <span class="pre">kv))</span></code>, it produces the <strong>physically smaller</strong> weights for the
+chosen variant by prefix-slicing (removal) or merging (q-preserving KV reduction). It backs the
+block library (a variant = a slice/merge spec into the sorted teacher, not realized <code class="docutils literal notranslate"><span class="pre">weight_paths</span></code>)
+and the bypass / final-realize steps.</p>
+<p>Because the sorted teacher orders channels/heads by importance, slicing <code class="docutils literal notranslate"><span class="pre">[:K]</span></code> (and the blocked
+attention keep-set) yields exactly the importance-pruned weights. Reuses the model-agnostic
+primitives in <a class="reference internal" href="modelopt.torch.puzzletron.pruning.attention_ffn_surgery.html#module-modelopt.torch.puzzletron.pruning.attention_ffn_surgery" title="modelopt.torch.puzzletron.pruning.attention_ffn_surgery"><code class="xref py py-mod docutils literal notranslate"><span class="pre">attention_ffn_surgery</span></code></a>; the descriptor supplies the per-layer keys/geometry via
+<a class="reference internal" href="modelopt.torch.puzzletron.pruning.sorted_teacher.html#modelopt.torch.puzzletron.pruning.sorted_teacher.build_layer_layouts" title="modelopt.torch.puzzletron.pruning.sorted_teacher.build_layer_layouts"><code class="xref py py-func docutils literal notranslate"><span class="pre">sorted_teacher.build_layer_layouts()</span></code></a>.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget" title="modelopt.torch.puzzletron.pruning.materialize.BlockTarget"><code class="xref py py-obj docutils literal notranslate"><span class="pre">BlockTarget</span></code></a></p></td>
+<td><p>Target dims for one layer's replaced subblock (None = unchanged for that axis).</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict" title="modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_solution_state_dict</span></code></a></p></td>
+<td><p>Return a new state dict with each targeted layer's block sliced/merged to its variant.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.block_targets_from_replacements" title="modelopt.torch.puzzletron.pruning.materialize.block_targets_from_replacements"><code class="xref py py-obj docutils literal notranslate"><span class="pre">block_targets_from_replacements</span></code></a></p></td>
+<td><p>Convert replacement-library <code class="docutils literal notranslate"><span class="pre">layer_replacements</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">{layer_idx:</span> <span class="pre">BlockTarget}</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_model_from_sorted" title="modelopt.torch.puzzletron.pruning.materialize.materialize_model_from_sorted"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_model_from_sorted</span></code></a></p></td>
+<td><p>Build a pruned model by materializing <code class="docutils literal notranslate"><span class="pre">layer_replacements</span></code> from the sorted teacher.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_checkpoint_from_sorted" title="modelopt.torch.puzzletron.pruning.materialize.materialize_checkpoint_from_sorted"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_checkpoint_from_sorted</span></code></a></p></td>
+<td><p>Stream one sorted-teacher shard at a time into a realized HF checkpoint.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_hidden_width_checkpoint" title="modelopt.torch.puzzletron.pruning.materialize.materialize_hidden_width_checkpoint"><code class="xref py py-obj docutils literal notranslate"><span class="pre">materialize_hidden_width_checkpoint</span></code></a></p></td>
+<td><p>Physically realize only the descriptor-owned residual width.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">BlockTarget</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Target dims for one layer’s replaced subblock (None = unchanged for that axis).</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target_intermediate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_num_q</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_num_kv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mla_heads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_q_lora_rank</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_kv_lora_rank</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_num_experts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_keep_indices</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_expert_intermediate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_shared_expert_intermediate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_latent_dim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mamba_heads</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mamba_groups</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mamba_head_dim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_mamba_state_dim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_ffn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_attention</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_mamba</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_moe</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>target_intermediate</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_num_q</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_num_kv</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_mla_heads</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_q_lora_rank</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_kv_lora_rank</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_num_experts</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>expert_keep_indices</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>...</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>target_expert_intermediate</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_shared_expert_intermediate</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_latent_dim</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_mamba_heads</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_mamba_groups</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_mamba_head_dim</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>target_mamba_state_dim</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>remove_ffn</strong> (<em>bool</em>)</p></li>
+<li><p><strong>remove_attention</strong> (<em>bool</em>)</p></li>
+<li><p><strong>remove_mamba</strong> (<em>bool</em>)</p></li>
+<li><p><strong>remove_moe</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.expert_keep_indices">
+<span class="sig-name descname"><span class="pre">expert_keep_indices</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.expert_keep_indices" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_attention">
+<span class="sig-name descname"><span class="pre">remove_attention</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_attention" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_ffn">
+<span class="sig-name descname"><span class="pre">remove_ffn</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_ffn" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_mamba">
+<span class="sig-name descname"><span class="pre">remove_mamba</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_mamba" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_moe">
+<span class="sig-name descname"><span class="pre">remove_moe</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.remove_moe" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_expert_intermediate">
+<span class="sig-name descname"><span class="pre">target_expert_intermediate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_expert_intermediate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_intermediate">
+<span class="sig-name descname"><span class="pre">target_intermediate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_intermediate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_kv_lora_rank">
+<span class="sig-name descname"><span class="pre">target_kv_lora_rank</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_kv_lora_rank" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_latent_dim">
+<span class="sig-name descname"><span class="pre">target_latent_dim</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_latent_dim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_groups">
+<span class="sig-name descname"><span class="pre">target_mamba_groups</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_groups" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_head_dim">
+<span class="sig-name descname"><span class="pre">target_mamba_head_dim</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_head_dim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_heads">
+<span class="sig-name descname"><span class="pre">target_mamba_heads</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_heads" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_state_dim">
+<span class="sig-name descname"><span class="pre">target_mamba_state_dim</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mamba_state_dim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mla_heads">
+<span class="sig-name descname"><span class="pre">target_mla_heads</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_mla_heads" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_experts">
+<span class="sig-name descname"><span class="pre">target_num_experts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_experts" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_kv">
+<span class="sig-name descname"><span class="pre">target_num_kv</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_kv" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_q">
+<span class="sig-name descname"><span class="pre">target_num_q</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_num_q" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_q_lora_rank">
+<span class="sig-name descname"><span class="pre">target_q_lora_rank</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_q_lora_rank" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_shared_expert_intermediate">
+<span class="sig-name descname"><span class="pre">target_shared_expert_intermediate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget.target_shared_expert_intermediate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.block_targets_from_replacements">
+<span class="sig-name descname"><span class="pre">block_targets_from_replacements</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_replacements</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">teacher_block_configs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_attention_heads</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.block_targets_from_replacements" title="Link to this definition"></a></dt>
+<dd><p>Convert replacement-library <code class="docutils literal notranslate"><span class="pre">layer_replacements</span></code> -&gt; <code class="docutils literal notranslate"><span class="pre">{layer_idx:</span> <span class="pre">BlockTarget}</span></code>.</p>
+<p>Each replacement pairs <code class="docutils literal notranslate"><span class="pre">parent_layer_indices</span></code> with <code class="docutils literal notranslate"><span class="pre">child_block_configs</span></code> (parsed
+<code class="docutils literal notranslate"><span class="pre">BlockConfig</span></code> objects). The child’s FFN <code class="docutils literal notranslate"><span class="pre">intermediate_size</span></code> / attention
+<code class="docutils literal notranslate"><span class="pre">num_query_heads</span></code> + <code class="docutils literal notranslate"><span class="pre">num_kv_heads</span></code> become the per-layer target dims that
+<a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict" title="modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict"><code class="xref py py-func docutils literal notranslate"><span class="pre">materialize_solution_state_dict()</span></code></a> slices. If a child only reduces
+<code class="docutils literal notranslate"><span class="pre">num_kv_heads</span></code>, materialization also reduces <code class="docutils literal notranslate"><span class="pre">num_query_heads</span></code> by removing
+the corresponding sorted query-head groups.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>num_attention_heads</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>int</em>, <a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget" title="modelopt.torch.puzzletron.pruning.materialize.BlockTarget"><em>BlockTarget</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.materialize_checkpoint_from_sorted">
+<span class="sig-name descname"><span class="pre">materialize_checkpoint_from_sorted</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sorted_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_replacements</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">descriptor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">child_model_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overwrite</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solution_identity</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_checkpoint_from_sorted" title="Link to this definition"></a></dt>
+<dd><p>Stream one sorted-teacher shard at a time into a realized HF checkpoint.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>overwrite</strong> (<em>bool</em>)</p></li>
+<li><p><strong>solution_identity</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Path</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.materialize_hidden_width_checkpoint">
+<span class="sig-name descname"><span class="pre">materialize_hidden_width_checkpoint</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sorted_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">descriptor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_width</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_dir</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alignment</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overwrite</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_hidden_width_checkpoint" title="Link to this definition"></a></dt>
+<dd><p>Physically realize only the descriptor-owned residual width.</p>
+<p>This creates the width-specific parent used by nested replacement scoring:
+block configurations remain identical to the sorted teacher while every
+language residual tensor, projector output, LM-head input, and MTP residual
+axis is sliced together.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>hidden_width</strong> (<em>int</em>)</p></li>
+<li><p><strong>alignment</strong> (<em>int</em>)</p></li>
+<li><p><strong>overwrite</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Path</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.materialize_model_from_sorted">
+<span class="sig-name descname"><span class="pre">materialize_model_from_sorted</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sorted_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_replacements</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">descriptor</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">child_model_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_model_from_sorted" title="Link to this definition"></a></dt>
+<dd><p>Build a pruned model by materializing <code class="docutils literal notranslate"><span class="pre">layer_replacements</span></code> from the sorted teacher.</p>
+<p>The realize/library counterpart of the dynamic prune: load the sorted teacher’s weights, slice/
+merge the replaced blocks to their target dims, then load the result into a model built from
+<code class="docutils literal notranslate"><span class="pre">child_model_config</span></code> (the solution’s heterogeneous block configs). No realized intermediate
+checkpoint. For large models this materializes densely — the sharded path writes the result via
+the normal save and reloads with <code class="docutils literal notranslate"><span class="pre">load_and_shard_model</span></code> (an in-container follow-up).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict">
+<span class="sig-name descname"><span class="pre">materialize_solution_state_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">state_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layouts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">targets</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.pruning.materialize.materialize_solution_state_dict" title="Link to this definition"></a></dt>
+<dd><p>Return a new state dict with each targeted layer’s block sliced/merged to its variant.</p>
+<p><code class="docutils literal notranslate"><span class="pre">state_dict</span></code> is the (sorted) teacher’s; <code class="docutils literal notranslate"><span class="pre">targets</span></code> maps <code class="docutils literal notranslate"><span class="pre">layer_idx</span> <span class="pre">-&gt;</span> <span class="pre">BlockTarget</span></code>. Untargeted
+layers are copied unchanged. The result has smaller tensors for materialized blocks, so it loads
+into a model configured with the corresponding (heterogeneous) block configs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>targets</strong> (<em>dict</em><em>[</em><em>int</em><em>, </em><a class="reference internal" href="#modelopt.torch.puzzletron.pruning.materialize.BlockTarget" title="modelopt.torch.puzzletron.pruning.materialize.BlockTarget"><em>BlockTarget</em></a><em>]</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.pruning.mamba2_surgery.html" class="btn btn-neutral float-left" title="mamba2_surgery" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.html" class="btn btn-neutral float-right" title="moe_mamba_pruning_mixin" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
