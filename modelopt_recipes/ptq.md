@@ -152,6 +152,12 @@ of the body scheme. Quantizing the KV cache reduces memory at long context.
 - **`kv_fp8`** — FP8 E4M3 KV cache with **calibrated** per-tensor amax. The KV
   scales are measured during the calibration pass. Hopper+.
 
+- **`kv_fp16`** — the KV cache is **not** quantized; it stays at the model's
+  activation dtype (BF16/FP16). Combine with any body scheme when the deployment
+  stack does not consume an FP8 KV cache, or when long-context memory is not the
+  binding constraint. Some published checkpoints ship this way, so a body scheme
+  gains a `-kv_fp16` variant when one of them needs it.
+
 > **`kv_fp8_cast` vs `kv_fp8`:** both produce an FP8 KV cache. `_cast` uses a
 > fixed scale and skips the KV calibration step (faster, no extra data
 > dependence); plain `kv_fp8` calibrates the scale from data. The cast version
@@ -237,7 +243,7 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
-earns a place under `model_type/<model_type>/` or
+earns a **body** under `model_type/<model_type>/` or
 `models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
@@ -255,6 +261,15 @@ that baseline. The deviations come in four kinds:
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
+
+> **Not every `models/<org>/<checkpoint>/` folder holds a deviation.** When a
+> general (or `huggingface/<model_type>`) recipe already produces a released
+> checkpoint's scheme, the folder holds a thin **alias** that imports that recipe
+> wholesale and overrides only `metadata` — no duplicated `quant_cfg` — so the
+> recipe is reachable from the checkpoint's own hub path. [Checkpoint
+> mirrors](#checkpoint-mirrors--modelsorgcheckpoint) covers the folders that
+> genuinely deviate and aliases the ones that don't; see
+> [`models/README.md`](models/README.md) for the alias format and when to write one.
 
 ### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
@@ -459,6 +474,22 @@ Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flas
 is the exception: its deviation is a model-specific *scope* — a wildcard scheme
 plus a load-bearing vision-tower exclusion and the VLM-required
 `layerwise.enable=false` — rather than a per-component precision map.
+
+### Checkpoint aliases — `models/<org>/<checkpoint>`
+
+Some published checkpoints use a scheme a portable recipe already produces, so their
+entry is a thin **alias** that imports that recipe wholesale and overrides only
+`metadata` (see [`models/README.md`](models/README.md) for the format):
+
+- **`models/moonshotai/Kimi-K2.6/ptq/nvfp4_experts_only_mse-kv_fp8_cast`** aliases the general
+  `general/ptq/nvfp4_experts_only_mse-kv_fp8_cast` — expert-only NVFP4 with MSE-swept static
+  weight scales and dynamic inputs, plus an FP8 KV cache in cast mode — as published in
+  `nvidia/Kimi-K2.6-NVFP4`.
+- **`models/nvidia/Qwen3.5-397B-A17B/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8`** aliases the
+  `qwen3_5_moe` architecture recipe
+  `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
+  on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
+  `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
 
 ---
 

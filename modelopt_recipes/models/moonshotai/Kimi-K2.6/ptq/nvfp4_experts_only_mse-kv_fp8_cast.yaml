@@ -13,23 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Composed PTQ recipe for NVFP4 W4A16 weight-only quantization with FP8 KV-cache cast mode.
+# Alias recipe for nvidia/Kimi-K2.6-NVFP4 (source moonshotai/Kimi-K2.6). The general
+# expert-only NVFP4 scheme -- MSE-swept static weight scales, dynamic NVFP4 inputs, FP8
+# KV cache in cast mode -- reproduces this release with no checkpoint-specific deviation,
+# so this entry imports that recipe wholesale instead of copying its body.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
-  base_disable_all: configs/ptq/units/base_disable_all
-  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  w4a16_nvfp4: configs/ptq/units/w4_nvfp4
-  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+  base: general/ptq/nvfp4_experts_only_mse-kv_fp8_cast
 
+$import: base
 metadata:
   description: >-
-    NVFP4 W4A16 weight-only, BF16 activations, plus FP8 KV-cache cast mode using constant amax; uses
-    max calibration. No calibration forward pass required.
-quantize:
-  algorithm: max
-  quant_cfg:
-    - $import: base_disable_all
-    - $import: w4a16_nvfp4
-    - $import: kv_fp8_cast
-    - $import: default_disabled_quantizers
+    moonshotai/Kimi-K2.6 quantized with the general expert-only NVFP4 scheme (MSE static
+    weight scales, dynamic inputs) and an FP8 KV cache in cast mode, as published in
+    nvidia/Kimi-K2.6-NVFP4.

@@ -11,13 +11,13 @@
 # Weights: 4/6 NVFP4, per-block M=6 vs M=4 selected by MSE. Activations: dynamic NVFP4 (NOT MSE).
 # Shared experts + mamba in/out_proj + KV cache: FP8. Everything else: BF16.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
   nvfp4: configs/numerics/nvfp4
   fp8: configs/numerics/fp8
 
 metadata:
-  recipe_type: ptq
   description: Ultra NVFP4 with Four-Over-Six (4/6) MSE-selected weights on routed experts (W4A4, block 16); dynamic NVFP4 activations (not MSE); shared
     experts + mamba in/out_proj + KV cache FP8; everything else BF16.
 quantize:
@@ -79,3 +79,12 @@ quantize:
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
       cfg: {$import: fp8}
+
+    # MTP block -> BF16. Only reachable on the Megatron-Core path, where the block is a
+    # live `model.mtp` submodule the broad `*mixer.*` patterns above match into; the HF
+    # `nemotron_h` class drops the MTP tensors on load
+    # (`_keys_to_ignore_on_load_unexpected = [r"mtp.*"]`), so this is inert there. Must
+    # stay last, after the patterns it undoes. Mirrors the same entry in
+    # `configs/ptq/units/default_disabled_quantizers`, which this recipe does not import.
+    - quantizer_name: 'mtp.*'
+      enable: false
