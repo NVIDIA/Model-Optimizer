@@ -28,12 +28,12 @@ NVFP4 represents each group of 16 weights with FP4 values and an FP8 block
 scale [1]_. This block scale is used to scale the per-block values so to NVFP4 E2M1 range (-6.0, 6.0).
 The default way is to set the block scale based on the per-block maximum value (max scaling) [1]_.
 
-As shown, originally in 'Four-Over-Six' paper [2]_, this block scale can be selected based on other 
-critieria like per-block error. While 'Four-Over-Six' selects the per-block scale from  2 candidates while 
-`Model-Optimizer Mean Square Error (MSE) <https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.mse_calibrate>`_ algorithm sets this based on exhuastive sweep over all positive and non-zero FP8 
+As originally shown in the 'Four-Over-Six' paper [2]_, this block scale can be selected based on other
+criteria such as per-block error. 'Four-Over-Six' selects the per-block scale from 2 candidates, while the
+:func:`Model-Optimizer Mean Square Error (MSE) <modelopt.torch.quantization.model_calib.mse_calibrate>` algorithm uses an exhaustive sweep over all positive, non-zero FP8
 scales (126 values).
 
-Both of these approaches for scale selection only considers weight tensor level error which we find does not correlate 
+Both of these approaches for scale selection consider only weight tensor-level error, which we find does not correlate
 well with downstream accuracy evaluation results.
 
 How Local-Hessian Works
@@ -100,10 +100,10 @@ where :math:`W_b\in\mathbb{R}^{1\times16}` is one NVFP4 block of weights,
 :math:`X_b\in\mathbb{R}^{16\times N}` holds the rows of :math:`X` the
 block multiplies, so the local Hessian :math:`X_bX_b^{\top}` is only
 :math:`16\times16`. We sweep all 126 candidate FP8 scales per block, just
-as the MSE algorithm does; because blocks are independent, a `Triton kernel
-<https://github.com/NVIDIA/Model-Optimizer/blob/f70991f36e697617bad7ca4d00459fff200377a9/modelopt/torch/kernels/quantization/gemm/nvfp4_fp8_sweep.py#L229>`_
-does the whole layer at once. See the `Model Optimizer Local-Hessian code
-<https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.layerwise_calibrate>`_
+as the MSE algorithm does; because blocks are independent, a
+:func:`Triton kernel <modelopt.torch.kernels.quantization.gemm.nvfp4_fp8_sweep.nvfp4_fp8_scale_sweep_hessian>`
+does the whole layer at once. See the
+:func:`Model Optimizer Local-Hessian code <modelopt.torch.quantization.model_calib.local_hessian_calibrate>`
 for details.
 
 Local-Hessian Results
@@ -112,7 +112,7 @@ Local-Hessian Results
 Accuracy Comparison
 ====================
 
-In Table 1 we compares Local-Hessian Vs other scale selection algorithms dor weights on Qwen 3.5 9B.
+In Table 1 we compare Local-Hessian against other scale-selection algorithms for weights on Qwen3.5-9B.
 
 Local-Hessian gives the overall best accuracy among the NVFP4
 weight-scale selection methods, cutting the average drop from 5.10 to 3.10
@@ -258,8 +258,8 @@ incurring any deployment throughput penalty.
 Using Local-Hessian
 *******************
 
-See the `local_hessian_calibrate API
-<https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_calib.html#modelopt.torch.quantization.model_calib.local_hessian_calibrate>`_
+See the
+:func:`local_hessian_calibrate API <modelopt.torch.quantization.model_calib.local_hessian_calibrate>`
 for the calibration entry point.
 
 To use it in your own configuration, set the ``algorithm`` field:
