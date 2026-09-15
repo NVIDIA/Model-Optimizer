@@ -13,6 +13,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
+         <button class="announcement-tag" type="button" data-tag="single-gpu" aria-pressed="false">Single GPU</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -24,6 +25,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-15" data-title="Quantizing a 1.5 TB Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
+       <div class="announcement-card-meta">September 15, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/single-gpu-ptq.html">Quantizing a 1.5 TB Model on a Single GPU</a></h2>
+       <p>Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer.</p>
+       <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>layerwise</span><span>moe</span><span>single-gpu</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
