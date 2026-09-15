@@ -86,7 +86,7 @@ services:
     extra_args: [...]           # raw vllm flags — everything EXCEPT parallelism/served-model-name/port (see "vLLM deployment" below)
     extra_env: {...}            # VLLM_* backend env (e.g. NVFP4 MoE flags)
     container_mounts: [<lustre>/.cache/vllm:/cache/vllm, ...]
-    generation: {temperature: 1.0, top_p: 0.95}
+    generation: {}             # add overrides only per Step 3's generation provenance/precedence policy
     proxy: {request_timeout: 3600, extra_body: {...}, interceptors: [...]}   # >= llm_kwargs.timeout
     node_pool: gpu
 benchmarks:                     # EXACTLY ONE entry — one benchmark per config (see "One benchmark per config")
