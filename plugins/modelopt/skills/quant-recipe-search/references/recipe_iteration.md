@@ -226,7 +226,7 @@ paths and validation gates are authoritative.
 When ModelOpt is available, start from `modelopt_recipes`:
 
 1. Check model-specific recipes first, for example
-   `modelopt_recipes/huggingface/<model_family>/ptq/`.
+   `modelopt_recipes/model_type/<model_family>/ptq/`.
 2. Check general PTQ recipes and presets.
 3. Use recipe fragments to build controlled manual variants.
 4. Summarize include/exclude coverage before calibration. If a pattern misses the

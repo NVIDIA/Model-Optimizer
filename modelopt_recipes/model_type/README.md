@@ -13,7 +13,7 @@ Built-in recipes live in three tiers — pick the most specific that applies:
 1. **[`../models/<org>/<model_id>/`](../models/)** first, if there is an entry
    for your **exact** published checkpoint (keyed by its model-hub path). It
    mirrors a validated, per-checkpoint scheme.
-2. **`huggingface/<model_type>/`** for the target model's Hugging Face
+2. **`model_type/<model_type>/`** for the target model's Hugging Face
    `model_type` — an architecture-level recipe that applies to every checkpoint
    of that `model_type`. The presence of a folder here signals a recommended
    recipe for that architecture.
@@ -30,7 +30,7 @@ value of the top-level `model_type` field in the model's `config.json`
 language model). Use the exact `model_type` as the directory name:
 
 ```text
-modelopt_recipes/huggingface/
+modelopt_recipes/model_type/
   <model_type>/
     <task>/
       <recipe>.yaml
@@ -43,7 +43,7 @@ modelopt_recipes/huggingface/
 
 Selecting a recipe at runtime uses the path relative to
 `modelopt_recipes/`, e.g.
-`--recipe huggingface/<model_type>/<task>/<recipe>`.
+`--recipe model_type/<model_type>/<task>/<recipe>`.
 
 ### Verifying a model's `model_type`
 

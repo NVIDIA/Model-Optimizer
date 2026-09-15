@@ -15,6 +15,8 @@
 
 """Recipe loading utilities."""
 
+import warnings
+
 try:
     from importlib.resources.abc import Traversable
 except ImportError:  # Python < 3.11
@@ -24,7 +26,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
-from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.opt.config_loader import _alias_builtin_recipe_prefix, load_config
 from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import (
@@ -50,7 +52,7 @@ _REQUIRED_SECTION_PER_RECIPE_TYPE: dict[RecipeType, str] = {
 
 
 def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traversable:
-    """Resolve a recipe path, checking the built-in library first then the filesystem.
+    """Resolve a recipe path, checking the filesystem first then the built-in library.
 
     Returns the resolved path (file or directory).
     """
@@ -58,24 +60,44 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         isinstance(recipe_path, Path) and recipe_path.is_absolute()
     ):
         rp_str = str(recipe_path)
-        # Backward-compat alias: checkpoint-mirror recipes moved from the old
-        # ``huggingface/models/<org>/<model_id>/`` layout to the top-level ``models/``
-        # tier. A source checkout also keeps a ``huggingface/models`` -> ``../models``
-        # symlink, but symlinks don't survive into built wheels, so rewrite the old
-        # prefix here too — that keeps saved ``--recipe huggingface/models/...`` paths
-        # working for pip-installed users, not just source checkouts.
-        _bc_prefix = "huggingface/models/"
-        if rp_str.replace("\\", "/").startswith(_bc_prefix):
-            rp_str = "models/" + rp_str.replace("\\", "/")[len(_bc_prefix) :]
-        suffixes = [""] if rp_str.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
-        for suffix in suffixes:
-            candidate = BUILTIN_RECIPES_LIB.joinpath(rp_str + suffix)
+        # Backward-compat aliases for the recipe-library restructure. A source checkout keeps
+        # ``huggingface`` -> ``model_type`` (and the nested ``model_type/models`` -> ``../models``)
+        # symlinks, but symlinks don't survive into built wheels, so the deprecated tier
+        # prefixes are rewritten (see ``_alias_builtin_recipe_prefix``) for the built-in lookup,
+        # keeping saved ``--recipe huggingface/...`` paths working for pip-installed users.
+        aliased = _alias_builtin_recipe_prefix(rp_str)
+
+        def _suffixes(s: str) -> list[str]:
+            return [""] if s.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
+
+        # Filesystem first, probing the path exactly as given (then its aliased form), so a
+        # user's own local recipe tree overrides a built-in of the same name -- the same
+        # precedence as ``config_loader._resolve_config_path``. A local ``huggingface/<type>/...``
+        # file therefore still wins even when ``<type>`` collides with a shipped ``model_type``.
+        for probe in dict.fromkeys((rp_str, aliased)):
+            for suffix in _suffixes(probe):
+                fs_candidate = Path(probe + suffix)
+                if fs_candidate.is_file() or fs_candidate.is_dir():
+                    return fs_candidate
+        # Then the built-in library, using the aliased (renamed-tier) form so old
+        # ``huggingface/...`` paths resolve from wheels where the compat symlink is gone.
+        # Resolving via a rewritten prefix means the user passed a deprecated tier name, so
+        # nudge them off it (only here, not when a local file above already won by its own name).
+        for suffix in _suffixes(aliased):
+            candidate = BUILTIN_RECIPES_LIB.joinpath(aliased + suffix)
             if candidate.is_file() or candidate.is_dir():
+                if aliased != rp_str:
+                    warnings.warn(
+                        f"Recipe path {rp_str!r} uses a deprecated recipe-tier prefix; it "
+                        f"resolved to the built-in {aliased!r}. Update saved ``--recipe`` paths "
+                        "to the new prefix -- the deprecated one will be removed in a future "
+                        "release.",
+                        FutureWarning,
+                        # Point at the caller of the public ``load_recipe`` (one internal frame
+                        # above this one), the common entry point through which a path arrives.
+                        stacklevel=3,
+                    )
                 return candidate
-        for suffix in suffixes:
-            fs_candidate = Path(rp_str + suffix)
-            if fs_candidate.is_file() or fs_candidate.is_dir():
-                return fs_candidate
         return Path(rp_str)
     return recipe_path
 

@@ -20,12 +20,12 @@
 # `w4a16_nvfp4-fp8_attn-kv_fp8_cast.yaml`: NVFP4 weight scales come from an MSE
 # FP8-scale sweep instead of max calibration. Shares its `quant_cfg` with the
 # dense counterpart at
-# `huggingface/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.yaml`; the
+# `model_type/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.yaml`; the
 # snippet lives under
-# `huggingface/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.quant_cfg.yaml`.
+# `model_type/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.quant_cfg.yaml`.
 
 imports:
-  shared_quant_cfg: huggingface/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.quant_cfg
+  shared_quant_cfg: model_type/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.quant_cfg
 
 metadata:
   recipe_type: ptq
