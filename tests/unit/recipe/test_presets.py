@@ -32,6 +32,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe, presets
 from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
+from modelopt.torch.quantization.algorithms import estimate_quant_compression
 from modelopt.torch.quantization.config import QuantizeConfig
 
 
@@ -67,6 +68,21 @@ def test_kv_none_sentinel_is_not_a_discovered_preset():
     # The scripts branch on ``kv_cache_qformat != KV_CACHE_NONE``; a real preset named
     # "none" would make that branch ambiguous.
     assert presets.KV_CACHE_NONE not in presets.KV_QUANT_CFG_CHOICES
+
+
+@pytest.mark.parametrize(
+    ("preset", "effective_bits"),
+    [
+        ("nvfp4_w4a4_weight_mse_fp8_sweep", 4.5),
+        ("nvfp4_four_over_six", 4.5),
+        ("nvfp4_mlp_weight_only", 4.25),
+    ],
+)
+def test_nvfp4_presets_use_resolved_storage_cost(preset, effective_bits):
+    quant_cfg = QuantizeConfig(**presets.QUANT_CFG_CHOICES[preset])
+
+    assert quant_cfg.effective_bits is None
+    assert estimate_quant_compression(quant_cfg) == effective_bits / 16.0
 
 
 def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():

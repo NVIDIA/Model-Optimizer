@@ -23,3 +23,6 @@ block_sizes:
   type: static
   scale_bits: e4m3
   four_over_six: true
+# Autoquant LP cost: 4 value bits + an FP8 (8-bit) scale per 16-element block = 4.5 bits/element
+# (the num_bits heuristic under-counts this as 4.0). Read only by autoquant.
+effective_bits: 4.5
