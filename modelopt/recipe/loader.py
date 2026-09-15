@@ -261,7 +261,7 @@ def _peek_recipe_type(
     except (TypeError, KeyError, ValueError):
         pass
 
-    for base in delegated_recipe_paths(raw):
+    for base in _delegated_recipe_paths(raw):
         if str(base) in _seen:
             continue
         rtype = _peek_recipe_type(base, _seen)
@@ -270,7 +270,7 @@ def _peek_recipe_type(
     return None
 
 
-def delegated_recipe_paths(raw: dict) -> list[Path | Traversable]:
+def _delegated_recipe_paths(raw: dict) -> list[Path | Traversable]:
     """Resolve the recipe files a raw recipe body delegates to via top-level ``$import``.
 
     Returns an empty list for an ordinary recipe. Names that do not appear in the
@@ -324,7 +324,7 @@ def _load_recipe_from_file(
     # have to be the same kind. Checked here, and against the *declared* kind on both
     # sides, so a mismatch reads as a mismatch -- otherwise it surfaces as whatever
     # pydantic makes of, say, an ``eagle`` section spliced into a PTQ schema.
-    for base in delegated_recipe_paths(raw):
+    for base in _delegated_recipe_paths(raw):
         base_type = _peek_recipe_type(base)
         if base_type is not None and base_type != rtype:
             raise ValueError(

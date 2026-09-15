@@ -879,13 +879,16 @@ def test_shipped_modelopt_schema_comments_are_in_the_preamble():
     point some future recipe tries to ``$import`` it.
     """
     root = Path(str(files("modelopt_recipes")))
+    # The parser matches line by line, so its own pattern is not multiline; recompile it
+    # here to scan whole files, keeping the accepted syntax identical to the parser's.
+    _schema_comment_anywhere = re.compile(_MODELOPT_SCHEMA_RE.pattern, re.MULTILINE)
     ignored = [
         str(path.relative_to(root))
         for path in sorted(root.rglob("*.yaml"))
         # Use the parser's own pattern so this can't drift from what it accepts, and so
         # prose that merely mentions the comment is not mistaken for one.
         if not path.is_symlink()
-        and _MODELOPT_SCHEMA_RE.search(path.read_text(encoding="utf-8"))
+        and _schema_comment_anywhere.search(path.read_text(encoding="utf-8"))
         and peek_declared_schema(path) is None
     ]
     assert not ignored, (

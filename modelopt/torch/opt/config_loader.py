@@ -110,7 +110,7 @@ def _alias_builtin_recipe_prefix(config_path: str) -> str:
 
 _EXMY_RE = re.compile(r"^[Ee](\d+)[Mm](\d+)$")
 _EXMY_KEYS = frozenset({"num_bits", "scale_bits"})
-_MODELOPT_SCHEMA_RE = re.compile(r"^\s*#\s*modelopt-schema:\s*(\S+)\s*$", re.MULTILINE)
+_MODELOPT_SCHEMA_RE = re.compile(r"^\s*#\s*modelopt-schema:\s*(\S+)\s*$")
 
 
 def _parse_exmy_num_bits(obj: Any) -> Any:
