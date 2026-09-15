@@ -185,12 +185,28 @@ def _uses_modelopt_fp8_weight_scales(weight_quantizer: TensorQuantizer) -> bool:
     return weight_quantizer.backend is None and weight_quantizer.is_nvfp4_static
 
 
-def weight_only_quantize(model: nn.Module):
+def _in_scope(should_process: Callable[[nn.Module], bool] | None, module: nn.Module) -> bool:
+    """Write-mask helper: ``None`` means "the whole model", i.e. today's behaviour.
+
+    Calibration algorithms AND this into their existing ``is_enabled`` filter so a scoped stage
+    writes only its own targets. It never toggles enable-state, so reads -- and hence the
+    activations seen by search-based algorithms -- are identical either way.
+
+    The mask is keyed on the **module object**, not its name: ``layerwise_calibrate`` invokes an
+    algorithm on a single decoder layer, where ``named_modules()`` yields subtree-relative names
+    that no full-model name would match. Identity survives that reparenting.
+    """
+    return should_process is None or should_process(module)
+
+
+def weight_only_quantize(
+    model: nn.Module, should_process: Callable[[nn.Module], bool] | None = None
+):
     """Just quantize the weights of the model."""
     name_to_module = dict(model.named_modules())
     seen_modules = set()
     for module in name_to_module.values():
-        if module in seen_modules:
+        if module in seen_modules or not _in_scope(should_process, module):
             continue
 
         if isinstance(module, QuantModule):
@@ -316,6 +332,7 @@ def max_calibrate(
     sync_expert_weight_amax=False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
     skip_forward_without_activation_calib: bool = False,
+    should_process: Callable[[nn.Module], bool] | None = None,
 ):
     """Calibrate the model using max.
 
@@ -349,8 +366,8 @@ def max_calibrate(
     # Always run weight calibration on the weight tensor directly so every weight
     # quantizer gets ``_amax``, regardless of MoE routing. Downstream algorithms
     # (MSE, AWQ, export) then no longer need to patch in a missing ``_amax``.
-    enable_stats_collection(model)
-    weight_only_quantize(model)
+    enable_stats_collection(model, should_process)
+    weight_only_quantize(model, should_process)
     if forward_loop is not None:
         if skip_forward_without_activation_calib and not _needs_activation_forward_for_max_calib(
             model
@@ -361,7 +378,7 @@ def max_calibrate(
             )
         else:
             forward_loop(model)
-    finish_stats_collection(model)
+    finish_stats_collection(model, should_process=should_process)
 
     # Sync quantizer amax across local experts within each rank (for SequentialMLP)
     for name, module in model.named_modules():
@@ -383,7 +400,11 @@ def max_calibrate(
 
     # Check MoE calibration completeness before sync
     for name, module in model.named_modules():
-        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
+        if (
+            isinstance(module, QuantModule)
+            and _has_expert_parallelism(module)
+            and _in_scope(should_process, module)
+        ):
             for child in module.children():
                 if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
@@ -402,7 +423,7 @@ def max_calibrate(
 
     # Step 2:Sync amax across data parallelism
     for name, module in model.named_modules():
-        if isinstance(module, QuantModule):
+        if isinstance(module, QuantModule) and _in_scope(should_process, module):
             for child_name, child in module.named_children():
                 if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
@@ -740,6 +761,8 @@ def mse_calibrate(
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    skip_max_init: bool = False,
+    should_process: Callable[[nn.Module], bool] | None = None,
 ):
     """Calibrate weight quantizers using MSE-based amax search.
 
@@ -765,7 +788,17 @@ def mse_calibrate(
     details on the remaining arguments.
     """
     # max_calibrate initializes activations and weights; MSE only refines weights below.
-    max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
+    # When a previous pipeline stage already produced amax (and possibly mutated the
+    # weights), re-running it would discard that stage's starting point, so the executor
+    # sets skip_max_init and the search refines what the previous stage left behind.
+    if not skip_max_init:
+        max_calibrate(
+            model,
+            forward_loop,
+            distributed_sync,
+            shared_states=shared_states,
+            should_process=should_process,
+        )
     name_to_module = dict(model.named_modules())
     _mse_calibrate_weights(
         model,
@@ -774,6 +807,7 @@ def mse_calibrate(
         start_multiplier=start_multiplier,
         stop_multiplier=stop_multiplier,
         fp8_scale_sweep=fp8_scale_sweep,
+        should_process=should_process,
     )
 
 
@@ -787,6 +821,7 @@ def _mse_calibrate_weights(
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
     hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
+    should_process: Callable[[nn.Module], bool] | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
@@ -799,6 +834,8 @@ def _mse_calibrate_weights(
     pbar = tqdm(desc="MSE weight calibration")
     for parent_module in name_to_module.values():
         if id(parent_module) in seen_modules or not isinstance(parent_module, QuantModule):
+            continue
+        if not _in_scope(should_process, parent_module):
             continue
         seen_modules.add(id(parent_module))
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
@@ -816,12 +853,22 @@ def _mse_calibrate_weights(
                 )
                 if cal is None:
                     continue
-                weight_quantizer._calibrator = cal
-                _run_and_load_max_stats(
-                    weight_quantizer, partial(_collect_weight_stats, weight=weight)
-                )
-                if hasattr(cal, "reset"):
-                    cal.reset()
+                # The MSE calibrator is a *search* calibrator installed for the duration of
+                # this amax search only. Restoring the original afterwards matters as soon as
+                # calibration is a pipeline: a later stage that collects stats (any `max`, and
+                # anything built on it) would otherwise re-enter this spent calibrator and
+                # fail on its cleared `_initial_amax`. The structural fix is to make the
+                # per-tensor strategy config-selected instead of swapping the object.
+                previous_calibrator = weight_quantizer._calibrator
+                try:
+                    weight_quantizer._calibrator = cal
+                    _run_and_load_max_stats(
+                        weight_quantizer, partial(_collect_weight_stats, weight=weight)
+                    )
+                    if hasattr(cal, "reset"):
+                        cal.reset()
+                finally:
+                    weight_quantizer._calibrator = previous_calibrator
 
                 pbar.update(1)
     pbar.close()
@@ -1126,10 +1173,16 @@ def local_hessian_calibrate(
     print_rank_0("local_hessian: Calibration complete.")
 
 
-def enable_stats_collection(model: nn.Module):
+def enable_stats_collection(
+    model: nn.Module, should_process: Callable[[nn.Module], bool] | None = None
+):
     """Enable stats collection for all quantizers in the model."""
     for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and not module._disabled:
+        if (
+            isinstance(module, TensorQuantizer)
+            and not module._disabled
+            and _in_scope(should_process, module)
+        ):
             if module._use_constant_amax or module._constant_amax is not None:
                 # Quantizers with a constant amax use a fixed amax and don't need calibration.
                 # Disable quantization during calibration so it doesn't affect other quantizers.
@@ -1142,10 +1195,17 @@ def enable_stats_collection(model: nn.Module):
                 module.disable()
 
 
-def finish_stats_collection(model: nn.Module, method: str | None = None, **kwargs):
+def finish_stats_collection(
+    model: nn.Module,
+    method: str | None = None,
+    should_process: Callable[[nn.Module], bool] | None = None,
+    **kwargs,
+):
     """Finish stats collection for all quantizers in the model."""
-    for _, module in model.named_modules():
+    for _name, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+        if not _in_scope(should_process, module):
             continue
 
         if module._use_constant_amax or module._constant_amax is not None:
@@ -1272,7 +1332,12 @@ def apply_pre_quant_scale_and_smooth(
 
 
 @torch.no_grad()
-def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha=1.0):
+def smoothquant(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    alpha=1.0,
+    should_process: Callable[[nn.Module], bool] | None = None,
+):
     """Smooth-Quant variant with per-channel weight scaling.
 
     Args:
@@ -1302,10 +1367,11 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
             is_quantized_linear(module)
             and module.input_quantizer.is_enabled
             and module.input_quantizer.axis is None
+            and _in_scope(should_process, module)
         ):
             module.input_quantizer.axis = -1
 
-    max_calibrate(model, forward_loop)
+    max_calibrate(model, forward_loop, should_process=should_process)
 
     def postprocess(module):
         # It is important to keep scaling math in fp32 to be numerically safe
@@ -1337,7 +1403,12 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
 
     name_to_module = dict(model.named_modules())
     smoothed_modules = 0
+    # The write-mask has to gate the loop that *writes*, not only the ones that prepare.
+    # Out-of-scope modules were previously excluded only incidentally, by the axis guard
+    # above -- which does not hold for a config that presets `input_quantizer.axis = -1`.
     for name, module in name_to_module.items():
+        if not _in_scope(should_process, module):
+            continue
         if is_quantized_linear(module):
             if not hasattr(module.input_quantizer, "_amax"):
                 warnings.warn(f"{name} is not calibrated, skip smoothing")
@@ -1364,6 +1435,7 @@ def awq(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     algorithm: str = "awq_lite",
+    should_process: Callable[[nn.Module], bool] | None = None,
     **kwargs,
 ):
     """Apply AWQ to the model.
@@ -1378,16 +1450,20 @@ def awq(
     """
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
-            awq_lite(model, forward_loop, **kwargs)
+            awq_lite(model, forward_loop, should_process=should_process, **kwargs)
 
         if algorithm in ["awq_full", "awq_clip"]:
-            awq_clip(model, forward_loop, **kwargs)
+            awq_clip(model, forward_loop, should_process=should_process, **kwargs)
 
     # Special handling for SequentialQuantizer
     # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
     name_to_module = dict(model.named_modules())
     for name, module in model.named_modules():
-        if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
+        if (
+            is_quantized_linear(module)
+            and isinstance(module.weight_quantizer, SequentialQuantizer)
+            and _in_scope(should_process, module)
+        ):
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
 
@@ -1398,6 +1474,7 @@ def awq_lite(
     forward_loop: ForwardLoop,
     alpha_step: float = 0.1,
     debug: bool = False,
+    should_process: Callable[[nn.Module], bool] | None = None,
     **kwargs,
 ):
     """Lite version of AWQ.
@@ -1563,7 +1640,11 @@ def awq_lite(
     # Pre-compute name_to_module dict ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
     name_to_module = dict(model.named_modules())
     for name, module in name_to_module.items():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+        if (
+            is_quantized_linear(module)
+            and module.weight_quantizer.is_enabled
+            and _in_scope(should_process, module)
+        ):
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 module.awq_lite = AWQLiteHelper(module, name)
             module.awq_lite.setup()
@@ -1574,7 +1655,7 @@ def awq_lite(
 
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
-    enable_stats_collection(model)
+    enable_stats_collection(model, should_process)
     forward_loop(model)
 
     # Load the amax values collected during the caching mode forward pass
@@ -1583,8 +1664,10 @@ def awq_lite(
         model,
         [{"quantizer_name": "*weight_quantizer", "enable": False}],
     ):
-        max_calibrate(model, lambda model: None, distributed_sync=True)
-    finish_stats_collection(model)
+        max_calibrate(
+            model, lambda model: None, distributed_sync=True, should_process=should_process
+        )
+    finish_stats_collection(model, should_process=should_process)
 
     def sync_act_scale_across_dp(module, data_parallel_group):
         """Sync activation scale across Data Parallel (DP)."""
@@ -1731,6 +1814,7 @@ def awq_clip(
     min_clip_ratio: float = 0.5,
     shrink_step: float = 0.05,
     debug: bool = False,
+    should_process: Callable[[nn.Module], bool] | None = None,
     **kwargs,
 ):
     """AWQ-Clip variant.
@@ -1901,6 +1985,7 @@ def awq_clip(
             is_quantized_linear(module)
             and module.weight_quantizer.is_enabled
             and module.weight_quantizer.block_sizes is not None
+            and _in_scope(should_process, module)
         ):
             bind_forward_method(module, partial(forward, name), "_forward_no_awq")
             with enable_weight_access_and_writeback(module, model, name_to_module):
@@ -1909,7 +1994,7 @@ def awq_clip(
     print_rank_0("awq_clip: Estimating parameters...")
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
-    enable_stats_collection(model)
+    enable_stats_collection(model, should_process)
     forward_loop(model)
     # Load the amax values collected during the caching mode forward pass
     # This will also perform distributed amax sync for input_quantizers
@@ -1917,8 +2002,10 @@ def awq_clip(
         model,
         [{"quantizer_name": "*weight_quantizer", "enable": False}],
     ):
-        max_calibrate(model, lambda model: None, distributed_sync=True)
-    finish_stats_collection(model)
+        max_calibrate(
+            model, lambda model: None, distributed_sync=True, should_process=should_process
+        )
+    finish_stats_collection(model, should_process=should_process)
 
     def postprocess(module):
         update_best_params(module)
@@ -2224,6 +2311,8 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    skip_max_init: bool = False,
+    should_process: Callable[[nn.Module], bool] | None = None,
 ):
     """GPTQ quantization.
 
@@ -2237,7 +2326,8 @@ def gptq(
 
     Per-module steps:
 
-    1. ``max_calibrate`` to set amax values from the current activations.
+    1. ``max_calibrate`` to set amax values from the current activations, unless
+       ``skip_max_init`` says an earlier pipeline stage already produced them.
     2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect per-linear-layer Hessian matrices via forward hooks.
     4. Blockwise weight updates using the inverse Hessian to compensate for
@@ -2250,16 +2340,23 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        skip_max_init: If True, keep the amax an earlier stage established instead of
+            re-deriving it from max. GPTQ compensates rounding error against a specific
+            quantization grid, so when a previous stage searched a better grid (e.g. ``mse``)
+            the compensation must be computed against *that* grid, not a fresh max one.
     """
     total_start = time.time()
 
-    # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop)
+    # Scale setting: max by default, or whatever a previous pipeline stage established.
+    # Note this also seeds the input quantizers, so it may only be skipped when an earlier
+    # stage has already calibrated them -- which is what the executor's handoff guarantees.
+    if not skip_max_init:
+        max_calibrate(model, forward_loop=forward_loop, should_process=should_process)
 
     quantized_layers = [
         (n, m)
         for n, m in model.named_modules()
-        if is_quantized_linear(m) and m.weight_quantizer.is_enabled
+        if is_quantized_linear(m) and m.weight_quantizer.is_enabled and _in_scope(should_process, m)
     ]
     if not quantized_layers:
         print_rank_0("No quantized linear layers found, skipping GPTQ")

@@ -65,6 +65,8 @@ def calibrate(
     model: nn.Module,
     algorithm: QuantizeAlgoCfgType = "max",
     forward_loop: ForwardLoop | None = None,
+    algo_cfg: list | None = None,
+    strict: bool = True,
 ) -> nn.Module:
     """Adjusts weights and scaling factors based on selected algorithms.
 
@@ -86,6 +88,14 @@ def calibrate(
         forward_loop: A callable which takes the model as argument and forwards calibration data
             through the model. This is not required for weight-only quantization with the ``"max"``
             algorithm.
+        algo_cfg: An optional ordered list of :class:`AlgoCfgEntry
+            <modelopt.torch.quantization.config.AlgoCfgEntry>` dicts assigning a calibration
+            pipeline to a scope, e.g.
+            ``[{"module_name": "*mlp*", "cfg": ["awq_lite", "mse"]}]``. When given, the config is
+            compiled into an ordered list of scoped stages run by the ``"calibration_plan"`` mode,
+            and ``algorithm`` becomes the fallback for targets no entry matches.
+        strict: Fail on plan-validation errors instead of warning. Only relevant with
+            ``algo_cfg``.
 
     Returns: The calibrated pytorch model.
     """
@@ -109,10 +119,20 @@ def calibrate(
     is_training = model.training
     model.eval()
 
+    # A scoped plan runs through the `calibration_plan` mode, which compiles `algo_cfg` and
+    # `algorithm` into one ordered stage list and records a single mode. Without `algo_cfg`
+    # the plan is the all-"*" single-stage case, which is exactly what the legacy per-algorithm
+    # modes already do -- so that path is left alone and its recorded state stays byte-identical.
+    mode = (
+        [("calibration_plan", {"algo_cfg": algo_cfg, "algorithm": algorithm, "strict": strict})]
+        if algo_cfg
+        else get_modelike_from_algo_cfg(algorithm)
+    )
+
     with forward_with_reshard(model):
         apply_mode(
             model,
-            mode=get_modelike_from_algo_cfg(algorithm),
+            mode=mode,
             mode_kwargs={"forward_loop": forward_loop},
         )
 
@@ -247,7 +267,13 @@ def quantize(
         # Already quantized, so lets apply the quant_cfg from the config
         quant_cfg = QuantizeConfig(**dict(config)).quant_cfg
         set_quantizer_by_cfg(model, quant_cfg)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+    return calibrate(
+        model,
+        config.get("algorithm"),
+        forward_loop=forward_loop,
+        algo_cfg=config.get("algo_cfg"),
+        strict=config.get("strict", True),
+    )
 
 
 # TODO: create a config interface for auto_quantize and expose setting

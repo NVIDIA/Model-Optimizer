@@ -771,14 +771,15 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
-    calib_mutates_weights: bool = ModeloptField(
-        default=True,
-        title="Whether layerwise calibration mutates layer weights.",
+    calib_mutates_weights: bool | None = ModeloptField(
+        default=None,
+        title="Whether layerwise calibration writes layer weights back.",
         description=(
-            "Set to False only for algorithms that update solely "
-            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
-            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
-            "silently lose updates on resume."
+            "Leave unset (the default): the right value is a property of the algorithm, not a "
+            "preference, and is derived from what the algorithm declares it writes. Writing "
+            "back is always safe and merely costs I/O; skipping it silently discards in-place "
+            "weight updates, so ``False`` is rejected for a weight-mutating algorithm "
+            "(GPTQ, AWQ, SmoothQuant)."
         ),
     )
 
@@ -796,11 +797,6 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
-
-    # Whether this algorithm mutates ``layer.weight`` during calibration. Amax-only
-    # algorithms (max/mse/local_hessian) set this False; it gates whether
-    # ``layerwise.calib_mutates_weights=False`` is allowed.
-    _mutates_weights: ClassVar[bool] = True
 
     method: Literal[None] = ModeloptField(
         None,
@@ -839,13 +835,24 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
-        """Enforce the ``calib_mutates_weights=False`` whitelist."""
-        if not self.layerwise.calib_mutates_weights and self._mutates_weights:
-            raise ValueError(
-                f"Algorithm '{self.method}' mutates layer weights in-place; "
-                "calib_mutates_weights=False would lose those updates on resume. "
-                "Only max/mse/local_hessian (amax-only) support this flag."
-            )
+        """Reject ``calib_mutates_weights=False`` for an algorithm that writes weights.
+
+        The fact is sourced from the algorithm's declared capabilities rather than mirrored
+        into a flag here, so there is one statement of it. The import is function-local
+        because this module is imported *by* the capability model; only an explicit ``False``
+        -- never the derived default -- reaches the lookup, so it cannot fire while that
+        module is still loading.
+        """
+        if self.layerwise.calib_mutates_weights is False:
+            from .algo_cfg import WEIGHT, capabilities_for
+
+            caps = capabilities_for(self.method)
+            if caps is not None and WEIGHT in caps.produces:
+                raise ValueError(
+                    f"Algorithm '{self.method}' mutates layer weights in-place; "
+                    "calib_mutates_weights=False would lose those updates on resume. "
+                    "Leave it unset to derive the right value from the algorithm."
+                )
         return self
 
 
@@ -906,8 +913,6 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
-    _mutates_weights: ClassVar[bool] = False
-
     method: Literal["max"] = ModeloptField("max")
 
     distributed_sync: bool | None = ModeloptField(
@@ -956,8 +961,6 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
 
-    _mutates_weights: ClassVar[bool] = False
-
     method: Literal["mse"] = ModeloptField("mse")
 
     step_size: float | None = ModeloptField(
@@ -996,6 +999,16 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description="If True, the amax will be synced across the distributed processes.",
     )
 
+    skip_max_init: bool = ModeloptField(
+        default=False,
+        title="Skip the max-calibration that initializes amax before the MSE search.",
+        description="MSE normally runs ``max_calibrate`` first to seed ``amax``. When a previous "
+        "stage of an ``algo_cfg`` pipeline already produced weights and an initial ``amax`` "
+        "(e.g. ``gptq`` or ``awq_lite``), re-running max calibration would discard nothing but "
+        "does cost a forward; more importantly the search should refine *that* stage's amax. "
+        "The calibration-plan executor sets this automatically for non-leading MSE stages.",
+    )
+
 
 class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for local Hessian-weighted MSE calibration.
@@ -1009,8 +1022,6 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
-
-    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
@@ -1241,6 +1252,17 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         per-column error propagation into one launch per GPTQ block.""",
     )
 
+    skip_max_init: bool = ModeloptField(
+        default=False,
+        title="Skip the max-calibration that initializes amax before the GPTQ update.",
+        description="GPTQ normally runs ``max_calibrate`` first so every quantizer has an amax to "
+        "round against. When an earlier stage of an ``algo_cfg`` pipeline already produced that "
+        "amax -- e.g. an ``mse`` range search -- re-deriving it from max would discard the search "
+        "and make GPTQ compensate against a grid the model will not use. The calibration-plan "
+        "executor sets this automatically for non-leading GPTQ stages; it must not be set when "
+        "GPTQ runs first, since nothing else would initialize amax.",
+    )
+
     @model_validator(mode="after")
     def _gptq_qdq_default(self):
         """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
@@ -1275,8 +1297,6 @@ class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
     See :class:`NVFP4ActHeadroomCalibrator
     <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
     """
-
-    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
 
@@ -1577,6 +1597,99 @@ def normalize_quant_cfg_list(
     return result
 
 
+class AlgoCfgEntry(ModeloptBaseConfig):
+    """A single entry in an ``algo_cfg`` list — one scope, one ordered algorithm pipeline.
+
+    Deliberately shaped like :class:`QuantizerCfgEntry`: a selector plus a ``cfg``.  Where
+    ``quant_cfg`` entries carry quantizer *attributes*, ``algo_cfg`` entries carry the ordered
+    list of calibration *algorithms* to run on the matched targets.
+
+    Exactly one selector must be given:
+
+    - ``module_name`` — glob over quantized-linear module names.  Use for weight/module-level
+      algorithms (``gptq``, ``awq_lite``, ``smoothquant``), where the role is implied by the
+      algorithm itself.
+    - ``quantizer_name`` — glob over quantizer module names.  Use when the role must be picked
+      explicitly, e.g. ``max`` on ``*input_quantizer`` only.
+    """
+
+    module_name: str | None = ModeloptField(
+        default=None,
+        title="Module name pattern.",
+        description="Glob matched against quantized-linear module names.",
+    )
+    quantizer_name: str | None = ModeloptField(
+        default=None,
+        title="Quantizer name pattern.",
+        description="Glob matched against quantizer module names.",
+    )
+    cfg: list[_QuantizeAlgoCfgType] = ModeloptField(
+        default=...,
+        title="Ordered calibration pipeline for the matched targets.",
+        description="A list of algorithms run in order, each consuming the previous one's "
+        'mutated weights/scales. An element is an algorithm name (``"max"``), a dict keyed on '
+        '``method`` (``{"method": "gptq", "block_size": 64}``), or a '
+        ":class:`QuantizeAlgorithmConfig`.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_entry(cls, values):
+        """Accept a bare (non-list) ``cfg`` and enforce the exactly-one-selector rule."""
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        if "cfg" in values and not isinstance(values["cfg"], list):
+            values["cfg"] = [values["cfg"]]
+        selectors = [k for k in ("module_name", "quantizer_name") if values.get(k) is not None]
+        if len(selectors) != 1:
+            raise ValueError(
+                "AlgoCfgEntry needs exactly one of 'module_name' / 'quantizer_name'; got "
+                f"{selectors or 'neither'}. Entry: {values!r}"
+            )
+        if not values.get("cfg"):
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        return values
+
+    @property
+    def selector(self) -> tuple[str, str]:
+        """``(selector_kind, glob)`` for this entry."""
+        if self.module_name is not None:
+            return "module_name", self.module_name
+        return "quantizer_name", self.quantizer_name  # type: ignore[return-value]
+
+
+class CalibrationPlanConfig(QuantizeAlgorithmConfig):
+    """Config for the ``calibration_plan`` mode — the compiled, scoped calibration plan.
+
+    The saved config is the user's *intent* (``algo_cfg`` + ``algorithm``), not the compiled
+    stage list: the plan is a pure function of the config and the model structure, so it is
+    re-derivable, and keeping the intent makes the recorded state readable.
+    """
+
+    method: Literal["calibration_plan"] = ModeloptField("calibration_plan")
+
+    algo_cfg: list[AlgoCfgEntry] | None = ModeloptField(
+        default=None,
+        title="Scoped calibration pipelines; see :class:`AlgoCfgEntry`.",
+    )
+
+    algorithm: QuantizeAlgoCfgType = ModeloptField(
+        default=None,
+        title="Model-wide fallback algorithm for targets no ``algo_cfg`` entry matches.",
+    )
+
+    strict: bool = ModeloptField(
+        default=True,
+        title="Fail on validation errors instead of warning.",
+        description="``False`` downgrades plan-validation errors to warnings, so a config the "
+        "compiler considers wrong can still be executed (used to demonstrate *why* a rule "
+        "exists). Leave at ``True`` outside experiments.",
+    )
+
+
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
 
@@ -1591,6 +1704,23 @@ class QuantizeConfig(ModeloptBaseConfig):
         title="Calibration algorithm, see :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>` "
         "for more details.",
         validate_default=True,
+    )
+
+    algo_cfg: list[AlgoCfgEntry] | None = ModeloptField(
+        default=None,
+        title="Scoped calibration pipelines.",
+        description="An ordered list of :class:`AlgoCfgEntry` dicts assigning a calibration "
+        "pipeline to a scope, e.g. ``[{'module_name': '*mlp*', 'cfg': ['awq_lite', 'mse']}]``. "
+        "Targets not matched by any entry fall back to the model-wide ``algorithm``. When "
+        "omitted, ``algorithm`` alone is used and behaviour is unchanged.",
+    )
+
+    strict: bool = ModeloptField(
+        default=True,
+        title="Fail on ``algo_cfg`` validation errors instead of warning.",
+        description="Only affects configs that use ``algo_cfg``. ``False`` downgrades plan "
+        "validation errors to warnings so a pipeline the compiler considers wrong can still be "
+        "run -- useful for checking whether a rule is justified, not for production recipes.",
     )
 
     effective_bits: float | None = ModeloptField(
@@ -1833,6 +1963,9 @@ choices: set[str] = {
 
 def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     """Check if calibration is needed for the given config."""
+    if config.get("algo_cfg"):
+        # Any scoped pipeline is an explicit request to calibrate.
+        return True
     if config["algorithm"] is not None and config["algorithm"] != "max":
         return True
 
