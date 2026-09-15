@@ -466,25 +466,6 @@ checkpoint's** quant config verbatim:
   `general/ptq/nvfp4_experts_only-kv_fp8_cast` — the model-specific delta here is
   the dense-MLP scope plus the vision-tower exclusion.)
 
-- **`models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
-  mirrors `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`: MoE routed and shared experts plus
-  the Mamba `mixer.in_proj` / `mixer.out_proj` quantized, **except on layers 4, 11, 18,
-  25, 32 and 41** — the Mamba layer immediately preceding each of the six attention
-  layers, which the release leaves BF16. Attention, `conv1d`, routers and `lm_head` stay
-  BF16; KV cache FP8 cast. There is deliberately no NVFP4 sibling: that release's model
-  card says quantization-aware distillation was applied after PTQ, so no PTQ recipe
-  reproduces it.
-- **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/fp8_moe_mamba-kv_fp8_cast`**
-  mirrors `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`, the FP8 sibling of the NVFP4
-  release above: FP8 W8A8 on the routed experts, shared experts and Mamba in/out
-  projections on every Mamba layer — uniform, with no per-layer carve-out — and BF16 for
-  attention, the latent-MoE projections, `conv1d`, routers, `lm_head` and MTP.
-- **`models/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/ptq/{fp8-kv_fp8_cast,nvfp4_experts-fp8_rest-kv_fp8_cast}`**
-  mirror the omni-modal (text + vision + audio) Nemotron-H releases. The FP8 one is
-  uniform W8A8 across the decoder; the NVFP4 one is mixed — routed experts NVFP4, shared
-  experts / Mamba in-out / attention **o_proj only** FP8, q/k/v BF16. Both add explicit
-  disables for the RADIO vision tower, the Conformer sound encoder and the `mlp1` /
-  `sound_projection` modality projectors, none of which match a standard exclusion.
 *Why special:* unlike any general recipe, each is pinned to one checkpoint and
 captures a model-specific deviation a portable general recipe can't express. Most
 **mix FP8 and NVFP4 across different component types — or individual layers** —
@@ -493,6 +474,22 @@ Megatron-Core module names) rather than a portable wildcard scheme. GLM-5.3-Flas
 is the exception: its deviation is a model-specific *scope* — a wildcard scheme
 plus a load-bearing vision-tower exclusion and the VLM-required
 `layerwise.enable=false` — rather than a per-component precision map.
+
+### Checkpoint aliases — `models/<org>/<checkpoint>`
+
+Some published checkpoints use a scheme a portable recipe already produces, so their
+entry is a thin **alias** that imports that recipe wholesale and overrides only
+`metadata` (see [`models/README.md`](models/README.md) for the format):
+
+- **`models/moonshotai/Kimi-K2.6/ptq/nvfp4_experts_only_mse-kv_fp8_cast`** aliases the general
+  `general/ptq/nvfp4_experts_only_mse-kv_fp8_cast` — expert-only NVFP4 with MSE-swept static
+  weight scales and dynamic inputs, plus an FP8 KV cache in cast mode — as published in
+  `nvidia/Kimi-K2.6-NVFP4`.
+- **`models/nvidia/Qwen3.5-397B-A17B/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8`** aliases the
+  `qwen3_5_moe` architecture recipe
+  `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
+  on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
+  `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
 
 ---
 
