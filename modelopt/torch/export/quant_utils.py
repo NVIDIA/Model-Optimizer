@@ -1907,10 +1907,13 @@ def get_quant_config(
             warn(
                 "The exported checkpoint combines uniform quantized weights with a mixed-precision "
                 "KV-cache layer map. Released runtimes do not yet consume "
-                "kv_cache_quantized_layers for uniform-weight ModelOpt checkpoints; deployment "
-                "remains unsupported until the runtime adds that metadata path.",
+                "kv_cache_quantized_layers for uniform-weight ModelOpt checkpoints. Export succeeds "
+                "for artifact inspection only; do not deploy this checkpoint until the runtime "
+                "adds that metadata path. The exported metadata records "
+                "kv_cache_deployment_supported=false.",
                 stacklevel=2,
             )
+            quant_config["quantization"]["kv_cache_deployment_supported"] = False
         # KV metadata is orthogonal to weight metadata. In particular, a KV-only search
         # must preserve BF16 weights instead of synthesizing a weight quantization algorithm.
         quant_config["quantization"]["kv_cache_quant_algo"] = (

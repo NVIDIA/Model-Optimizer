@@ -422,6 +422,7 @@ def test_uniform_weight_quantization_exports_mixed_kv_cache_map():
 
     assert quantization["quant_algo"] == "FP8"
     assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_deployment_supported"] is False
     assert quantization["kv_cache_quantized_layers"] == {
         "attn0": {"quant_algo": "FP8"},
         "attn1": {"quant_algo": "NVFP4"},

@@ -329,9 +329,12 @@ def test_fixed_ptq_kv_precheck_does_not_widen_scoped_gemm_rule(monkeypatch):
         "model.layers.*.self_attn.*[kv]_bmm_quantizer",
         "*self_attn*k_bmm_quantizer",
         "*.language_model.*.attention.*_bmm_quantizer",
+        "*k_bmm*",
+        "*self_attn.*",
+        "*[kv]_bmm*",
     ],
 )
-def test_fixed_ptq_kv_precheck_ignores_unrelated_parent_scoped_rules(monkeypatch, kv_pattern):
+def test_fixed_ptq_kv_precheck_detects_scoped_kv_rules(monkeypatch, kv_pattern):
     hf_ptq = _import_hf_ptq(monkeypatch)
     fixed = QuantizeConfig(
         quant_cfg=[
@@ -399,6 +402,50 @@ def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     with pytest.raises(ValueError, match="fixed quantize stage explicitly enables K/V"):
         hf_ptq._run_auto_quantize_recipe(
             args, recipe, torch.nn.Module(), torch.nn.Module(), None, False, [], False
+        )
+
+
+def test_weight_autoquant_then_kv_rejects_fixed_kv_before_weight_search(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*self_attn.*",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            },
+        ],
+        algorithm="max",
+    )
+    weight_aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "candidate_formats": [QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])],
+            }
+        ],
+    )
+    kv_aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    recipe = ModelOptAutoQuantizeRecipe(
+        quantize=fixed, auto_quantize=weight_aq, kv_auto_quantize=kv_aq
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "auto_quantize",
+        lambda *_args, **_kwargs: pytest.fail("weight AutoQuantize must not start"),
+    )
+
+    with pytest.raises(ValueError, match="fixed quantize stage explicitly enables K/V"):
+        hf_ptq._run_auto_quantize_recipe(
+            SimpleNamespace(),
+            recipe,
+            torch.nn.Module(),
+            torch.nn.Module(),
+            None,
+            False,
+            [],
+            False,
         )
 
 

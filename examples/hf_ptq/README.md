@@ -527,12 +527,16 @@ times the model vocabulary because reference and candidate log probabilities are
 > vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
 > `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
 > The companion consumer also does not yet apply the layer map when uniform FP8/NVFP4 weights are
-> present; export warns for that composed combination. Do not deploy either unsupported case. Full
-> FP8 K/V and full NVFP4 K/V use existing vLLM kernels once the relevant metadata path is available.
+> present; export warns for that composed combination and records
+> `kv_cache_deployment_supported: false`. Do not deploy either unsupported case. Full FP8 K/V and
+> full NVFP4 K/V use existing vLLM kernels once the relevant metadata path is available.
 
 `--auto_quantize_checkpoint` saves/restores weight-search state. Every KV-domain search uses
 `--kv_auto_quantize_checkpoint`; a KV-primary recipe temporarily accepts the former flag as a
-deprecated fallback. Composed recipes therefore keep the weight and KV search states separate:
+deprecated fallback. Composed recipes therefore keep the weight and KV search states separate. A
+KV checkpoint is compatible only with the exact preceding non-K/V quantizer configuration and
+calibrated state; if that state cannot be reproduced exactly, use a new checkpoint path to recompute
+the KV sensitivities:
 
 ```bash
 scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits \

@@ -304,6 +304,10 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             new_config["kv_cache_schema_version"] = original_quantization_details.get(
                 "kv_cache_schema_version", 1
             )
+            if "kv_cache_deployment_supported" in original_quantization_details:
+                new_config["kv_cache_deployment_supported"] = original_quantization_details[
+                    "kv_cache_deployment_supported"
+                ]
 
     producer_info = input_config.get("producer")
     if producer_info:

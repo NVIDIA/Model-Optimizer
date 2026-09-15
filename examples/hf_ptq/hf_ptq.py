@@ -448,7 +448,7 @@ def _quantize_config_explicitly_enables_kv(quant_cfg: dict[str, Any]) -> bool:
     enabled_by_parent = {None: dict.fromkeys(names, False)}
     for entry in quant_cfg["quant_cfg"]:
         pattern = entry["quantizer_name"]
-        if pattern != "*" and "bmm_quantizer" not in pattern:
+        if pattern != "*" and not any(marker in pattern for marker in ("bmm", "attn", "attention")):
             continue
         basename_pattern = pattern.rsplit(".", 1)[-1]
         matched_names = [
@@ -921,6 +921,8 @@ def _prepare_quant_cfg(
         assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
         quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
         print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+        # Shards are resumable only while the manifest naming their resume point remains beside
+        # them; default the calibration checkpoint directory accordingly.
         quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
         if moved:
             print(
@@ -954,13 +956,15 @@ def _run_auto_quantize_recipe(
     primary_is_kv = primary.constraints.cost_model == "kv_cache"
     fixed_quantize_config = recipe.quantize
 
-    if primary_is_kv and fixed_quantize_config is not None:
-        quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
-        if _quantize_config_explicitly_enables_kv(quant_cfg):
+    if fixed_quantize_config is not None and (primary_is_kv or followup_kv is not None):
+        if _quantize_config_explicitly_enables_kv(fixed_quantize_config.model_dump()):
             raise ValueError(
                 "The fixed quantize stage explicitly enables K/V quantizers before KV-cache "
                 "AutoQuantize. Disable them in the fixed stage."
             )
+
+    if primary_is_kv and fixed_quantize_config is not None:
+        quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
         mono_quantize(
             args,
             quant_cfg,

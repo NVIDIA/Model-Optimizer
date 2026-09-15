@@ -33,6 +33,7 @@ def test_convert_mixed_kv_cache_config_preserves_layer_map():
                 "kv_cache_quant_algo": "MIXED_PRECISION",
                 "kv_cache_quantized_layers": layer_map,
                 "kv_cache_schema_version": 1,
+                "kv_cache_deployment_supported": False,
             },
         }
     )
@@ -43,6 +44,7 @@ def test_convert_mixed_kv_cache_config_preserves_layer_map():
     assert converted["kv_cache_quant_algo"] == "MIXED_PRECISION"
     assert converted["kv_cache_quantized_layers"] == layer_map
     assert converted["kv_cache_schema_version"] == 1
+    assert converted["kv_cache_deployment_supported"] is False
 
 
 def test_convert_uniform_kv_cache_config_preserves_layer_map():

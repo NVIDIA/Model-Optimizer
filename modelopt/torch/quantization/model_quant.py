@@ -42,7 +42,11 @@ from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .kv_cache_auto_quant import AutoQuantizeKVSearcher, get_kv_cache_auto_quantize_config
+from .kv_cache_auto_quant import (
+    _KV_QUANTIZER_ATTRS,
+    AutoQuantizeKVSearcher,
+    get_kv_cache_auto_quantize_config,
+)
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
@@ -428,8 +432,7 @@ def _auto_quantize_kv_cache(
         enabled_kv_quantizers = [
             name
             for name, module in model.named_modules(remove_duplicate=False)
-            if name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
-            and getattr(module, "is_enabled", False)
+            if name.endswith(_KV_QUANTIZER_ATTRS) and getattr(module, "is_enabled", False)
         ]
         if enabled_kv_quantizers:
             raise ValueError(
