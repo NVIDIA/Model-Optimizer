@@ -24,7 +24,10 @@ pipeline:
     args:
       - --input-data modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
       - --output-dir /scratchspace/dflash_qwen3_0.6b_hidden_states
-      # Must match the draft model's num_hidden_layers (recipe default: 5).
+      # Layer-selection preset (keyword, not a count). It resolves to a 5-layer
+      # draft, which must match the draft model's num_hidden_layers (recipe
+      # default: 5). The HF dump has no --num-draft-layers override, so a draft
+      # of a different depth needs an explicit id list here, e.g. --aux-layers 2,5,8.
       - --aux-layers dflash
       - --answer-only-loss
       - --chat-template examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
