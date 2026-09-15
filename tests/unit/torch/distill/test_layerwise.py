@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import warnings
+import weakref
 
 import pytest
 import torch
@@ -45,6 +47,20 @@ def layerwise_distillation_model():
     layerwise_model = mtd.convert(student, mode=[("layerwise_kd", config)])
 
     return layerwise_model
+
+
+def test_layerwise_export_releases_teacher_inputs(layerwise_distillation_model):
+    model = layerwise_distillation_model
+    with model.only_teacher_forward():
+        model(get_input_tensor())
+    teacher_layers = {teacher for _, teacher in model._layers_to_loss}
+    captures = [weakref.ref(layer._intermediate_input[0]) for layer in teacher_layers]
+
+    mtd.export(model)
+    gc.collect()
+
+    assert all(capture() is None for capture in captures)
+    assert all(not hasattr(layer, "_intermediate_input") for layer in teacher_layers)
 
 
 def test_layerwise_hooks_registration(layerwise_distillation_model):
