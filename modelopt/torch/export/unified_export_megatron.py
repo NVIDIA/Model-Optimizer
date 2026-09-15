@@ -551,8 +551,9 @@ class GPTModelExporter:
     def _get_state_dict(self):
         model = self.model
 
-        # Embedding
-        if hasattr(model, "embedding"):
+        # Embedding. MCore also builds `embedding` on the MTP stage, so gating on hasattr
+        # alone would emit a second, orphaned copy of the vocab embedding when PP > 1.
+        if model.pre_process and hasattr(model, "embedding"):
             self.rules["word_embeddings"](model.embedding.word_embeddings)
 
         # Decoder layers
