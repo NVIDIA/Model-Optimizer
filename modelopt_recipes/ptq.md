@@ -419,6 +419,9 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
+- **`models/nvidia/MiniMax-M2.7-NVFP4/ptq/nvfp4_experts_only-kv_fp8_cast`** uses
+  max-calibrated NVFP4 W4A4 experts (block size 16) and FP8 KV-cache cast mode;
+  attention projections, router, and LM head stay BF16.
 - **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
