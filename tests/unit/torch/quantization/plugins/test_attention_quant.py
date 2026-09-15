@@ -185,3 +185,42 @@ def test_p_qdq_mode_detection():
     sq.block_sizes = None
     sq.disable()
     assert quant_attention._p_qdq_mode() is None
+
+
+def test_causal_p_qdq_respects_disable_quant(monkeypatch):
+    """Causal attention must bypass fused P QDQ when quantization is inactive."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = None
+    pq.disable_quant()
+
+    monkeypatch.setattr(
+        quant_attention,
+        "_triton_qdq_attention",
+        lambda *args, **kwargs: pytest.fail("inactive P quantizer reached Triton QDQ"),
+    )
+    monkeypatch.setattr(
+        quant_attention,
+        "_init_kitchen_attn_fn",
+        lambda: pytest.fail("inactive P quantizer reached Kitchen initialization"),
+    )
+    expected = object()
+
+    def original_attention(*args, **kwargs):
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+        attention_mask=None,
+    )
+
+    assert output is expected
