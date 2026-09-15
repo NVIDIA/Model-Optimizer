@@ -1638,9 +1638,13 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
             weight_map_for,
         )
 
+        # Narrowed here rather than below so the call site can see that `ckpt` is a real path;
+        # the guards above only narrow it inside the `keys is None` branch.
+        if not ckpt:
+            return {}
         if keys is None:
             keys = unplaced_source_keys(model, ckpt)
-        if not keys or not ckpt:
+        if not keys:
             return {}
 
         weight_map = weight_map_for(ckpt)
