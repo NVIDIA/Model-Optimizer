@@ -35,7 +35,7 @@ from evaluation import evaluate
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
-from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
 
@@ -517,9 +517,13 @@ def main():
     )
     parser.add_argument(
         "--qformat",
+        action=RecipeSupersededAction,
         choices=["fp8", "mxfp8", "int8", "nvfp4", "int4_awq", "auto"],
         default="mxfp8",
-        help="Quantization format to apply when --recipe is not provided. Default is MXFP8.",
+        help=(
+            "(deprecated: use --recipe) Quantization format to apply when --recipe is not "
+            "provided. Default is MXFP8."
+        ),
     )
     parser.add_argument(
         "--recipe",

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import getpass
 import importlib
 import json
@@ -27,7 +28,7 @@ from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
-from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 
@@ -1027,3 +1028,57 @@ def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp
         pass
 
     assert not (tmp_path / ".experiment.json").exists()
+
+
+# --- flags that --recipe supersedes -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--qformat", "nvfp4"), ("--kv_cache_qformat", "nvfp4")],
+)
+def test_recipe_superseded_flag_warns_when_passed(monkeypatch, flag, value):
+    """Passing one of these must say so; they are slated for removal in favour of --recipe."""
+    with pytest.warns(FutureWarning, match=f"{flag} is deprecated"):
+        _, args = _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", flag, value
+        )
+    assert getattr(args, flag.lstrip("-")) == value
+
+
+def test_recipe_superseded_flags_are_silent_when_defaulted(monkeypatch, recwarn):
+    """The defaults quantize (--qformat fp8, --kv_cache_qformat fp8_cast), so warning on every
+    run -- including runs that correctly pass --recipe -- would be pure noise. argparse only
+    invokes an action for options actually present, which is what keeps this quiet."""
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    deprecations = [w for w in recwarn if issubclass(w.category, FutureWarning)]
+    assert not [w for w in deprecations if "is deprecated" in str(w.message)]
+    # and the defaults themselves are untouched by the deprecation wiring
+    assert args.qformat == "fp8"
+    assert args.kv_cache_qformat == "fp8_cast"
+
+
+def test_recipe_superseded_action_is_wired_to_both_flags(monkeypatch):
+    """Guards against a future edit dropping the action while leaving the help text.
+
+    Introspects the parser hf_ptq actually builds rather than its source text, so reordering
+    keyword arguments or reflowing the call does not fail the test while the wiring is intact.
+    """
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--pyt_ckpt_path", "/models/Qwen3-0.6B"])
+
+    built = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def capture(self, *args, **kwargs):
+        built.setdefault("parser", self)
+        return real_parse_args(self, *args, **kwargs)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
+    hf_ptq.parse_args()
+
+    by_dest = {action.dest: action for action in built["parser"]._actions}
+    for dest in ("qformat", "kv_cache_qformat"):
+        assert isinstance(by_dest[dest], RecipeSupersededAction), (
+            f"--{dest} lost its deprecation action"
+        )
