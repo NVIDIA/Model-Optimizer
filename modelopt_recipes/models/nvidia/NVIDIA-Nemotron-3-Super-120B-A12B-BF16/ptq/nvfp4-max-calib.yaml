@@ -29,8 +29,8 @@
 #   - SSM cache:                                    FP32 (can be set to FP16 in VLLM)
 #
 # Calibration: amax/max calibration comparison variant
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 metadata:
-  recipe_type: ptq
   description: Super NVFP4 mixed precision — sparse MoE experts NVFP4 (W4A4, group_size 16); shared experts, mamba in/out_proj FP8 per-tensor; FP8 KV cache;
     everything else(lm_head/MTP/Latent MOE) stay BF16. Amax calibration comparison variant.
 quantize:
@@ -129,3 +129,12 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
+
+    # MTP block -> BF16. Only reachable on the Megatron-Core path, where the block is a
+    # live `model.mtp` submodule the broad `*mixer.*` patterns above match into; the HF
+    # `nemotron_h` class drops the MTP tensors on load
+    # (`_keys_to_ignore_on_load_unexpected = [r"mtp.*"]`), so this is inert there. Must
+    # stay last, after the patterns it undoes. Mirrors the same entry in
+    # `configs/ptq/units/default_disabled_quantizers`, which this recipe does not import.
+    - quantizer_name: 'mtp.*'
+      enable: false

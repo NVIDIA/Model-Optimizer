@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16, mirroring
+# nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 -- the FP8 sibling of the NVFP4
+# release that `nvfp4-mse.yaml` / `nvfp4-max-calib.yaml` mirror.
+#
+# The Super hybrid has 88 `backbone.layers`: Mamba-2 mixer layers, MoE layers, and
+# eight attention layers (7, 16, 25, 36, 47, 58, 69, 78).
+#
+# Quantized, all FP8 W8A8 per-tensor: the MoE routed experts
+# (`mixer.experts.<i>.{up,down}_proj`), the shared experts, and the Mamba
+# `mixer.in_proj` / `mixer.out_proj` on every Mamba layer. Unlike the NVFP4 release
+# this one is uniform -- there is no per-layer carve-out.
+#
+# BF16 everywhere else: all attention (`mixer.{q,k,v,o}_proj`), the latent-MoE
+# projections (`mixer.fc1_latent_proj` / `fc2_latent_proj`), the `mixer.conv1d`
+# depthwise convolutions, the `mixer.gate` routers, `lm_head`, and the whole MTP block.
+#
+# KV cache: FP8 with a constant amax -- the published checkpoint's `k_scale` is exactly
+# 1.0, which is what `use_constant_amax` produces (amax pinned to the E4M3 max, 448).
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  description: >-
+    NVIDIA-Nemotron-3-Super-120B-A12B: FP8 W8A8 per-tensor on the MoE routed experts,
+    the shared experts and the Mamba in/out projections, plus an FP8 KV cache in cast
+    mode; max calibration. Attention, latent-MoE projections, conv1d, routers, lm_head
+    and the MTP block stay BF16.
+quantize:
+  algorithm:
+    method: max
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*mixer.experts.*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.experts.*input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.shared_experts.*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.shared_experts.*input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.in_proj*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.in_proj*input_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.out_proj*weight_quantizer'
+      cfg: {$import: fp8}
+    - quantizer_name: '*mixer.out_proj*input_quantizer'
+      cfg: {$import: fp8}
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # Latent-MoE projections stay BF16 -- `*_proj` wildcards above do not reach them,
+    # but pin it so a widened pattern cannot silently pull them in.
+    - {quantizer_name: '*latent_proj*', enable: false}

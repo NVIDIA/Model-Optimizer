@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16, mirroring
+# nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8.
+#
+# Nemotron-3-Nano-Omni is the omni-modal (text + vision + audio) sibling of
+# NVIDIA-Nemotron-3-Nano-30B-A3B: the same 52-layer Nemotron-H hybrid decoder, nested
+# under `language_model.backbone.layers`, plus a RADIO vision tower
+# (`vision_model.radio_model.*`), a Conformer sound encoder (`sound_encoder.*`) and the
+# `mlp1` / `sound_projection` modality projectors.
+#
+# Only the language decoder is quantized. The vision tower, the sound encoder and both
+# projectors stay BF16 -- and `sound_encoder*`, `sound_projection*` and `mlp1*` match
+# none of the shared `default_disabled_quantizers` patterns, so this recipe disables
+# them explicitly. That extra exclusion is the model-specific part.
+#
+# `layerwise.enable=false` is required: the decoder layers nest under
+# `language_model.backbone.layers`, where layerwise_calibrate cannot find them.
+#
+# `hf_quant_config.json` records `kv_cache_quant_algo: FP8` but the checkpoint ships no
+# `k_scale`/`v_scale` tensors, which is the constant-amax (cast) KV cache.
+#
+# Quantized, all FP8 W8A8 per-tensor: every linear in the decoder -- MoE routed and
+# shared experts, the Mamba `mixer.in_proj` / `mixer.out_proj` on every Mamba layer, and
+# all six attention layers' `mixer.{q,k,v,o}_proj`. BF16: `mixer.conv1d`, the
+# `mixer.gate` routers and `lm_head`.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  description: >-
+    Nemotron-3-Nano-Omni-30B-A3B-Reasoning: FP8 W8A8 per-tensor on every language-decoder
+    linear (MoE experts, shared experts, Mamba in/out projections and attention), plus an
+    FP8 KV cache in cast mode; max calibration. The RADIO vision tower, the Conformer
+    sound encoder, both modality projectors, conv1d, routers and lm_head stay BF16.
+quantize:
+  algorithm:
+    method: max
+    # Required: the decoder nests under `language_model.backbone.layers`, which
+    # layerwise_calibrate cannot locate.
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w8a8_fp8_fp8
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # Non-language branches. MUST stay after the broad enables above; none of these
+    # match a `default_disabled_quantizers` pattern.
+    - {quantizer_name: '*sound_encoder*', enable: false}
+    - {quantizer_name: '*sound_projection*', enable: false}
+    - {quantizer_name: '*radio_model*', enable: false}
+    - {quantizer_name: 'mlp1.*', enable: false}
+    - {quantizer_name: '*mixer.conv1d*', enable: false}
+    - {quantizer_name: '*mixer.gate.*', enable: false}
