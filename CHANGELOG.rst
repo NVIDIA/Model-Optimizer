@@ -6,6 +6,11 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. Skip-softmax serving keeps the calibrated 128-token KV-tile granularity (and 128-row prefill Q tiles), autotunes only its execution schedule, and uses a smaller Q tile for one-token decode.
+- Sparse-only vLLM installs now reject unsupported DCP, DBO/ubatching, speculative decoding, and FULL mixed-batch CUDA graphs; calibrated decode also rejects FULL decode graphs.
+
 *Quantization*
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
