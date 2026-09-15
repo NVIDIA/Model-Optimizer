@@ -151,13 +151,18 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
 
     effective_bits: float = ModeloptField(
         default=4.8,
-        title="Effective bits per weight",
-        description="Average weight-storage bits target for the LP, in (0, 16].",
+        title="Effective bits",
+        description=(
+            "Average storage-bits target for the selected cost model, in (0, 16]. Defaults to 4.8."
+        ),
     )
-    cost_model: Literal["weight", "active_moe"] = ModeloptField(
+    cost_model: Literal["weight", "active_moe", "kv_cache"] = ModeloptField(
         default="weight",
         title="Cost model",
-        description="'weight' counts all weights equally; 'active_moe' scales routed-expert weights.",
+        description=(
+            "'weight' counts all weights equally; 'active_moe' scales routed-expert weights; "
+            "'kv_cache' accounts for paired K/V-cache storage."
+        ),
     )
     cost: AutoQuantizeCost | None = ModeloptField(
         default=None,
@@ -171,6 +176,12 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         if not (0 < v <= 16):
             raise ValueError(f"effective_bits must be in (0, 16], got {v}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_cost_settings(self):
+        if self.cost_model == "kv_cache" and self.cost is not None:
+            raise ValueError("KV-cache AutoQuant does not accept weight cost settings.")
+        return self
 
 
 class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):
@@ -272,6 +283,25 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
                 "entry. For uniform quantization, use a PTQ recipe instead."
             )
+        if self.constraints.cost_model == "kv_cache":
+            if self.auto_quantize_method != "kl_div":
+                raise ValueError(
+                    "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."
+                )
+            if self.module_search_spaces:
+                raise ValueError(
+                    "KV-cache AutoQuant uses one candidate space for all eligible attention "
+                    "layers; module_search_spaces is not supported."
+                )
+            if self.kv_cache is not None:
+                raise ValueError(
+                    "KV-cache AutoQuant candidate_formats replace the uniform kv_cache post-step."
+                )
+            if self.cost_excluded_layers:
+                raise ValueError(
+                    "KV-cache AutoQuant does not support cost_excluded_layers; use "
+                    "disabled_layers to exclude non-KV-cache modules from the search."
+                )
         return self
 
 

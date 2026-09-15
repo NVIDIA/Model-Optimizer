@@ -1,6 +1,6 @@
 ---
 name: release-cherry-pick
-description: Cherry-pick merged PRs labeled for a release branch into that branch, then open a PR and apply the cherry-pick-done label. Use when asked to "cherry-pick PRs for release/X.Y.Z", "pick PRs to release branch", or "cherry-pick labeled PRs".
+description: Audit merged bug-fix PRs and release NVBugs for missing cherry-pick labels, then cherry-pick labeled PRs into a release branch and open a PR. Use when asked to "cherry-pick PRs for release/X.Y.Z", "pick PRs to release branch", "verify cherry-pick labels", or "cherry-pick labeled PRs".
 ---
 
 # Cherry-pick PRs to a Release Branch
@@ -13,7 +13,94 @@ Ask the user for the release version (e.g. `0.44.0`) if not already provided.
 
 Set `VERSION=<version>` for use in subsequent steps.
 
-## Step 2 — Fetch pending PRs
+## Step 2 — Audit candidates for missing labels
+
+Before fetching the labeled queue, audit release NVBugs and recent merged PRs so bug fixes are not omitted.
+
+### Audit release NVBugs
+
+Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned.
+
+Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Keep only PRs that are merged into `main`, lack `cherry-pick-<VERSION>`, and are not already included in the release branch. Verify each remaining PR is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
+
+### Audit recent merged PRs
+
+Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
+
+```bash
+git fetch origin main "release/$VERSION" --tags
+RC_TAG=$(git tag --merged "origin/release/$VERSION" \
+  --list "${VERSION}rc*" --sort=-version:refname | head -1)
+test -n "$RC_TAG" || {
+  echo "No ${VERSION}rc* tag found on origin/release/$VERSION" >&2
+  exit 1
+}
+SINCE=$(git for-each-ref --format='%(creatordate:iso-strict)' \
+  "refs/tags/$RC_TAG")
+
+PATCH_STATUS=$(git cherry "origin/release/$VERSION" origin/main)
+
+SEARCH_RESULTS=$(
+  gh search prs \
+    --repo NVIDIA/Model-Optimizer \
+    --merged \
+    --base main \
+    --merged-at ">=$SINCE" \
+    --limit 1000 \
+    --json number,title,author,labels,url \
+    -- "-label:cherry-pick-$VERSION"
+)
+
+if test "$(jq 'length' <<<"$SEARCH_RESULTS")" -ge 1000; then
+  echo "Recent-PR audit reached the 1,000-result limit" >&2
+  exit 1
+fi
+
+jq -r '.[].number' <<<"$SEARCH_RESULTS" \
+  | while read -r pr; do
+      sha=$(gh pr view "$pr" --repo NVIDIA/Model-Optimizer \
+        --json mergeCommit --jq '.mergeCommit.oid')
+      if grep -q "^+ $sha$" <<<"$PATCH_STATUS"; then
+        gh pr view "$pr" --repo NVIDIA/Model-Optimizer \
+          --json number,title,author,labels,url
+      fi
+    done
+```
+
+A release is not normally expected to reach the 1,000-PR limit.
+
+Review each PR's title, body, labels, changed files, and linked issue context. Classify it as:
+
+- **Yes** — repairs incorrect behavior, a regression, crash, compatibility problem, or documentation defect relevant to the release.
+- **No** — feature, refactor, cleanup, dependency refresh, or other change not needed to correct the release.
+- **Unclear** — insufficient evidence or meaningful backport risk; ask the user.
+
+Deduplicate PRs found through both audits.
+
+### Report and label
+
+Present the complete audit before changing GitHub labels:
+
+| PR | Title | Author | NVBug(s) | Bug fix? | `cherry-pick-<VERSION>` present? | Recommendation |
+|---|---|---|---|---|---|---|
+
+Use these recommendation values and sort the table in this order:
+
+1. **Needs label** — confirmed release-relevant bug fix.
+2. **Unknown** — requires user judgment.
+3. **No action needed** — not a release-relevant bug fix.
+
+Use `—` when no NVBug is known. Also list NVBugs with no linked PR. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
+
+```bash
+for pr in <APPROVED_NUMBERS>; do
+  gh pr edit "$pr" --repo NVIDIA/Model-Optimizer --add-label "cherry-pick-$VERSION"
+done
+```
+
+Do not label unmerged PRs, PRs not based on `main`, or candidates classified **Unclear** without explicit approval. Re-run the audit table after edits so it reflects the final label state.
+
+## Step 3 — Fetch pending PRs
 
 Use the GitHub search API to list PRs that have the cherry-pick label but not cherry-pick-done, sorted by merge date ascending:
 
@@ -25,7 +112,7 @@ gh api "search/issues?q=repo:NVIDIA/Model-Optimizer+is:pr+is:merged+base:main+la
 
 Present the list to the user before proceeding.
 
-## Step 3 — Set up the release branch
+## Step 4 — Set up the release branch
 
 Check out `release/<VERSION>`, creating it from the remote if it doesn't exist locally:
 
@@ -34,7 +121,7 @@ git fetch origin release/<VERSION>
 git checkout release/<VERSION>
 ```
 
-## Step 4 — Get merge commit SHAs
+## Step 5 — Get merge commit SHAs
 
 All PRs are squash-merged, so each has a single-parent commit. Retrieve the SHA for each PR:
 
@@ -42,7 +129,7 @@ All PRs are squash-merged, so each has a single-parent commit. Retrieve the SHA 
 gh pr view <NUM> --repo NVIDIA/Model-Optimizer --json mergeCommit --jq '.mergeCommit.oid'
 ```
 
-## Step 5 — Cherry-pick in merge order
+## Step 6 — Cherry-pick in merge order
 
 Cherry-pick each commit with `-s` (DCO sign-off). GPG signing is handled automatically by the repo's git config.
 
@@ -56,7 +143,7 @@ git cherry-pick -s <SHA>
 git cherry-pick --continue
 ```
 
-## Step 6 — Create a PR to the release branch
+## Step 7 — Create a PR to the release branch
 
 Push the cherry-picks to a new branch and open a PR targeting `release/<VERSION>`. The PR title lists every cherry-picked PR number. The body uses `## Cherry-picked PRs` as the only heading with one `- #<NUM>` bullet per PR — no titles, no links, no extra text.
 
@@ -78,7 +165,7 @@ EOF
 )"
 ```
 
-## Step 7 — Apply cherry-pick-done label
+## Step 8 — Apply cherry-pick-done label
 
 Add the `cherry-pick-done` label to every PR that was successfully cherry-picked:
 

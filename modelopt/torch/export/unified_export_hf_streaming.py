@@ -33,6 +33,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.utils.core_utils import (
     _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
@@ -44,7 +45,11 @@ from modelopt.torch.utils import distributed as _dist
 
 from .model_utils import get_export_units
 from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
-from .quant_utils import _postprocess_single_tensor, get_quant_config
+from .quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    get_quant_config,
+)
 from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
@@ -282,7 +287,7 @@ def _make_tensor_sink(
     name_mapper,
     tied_alias_keys: set[str],
     kv_cache_max_bound: float,
-    kv_cache_format: str | None,
+    kv_cache_format: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool,
 ):
     """Build the per-tensor step both streaming exporters use.
@@ -373,7 +378,7 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     # --- Tied alias keys to skip ---
     # data_ptr() is unreliable for disk-offloaded weights, so we use _tied_weights_keys.
@@ -427,7 +432,15 @@ def _export_transformers_checkpoint_streaming(
     # --- Stream tensors to shard files ---
     shard_size_bytes = _parse_shard_size(max_shard_size)
     writer = _StreamingShardWriter(export_dir, shard_size_bytes)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    # No export handler reads model_type today -- only the prepare handlers do, and this
+    # path prepares from the root model above. Carried anyway so all three ExportContext
+    # constructions agree and a future handler cannot silently receive None here.
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     seen_keys: set[str] = set()
 
     _stream_tensor = _make_tensor_sink(
@@ -575,7 +588,12 @@ def collect_export_tensors(
     _assert_fsdp2_owns_every_mesh_dim(model)
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     owned: list[tuple[str, torch.Tensor]] = []
     seen_keys: set[str] = set()
 
@@ -639,7 +657,7 @@ def _export_fsdp2_checkpoint_streaming(
     dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
 
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
     # view to compare storage against. tied_map covers dict-style and MoE ties.

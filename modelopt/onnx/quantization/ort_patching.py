@@ -52,7 +52,7 @@ import onnx
 import onnxruntime as ort
 import pynvml
 from onnx import onnx_pb
-from onnxruntime.quantization import calibrate
+from onnxruntime.quantization import calibrate, qdq_quantizer
 from onnxruntime.quantization.base_quantizer import BaseQuantizer
 from onnxruntime.quantization.calibrate import (
     CalibraterBase,
@@ -74,6 +74,7 @@ from onnxruntime.quantization.quant_utils import (
     QuantType,
     add_infer_metadata,
 )
+from onnxruntime.quantization.quant_utils import compute_scale_zp as _ort_compute_scale_zp
 from onnxruntime.quantization.quantize import check_static_quant_arguments
 from onnxruntime.quantization.registry import QDQRegistry, QLinearOpsRegistry
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
@@ -94,6 +95,53 @@ def load_model_with_shape_infer(model_path: Path) -> onnx.ModelProto:
     return model
 
 
+def _compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=None):
+    """Retry FP16 scale calculation in FP32 when range subtraction overflows."""
+    range_dtype = np.asarray(rmax).dtype
+    if range_dtype != np.float16:
+        return _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        zero_point, scale = _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+        if np.all(np.isfinite(scale)):
+            return zero_point, scale
+
+        zero_point, scale = _ort_compute_scale_zp(
+            np.asarray(rmin, dtype=np.float32),
+            np.asarray(rmax, dtype=np.float32),
+            qmin,
+            qmax,
+            symmetric,
+            min_real_range,
+        )
+        return zero_point, np.asarray(scale, dtype=range_dtype)
+
+
+def _prepare_histogram_data(histogram_collector, tensor, data_arr):
+    """Use FP32 for histogram math while remembering the source dtype."""
+    if data_arr.dtype != np.float16:
+        return data_arr
+
+    original_dtypes = getattr(histogram_collector, "_modelopt_original_dtypes", {})
+    original_dtypes[tensor] = data_arr.dtype
+    histogram_collector._modelopt_original_dtypes = original_dtypes
+    return data_arr.astype(np.float32)
+
+
+def _restore_histogram_calibration_dtypes(histogram_collector, tensors_range):
+    """Restore source dtypes at the calibration-to-quantization boundary."""
+    original_dtypes = getattr(histogram_collector, "_modelopt_original_dtypes", {})
+    for tensor, dtype in original_dtypes.items():
+        if tensor not in tensors_range:
+            continue
+        tensor_data = tensors_range[tensor]
+        dtype_limits = np.finfo(dtype)
+        for attribute in ("lowest", "highest", "avg", "std"):
+            if hasattr(tensor_data, attribute):
+                value = np.clip(getattr(tensor_data, attribute), dtype_limits.min, dtype_limits.max)
+                setattr(tensor_data, attribute, np.asarray(value, dtype=dtype))
+
+
 def _collect_value(histogram_collector, name_to_arr):
     """Collect histogram on real value."""
     for tensor, data_arr in tqdm(name_to_arr.items()):
@@ -105,6 +153,7 @@ def _collect_value(histogram_collector, name_to_arr):
             curr_data_arr = curr_data_arr.flatten()
             concat_data_arr = np.concatenate((concat_data_arr, curr_data_arr))
 
+        concat_data_arr = _prepare_histogram_data(histogram_collector, tensor, concat_data_arr)
         data_arr = concat_data_arr
         # ==========================================================
         if data_arr.size > 0:
@@ -130,9 +179,6 @@ def _collect_value(histogram_collector, name_to_arr):
                 old_histogram, data_arr, min_value, max_value, threshold
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
@@ -1126,6 +1172,7 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
     """Collect histogram on real value."""
     for tensor, data_arr in name_to_arr.items():
         data_arr = np.asarray(data_arr).flatten()
+        data_arr = _prepare_histogram_data(histogram_collector, tensor, data_arr)
         min_value, max_value = (np.min(data_arr), np.max(data_arr)) if data_arr.size > 0 else (0, 0)
 
         # Replace inf/nan with float32 min/max
@@ -1147,9 +1194,6 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
                 threshold,
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
@@ -1685,6 +1729,8 @@ def _quantize_static(
             raise TypeError(
                 f"Unexpected type {type(tensors_range)} for tensors_range and calibrator={type(calibrator)}."
             )
+        if isinstance(calibrator, HistogramCalibrater):
+            _restore_histogram_calibration_dtypes(calibrator.collector, tensors_range)
         del calibrator
 
     check_static_quant_arguments(quant_format, activation_type, weight_type)
@@ -1795,4 +1841,5 @@ def patch_ort_modules(calibrate_per_node: bool = False):
     CalibraterBase.select_tensors_to_calibrate = _select_tensors_to_calibrate
     QDQQuantizer.check_opset_version = _check_opset_version
     BaseQuantizer.adjust_tensor_ranges = _adjust_tensor_ranges
+    qdq_quantizer.compute_scale_zp = _compute_scale_zp
     CalibraterBase.__init__ = _init_calibrater_base

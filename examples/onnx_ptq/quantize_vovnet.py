@@ -14,16 +14,18 @@
 # limitations under the License.
 
 import argparse
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 from modelopt.onnx.quantization import quantize
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from examples.onnx_ptq.quantization_utils import NpzCalibrationReader, find_vovnet_nodes_to_exclude
+from examples.onnx_ptq.quantization_utils import (
+    NpzCalibrationReader,
+    find_vovnet_nodes_to_exclude,
+    temporary_onnx_copy,
+)
 
 
 def parse_args():
@@ -38,22 +40,16 @@ def parse_args():
 def main():
     args = parse_args()
     onnx_path = Path(args.onnx_path)
-    output_path = args.output or onnx_path.with_name(
-        f"{onnx_path.stem}.{args.precision}{onnx_path.suffix}"
+    output_path = (
+        Path(args.output)
+        if args.output
+        else onnx_path.with_name(f"{onnx_path.stem}.{args.precision}{onnx_path.suffix}")
     )
+    if output_path.resolve() == onnx_path.resolve():
+        raise ValueError("Output path must differ from the source ONNX path")
     excluded_nodes = find_vovnet_nodes_to_exclude(onnx_path)
     print(f"Excluding {len(excluded_nodes)} accuracy-sensitive VoVNet nodes")
-    # Shape inference updates its input in place; a sibling copy preserves external-data paths.
-    temporary_file = tempfile.NamedTemporaryFile(
-        dir=onnx_path.parent,
-        prefix=f".{onnx_path.stem}.",
-        suffix=onnx_path.suffix,
-        delete=False,
-    )
-    temporary_onnx = Path(temporary_file.name)
-    temporary_file.close()
-    try:
-        shutil.copyfile(onnx_path, temporary_onnx)
+    with temporary_onnx_copy(onnx_path) as temporary_onnx:
         quantize(
             onnx_path=str(temporary_onnx),
             quantize_mode=args.precision,
@@ -64,8 +60,6 @@ def main():
             high_precision_dtype="fp16",
             output_path=str(output_path),
         )
-    finally:
-        temporary_onnx.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

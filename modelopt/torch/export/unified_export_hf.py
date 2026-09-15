@@ -16,6 +16,7 @@
 """Code that export quantized Hugging Face models for deployment."""
 
 import contextlib
+import copy
 import importlib
 import json
 import re
@@ -33,6 +34,8 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+from modelopt.torch.models import hf_model_type, is_moe
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -81,13 +84,7 @@ except ImportError:
 # Importing the built-in handlers installs their entries in the two registries.
 from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
 from .convert_hf_config import convert_hf_quant_config_format
-from .layer_utils import (
-    get_experts_list,
-    is_layernorm,
-    is_moe,
-    is_quantlinear,
-    sync_moe_gate_up_amax,
-)
+from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
@@ -110,6 +107,7 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
+    _get_kv_cache_postprocess_config,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -457,6 +455,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
     model_type = type(model).__name__.lower()
+    model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
     names = module_name_maps(model)
@@ -467,19 +466,19 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     #    the later gate up fusion.
     # Fuse pre_quant_scale to the linear weights if possible
     if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
-        fuse_prequant_to_linear(model)
+        fuse_prequant_to_linear(model, model_type=model_hf_type)
 
     # Pre-process MoE experts
     for name, module in model.named_modules():
         module_names.add(name)
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and (
+        if is_moe(module, model_hf_type) and (
             quantization_format is not QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
-            grouped_experts = get_experts_list(module, model_type)
+            grouped_experts = get_experts_list(module, model_hf_type)
             for modules in grouped_experts:
                 with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
@@ -869,15 +868,26 @@ def _prepare_moe_inputs(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool,
+    model_type: str | None = None,
 ) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
+
+    ``model_type`` is the root model's HF model type. Callers that pass a sub-tree
+    rather than the root model (layerwise export passes one decoder layer) must supply
+    it, since a decoder layer carries no reliable ``config.model_type`` of its own and
+    the expert-naming lookup would otherwise fail to resolve.
     """
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    prepare_ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=model_type if model_type is not None else hf_model_type(model),
+    )
     for name, sub_module in model.named_modules():
-        if is_moe(sub_module) and hasattr(sub_module, "experts"):
+        if is_moe(sub_module, prepare_ctx.model_type) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
             if handler is None:
                 # Unsupported MoE model structure
@@ -942,7 +952,12 @@ def _process_quantized_modules(
     assert not is_fsdp2_model(model), (
         "_process_quantized_modules cannot pack a sharded model; use collect_export_tensors"
     )
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
 
     for name, sub_module in model.named_modules():
         _dispatch_export_handler(name, sub_module, ctx)
@@ -1060,12 +1075,12 @@ def _export_transformers_checkpoint(
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,
         kv_cache_max_bound,
-        kv_cache_format,
+        kv_cache_postprocess_config,
         is_modelopt_qlora,
         tied_map=tied_map,
     )
@@ -1564,7 +1579,16 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: dict | None) -> None:
+def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+    """Return a name-reverted copy, leaving the input untouched if mapping fails."""
+    mapped_quant_config = copy.deepcopy(hf_quant_config)
+    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    return mapped_quant_config
+
+
+def _revert_quant_config_names_best_effort(
+    model: nn.Module, hf_quant_config: dict | None
+) -> dict | None:
     """Rename the quant config's modules back to their original checkpoint names.
 
     On failure it warns and keeps the current names, so the config still matches the weights.
@@ -1572,12 +1596,13 @@ def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: di
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
             "names may not match the original HF hub checkpoint."
         )
+    return hf_quant_config
 
 
 def export_hf_checkpoint(
@@ -1673,7 +1698,7 @@ def export_hf_checkpoint(
             )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
-            _revert_quant_config_names_best_effort(model, hf_quant_config)
+            hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         elif is_fsdp2_sharded:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank buffers its own share of the model rather than the whole checkpoint, and the
@@ -1693,7 +1718,7 @@ def export_hf_checkpoint(
             if rank == 0:
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
-                _revert_quant_config_names_best_effort(model, hf_quant_config)
+                hf_quant_config = _revert_quant_config_names_best_effort(model, hf_quant_config)
         else:
             post_state_dict, hf_quant_config = _export_transformers_checkpoint(
                 model, dtype, **kwargs
@@ -1716,13 +1741,19 @@ def export_hf_checkpoint(
             # do it here. The same rename is applied to the quant-config module references
             # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
             # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
-            # and fails). Best-effort: any failure (an op we cannot reverse yet, transformers API
-            # drift, unexpected shapes) falls back to the in-memory names.
+            # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
+            # transformers API drift, unexpected shapes) falls back to the in-memory names for
+            # both weights and config so they stay mutually consistent.
             try:
                 name_mapper = build_reverse_name_mapper(model)
-                export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                mapped_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
-                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+                    mapped_quant_config = _revert_hf_quant_config_names(
+                        hf_quant_config, name_mapper
+                    )
+                export_state_dict = mapped_state_dict
+                hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
                     f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "

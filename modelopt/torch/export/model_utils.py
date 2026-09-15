@@ -121,7 +121,7 @@ def is_multimodal_model(model):
     )
 
 
-def get_language_model_from_vl(model) -> list[nn.Module] | None:
+def get_language_model_from_vl(model, *, strict: bool = False) -> list[nn.Module] | None:
     """Extract the language model lineage from a Vision-Language Model (VLM).
 
     This function handles the common patterns for accessing the language model component
@@ -130,6 +130,12 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     Args:
         model: The VLM model instance to extract the language model from
+        strict: Raise if distinct direct and nested language-model roots are present. Generic
+            export callers retain the historical nested-root preference by default; search
+            boundaries can opt in to fail-closed ambiguity handling.
+
+    Raises:
+        ValueError: If ``strict`` is True and the model exposes competing language-model roots.
 
     Returns:
         list: the lineage path towards the language model
@@ -140,12 +146,22 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
         >>> # lineage[0] is vlm_model
         >>> # lineage[1] is vlm_model.language_model
     """
-    # always prioritize model.model.langauge_model
-    if hasattr(model, "model") and hasattr(model.model, "language_model"):
-        return [model, model.model, model.model.language_model]
-
-    if hasattr(model, "language_model"):
-        return [model, model.language_model]
+    nested_parent = getattr(model, "model", None)
+    nested_language_model = getattr(nested_parent, "language_model", None)
+    direct_language_model = getattr(model, "language_model", None)
+    if (
+        strict
+        and nested_language_model is not None
+        and direct_language_model is not None
+        and nested_language_model is not direct_language_model
+    ):
+        raise ValueError(
+            "Found multiple language-model roots; refusing to select one by traversal order."
+        )
+    if nested_language_model is not None:
+        return [model, nested_parent, nested_language_model]
+    if direct_language_model is not None:
+        return [model, direct_language_model]
 
     # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model.
     # Only match if the model is detected as multimodal to avoid matching non-VLM encoder-decoder

@@ -224,6 +224,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "head_dim": 8,
         "max_position_embeddings": 32,
         "vocab_size": 32,
+        "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
     # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
     # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.

@@ -60,6 +60,7 @@ EXPERIMENT_ENV = "MLFLOW_EXPERIMENT_NAME"
 RUN_NAME_ENV = "MODELOPT_MLFLOW_RUN_NAME"
 REQUIRED_ENV = "MODELOPT_MLFLOW_REQUIRED"
 COMMAND_ENV = "MODELOPT_MLFLOW_COMMAND"
+EXTRA_TAGS_ENV = "MODELOPT_MLFLOW_EXTRA_TAGS"
 
 # Everything the rank-0 worker needs in its environment to reach the tracking server. The
 # credentials are never set here, only forwarded when the launching shell exported them --
@@ -71,6 +72,7 @@ MLFLOW_ENV_VARS = frozenset(
         RUN_NAME_ENV,
         REQUIRED_ENV,
         COMMAND_ENV,
+        EXTRA_TAGS_ENV,
         "MLFLOW_TRACKING_TOKEN",
         "MLFLOW_TRACKING_USERNAME",
         "MLFLOW_TRACKING_PASSWORD",
@@ -375,6 +377,30 @@ def _vllm_params(worker: Any) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
 
 
+def _extra_tags() -> dict[str, str]:
+    """Caller-supplied tags from ``$MODELOPT_MLFLOW_EXTRA_TAGS``: ``key=value`` pairs,
+    comma separated.
+
+    For what this library cannot know -- the revision of the harness that launched the
+    serve, a sweep id -- so a caller can join its own records to this run.
+
+    Deliberately not JSON. The variable reaches the worker through a shell
+    ``export VAR="..."``, and JSON's own double quotes terminate that quoting, so the
+    value arrives truncated at the first one. Malformed entries are reported and skipped:
+    a typo in a tag must not lose a serve that has already spent minutes getting here.
+    """
+    tags, dropped = {}, []
+    for item in (os.environ.get(EXTRA_TAGS_ENV) or "").split(","):
+        key, sep, value = item.partition("=")
+        if sep and key.strip() and value.strip():
+            tags[key.strip()] = value.strip()
+        elif item.strip():
+            dropped.append(item.strip())
+    if dropped:
+        warnings.warn(f"Ignoring malformed entries in ${EXTRA_TAGS_ENV}: {dropped}")
+    return tags
+
+
 def _run_tags(worker: Any) -> dict[str, str]:
     """Tags shared with ``hf_ptq``, so a checkpoint's PTQ run and the serves of it join up.
 
@@ -384,6 +410,7 @@ def _run_tags(worker: Any) -> dict[str, str]:
     """
     model = _stringify(_model_config_value(worker, "model")) or "unknown"
     tags = {
+        **_extra_tags(),  # first, so the keys below always win
         "tool": TOOL_NAME,
         "model": Path(model).name,
         "checkpoint_path": _resolved(model),

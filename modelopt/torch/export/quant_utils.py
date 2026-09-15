@@ -18,7 +18,6 @@
 import logging
 from collections import defaultdict
 from collections.abc import Generator
-from types import SimpleNamespace
 from typing import Any
 from warnings import warn
 
@@ -26,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
+from modelopt.torch.models import get_spec, list_all_possible
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -48,9 +48,10 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils import clear_cuda_cache
 
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
-from .model_utils import TiedWeightMap
+from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
     KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_INT8,
     KV_CACHE_NVFP4,
     KV_CACHE_NVFP4_AFFINE,
@@ -74,6 +75,11 @@ from .quant_format import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _has_large_fp8_scale(value: torch.Tensor) -> bool:
+    """Return whether an FP8 scale exceeds the recommended threshold."""
+    return bool(torch.any(value > 0.5))
 
 
 def maybe_transpose_expert_weight_dimensions(
@@ -307,27 +313,38 @@ def get_kv_cache_scaling_factor(
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
 
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if clamp_fp8_scales and get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
-        for i, factor in enumerate(scaling_factors):
-            if factor is None:
-                continue
-            if factor.item() > 0.5:
-                warn(
-                    f"Warning: Large KV activation detected: {factor.item()}, "
-                    "Quantized KV cache may lead to higher accuracy drop."
-                )
-            scaling_factors[i] = torch.max(
-                factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+    # For FP8, we recommend default KV-cache scaling factor to be 1. The
+    # asymmetric format applies this only to K; V remains NVFP4.
+    kv_cache_dtype = get_kv_cache_dtype(self_attention_module)
+    if not clamp_fp8_scales:
+        fp8_indices = ()
+    elif kv_cache_dtype == KV_CACHE_FP8:
+        fp8_indices = range(len(scaling_factors))
+    elif kv_cache_dtype == KV_CACHE_FP8_K_NVFP4_V:
+        fp8_indices = (0,)
+    else:
+        fp8_indices = ()
+    for i in fp8_indices:
+        factor = scaling_factors[i]
+        if factor is None:
+            continue
+        if _has_large_fp8_scale(factor):
+            warn(
+                "Warning: Large KV activation detected. "
+                "Quantized KV cache may lead to higher accuracy drop."
             )
+        scaling_factors[i] = torch.max(
+            factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+        )
     return scaling_factors
 
 
 def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
     """Returns the kv_cache dtype.
 
-    If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
-    otherwise returns None.
+    K/V quantizers are inspected as a pair so FP8 K with NVFP4 V remains
+    distinguishable from uniform FP8 or NVFP4. The output quantizer is retained
+    as a fallback for the unified Megatron export path.
 
     Args:
         modules: The module or list of modules to inspect.
@@ -342,6 +359,29 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
         modules = [modules]
 
     for module in modules:
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        if (
+            k_quantizer is not None
+            and v_quantizer is not None
+            and k_quantizer.is_enabled
+            and v_quantizer.is_enabled
+        ):
+            k_dtype = _compute_kv_cache_dtype(
+                [k_quantizer.num_bits], hasattr(k_quantizer, "_bias_value")
+            )
+            v_dtype = _compute_kv_cache_dtype(
+                [v_quantizer.num_bits], hasattr(v_quantizer, "_bias_value")
+            )
+            if k_dtype == KV_CACHE_FP8 and v_dtype == KV_CACHE_NVFP4:
+                return KV_CACHE_FP8_K_NVFP4_V
+            if k_dtype == v_dtype:
+                return k_dtype
+            raise NotImplementedError(
+                "Unsupported mixed K/V cache quantization pair: "
+                f"K uses {k_dtype}, while V uses {v_dtype}."
+            )
+
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
         # Still check for output quantizer for the unified_megatron_export path
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer", "output_quantizer"):
@@ -931,7 +971,7 @@ def _postprocess_single_tensor(
     key: str,
     value: torch.Tensor,
     kv_cache_max_bound: float,
-    kv_cache_format: str | None,
+    kv_cache_format: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool = False,
 ) -> tuple[str | None, torch.Tensor | None]:
     """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
@@ -965,12 +1005,15 @@ def _postprocess_single_tensor(
         if key.endswith(old_suffix):
             prefix = key[: -len(old_suffix)]
             if "_amax" in key:
-                assert kv_cache_format in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
-                    "Invalid KV cache quantization format."
-                )
+                layer_quantization = _resolve_kv_cache_format_for_key(key, kv_cache_format)
+                assert layer_quantization in [
+                    KV_CACHE_FP8,
+                    KV_CACHE_NVFP4,
+                    KV_CACHE_NVFP4_AFFINE,
+                ], "Invalid KV cache quantization format."
                 assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
                 value = value.float() / kv_cache_max_bound
-                if kv_cache_format == KV_CACHE_FP8 and value.item() > 0.5:
+                if layer_quantization == KV_CACHE_FP8 and _has_large_fp8_scale(value):
                     logger.warning(
                         "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                     )
@@ -981,10 +1024,40 @@ def _postprocess_single_tensor(
     return None, None
 
 
+def _resolve_kv_cache_format_for_key(
+    key: str, quantization: str | dict[str, dict[str, str]] | None
+) -> str | None:
+    """Resolve uniform or per-layer metadata to the format for this K or V tensor."""
+    if isinstance(quantization, dict):
+        matches = [
+            (layer_name, layer_config.get("quant_algo"))
+            for layer_name, layer_config in quantization.items()
+            if key == layer_name or key.startswith(layer_name + ".")
+        ]
+        quantization = max(matches, key=lambda item: len(item[0]))[1] if matches else None
+    if quantization == KV_CACHE_FP8_K_NVFP4_V:
+        if key.endswith("k_bmm_quantizer._amax"):
+            return KV_CACHE_FP8
+        if key.endswith("v_bmm_quantizer._amax"):
+            return KV_CACHE_NVFP4
+        return None
+    return quantization
+
+
+def _get_kv_cache_postprocess_config(
+    quantization_details: dict[str, Any],
+) -> str | dict[str, dict[str, str]] | None:
+    """Return the uniform format or layer map consumed by both HF exporters."""
+    kv_cache_format = quantization_details.get("kv_cache_quant_algo")
+    if kv_cache_format == "MIXED_PRECISION":
+        return quantization_details.get("kv_cache_quantized_layers", {})
+    return kv_cache_format
+
+
 def postprocess_state_dict(
     state_dict: dict,
     maxbound: float,
-    quantization: str | None,
+    quantization: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool = False,
     tied_map: "TiedWeightMap | None" = None,
 ) -> dict:
@@ -993,7 +1066,8 @@ def postprocess_state_dict(
     Args:
         state_dict: The full model state_dict.
         maxbound: The maximum bound value for the output quantizer.
-        quantization: The KV cache quantization format.
+        quantization: The uniform KV cache quantization format, or a per-attention-layer
+            ``{layer_name: {"quant_algo": ...}}`` mapping for mixed precision.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
         tied_map: Optional :class:`TiedWeightMap`. When provided, tied-weight
             dedup is authoritative and name-based: a declared alias key whose canonical
@@ -1031,15 +1105,18 @@ def postprocess_state_dict(
                 prefix = key[: -len(old_suffix)]
 
                 if "_amax" in key:
-                    assert quantization in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
-                        "Invalid KV cache quantization format."
-                    )
+                    layer_quantization = _resolve_kv_cache_format_for_key(key, quantization)
+                    assert layer_quantization in [
+                        KV_CACHE_FP8,
+                        KV_CACHE_NVFP4,
+                        KV_CACHE_NVFP4_AFFINE,
+                    ], "Invalid KV cache quantization format."
                     assert maxbound > 0, "Maxbound must be greater than zero."
 
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    if quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                    if layer_quantization == KV_CACHE_FP8 and _has_large_fp8_scale(value):
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
@@ -1266,40 +1343,57 @@ def _update_svdquant(modules, new_pre_quant_scale):
         finish_stats_collection(module.weight_quantizer)
 
 
-# Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
-PQS_FUSE_MODULE_MAPPING = [
-    # Attention: Fuse o_proj's pre_quant_scale into v_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
-    #   After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
-    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention"], ("v_proj", "o_proj")),
-    # MLP: Fuse down_proj's pre_quant_scale into up_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: down_proj_out = {[act_fn(self.gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
-    #   After:  down_proj_out = {[act_fn(self.gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
-    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP"], ("up_proj", "down_proj")),
-]
+# AWQ pre_quant_scale fusion rules are per-model data and live in modelopt/torch/models/*:
+#   - Attention: fold o_proj's pre_quant_scale into v_proj's output dimension.
+#       Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
+#       After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
+#   - MLP: fold down_proj's pre_quant_scale into up_proj's output dimension.
+#       Before: down_proj_out = {[act_fn(gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
+#       After:  down_proj_out = {[act_fn(gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
+# Each rule is a (module_class_substrings, fuse_into, fuse_from) triple.
 
 
-def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
+def _pqs_fuse_rules(model_type: str | None):
+    """The AWQ pre_quant_scale fusion rules to try, preferring the model's own.
+
+    A rule asserts a mathematical equivalence for one model's modules, so a registered
+    model uses only what its own spec declares. The aggregate across every spec is the
+    fallback for a model with no spec, or one whose spec declares no rules -- which is
+    what this did for every model before. That fallback is safe rather than merely
+    tolerated, because each rule is keyed on class-name substrings (``LlamaAttention``,
+    ``Qwen3MoeMLP``) that cannot match another family's modules.
+    """
+    spec = get_spec(model_type) if model_type else None
+    export_spec = spec.export_spec if spec is not None else None
+    if export_spec is not None and export_spec.pqs_fuse_rules:
+        return export_spec.pqs_fuse_rules
+    return list_all_possible("pqs_fuse_rules")
+
+
+def fuse_prequant_to_linear(
+    model: torch.nn.Module, fuse_grouped_heads=False, model_type: str | None = None
+):
     """Fuse pre_quant_scale to the linear weights if possible.
 
     Args:
         model: The model to fuse pre_quant_scale to.
         fuse_grouped_heads: If True, fuse the pre_quant_scale even if dimension between pre_quant_scale
             and linear weights is not the same.
+        model_type: The root model's HF model type, used to prefer its own fusion rules.
 
     Returns:
         fused_modules: A list of modules of which pre_quant_scale is fused to the previous linear layer.
     """
+    # Resolved once: this is a fixed vocabulary for the whole walk, and recomputing it per
+    # module rescans every registered spec.
+    fuse_rules = _pqs_fuse_rules(model_type)
+
     # Fuse pre_quant_scale to the linear weights
     for _, module in model.named_modules():
-        for module_map in PQS_FUSE_MODULE_MAPPING:
-            target_module_list = module_map[0]
-            linear_pair = module_map[1]
+        for target_module_list, fuse_into, fuse_from in fuse_rules:
             if any(module_name in type(module).__name__ for module_name in target_module_list):
-                linear_fuse_into = module.get_submodule(linear_pair[0])
-                linear_pqs_from = module.get_submodule(linear_pair[1])
+                linear_fuse_into = module.get_submodule(fuse_into)
+                linear_pqs_from = module.get_submodule(fuse_from)
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
@@ -1360,10 +1454,23 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    if any(
-        name in type(module).__name__
-        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-    ):
+    """Whether this norm stores ``w - 1``, so export must fold scales into ``weight + 1``.
+
+    The names are per-model data (``ExportSpec.weight_plus_one_norm_names``) but the match
+    is by *substring*, not exact name, which is what the hardcoded list this replaced did.
+    That is load-bearing rather than sloppy: the convention travels by family, and
+    transformers derives several norms whose names embed a registered one --
+    ``DiffusionGemmaRMSNorm``, ``RecurrentGemmaRMSNorm``, ``T5GemmaRMSNorm``,
+    ``T5Gemma2RMSNorm``, ``VaultGemmaRMSNorm`` all carry the Gemma convention. Exact
+    matching would drop them silently, and the failure is wrong numerics in an exported
+    checkpoint rather than an error.
+
+    Checked against every class in the MRO so quantized subclasses still match.
+    ``zero_centered_gamma`` is the structural fallback for norms that announce it.
+    """
+    registered = [n.lower() for n in list_all_possible("weight_plus_one_norm_names")]
+    mro_names = [cls.__name__.lower() for cls in type(module).__mro__]
+    if any(name in cls_name for cls_name in mro_names for name in registered):
         return True
 
     return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
@@ -1531,7 +1638,7 @@ def get_quant_config(
     block_size = None
 
     # Create base config
-    quant_config = {
+    quant_config: dict[str, Any] = {
         "producer": {
             "name": "modelopt",
             "version": __version__,
@@ -1549,7 +1656,14 @@ def get_quant_config(
     # It also holds awq_block_size information for applicable layers.
     layer_config_dict = {}
 
-    kv_cache_format = QUANTIZATION_NONE
+    kv_cache_formats: set[str] = set()
+    kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
+    language_model_lineage = get_language_model_from_vl(model)
+    language_model_modules = (
+        None
+        if language_model_lineage is None
+        else {id(module) for module in language_model_lineage[-1].modules()}
+    )
     for name, module in dict(model.named_modules()).items():
         # Check for standard quantizers or any quantizers from weight attributes
         weight_names = list(weight_attr_names(module))
@@ -1602,21 +1716,34 @@ def get_quant_config(
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
 
-        not_enabled = SimpleNamespace(is_enabled=False)
-
         # Find kv cache quant format
-        if (
-            getattr(module, "k_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "v_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "output_quantizer", not_enabled).is_enabled
-        ):
+        is_language_model_module = (
+            language_model_modules is None or id(module) in language_model_modules
+        )
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        output_quantizer = getattr(module, "output_quantizer", None)
+        # Projection modules also expose output_quantizer; it is a KV fallback only on an
+        # attention boundary that has at least one K/V quantizer attribute.
+        is_kv_boundary = k_quantizer is not None or v_quantizer is not None
+        enabled_kv_quantizers = [
+            quantizer
+            for quantizer in (k_quantizer, v_quantizer, output_quantizer)
+            if is_kv_boundary and quantizer is not None and quantizer.is_enabled
+        ]
+        if enabled_kv_quantizers and is_language_model_module:
             module_kv_quant = get_kv_cache_dtype(module)
-            if kv_cache_format == QUANTIZATION_NONE:
-                kv_cache_format = module_kv_quant
-            else:
-                assert kv_cache_format == module_kv_quant, (
-                    "Do not support mixed precision kv cache quantization"
-                )
+            if module_kv_quant != QUANTIZATION_NONE:
+                kv_cache_formats.add(module_kv_quant)
+                # Per-layer mixed-KV metadata is defined only for an actual enabled K/V pair.
+                # Keep the output-quantizer/single-sided Megatron fallback top-level only.
+                if (
+                    k_quantizer is not None
+                    and v_quantizer is not None
+                    and k_quantizer.is_enabled
+                    and v_quantizer.is_enabled
+                ):
+                    kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
 
     # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
     # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
@@ -1629,8 +1756,26 @@ def get_quant_config(
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    if kv_cache_format is not None:
-        quant_config["quantization"]["kv_cache_quant_algo"] = kv_cache_format
+    weight_quant_algo = quant_config["quantization"].get("quant_algo")
+    needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (
+        weight_quant_algo is None or len(kv_cache_formats) > 1
+    )
+    if needs_layerwise_kv_metadata:
+        if weight_quant_algo not in (None, "MIXED_PRECISION"):
+            raise NotImplementedError(
+                "Mixed-precision KV-cache export with a uniform quantized-weight format is "
+                "not supported yet. Use BF16 weights or a mixed-weight AutoQuantize recipe."
+            )
+        # KV metadata is orthogonal to weight metadata. In particular, a KV-only search
+        # must preserve BF16 weights instead of synthesizing a weight quantization algorithm.
+        quant_config["quantization"]["kv_cache_quant_algo"] = (
+            next(iter(kv_cache_formats)) if len(kv_cache_formats) == 1 else "MIXED_PRECISION"
+        )
+        quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
+        quant_config["quantization"]["kv_cache_schema_version"] = 1
+    elif len(kv_cache_formats) == 1:
+        # Preserve the pre-AutoQuantize uniform KV schema, including partial coverage.
+        quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
 
     return quant_config
 
