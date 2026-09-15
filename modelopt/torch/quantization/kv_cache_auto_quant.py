@@ -772,8 +772,9 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         ):
             raise ValueError(
                 "KV-cache AutoQuantize checkpoint does not match the current candidates, scoring "
-                "setup, eligible layers, or preceding non-K/V quantizer configuration. Use a "
-                "different checkpoint path."
+                "setup, eligible layers, or preceding non-K/V quantizer configuration or calibrated "
+                "state. Recreate the exact preceding quantized state to resume, or use a different "
+                "checkpoint path to recompute KV sensitivities."
             )
         self.search_signature = signature
         self._hparams = [

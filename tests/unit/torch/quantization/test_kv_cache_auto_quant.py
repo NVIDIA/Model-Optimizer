@@ -857,7 +857,9 @@ def test_kv_autoquant_checkpoint_rejects_changed_preceding_quantization(
         checkpoint=checkpoint,
     )
 
-    with pytest.raises(ValueError, match="preceding non-K/V quantizer"):
+    with pytest.raises(
+        ValueError, match=r"preceding non-K/V quantizer.*recompute KV sensitivities"
+    ):
         mtq.auto_quantize(
             _quantized_weight_baseline((2, 1)),
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
