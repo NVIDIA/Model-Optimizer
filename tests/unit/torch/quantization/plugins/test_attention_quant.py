@@ -187,8 +187,9 @@ def test_p_qdq_mode_detection():
     assert quant_attention._p_qdq_mode() is None
 
 
-def test_causal_p_qdq_respects_disable_quant(monkeypatch):
-    """Causal attention must bypass fused P QDQ when quantization is inactive."""
+@pytest.mark.parametrize("quantization_active", [True, False])
+def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active):
+    """Causal attention must dispatch according to the P quantizer runtime state."""
     quant_attention = make_quant_attention()
     for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
         getattr(quant_attention, name).disable()
@@ -196,21 +197,34 @@ def test_causal_p_qdq_respects_disable_quant(monkeypatch):
     pq = quant_attention.p_bmm_quantizer
     pq.num_bits = (4, 3)
     pq.block_sizes = None
-    pq.disable_quant()
+    if quantization_active:
+        pq.enable_quant()
+    else:
+        pq.disable_quant()
+
+    calls = []
+    expected = object()
+    expected_attention_mask = object()
+
+    def triton_attention(*args, **kwargs):
+        calls.append("triton")
+        assert kwargs["attention_mask"] is expected_attention_mask
+        return expected
 
     monkeypatch.setattr(
         quant_attention,
         "_triton_qdq_attention",
-        lambda *args, **kwargs: pytest.fail("inactive P quantizer reached Triton QDQ"),
+        triton_attention,
     )
     monkeypatch.setattr(
         quant_attention,
         "_init_kitchen_attn_fn",
-        lambda: pytest.fail("inactive P quantizer reached Kitchen initialization"),
+        lambda: pytest.fail("P quantizer dispatch reached Kitchen initialization"),
     )
-    expected = object()
 
-    def original_attention(*args, **kwargs):
+    def original_attention(_self, _query, _key, _value, attention_mask):
+        calls.append("original")
+        assert attention_mask is expected_attention_mask
         return expected
 
     states = torch.zeros(1, 4, 2, 32)
@@ -220,7 +234,8 @@ def test_causal_p_qdq_respects_disable_quant(monkeypatch):
         states,
         states,
         states,
-        attention_mask=None,
+        expected_attention_mask,
     )
 
     assert output is expected
+    assert calls == ["triton" if quantization_active else "original"]
