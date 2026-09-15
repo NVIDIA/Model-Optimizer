@@ -15,7 +15,11 @@
 
 """Module to load C++ / CUDA extensions."""
 
+import os
 from pathlib import Path
+
+import torch
+from packaging.version import Version
 
 from modelopt.torch.utils import load_cpp_extension
 
@@ -23,6 +27,18 @@ __all__ = ["get_cuda_ext", "get_cuda_ext_fp8", "get_cuda_ext_mx", "precompile"]
 
 path = Path(__file__).parent
 kernels_gemm = path.parent / "kernels" / "quantization" / "gemm"
+
+
+def _get_mx_cuda_cflags() -> list[str]:
+    flags = ["--use_fast_math"]
+    if (
+        os.name == "nt"
+        and torch.version.cuda is not None
+        and Version(torch.version.cuda) >= Version("13")
+    ):
+        # CUDA 13 CCCL requires MSVC's standard-conforming preprocessor.
+        flags.extend(["-Xcompiler", "/Zc:preprocessor"])
+    return flags
 
 
 def get_cuda_ext(raise_if_failed: bool = False):
@@ -66,7 +82,7 @@ def get_cuda_ext_mx(raise_if_failed: bool = False):
                 "CUDA extension for MX quantization could not be built and loaded, MX simulated"
                 " quantization will not be available."
             ),
-            extra_cuda_cflags=["--use_fast_math"],
+            extra_cuda_cflags=_get_mx_cuda_cflags(),
             raise_if_failed=raise_if_failed,
         )
     return get_cuda_ext_mx.extension  # type:ignore[attr-defined]
