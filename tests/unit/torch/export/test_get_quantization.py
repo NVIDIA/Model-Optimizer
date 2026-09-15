@@ -37,6 +37,7 @@ from modelopt.torch.export.quant_format import (
     QUANTIZATION_W4A8_AWQ,
 )
 from modelopt.torch.export.quant_utils import (
+    _get_carried_over_module_names,
     _has_large_fp8_scale,
     get_kv_cache_scaling_factor,
     get_quant_config,
@@ -643,8 +644,6 @@ def test_carried_over_weights_are_excluded_from_quantization():
 
 def test_carried_over_module_names_strip_parameter_and_dedup():
     """Keys are ``<module>.<param>``; two params of one module yield one module name."""
-    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
-
     model = torch.nn.Module()
     # No attribute at all -- the common case, and every non-carry-over caller.
     assert _get_carried_over_module_names(model) == []
