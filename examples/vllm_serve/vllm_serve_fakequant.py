@@ -140,30 +140,56 @@ def _add_fakequant_args(parser) -> None:
         "ModelOpt FakeQuant options",
         description="Each flag falls back to its corresponding env var when not set on the CLI.",
     )
-    g.add_argument("--modelopt-quant-cfg", default=os.environ.get("QUANT_CFG"),
-                   help="ModelOpt quantization config name (e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG) [env: QUANT_CFG]")
-    g.add_argument("--modelopt-kv-quant-cfg", default=os.environ.get("KV_QUANT_CFG"),
-                   help="KV cache quantization config name [env: KV_QUANT_CFG]")
-    g.add_argument("--modelopt-quant-file-path", default=os.environ.get("QUANT_FILE_PATH"),
-                   help="Path to amax / quantizer state file (.pt). Auto-detected as "
-                        "<model_dir>/quantizer_state.pth for a local model directory if omitted "
-                        "[env: QUANT_FILE_PATH]")
-    g.add_argument("--modelopt-state-path", default=os.environ.get("MODELOPT_STATE_PATH"),
-                   help="Path to full ModelOpt state checkpoint (.pt). Auto-detected as "
-                        "<model_dir>/vllm_fq_modelopt_state.pth for a local model directory if "
-                        "omitted [env: MODELOPT_STATE_PATH]")
-    g.add_argument("--modelopt-recipe-path", default=os.environ.get("RECIPE_PATH"),
-                   help="Path to a quantization recipe file, or a Megatron export's "
-                        "per-quantizer resolved config YAML (auto-translated to vLLM naming). "
-                        "Auto-detected as <model_dir>/vllm_fq_quantizer_state.yaml for a local "
-                        "model directory if omitted [env: RECIPE_PATH]")
-    g.add_argument("--modelopt-quant-dataset", default=os.environ.get("QUANT_DATASET", "cnn_dailymail"),
-                   help="Calibration dataset name (default: cnn_dailymail) [env: QUANT_DATASET]")
-    g.add_argument("--modelopt-quant-calib-size", type=int, default=int(os.environ.get("QUANT_CALIB_SIZE", 512)),
-                   help="Number of calibration samples (default: 512) [env: QUANT_CALIB_SIZE]")
-    g.add_argument("--modelopt-calib-batch-size", type=int, default=int(os.environ.get("CALIB_BATCH_SIZE", 1)),
-                   help="Calibration batch size (default: 1) [env: CALIB_BATCH_SIZE]")
-    
+    g.add_argument(
+        "--modelopt-quant-cfg",
+        default=os.environ.get("QUANT_CFG"),
+        help="ModelOpt quantization config name (e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG) [env: QUANT_CFG]",
+    )
+    g.add_argument(
+        "--modelopt-kv-quant-cfg",
+        default=os.environ.get("KV_QUANT_CFG"),
+        help="KV cache quantization config name [env: KV_QUANT_CFG]",
+    )
+    g.add_argument(
+        "--modelopt-quant-file-path",
+        default=os.environ.get("QUANT_FILE_PATH"),
+        help="Path to amax / quantizer state file (.pt). Auto-detected as "
+        "<model_dir>/quantizer_state.pth for a local model directory if omitted "
+        "[env: QUANT_FILE_PATH]",
+    )
+    g.add_argument(
+        "--modelopt-state-path",
+        default=os.environ.get("MODELOPT_STATE_PATH"),
+        help="Path to full ModelOpt state checkpoint (.pt). Auto-detected as "
+        "<model_dir>/vllm_fq_modelopt_state.pth for a local model directory if "
+        "omitted [env: MODELOPT_STATE_PATH]",
+    )
+    g.add_argument(
+        "--modelopt-recipe-path",
+        default=os.environ.get("RECIPE_PATH"),
+        help="Path to a quantization recipe file, or a Megatron export's "
+        "per-quantizer resolved config YAML (auto-translated to vLLM naming). "
+        "Auto-detected as <model_dir>/vllm_fq_quantizer_state.yaml for a local "
+        "model directory if omitted [env: RECIPE_PATH]",
+    )
+    g.add_argument(
+        "--modelopt-quant-dataset",
+        default=os.environ.get("QUANT_DATASET", "cnn_dailymail"),
+        help="Calibration dataset name (default: cnn_dailymail) [env: QUANT_DATASET]",
+    )
+    g.add_argument(
+        "--modelopt-quant-calib-size",
+        type=int,
+        default=int(os.environ.get("QUANT_CALIB_SIZE", 512)),
+        help="Number of calibration samples (default: 512) [env: QUANT_CALIB_SIZE]",
+    )
+    g.add_argument(
+        "--modelopt-calib-batch-size",
+        type=int,
+        default=int(os.environ.get("CALIB_BATCH_SIZE", 1)),
+        help="Calibration batch size (default: 1) [env: CALIB_BATCH_SIZE]",
+    )
+
 
 def _fakequant_requested(modelopt_args) -> bool:
     """Mirrors the gate in fakequant_worker.compile_or_warm_up_model: these are the
@@ -187,7 +213,11 @@ def _autodetect_fakequant_paths(args) -> None:
     manual_ptq_requested = bool(
         args.modelopt_quant_cfg or args.modelopt_kv_quant_cfg or args.modelopt_recipe_path
     )
-    if not args.modelopt_state_path and not manual_ptq_requested and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth"):
+    if (
+        not args.modelopt_state_path
+        and not manual_ptq_requested
+        and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth")
+    ):
         args.modelopt_state_path = str(Path(model) / "vllm_fq_modelopt_state.pth")
 
     elif not args.modelopt_quant_file_path and not args.modelopt_state_path:
@@ -196,17 +226,18 @@ def _autodetect_fakequant_paths(args) -> None:
         if os.path.exists(f"{model}/vllm_fq_quantizer_state.yaml"):
             args.modelopt_recipe_path = str(Path(model) / "vllm_fq_quantizer_state.yaml")
 
+
 def _apply_fakequant_env(args, rest_argv: list) -> None:
     """Translate parsed --modelopt-* CLI args to env vars that fakequant_worker reads."""
     env_map = {
-        "QUANT_CFG":              args.modelopt_quant_cfg,
-        "KV_QUANT_CFG":           args.modelopt_kv_quant_cfg,
-        "QUANT_FILE_PATH":        args.modelopt_quant_file_path,
-        "MODELOPT_STATE_PATH":    args.modelopt_state_path,
-        "RECIPE_PATH":            args.modelopt_recipe_path,
-        "QUANT_DATASET":          args.modelopt_quant_dataset,
-        "QUANT_CALIB_SIZE":       args.modelopt_quant_calib_size,
-        "CALIB_BATCH_SIZE":       args.modelopt_calib_batch_size,
+        "QUANT_CFG": args.modelopt_quant_cfg,
+        "KV_QUANT_CFG": args.modelopt_kv_quant_cfg,
+        "QUANT_FILE_PATH": args.modelopt_quant_file_path,
+        "MODELOPT_STATE_PATH": args.modelopt_state_path,
+        "RECIPE_PATH": args.modelopt_recipe_path,
+        "QUANT_DATASET": args.modelopt_quant_dataset,
+        "QUANT_CALIB_SIZE": args.modelopt_quant_calib_size,
+        "CALIB_BATCH_SIZE": args.modelopt_calib_batch_size,
     }
     # None means "flag not passed" (string args); skip so an already-exported env var isn't
     # clobbered with "None". The calib-size/batch-size ints always have a value here (argparse
@@ -267,10 +298,7 @@ def main():
     modelopt_args.model = _find_serve_model(rest_argv) or "unknown-model"
     resolve_mlflow_args(modelopt_args, modelopt_parser)
     _autodetect_fakequant_paths(modelopt_args)
-    print(f"Modelopt args: {modelopt_args}")
-    print(f"Fakequant requested: {_fakequant_requested(modelopt_args)}")
     if _fakequant_requested(modelopt_args):
-        print(f"Fakequant requested for model: {modelopt_args.model}")
         _apply_fakequant_env(modelopt_args, rest_argv)
 
         # Fakequant only actually runs inside FakeQuantWorker; default to it here so

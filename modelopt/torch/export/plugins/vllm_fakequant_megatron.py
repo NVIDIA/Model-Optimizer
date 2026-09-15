@@ -34,13 +34,14 @@ __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
-    """Every ``TensorQuantizer``'s resolved num_bits/axis/block_sizes/enabled state, keyed by
-    name relative to *module*, in the private-attribute-named shape ``get_modelopt_state``
-    uses elsewhere (e.g. ``_disabled``) -- only the fields ``load_quantizer_state_as_quant_cfg``
-    (examples/vllm_serve/vllm_reload_utils.py) actually reads back, since the rest of
-    ``get_modelopt_state``'s output includes fields that aren't YAML-safe (e.g. dtypes).
-    Reload translates this HF-shaped dict to vLLM naming the same way it already does for
-    ``quantizer_state.pth`` and ``vllm_fq_modelopt_state.pth`` (``convert_dict_to_vllm``).
+    """Return a dictionary of quantizer configs, keyed by name relative to *module*.
+
+    Args:
+        module: The module to save the quantizer configs.
+
+    Returns:
+        A dictionary of quantizer configs, keyed by name relative to *module*, with each value
+        containing the quantizer's num_bits, axis, block_sizes, and is_enabled state.
     """
     return {
         get_unwrapped_name(name, module): {
@@ -135,11 +136,11 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save HF shards + sidecar ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml``;
-        then delegate to base export.
+        """Save ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` before delegating to base export.
 
-        Pipeline-parallel placement of ``config.json``, tokenizer, and multimodal tensors
-        remains handled by ``GPTModelExporter.save_pretrained`` (via ``super()``).
+        Args:
+            save_directory: The directory to save the exported model.
+            pretrained_model_name_or_path: The name or path of the pretrained model.
         """
         save_dir = os.fspath(save_directory)
         os.makedirs(save_dir, exist_ok=True)

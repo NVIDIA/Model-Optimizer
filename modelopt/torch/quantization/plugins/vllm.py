@@ -16,7 +16,6 @@
 """Support quantization for VLLM layers."""
 
 import contextvars
-import fnmatch
 import importlib
 import warnings
 from collections.abc import Callable
@@ -31,7 +30,6 @@ import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
-from ..config import RawQuantizeQuantCfgType, normalize_quant_cfg_list
 from ..conversion import set_quantizer_by_cfg
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
@@ -273,21 +271,12 @@ def disable_compilation(model):
 # No model-wide fallback: a tensor from a different shard gives the wrong device under TP.
 
 
-# vLLM's kv_cache_dtype uses its own vocabulary (e.g. ``"fp8_e4m3"``) that doesn't match
-# torch dtype attribute names (``torch.float8_e4m3fn``); map the ones that diverge.
-_VLLM_DTYPE_ALIASES = {
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
-
-
 def _vllm_attr_dtype_to_torch(dtype) -> torch.dtype | None:
     """Resolve vLLM dtype attr to ``torch.dtype``; ``None`` for ``"auto"`` (caller falls through)."""
     if isinstance(dtype, torch.dtype):
         return dtype
     if isinstance(dtype, str) and dtype != "auto":
-        resolved = _VLLM_DTYPE_ALIASES.get(dtype) or getattr(torch, dtype, None)
+        resolved = getattr(torch, dtype, None)
         if resolved is None:
             raise ValueError(f"Unrecognized vLLM dtype string: {dtype!r}")
         return resolved
@@ -331,42 +320,6 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
-
-
-def validate_quant_cfg_against_vllm_quant_method(
-    model: torch.nn.Module, quant_cfg: RawQuantizeQuantCfgType
-) -> None:
-    """Fail fast if ``quant_cfg`` would fake-quantize a layer vLLM already quantized.
-
-    Statically checks, for every vLLM ``LinearBase`` module whose ``quant_method`` isn't
-    ``UnquantizedLinearMethod`` (i.e. already pre-quantized, e.g. real NVFP4/FP8 weights),
-    whether ``quant_cfg`` would enable its ``weight_quantizer``/``input_quantizer``/
-    ``output_quantizer`` (last matching entry wins, mirroring :func:`set_quantizer_by_cfg`).
-    Call before :func:`~modelopt.torch.quantization.quantize` for a clear error instead of a
-    wasted calibration run.
-
-    Note: ``parent_class``-scoped entries are treated as unscoped (rare in practice here).
-    """
-    entries = normalize_quant_cfg_list(quant_cfg)
-    for name, module in model.named_modules():
-        quant_method = getattr(module, "quant_method", None)
-        if quant_method is None or type(quant_method) is vllm_linear.UnquantizedLinearMethod:
-            continue
-        for suffix in ("weight_quantizer", "input_quantizer", "output_quantizer"):
-            qname = f"{name}.{suffix}"
-            enabled = False
-            for entry in entries:
-                if fnmatch.fnmatch(qname, entry.quantizer_name):
-                    enabled = entry.enable
-            if enabled:
-                raise ValueError(
-                    f"quant_cfg enables {qname!r}, but {name!r} is already quantized by vLLM "
-                    f"({type(quant_method).__name__}, not UnquantizedLinearMethod). "
-                    "Fake-quantizing weights/inputs/outputs on top of a checkpoint that's "
-                    "already quantized is not supported; disable this layer's "
-                    "weight_quantizer/input_quantizer/output_quantizer instead (e.g. only "
-                    "enable KV bmm quantizers for a KV-cache-only quant_cfg)."
-                )
 
 
 def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
@@ -487,13 +440,9 @@ class FakeQuantMethod:
         Returns:
             torch.Tensor: The quantized output tensor.
         """
-        # Quantizers may not exist for already-quantized layers (see _setup).
-        if getattr(layer, "input_quantizer", None) is not None and layer.input_quantizer.is_enabled:
+        if layer.input_quantizer.is_enabled:
             x = layer.input_quantizer(x)
-        if (
-            getattr(layer, "weight_quantizer", None) is not None
-            and layer.weight_quantizer.is_enabled
-        ):
+        if layer.weight_quantizer.is_enabled:
             original_weight = layer.weight
             quantized_tensor = layer.weight_quantizer(layer.weight)
             # parameterize the quantized weight
@@ -508,8 +457,7 @@ class FakeQuantMethod:
             layer.weight = original_weight
         else:
             output = self.quant_method.apply(layer, x, bias)
-        if getattr(layer, "output_quantizer", None) is not None:
-            output = layer.output_quantizer(output)
+        output = layer.output_quantizer(output)
         return output
 
 
@@ -527,22 +475,19 @@ def create_parallel_state():
 
 class _VLLMParallelLinear(QuantModule):
     def _setup(self):
-        already_quantized = type(self.quant_method) is not vllm_linear.UnquantizedLinearMethod
-        if not already_quantized:
-            # Skip for already-quantized layers: fold_weight() folds any "*weight_quantizer"
-            # attribute into its weight regardless of enabled state, which would corrupt an
-            # already real-quantized (e.g. packed NVFP4) weight tensor.
-            self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
-            self.weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
-            self.output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
-            self.output_quantizer.disable()
+        self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+        self.weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
+        self.output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
+        self.output_quantizer.disable()
+        assert type(self.quant_method) is vllm_linear.UnquantizedLinearMethod, (
+            f"quant_method is {type(self.quant_method)}"
+        )
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
         self.parallel_state = create_parallel_state()
 
     def _sync_input_pre_quant_scale_to_weight(self) -> None:
         """Align pre_quant_scale to weight (vLLM CUTLASS expects matching device/dtype)."""
-        input_quantizer = getattr(self, "input_quantizer", None)
-        pqs = getattr(input_quantizer, "_pre_quant_scale", None) if input_quantizer else None
+        pqs = getattr(self.input_quantizer, "_pre_quant_scale", None)
         if pqs is None:
             return
         w = getattr(self, "weight", None)
@@ -604,28 +549,23 @@ class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
 
 class _QuantFusedMoEBase(QuantModule):
     def _setup(self):
-        already_quantized = type(self.quant_method) is not UnquantizedFusedMoEMethod
-        if not already_quantized:
-            # Skip for already-quantized layers: fold_weight() folds any "*_weight_quantizer"
-            # attribute into its weight regardless of enabled state, which would corrupt an
-            # already real-quantized (e.g. packed NVFP4) expert weight.
-            self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
-            self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
-            self.w13_weight_quantizer = TensorQuantizer(
-                QuantLinearConvBase.default_quant_desc_weight
-            )
-            self.w2_weight_quantizer = TensorQuantizer(
-                QuantLinearConvBase.default_quant_desc_weight
-            )
-            self.w13_output_quantizer = TensorQuantizer(
-                QuantLinearConvBase.default_quant_desc_output
-            )
-            self.w2_output_quantizer = TensorQuantizer(
-                QuantLinearConvBase.default_quant_desc_output
-            )
-            self.w13_output_quantizer.disable()
-            self.w2_output_quantizer.disable()
+        self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+        self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+        self.w13_weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
+        self.w2_weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
+        self.w13_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
+        self.w2_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
+        self.w13_output_quantizer.disable()
+        self.w2_output_quantizer.disable()
+        assert type(self.quant_method) is UnquantizedFusedMoEMethod, (
+            f"quant_method is {type(self.quant_method)}"
+        )
         self.parallel_state = create_parallel_state()
+
+    def iter_weights_for_calibration(self):
+        """Yield the fused MoE weights with their corresponding quantizers."""
+        yield self.w13_weight, self.w13_weight_quantizer
+        yield self.w2_weight, self.w2_weight_quantizer
 
     def invoke_fused_moe_quantized(
         self,
@@ -657,19 +597,13 @@ class _QuantFusedMoEBase(QuantModule):
         **kwargs,
     ):
         if B is self.w13_weight:
-            # First layer of expert. Quantizers may not exist for already-quantized
-            # experts (see _setup).
-            w13_input_quantizer = getattr(self, "w13_input_quantizer", None)
-            if w13_input_quantizer is not None:
-                A = w13_input_quantizer(A)  # noqa: N806
-            w13_weight_quantizer = getattr(self, "w13_weight_quantizer", None)
-            if (
-                w13_weight_quantizer is not None and w13_weight_quantizer.is_enabled
-            ):  # pragma: no cover
+            # First layer of expert
+            A = self.w13_input_quantizer(A)  # noqa: N806
+            if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
                 # Same pattern as FakeQuantMethod.apply: wrap as nn.Parameter if needed, swap
                 # w13_weight, call kernel, restore (tensor cannot stay assigned to nn.Parameter slot).
                 original_weight = self.w13_weight
-                quantized_tensor = w13_weight_quantizer(original_weight)
+                quantized_tensor = self.w13_weight_quantizer(original_weight)
                 try:
                     if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
                         quantized_tensor, torch.nn.Parameter
@@ -684,19 +618,13 @@ class _QuantFusedMoEBase(QuantModule):
                     self.w13_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
-            w13_output_quantizer = getattr(self, "w13_output_quantizer", None)
-            if w13_output_quantizer is not None and w13_output_quantizer.is_enabled:
-                C[:] = w13_output_quantizer(C)
+            if self.w13_output_quantizer.is_enabled:
+                C[:] = self.w13_output_quantizer(C)
         elif B is self.w2_weight:
-            w2_input_quantizer = getattr(self, "w2_input_quantizer", None)
-            if w2_input_quantizer is not None:
-                A = w2_input_quantizer(A)  # noqa: N806
-            w2_weight_quantizer = getattr(self, "w2_weight_quantizer", None)
-            if (
-                w2_weight_quantizer is not None and w2_weight_quantizer.is_enabled
-            ):  # pragma: no cover
+            A = self.w2_input_quantizer(A)  # noqa: N806
+            if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
                 original_weight = self.w2_weight
-                quantized_tensor = w2_weight_quantizer(original_weight)
+                quantized_tensor = self.w2_weight_quantizer(original_weight)
                 try:
                     if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
                         quantized_tensor, torch.nn.Parameter
@@ -711,9 +639,8 @@ class _QuantFusedMoEBase(QuantModule):
                     self.w2_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
-            w2_output_quantizer = getattr(self, "w2_output_quantizer", None)
-            if w2_output_quantizer is not None and w2_output_quantizer.is_enabled:
-                C[:] = w2_output_quantizer(C)
+            if self.w2_output_quantizer.is_enabled:
+                C[:] = self.w2_output_quantizer(C)
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
@@ -749,14 +676,11 @@ class _QuantFusedMoEBase(QuantModule):
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
-        # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one.
-        # Quantizers may not exist for already-quantized experts (see _setup) -- nothing to fold then.
+        # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
         for weight, quantizer in (
-            (self.w13_weight, getattr(self, "w13_weight_quantizer", None)),
-            (self.w2_weight, getattr(self, "w2_weight_quantizer", None)),
+            (self.w13_weight, self.w13_weight_quantizer),
+            (self.w2_weight, self.w2_weight_quantizer),
         ):
-            if quantizer is None:
-                continue
             self._fold_weight_quantizer(
                 quantizer, (weight[i] for i in range(weight.shape[0])), keep_attrs
             )
