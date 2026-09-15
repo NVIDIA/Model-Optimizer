@@ -65,7 +65,7 @@ directly together with a ModelOpt-quantized checkpoint.
 
 The legacy export path using `export_tensorrt_llm_checkpoint()` is deprecated. Use the unified HF checkpoint format with `export_hf_checkpoint()` instead.
 
-If you encounter a legacy checkpoint (no `hf_quant_config.json`, has `rank*.safetensors` pattern), it needs the TRT-LLM build API to create an engine before deployment. See `docs/source/deployment/1_tensorrt_llm.rst`.
+Current TensorRT-LLM releases no longer support the legacy TensorRT backend. Re-export the quantized source model with `export_hf_checkpoint()` and deploy using the PyTorch backend. See `docs/source/deployment/3_unified_hf.rst`.
 
 ## Evaluation with TRT-LLM
 
@@ -91,5 +91,3 @@ explicitly for few-shot tasks.
 |-------|-----|
 | `No module named tensorrt_llm` | Install via container or pip |
 | NVFP4 inference fails on Hopper | NVFP4 requires Blackwell GPUs for inference |
-| Slow first inference | Engine compilation happens on first run; subsequent runs are cached |
-| OOM during engine build | Reduce `--max_batch_size` or increase TP |
