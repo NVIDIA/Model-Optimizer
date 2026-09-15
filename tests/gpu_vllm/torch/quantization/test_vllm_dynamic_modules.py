@@ -69,6 +69,76 @@ def _load_example_module(name: str):
     return module
 
 
+def _calibration_worker(num_blocks: int):
+    cache_groups = [
+        SimpleNamespace(kv_cache_spec="attention"),
+        SimpleNamespace(kv_cache_spec="mamba"),
+    ]
+    return SimpleNamespace(
+        model_runner=SimpleNamespace(
+            kv_cache_config=SimpleNamespace(
+                kv_cache_groups=cache_groups,
+                num_blocks=num_blocks,
+            )
+        )
+    )
+
+
+def test_allocate_calibration_blocks_assigns_non_null_blocks(monkeypatch):
+    """Scratch block tables must use unique non-null blocks for every request and group."""
+    module = _load_example_module("vllm_ptq_utils")
+    block_count = Mock(side_effect=[1, 2, 2, 1])
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=block_count),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(num_blocks=7),
+        sequence_lengths=[8, 16],
+    )
+
+    assert block_tables == [
+        ([1], [2, 3]),
+        ([4, 5], [6]),
+    ]
+    assert block_count.call_args_list == [
+        ((8, "attention"),),
+        ((8, "mamba"),),
+        ((16, "attention"),),
+        ((16, "mamba"),),
+    ]
+
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = (
+        [1, 2, 3, 4, 5, 6] if "new_block_ids_to_zero" in scheduler_fields else None
+    )
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_rejects_insufficient_capacity(monkeypatch):
+    """Scratch block allocation must account for block 0 being unavailable."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(side_effect=[1, 2, 2, 1])),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Calibration batch requires 6 KV cache blocks, "
+            r"but only 5 non-null blocks are available\."
+        ),
+    ):
+        module._allocate_calibration_blocks(
+            _calibration_worker(num_blocks=6),
+            sequence_lengths=[8, 16],
+        )
+
+
 @pytest.mark.parametrize("has_calibration_error", [False, True])
 def test_cleanup_failure_preserves_calibration_error(has_calibration_error):
     """Cleanup must fail closed without replacing an active calibration error."""

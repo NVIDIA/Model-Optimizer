@@ -36,19 +36,10 @@ def _create_new_data_cls(data_cls, **kwargs):
     return data_cls(**filtered_kwargs)
 
 
-def _allocate_calibration_blocks(
-    self: Any, sequence_lengths: list[int]
-) -> tuple[list[tuple[list[int], ...]], list[int] | None]:
-    """Allocate scheduler-compatible scratch blocks for calibration requests.
-
-    vLLM 0.28 treats block 0 as the null block. Its GPU runner expects real block
-    tables for hybrid attention/Mamba models, even for one-shot prefill requests.
-    Use vLLM's warmup reservation policy so this stays aligned with each cache
-    group's KVCacheSpec.
-    """
-    kv_cache_config = self.model_runner.kv_cache_config
-    kv_cache_groups = kv_cache_config.kv_cache_groups
-    model_runner = self.model_runner
+def _get_calibration_block_count(
+    model_runner: Any,
+) -> Callable[[int, Any], int] | None:
+    """Return the block reservation policy supported by the installed vLLM."""
     vllm_config = model_runner.vllm_config
 
     try:
@@ -58,12 +49,7 @@ def _allocate_calibration_blocks(
             from vllm.utils.math_utils import cdiv
             from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
         except ImportError:
-            warnings.warn(
-                "vLLM warmup block reservation helpers were not found; falling back to "
-                "empty block tables. Hybrid attention/Mamba models may produce NaNs.",
-                stacklevel=2,
-            )
-            return [tuple([] for _ in kv_cache_groups) for _ in sequence_lengths], None
+            return None
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
             """Calculate the vLLM 0.26 warmup block reservation."""
@@ -88,6 +74,31 @@ def _allocate_calibration_blocks(
                 max_model_len=model_runner.max_model_len,
                 max_encoder_len=0,
             )
+
+    return block_count
+
+
+def _allocate_calibration_blocks(
+    self: Any, sequence_lengths: list[int]
+) -> tuple[list[tuple[list[int], ...]], list[int] | None]:
+    """Allocate scheduler-compatible scratch blocks for calibration requests.
+
+    vLLM 0.28 treats block 0 as the null block. Its GPU runner expects real block
+    tables for hybrid attention/Mamba models, even for one-shot prefill requests.
+    Use vLLM's warmup reservation policy so this stays aligned with each cache
+    group's KVCacheSpec.
+    """
+    kv_cache_config = self.model_runner.kv_cache_config
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    block_count = _get_calibration_block_count(self.model_runner)
+
+    if block_count is None:
+        warnings.warn(
+            "vLLM warmup block reservation helpers were not found; falling back to "
+            "empty block tables. Hybrid attention/Mamba models may produce NaNs.",
+            stacklevel=2,
+        )
+        return [tuple([] for _ in kv_cache_groups) for _ in sequence_lengths], None
 
     next_block_id = 1  # Block 0 is reserved as the null block.
     block_ids_batch: list[tuple[list[int], ...]] = []
