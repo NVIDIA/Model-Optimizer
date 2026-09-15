@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- TensorRT-LLM >= 0.17.0
+- TensorRT-LLM >= 1.2.0 (see `docs/source/deployment/3_unified_hf.rst`)
 - Typically installed via NVIDIA container: `nvcr.io/nvidia/tensorrt-llm/release:<version>`
 - Or: `pip install tensorrt-llm`
 
