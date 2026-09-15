@@ -103,6 +103,7 @@ Changelog
 **Bug Fixes**
 
 - Fix ONNX AutoCast failing on models with external initializers larger than 2 GiB.
+- Fix unified Megatron export writing a second, unreferenced copy of the vocab embedding when a model with MTP layers is exported with pipeline parallelism. The duplicate was never loaded but inflated the checkpoint by the size of the embedding (about 1 GB for Qwen3.6-35B-A3B); re-export to reclaim the space.
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
 - Fix FP8 ONNX export of BF16 models during real-weight compression.
