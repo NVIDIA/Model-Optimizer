@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Changelog - Model Optimizer 0.0.1.dev1+g39e3c520d</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="modelopt API" href="1_modelopt_api.html" /><link rel="prev" title="All GitHub Examples" href="../examples/0_all_examples.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Changelog - Model Optimizer 0.0.1.dev1+g9b7182600</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="modelopt API" href="1_modelopt_api.html" /><link rel="prev" title="All GitHub Examples" href="../examples/0_all_examples.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
@@ -449,6 +449,7 @@ data-aria-dark="Switch to auto color mode">
 <p><em>Quantization</em></p>
 <ul class="simple">
 <li><p>Add <code class="docutils literal notranslate"><span class="pre">layerwise.export_dir</span></code>: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate <code class="docutils literal notranslate"><span class="pre">export_hf_checkpoint()</span></code> pass is needed and, with <code class="docutils literal notranslate"><span class="pre">layerwise.checkpoint_dir</span></code>, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; <code class="docutils literal notranslate"><span class="pre">finalize()</span></code> on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. <code class="docutils literal notranslate"><span class="pre">examples/hf_ptq</span></code> does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise <code class="docutils literal notranslate"><span class="pre">NotImplementedError</span></code> before calibration starts.</p></li>
+<li><p>Add support for quantizing and calibrating enabled operators outside the transformer layers, such as <code class="docutils literal notranslate"><span class="pre">lm_head</span></code>, when using layerwise calibration.</p></li>
 <li><p>Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer" rel="noopener noreferrer" target="_blank">examples/onnx_ptq/bevformer/README.md</a> for details.</p></li>
 </ul>
 <p><em>Misc</em></p>
