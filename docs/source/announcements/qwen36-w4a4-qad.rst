@@ -22,7 +22,7 @@ Highlights
 **********
 
 * **W4A4 is the configuration worth targeting.** It beats BF16 in 9 of 12 measured shapes (up to
-  1.30x) and shrinks the checkpoint from 67 GiB to 23 GiB (2.9x). Weight-only W4A16 is slower than
+  1.30x) and shrinks the checkpoint from 67 GiB to 22 GiB (3.1x). Weight-only W4A16 is slower than
   BF16 in 10 of 12.
 * **Only 2 of 6 benchmarks lost measurable accuracy to W4A4**, so those are the only two where QAD
   has anything to recover.
