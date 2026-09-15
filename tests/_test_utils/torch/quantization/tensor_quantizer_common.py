@@ -417,6 +417,31 @@ class TensorQuantizerTester:
         amax = quantizer.export_amax()
         assert amax.shape == (1,)
 
+    def test_amax_export_zero_amax(self):
+        """A zero amax must export as a positive scale, and export must not mutate the quantizer.
+
+        Calibration leaves amax == 0 whenever a layer (or an unrouted expert) saw only zeros, and
+        every exporter divides by the exported amax. Regression test for NVBug 6768300, where a
+        dynamic-NVFP4 input quantizer returned its raw 0.0 and crashed HF checkpoint export.
+        """
+        for quant_attr_cfg in (
+            # dynamic NVFP4: the per-tensor second-level amax, exported without reshaping
+            QuantizerAttributeConfig(
+                num_bits=(2, 1), block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+            ),
+            # static per-tensor
+            QuantizerAttributeConfig(num_bits=4),
+        ):
+            quantizer = TensorQuantizer(quant_attr_cfg).to(self.device)
+            quantizer.amax = torch.zeros(1).to(self.device)
+
+            amax = quantizer.export_amax()
+
+            assert torch.all(amax > 0), amax
+            assert torch.all(amax == quantizer.maxbound), amax
+            # export must leave the calibrated state alone
+            assert torch.all(quantizer.amax == 0), quantizer.amax
+
     def test_save_restore(self):
         ref_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=4, axis=0))
 
