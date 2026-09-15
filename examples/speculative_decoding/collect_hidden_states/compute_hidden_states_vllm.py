@@ -55,9 +55,10 @@ def _resolve_aux_layers_standalone(
     This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
     'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
     pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
-    container does not have, so the import fails. Resolve the 'eagle' and 'dflash' presets inline
-    (mirroring ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers)
-    and accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
+    container does not have, so the import fails. Resolve both presets inline -- 'eagle'
+    mirrors ``hf_eagle.default_eagle_aux_layer_ids``, 'dflash' mirrors
+    ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers -- and
+    accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
     ``dflash.dflash_architecture_config.num_hidden_layers`` (pass --num-draft-layers) or the
     dumped aux layers silently mis-align with what the draft consumes at training time.
     Keep in sync with modelopt.
@@ -65,6 +66,13 @@ def _resolve_aux_layers_standalone(
     TODO: drop this once ``common.resolve_aux_layers`` is decoupled from the heavy
     ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
+    # One literal: a future preset means editing this message once, not twice. The bug
+    # this guards against was precisely a copy drifting from its original.
+    unsupported = (
+        f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
+        "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
+        "are supported."
+    )
     spec = aux_layers.strip().lower()
     if spec == "eagle":
         # Mirrors hf_eagle.default_eagle_aux_layer_ids: three layers near the start,
@@ -83,11 +91,7 @@ def _resolve_aux_layers_standalone(
     except ValueError as exc:
         # An unrecognised preset name would otherwise surface as a bare
         # "invalid literal for int()", which hides what the caller should pass.
-        raise ValueError(
-            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
-            "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
-            "are supported."
-        ) from exc
+        raise ValueError(unsupported) from exc
     # Match the shared helper's contract: ids must be valid layer indices.
     out_of_range = [i for i in ids if not 0 <= i < num_hidden_layers]
     if out_of_range:
@@ -96,11 +100,7 @@ def _resolve_aux_layers_standalone(
             f"for a {num_hidden_layers}-layer model."
         )
     if not ids:
-        raise ValueError(
-            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
-            "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
-            "are supported."
-        )
+        raise ValueError(unsupported)
     return ids
 
 

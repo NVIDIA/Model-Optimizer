@@ -21,7 +21,10 @@ nothing compares against is a copy that silently diverges: the 'eagle' preset --
 is ``add_aux_layers_args``' *default* -- was missing from it entirely, so the documented
 invocation died on ``int('eagle')`` before the dump began.
 
-These tests pin the standalone resolver to the shared implementation it mirrors.
+These tests pin the standalone resolver to the real ``hf_eagle`` helper. Unlike the
+dump script, the unit suite *can* import modelopt, so the comparison is against the
+actual source of truth rather than a third transcription of the formula -- a drift
+guard written against its own copy would guard nothing.
 """
 
 import importlib.util
@@ -29,6 +32,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from modelopt.torch.speculative.plugins.hf_eagle import default_eagle_aux_layer_ids
 
 _DIR = Path(__file__).resolve().parents[3] / "examples" / "speculative_decoding"
 _COLLECT = _DIR / "collect_hidden_states"
@@ -48,11 +53,6 @@ resolve = chs_vllm._resolve_aux_layers_standalone
 LAYER_COUNTS = [4, 6, 8, 12, 24, 28, 32, 36, 48, 52, 61, 80]
 
 
-def _reference_eagle(num_layers):
-    """Copy of hf_eagle.default_eagle_aux_layer_ids, which cannot be imported here."""
-    return sorted({1, max(0, num_layers // 2 - 1), max(0, num_layers - 4)})
-
-
 @pytest.mark.parametrize("num_layers", LAYER_COUNTS)
 def test_eagle_preset_matches_the_shared_helper(num_layers):
     """The standalone copy must agree with modelopt's own EAGLE layer selection.
@@ -60,7 +60,7 @@ def test_eagle_preset_matches_the_shared_helper(num_layers):
     Disagreement is silent: the dump writes plausible-looking hidden states from the
     wrong layers, and only a poor acceptance rate much later reveals it.
     """
-    assert resolve("eagle", num_layers) == _reference_eagle(num_layers)
+    assert resolve("eagle", num_layers) == default_eagle_aux_layer_ids(num_layers)
 
 
 def test_eagle_is_resolvable_because_it_is_the_documented_default():
