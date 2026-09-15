@@ -1084,10 +1084,36 @@ class TensorQuantizer(nn.Module):
             # remove block_sizes
             self._block_sizes = None
 
+    def _sanitize_export_amax(self, amax: torch.Tensor) -> torch.Tensor:
+        """Replace zero/NaN amax entries so exported scaling factors stay positive.
+
+        A zero amax means the quantizer saw only zeros during calibration (a layer or expert the
+        calibration data never activated); NaN means it saw NaN. Neither is a usable scale, and
+        every downstream exporter divides by it, so substitute ``maxbound`` (i.e. a unit scale)
+        rather than emitting a scale of 0 that would fail export or produce inf at inference.
+        """
+        if not bool(torch.isnan(amax).any() or (amax == 0).any()):
+            return amax
+
+        warnings.warn(
+            f"{type(self).__name__} has zero or NaN amax entries at export time, which means "
+            "calibration never activated the corresponding layer (or saw NaN activations). "
+            "Substituting maxbound so the exported scaling factor is positive. Consider "
+            "increasing the calibration size if this layer is expected to be active.",
+            stacklevel=3,
+        )
+        # Clone first: ``amax`` may alias (or be a view of) ``self._amax``, and export must not
+        # mutate the calibrated state of the quantizer.
+        amax = amax.clone()
+        amax[amax == 0] = self.maxbound
+        return torch.nan_to_num(amax, nan=self.maxbound)
+
     def export_amax(self) -> torch.Tensor | None:
         """Export correctly formatted/shaped amax."""
         if self.block_sizes is not None and self.block_sizes.get("type", None) == "dynamic":
-            return self.amax
+            # Dynamic block quantizers keep a per-tensor amax (the NVFP4 second-level scale) that
+            # needs no reshaping, but it still has to be positive for the exporters.
+            return None if self.amax is None else self._sanitize_export_amax(self.amax)
 
         if self.amax is None:
             return None
@@ -1096,8 +1122,7 @@ class TensorQuantizer(nn.Module):
             amax = self.amax
         else:
             amax = self.amax.reshape(self._amax_shape_for_export)
-        amax[amax == 0] = self.maxbound
-        amax = torch.nan_to_num(amax, nan=self.maxbound)
+        amax = self._sanitize_export_amax(amax)
         clamp_min, clamp_max = torch.finfo(amax.dtype).tiny, torch.finfo(amax.dtype).max
         amax = amax.clamp(min=clamp_min, max=clamp_max)
 
