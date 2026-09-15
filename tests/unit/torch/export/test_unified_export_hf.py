@@ -661,7 +661,23 @@ def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path,
         raise RuntimeError("cannot read the index")
 
     monkeypatch.setattr(model_load_utils, "unplaced_source_keys", _boom)
-    model = _ProvenanceModel(name_or_path=tmp_path)  # a real directory, so it gets that far
+    # A real directory holding safetensors, so the derivation is actually reached: a checkpoint
+    # with no safetensors short-circuits earlier, before anything can fail.
+    (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
+    model = _ProvenanceModel(name_or_path=tmp_path)
 
     with pytest.warns(UserWarning, match="Could not copy"):
         assert _carry_over_unplaced_source_weights(model) == {}
+
+
+def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recwarn):
+    """A pytorch_model.bin checkpoint has nothing this path can read, and nothing to carry.
+
+    Warning that weights are "missing from the export" would be alarming and wrong -- there are
+    no unplaced weights, only a format this reader does not handle.
+    """
+    (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
+    model = _ProvenanceModel(name_or_path=tmp_path)
+
+    assert _carry_over_unplaced_source_weights(model) == {}
+    assert [w for w in recwarn if "Could not copy" in str(w.message)] == []

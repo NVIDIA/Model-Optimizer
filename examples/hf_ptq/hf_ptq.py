@@ -994,6 +994,17 @@ def export_quantized(
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
+                # The fake-quant exporter saves the model-backed state only, so weights the loader
+                # could not place would be dropped. Refuse the combination when there ARE such
+                # weights rather than write a checkpoint that is quietly missing them -- a
+                # fake-quant export is evaluated, and an absent MTP head changes the answer.
+                _unplaced = getattr(full_model, "_modelopt_unplaced_source_keys", None)
+                if _unplaced:
+                    raise NotImplementedError(
+                        f"--vllm_fakequant_export cannot carry the {len(_unplaced)} checkpoint "
+                        f"weight(s) the model has no parameter for (e.g. {min(_unplaced)}); the "
+                        "exported model would be incomplete. Use the unified HF export instead."
+                    )
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )

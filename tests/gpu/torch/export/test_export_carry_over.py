@@ -35,6 +35,7 @@ import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir, create_tiny_qwen3vl_dir
 from safetensors.torch import load_file
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
@@ -77,10 +78,8 @@ _SCALE_SUFFIXES = (
 
 # Exported dtypes that mean "this weight was quantized" (NVFP4 packs two fp4 per uint8).
 _QUANTIZED_DTYPES = {"F8_E4M3", "U8", "I8"}
-_PACKED_DTYPES = {"U8"}
 
 
-@pytest.mark.timeout(600)
 def _safetensors_meta(directory: Path) -> dict[str, tuple[str, tuple[int, ...]]]:
     """``{tensor_name: (dtype, shape)}`` across every ``*.safetensors`` in ``directory``.
 
@@ -103,7 +102,6 @@ def _is_scale(key: str) -> bool:
 
 def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwargs):
     """Load the tiny model on every rank, FSDP2-shard it, PTQ it, and export."""
-    from transformers import AutoModelForCausalLM
 
     with patch_fsdp_mp_dtypes():
         model = AutoModelForCausalLM.from_pretrained(src_dir, dtype=torch.bfloat16).to("cuda")
@@ -127,6 +125,7 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwar
         torch.distributed.barrier()
 
 
+@pytest.mark.timeout(600)
 def test_fsdp2_distributed_export_carries_unplaced_weights_from_provenance(dist_workers, tmp_path):
     """Unplaced source weights are carried over even when nothing was recorded at load time.
 
@@ -195,7 +194,6 @@ def test_fsdp2_distributed_export_carries_unplaced_weights_from_provenance(dist_
 
 def _ptq_language_model_and_export(rank, size, *, src_dir, export_dir):
     """Quantize ONLY the VLM's language model, then export the whole model."""
-    from transformers import AutoModelForImageTextToText
 
     with patch_fsdp_mp_dtypes():
         model = AutoModelForImageTextToText.from_pretrained(src_dir, dtype=torch.bfloat16).to(

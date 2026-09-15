@@ -604,6 +604,25 @@ def _fmt_max_memory(max_memory: dict) -> str:
     return "\n".join(parts)
 
 
+def _resolved_local_dir(ckpt_path: str) -> str:
+    """Return the local directory ``ckpt_path`` names, resolving a hub id to its snapshot.
+
+    The export re-reads the source checkpoint by path to carry over the weights the loader could
+    not place. Recording the hub id instead would leave it reading ``org/model``, which is not a
+    directory -- so every carried weight would be dropped with a warning. ``from_pretrained`` has
+    already populated the cache by the time this runs, so the lookup is local and offline.
+    """
+    if Path(ckpt_path).is_dir():
+        return str(ckpt_path)
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(ckpt_path, local_files_only=True)
+    except Exception:
+        # No snapshot to point at; the export falls back to its own provenance handling.
+        return str(ckpt_path)
+
+
 def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     """``from_pretrained`` that records what the loader could not place.
 
@@ -616,7 +635,7 @@ def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     """
     model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
     unexpected = loading_info.get("unexpected_keys") or []
-    record_unplaced_source_keys(model, ckpt_path, unexpected)
+    record_unplaced_source_keys(model, _resolved_local_dir(ckpt_path), unexpected)
     if unexpected:
         print(
             f"✓ {len(unexpected)} checkpoint key(s) the model has no parameter for "
@@ -1026,9 +1045,6 @@ def copy_custom_model_files(
     # from the export, so copy them rather than leave them behind. Skipped by the call above,
     # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
     copied_weights = copy_off_index_safetensors(source_dir, export_dir)
-    for file_name in copied_weights:
-        print(f"Copied checkpoint sidecar file (not read by model loading): {file_name}")
-
     copied_files = [*copied_files, *copied_weights]
     if copied_files:
         for file_name in copied_files:

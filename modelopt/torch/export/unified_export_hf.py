@@ -1623,6 +1623,14 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
             if not ckpt or not Path(ckpt).is_dir():
                 # A hub id rather than a local path, or no provenance at all -- nothing to read.
                 return {}
+            # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can
+            # read. Returning quietly is right: there is nothing to carry, so warning about weights
+            # "missing" from the export would be alarming and wrong.
+            if (
+                not (Path(ckpt) / "model.safetensors.index.json").exists()
+                and not (Path(ckpt) / "model.safetensors").exists()
+            ):
+                return {}
             keys = unplaced_source_keys(model, ckpt)
         if not keys or not ckpt:
             return {}
@@ -1692,6 +1700,14 @@ def export_hf_checkpoint(
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
     """
+    # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
+    # source so the exported checkpoint is the complete model. Merged here, ahead of the path
+    # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
+    # wins on conflict: the caller asked for that tensor by name.
+    _carried = _carry_over_unplaced_source_weights(model)
+    if _carried:
+        extra_state_dict = {**_carried, **(extra_state_dict or {})}
+
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
     exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
@@ -1716,14 +1732,6 @@ def export_hf_checkpoint(
             **kwargs,
         )
         return
-
-    # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
-    # source so the exported checkpoint is the complete model. Merged here, ahead of the path
-    # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
-    # wins on conflict: the caller asked for that tensor by name.
-    _carried = _carry_over_unplaced_source_weights(model)
-    if _carried:
-        extra_state_dict = {**_carried, **(extra_state_dict or {})}
 
     is_fsdp2_sharded = (
         torch.distributed.is_available()

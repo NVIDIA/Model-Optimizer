@@ -339,7 +339,14 @@ def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike
         target = Path(dst) / name
         if target.exists():
             continue
-        shutil.copy2(Path(src) / name, target)
+        source = Path(src) / name
+        # copy2 follows symlinks, so a checkpoint shipping ``x.safetensors -> /somewhere/else``
+        # would copy that file into the export under an approved-looking name. Only copy what the
+        # listing actually described: a regular file inside the checkpoint directory.
+        if source.is_symlink() or not source.is_file():
+            warnings.warn(f"Skipping {name}: not a regular file in the source checkpoint.")
+            continue
+        shutil.copy2(source, target)
         copied.append(name)
     return copied
 
