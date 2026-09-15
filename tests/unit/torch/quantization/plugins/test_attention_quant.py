@@ -185,3 +185,57 @@ def test_p_qdq_mode_detection():
     sq.block_sizes = None
     sq.disable()
     assert quant_attention._p_qdq_mode() is None
+
+
+@pytest.mark.parametrize("quantization_active", [True, False])
+def test_causal_p_qdq_dispatch_respects_quant_state(monkeypatch, quantization_active):
+    """Causal attention must dispatch according to the P quantizer runtime state."""
+    quant_attention = make_quant_attention()
+    for name in ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"):
+        getattr(quant_attention, name).disable()
+
+    pq = quant_attention.p_bmm_quantizer
+    pq.num_bits = (4, 3)
+    pq.block_sizes = None
+    if quantization_active:
+        pq.enable_quant()
+    else:
+        pq.disable_quant()
+
+    calls = []
+    expected = object()
+    expected_attention_mask = object()
+
+    def triton_attention(*args, **kwargs):
+        calls.append("triton")
+        assert kwargs["attention_mask"] is expected_attention_mask
+        return expected
+
+    monkeypatch.setattr(
+        quant_attention,
+        "_triton_qdq_attention",
+        triton_attention,
+    )
+    monkeypatch.setattr(
+        quant_attention,
+        "_init_kitchen_attn_fn",
+        lambda: pytest.fail("P quantizer dispatch reached Kitchen initialization"),
+    )
+
+    def original_attention(_self, _query, _key, _value, attention_mask):
+        calls.append("original")
+        assert attention_mask is expected_attention_mask
+        return expected
+
+    states = torch.zeros(1, 4, 2, 32)
+    output = quant_attention._quantized_attention(
+        original_attention,
+        quant_attention,
+        states,
+        states,
+        states,
+        expected_attention_mask,
+    )
+
+    assert output is expected
+    assert calls == ["triton" if quantization_active else "original"]
