@@ -43,11 +43,11 @@ Check logs for silent errors that may invalidate results:
 ## Step 3: Validate config and methodology
 
 1. **Methodology consistency**: Verify same benchmark versions, prompt templates, sampling params, and infrastructure across all models. Flag discrepancies.
-2. **HF model card compliance**: Read the model's HuggingFace model card. Flag any deviations in inference parameters (temperature, top_p, max_new_tokens, deployment args, reasoning flags, etc.).
-3. **Reasoning model validation**: Verify temp > 0, top_p > 0, `max_tokens` = null (allow full output length).  
+2. **Generation settings**: Follow the evaluation skill's provenance policy: explicit user/task requirements first, then applicable model-card settings explicitly used for evaluation/benchmarking; otherwise preserve checkpoint/vLLM defaults. Flag unsupported overrides, not deviations from general inference recommendations.
+3. **Reasoning model validation**: Verify the intended reasoning mode and effective generation settings; do not impose generic sampling or token budgets.
    NOTE: `use_reasoning: False` in adapter_config does NOT mean reasoning is disabled — it only controls the reasoning interceptor. Whether reasoning is active depends on the model's own controls (deployment args, system prompt, API payload fields, etc.).
-4. **Non-reasoning model validation**: Verify `max_tokens` = 16k
-5. **Max model length**: Verify `max-model-len` = 131072 (leaderboard-recommended). Long context benchmarks (AA LCR, RULER) and agentic benchmarks may require a longer `max-model-len`.
+4. **Effective requests**: Check evaluator/adapter defaults and actual requests. Omitted fields and explicit `null` are not interchangeable; confirm required settings reach the server.
+5. **Max model length**: Check prompt + output capacity, including multi-turn history, against the supported context window. Do not infer generation limits from `max_position_embeddings` or impose a generic context override.
 6. **RULER tasks**: Check thinking disabled, walltime=4h, rope-scaling for Qwen models
 7. **AA baseline comparison**: Compare results against Artificial Analysis published scores. Exact match not expected — flag significant deviations.
 8. **Model baseline comparison**: For quantized runs, compare results against the matching baseline model run when available. The baseline may be unquantized or simply less quantized (for example, FP8 as the baseline for NVFP4). Use the same benchmark version, task config, serving args, token limits, dataset setup, and infrastructure before treating the delta as a quantization effect.

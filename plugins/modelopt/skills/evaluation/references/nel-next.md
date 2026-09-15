@@ -86,7 +86,7 @@ services:
     extra_args: [...]           # raw vllm flags — everything EXCEPT parallelism/served-model-name/port (see "vLLM deployment" below)
     extra_env: {...}            # VLLM_* backend env (e.g. NVFP4 MoE flags)
     container_mounts: [<lustre>/.cache/vllm:/cache/vllm, ...]
-    generation: {temperature: 1.0, top_p: 0.95}
+    generation: {}             # add overrides only per Step 3's generation provenance/precedence policy
     proxy: {request_timeout: 3600, extra_body: {...}, interceptors: [...]}   # >= llm_kwargs.timeout
     node_pool: gpu
 benchmarks:                     # EXACTLY ONE entry — one benchmark per config (see "One benchmark per config")
@@ -131,10 +131,15 @@ SKILL.md Step 3 (same vLLM). The 0.2.6 `command:` maps to structured `services.<
 | `image:` (bump to the model's recipe min; NVFP4 on sm_103 → CUDA-13 build, see Step 3) | `image:` (serving image, ≠ `eval_image`) |
 
 Size TP/DP + backend defaults (`--max-num-seqs = ceil(max_parallelism/DP)`, MoE
-`--enable-expert-parallel`, …) per `references/parallelism.md` + Step 3. **Sampling
-is a mandatory model-card lookup** (Step 3 / `references/model-card-research.md`,
-never generic defaults): `generation.temperature`/`top_p` (+`max_tokens` if the card
-caps output) and `proxy.extra_body` for any card extras (`skip_special_tokens`, thinking toggles).
+`--enable-expert-parallel`, …) per `references/parallelism.md` + Step 3.
+**Generation overrides follow Step 3's provenance/precedence policy:** explicit
+user/task requirements first, then only card values explicitly used for the
+applicable evaluation/benchmark. Use `generation.temperature`/`top_p`/`max_tokens`
+and supported `proxy.extra_body` fields. Otherwise preserve checkpoint/vLLM
+defaults, not general card recommendations or guessed caps. Inspect resolved
+configs and requests: evaluator/agent defaults may populate omitted fields,
+`null` is not omission, and interceptors may remove explicit caps. Ensure
+required settings reach the server; do not silently strip them.
 
 ## One benchmark per config
 

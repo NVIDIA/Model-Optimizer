@@ -144,7 +144,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 1. Read the task reference file(s).
 2. Use `recipes/examples/example_eval.yaml` as the base.
 3. Copy the YAML fragment(s) into `evaluation.tasks`, applying any per-task notes.
-4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** the top-level `params` and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link. Before filling `experiment_name`/`tags`, read the checkpoint's `.experiment.json` (Step 3) and carry the PTQ run's experiment name plus its `modelopt_*` tags across (Step 4).
+4. **MLflow auto-export is on by default** — it needs **two** pieces, both in `example_eval.yaml`: (a) the **trigger** `execution.auto_export.destinations: [mlflow]` (without it the run is *not* uploaded), and (b) the `export.mlflow` block that configures it. In the `export.mlflow` block use **literal** values for `experiment_name` / `description` / `tags` — substitute the actual `served_model_name` and sampling params. Do **not** use `${deployment.*}` / `${evaluation.*}` cross-references: with auto-export on, NEL resolves the export block at submit time in a scope without those nodes and fails with `Interpolation key '...' not found` (`${oc.env:USER}` and `${oc.env:MLFLOW_TRACKING_URI}` are fine — they're env vars). Because these literals can't interpolate, keep the `temperature` / `top_p` / `max_new_tokens` tags **equal to** explicit top-level `params` (label absent fields `omitted`, not an assumed effective value) and update both in the same edit — they're the only queryable record of sampling in MLflow (NEL doesn't log them as run params), so a stale tag silently misreports the run. `tracking_uri` = `${oc.env:MLFLOW_TRACKING_URI}` from `modelopttools:eval-config` (not hand-filled), and auto-export needs `execution.cpu_partition` (e.g. gcp-nrt `cpu`) — it's a separate CPU-only sbatch that GPU-only partitions reject (`Cannot find GPU specification`), silently dropping the link. Before filling `experiment_name`/`tags`, read the checkpoint's `.experiment.json` (Step 3) and carry the PTQ run's experiment name plus its `modelopt_*` tags across (Step 4).
 5. Proceed to Step 3, then Step 4, then Step 7.5/8. Skip Step 2's 5-question flow.
 
 ---
@@ -266,7 +266,7 @@ deployment:
     <... rest of cross-checked flags ...>
 ```
 
-Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required**; see `example_eval.yaml` for why); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Example fallback `--max-model-len 131072` covers AA-LCR (~120K + 16K gen) and SciCode (≥ 65536) — prefer `config.json` / recipe value.
+Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--served-model-name ${deployment.served_model_name}` (**required**; see `example_eval.yaml` for why); always `--host 0.0.0.0 --port ${deployment.port}`; use folded scalar (`>-`) for one flag per line. Preserve the checkpoint/vLLM context default unless an explicit task requirement or verified deployment recipe requires an override; check that the model supports the requested context.
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
@@ -300,7 +300,10 @@ Silence is not contradiction. Drop/override only when the recipe sets a differen
 
 #### Evaluation params template (top-level params)
 
-The top-level `nemo_evaluator_config.config.params` must contain **exactly these six fields** — no `top_k` / `presence_penalty` / `repetition_penalty` / `min_p`:
+Start with these operational fields in `nemo_evaluator_config.config.params`.
+Add generation overrides only under the policy below; route `top_k` /
+`presence_penalty` / `repetition_penalty` / `min_p` through the harness-supported
+request adapter, not unsupported top-level fields.
 
 ```yaml
 nemo_evaluator_config:
@@ -309,30 +312,44 @@ nemo_evaluator_config:
       parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
       request_timeout: 3600
       max_retries: 10
-      max_new_tokens: 65536  # see rule below
-      temperature: 1.0    # from model card (reasoning); adjust
-      top_p: 0.95         # from model card (reasoning); adjust
 ```
 
-Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
+#### Generation parameters — provenance and precedence
 
-**Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
+1. **Explicit user/task requirements take precedence.** Preserve required token
+   budgets and sampling settings; do not replace them with model-card values.
+2. **Read the full model card before deriving overrides.** Override
+   `max_new_tokens` / `max_tokens`, `temperature`, `top_p`, or other generation
+   parameters only when the card explicitly says they were used for evaluation
+   or benchmarking. Cite the statement and its applicable tasks/mode. General
+   inference recommendations, quickstarts, supported limits, and unrelated
+   scenarios do not qualify.
+3. **Otherwise preserve checkpoint/server defaults** from `config.json`,
+   `generation_config.json`, and vLLM. Do not invent reasoning/non-reasoning
+   fallbacks or borrow values from related models. Cross-check
+   `references/nvfp4-modelcard-sampling.md` against the exact card; never use it
+   to fill silent or ambiguous fields.
+4. **Verify the effective request.** Omitting a client parameter does not bypass
+   evaluator/task defaults; inspect the resolved config and canary requests.
+   Where supported, remove unintended client overrides so server defaults apply,
+   or explicitly carry verified checkpoint/server values. An explicit `null`
+   is not omission or a universal "uncapped" setting: verify its meaning in the
+   selected harness/server. Report unresolved defaults rather than guessing.
+5. **Keep settings scoped to their evidence.** Use shared top-level values only
+   where applicable; use per-task overrides (including token caps) for explicit
+   requirements or benchmark-specific card settings. Never take the highest
+   value anywhere in a card as a suite-wide cap. Apply the same policy to
+   baseline and candidate, and verify their effective settings match.
 
-**`temperature` / `top_p` are different: per-task overrides ARE allowed and often required.** Cards often specify sampling per scenario — DeepSeek-V4-Pro-0813 gives `top_p = 0.95` for agentic scenarios and `1.0` otherwise, so a single top-level `0.95` is wrong for every non-agentic task.
-Set the top-level value for the majority case, override only the tasks the card calls out, and apply
-the split identically to baseline and candidate. **The `export.mlflow` tags record only the
-top-level values**, so note any per-task override in the run `description` — otherwise the
-overridden task is reported under sampling params it did not use.
+Record explicit values and their sources in the config. Keep MLflow tags in
+sync; label omitted client fields as `omitted`, not as assumed numeric defaults,
+and record verified effective values and per-task differences in the description.
 
-#### `max_new_tokens` — mandatory model-card lookup
-
-1. **Fetch the HF model card before writing the value.** Not optional.
-2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
-   **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
-3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
-4. If the card is genuinely silent after a thorough read **and** the family table offers no usable pattern, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
-5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
-6. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
+For output length, distinguish generation limits from the server's context
+window. Check prompt + requested output against `max_model_len`, including
+accumulated history on multi-turn tasks. Surface conflicts instead of silently
+shrinking required budgets. Higher caps do not fix runaway reasoning; inspect
+`finish_reason: length` per `references/run-validation.md`.
 
 #### Quantization-aware benchmark defaults
 

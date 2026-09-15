@@ -143,10 +143,11 @@ self-deploys single-node vLLM, which is fine for a canary or a small policy. For
   SKILL Step 3/4's `ceil(parallelism / DP)` rule assumes `parallelism` is the in-flight
   request count; on the gym path it is not, and applying it literally gives an absurd
   cap. Use `ceil(stirrup_agent.concurrency / DP)` — e.g. 220 / DP 4 → 55, round to 64.
-+ **`max_new_tokens`:** the reviewed golden **does** set it alongside the adapter's
-  `params_to_remove: [max_tokens, max_completion_tokens]`, so do the Step 3 model-card
-  lookup as normal. The template omits it (five params) because the adapter strips the
-  per-request cap anyway; adding it back matches the golden and is harmless.
++ **`max_new_tokens`:** the template omits it and the adapter removes
+  `max_tokens` / `max_completion_tokens`. Follow Step 3's generation provenance
+  policy, not a golden config's incidental value. Omission can activate evaluator
+  defaults; inspect requests after adapters. If a user/task requires a cap,
+  ensure it reaches the server rather than being stripped.
 + **Match `temperature` / `top_p` to whatever the reference deliverables were generated
   with.** A pairwise ELO compares your deliverables against theirs, so a sampling
   difference lands in the score as if it were a quality difference.
