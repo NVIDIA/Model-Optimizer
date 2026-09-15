@@ -396,11 +396,11 @@ checkpoint's** quant config verbatim:
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
 - **`models/Qwen/Qwen3.8-27B/ptq/local_hessian_nvfp4_w4a4_mlp_fp8_attn`**
-  reproduces the 5.5-bit NVFP4-max AutoQuantize assignment for `Qwen/Qwen3.8-27B`:
+  reproduces NVFP4 W4A4 mixed precision quantization recipe used for `Qwen/Qwen3.8-27B`:
   MLP projections and `lm_head` use NVFP4 W4A4, self-attention and the large
   linear-attention projections use FP8 W8A8, and the vision tower, MTP layers,
   KV cache, and `linear_attn.in_proj_a/b` remain unquantized. Static NVFP4 weight
-  scales use local-Hessian calibration with an FP8-scale sweep.
+  scales are calibrated with local-Hessian algorithm.
 - **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
