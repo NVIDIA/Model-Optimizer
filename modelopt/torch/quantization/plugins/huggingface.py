@@ -254,6 +254,8 @@ class _QuantAttention(QuantModule):
 
         # Fused P-QDQ paths bypass TensorQuantizer.forward().
         if not self.p_bmm_quantizer.is_enabled or not self.p_bmm_quantizer._if_quant:
+            if args:
+                kwargs.pop("attention_mask", None)
             return original_attention_interface(
                 self, query_states, key_states, value_states, *args, **kwargs
             )
