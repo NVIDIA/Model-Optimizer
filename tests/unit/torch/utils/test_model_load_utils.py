@@ -29,6 +29,7 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _convert_keys,
     _resolve_target,
     read_safetensors_subset,
+    record_unplaced_source_keys,
     weight_map_for,
 )
 
@@ -154,3 +155,32 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
     for e in range(n_exp):
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.gate_proj.weight")[0] == gname
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.up_proj.weight")[0] == gname
+
+
+# --- the loader's own accounting of what it could not place --------------------------------------
+
+
+def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
+    model = torch.nn.Linear(2, 2)
+    keys = record_unplaced_source_keys(model, "/ckpt/path", ["z.weight", "a.weight"])
+
+    assert keys == ["a.weight", "z.weight"]
+    assert model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
+    assert model._modelopt_source_checkpoint == "/ckpt/path"
+
+
+def test_record_unplaced_source_keys_distinguishes_none_from_empty():
+    """An empty list is an ANSWER -- the loader placed everything -- not "nobody asked".
+
+    The export re-derives the set only when the attribute is absent, so recording [] has to stick;
+    treating it as falsy-and-therefore-unknown would make every clean load pay a re-derivation.
+    """
+    model = torch.nn.Linear(2, 2)
+    assert record_unplaced_source_keys(model, "/ckpt/path", None) == []
+    assert model._modelopt_unplaced_source_keys == []
+    assert model._modelopt_source_checkpoint == "/ckpt/path"
+
+
+def test_record_unplaced_source_keys_accepts_any_iterable():
+    model = torch.nn.Linear(2, 2)
+    assert record_unplaced_source_keys(model, "/c", iter(["b", "a"])) == ["a", "b"]

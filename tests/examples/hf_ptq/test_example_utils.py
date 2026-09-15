@@ -12,13 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end unit tests for ``examples/hf_ptq/example_utils.load_mtp_weights``.
+"""Unit tests for ``examples/hf_ptq/example_utils`` helpers.
 
 One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
 separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
-import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,22 +26,6 @@ import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
-
-
-class _FakeModel:
-    """Stub exposing only the surface ``load_mtp_weights`` touches."""
-
-    def __init__(self, config, state_dict_keys):
-        self.config = config
-        self._sd = {k: torch.zeros(1) for k in state_dict_keys}
-        self.loaded = {}
-
-    def state_dict(self):
-        return dict(self._sd)
-
-    def load_state_dict(self, state_dict, strict=True):
-        self.loaded.update(state_dict)
-        self._sd.update(state_dict)
 
 
 def _write_safetensors(path, tensors):
@@ -136,121 +119,6 @@ def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp
     assert example_utils._resolve_model_path("org/model", trust_remote_code=False) == str(
         snapshot_dir
     )
-
-
-def test_load_mtp_weights_inlined_orphaned(tmp_path):
-    # GLM-5.1: HF builds only num_hidden decoders → MTP keys orphaned.
-    main_keys = ["model.embed_tokens.weight", "model.layers.0.x.weight"]
-    mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {k: torch.zeros(2, 2) for k in main_keys + mtp_keys},
-    )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=1)
-    model = _FakeModel(cfg, state_dict_keys=main_keys)
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert prefixes == ["model.layers.4"]
-    assert set(orphans) == set(mtp_keys)
-    assert model.loaded == {}  # nothing matched the (MTP-less) state_dict
-
-
-def test_load_mtp_weights_inlined_in_state_dict(tmp_path):
-    # DeepSeek-V3 via trust_remote_code: MTP slots exist → keys loaded, no orphans.
-    main_keys = ["model.embed_tokens.weight"]
-    mtp_keys = ["model.layers.4.eh_proj.weight", "model.layers.4.enorm.weight"]
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {k: torch.ones(2, 2) for k in main_keys + mtp_keys},
-    )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=1)
-    model = _FakeModel(cfg, state_dict_keys=main_keys + mtp_keys)
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert prefixes == ["model.layers.4"]
-    assert orphans == {}
-    assert set(model.loaded) == set(mtp_keys)
-
-
-def test_load_mtp_weights_separate_standalone_file(tmp_path):
-    # GLM-4.7: standalone mtp.safetensors with no shard index.
-    _write_safetensors(
-        tmp_path / "model.safetensors", {"model.embed_tokens.weight": torch.zeros(2, 2)}
-    )
-    _write_safetensors(
-        tmp_path / "mtp.safetensors",
-        {
-            "mtp.fc.weight": torch.zeros(2, 2),
-            "mtp.layers.0.q_proj.weight": torch.zeros(2, 2),
-        },
-    )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert set(prefixes) == {"mtp", "mtp.layers.0"}
-    assert set(orphans) == {"mtp.fc.weight", "mtp.layers.0.q_proj.weight"}
-
-
-def test_load_mtp_weights_separate_indexed_shard(tmp_path):
-    # Qwen3-Next: mtp.* keys in a dedicated indexed tail shard (filename has no "mtp").
-    main_shard = "model-00001-of-00002.safetensors"
-    mtp_shard = "model-00002-of-00002.safetensors"
-    _write_safetensors(tmp_path / main_shard, {"model.embed_tokens.weight": torch.zeros(2, 2)})
-    mtp_tensors = {
-        "mtp.fc.weight": torch.zeros(2, 2),
-        "mtp.norm.weight": torch.zeros(2),
-        "mtp.layers.0.input_layernorm.weight": torch.zeros(2),
-        "mtp.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
-    }
-    _write_safetensors(tmp_path / mtp_shard, mtp_tensors)
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "weight_map": {
-                    "model.embed_tokens.weight": main_shard,
-                    **dict.fromkeys(mtp_tensors, mtp_shard),
-                }
-            }
-        )
-    )
-
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=0)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-
-    assert set(prefixes) == {"mtp", "mtp.layers.0"}
-    assert set(orphans) == set(mtp_tensors)
-
-
-def test_keys_to_prefixes_drops_model_top_level():
-    # nvbug 6108133: inlined keys like "model.layers.92.X" must NOT emit "model"
-    # as a top-level prefix (would become "model*" excluding the whole backbone).
-    out = example_utils._keys_to_prefixes(
-        ["model.layers.92.eh_proj.weight", "mtp.fc.weight", "mtp.layers.0.q_proj.weight"]
-    )
-    assert "model" not in out
-    assert out == {"mtp", "mtp.layers.0", "model.layers.92"}
-
-
-def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
-    # Also pins the ``num_nextn_predict_layers=None`` regression: some configs
-    # set the field explicitly to None, which must not crash ``int(None)``.
-    _write_safetensors(
-        tmp_path / "model.safetensors",
-        {
-            "model.embed_tokens.weight": torch.zeros(2, 2),
-            "model.layers.0.x.weight": torch.zeros(2, 2),
-        },
-    )
-    cfg = SimpleNamespace(num_hidden_layers=4, num_nextn_predict_layers=None)
-    model = _FakeModel(cfg, state_dict_keys=["model.embed_tokens.weight"])
-    prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
-    assert prefixes == []
-    assert orphans == {}
 
 
 # ---------- get_original_hf_quant_method -------------------------------------
@@ -364,21 +232,23 @@ def test_get_model_uses_expected_dtype_kwarg(
             return FakeModel()
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
             assert "dtype" not in kwargs
             assert kwargs["torch_dtype"] is torch.float16
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     class FakeLlamaForCausalLM(FakeAutoModelForCausalLM):
         _from_config = FakeAutoModelForCausalLM.from_config
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
             assert kwargs["dtype"] == "auto"
             assert "torch_dtype" not in kwargs
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     monkeypatch.setattr(
         example_utils.AutoConfig,
@@ -445,9 +315,10 @@ def test_get_model_device_map_for_diffusion_gemma(
             return FakeModel()
 
         @staticmethod
-        def from_pretrained(*args, **kwargs):
+        def from_pretrained(*args, output_loading_info=False, **kwargs):
             calls["from_pretrained"] = kwargs
-            return FakeModel()
+            m = FakeModel()
+            return (m, {"unexpected_keys": []}) if output_loading_info else m
 
     monkeypatch.setattr(
         example_utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: hf_config
@@ -540,9 +411,10 @@ def test_get_model_deepseek_honors_trust_remote_code(
             _from_config = from_config
 
             @staticmethod
-            def from_pretrained(*args, **kwargs):
+            def from_pretrained(*args, output_loading_info=False, **kwargs):
                 used["path"] = tag
-                return FakeModel()
+                m = FakeModel()
+                return (m, {"unexpected_keys": []}) if output_loading_info else m
 
         return Fake
 
@@ -691,3 +563,60 @@ class _Recipe:
 def test_recipe_layerwise_blocks(recipe, expected):
     """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
     assert example_utils.recipe_layerwise_blocks(recipe) == expected
+
+
+# --- carry-over of weights the loader could not place -------------------------------------------
+
+
+class _StubAuto:
+    """Minimal stand-in for an ``AutoModelFor*`` class."""
+
+    def __init__(self, unexpected, model=None):
+        self._unexpected = unexpected
+        self._model = model if model is not None else SimpleNamespace()
+        self.saw_output_loading_info = None
+        self.saw_kwargs = None
+
+    def from_pretrained(self, ckpt_path, output_loading_info=False, **kwargs):
+        self.saw_output_loading_info = output_loading_info
+        self.saw_kwargs = kwargs
+        return self._model, {
+            "missing_keys": [],
+            "unexpected_keys": list(self._unexpected),
+            "mismatched_keys": [],
+            "error_msgs": [],
+        }
+
+
+def test_from_pretrained_recording_asks_the_loader_for_its_accounting(tmp_path):
+    """The point of this path: take unexpected_keys from the loader rather than re-deriving it."""
+    auto = _StubAuto(["mtp.layers.0.eh_proj.weight", "mtp.fc.weight"])
+    model = example_utils._from_pretrained_recording(auto, str(tmp_path), device_map="cpu")
+
+    assert auto.saw_output_loading_info is True, "must request the loading info"
+    assert auto.saw_kwargs == {"device_map": "cpu"}, "caller kwargs must pass through untouched"
+    assert model._modelopt_unplaced_source_keys == [
+        "mtp.fc.weight",
+        "mtp.layers.0.eh_proj.weight",
+    ], "recorded sorted, so export order is stable"
+    assert model._modelopt_source_checkpoint == str(tmp_path)
+
+
+def test_from_pretrained_recording_is_quiet_when_everything_was_placed(tmp_path):
+    """Record an empty answer too, so the exporter can tell 'nothing to carry' from 'never asked'."""
+    auto = _StubAuto([])
+    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
+
+    assert model._modelopt_unplaced_source_keys == []
+    assert model._modelopt_source_checkpoint == str(tmp_path)
+
+
+def test_recording_is_architecture_agnostic(tmp_path):
+    """Nothing keys off the string 'mtp': an auxiliary tower is carried by the same rule."""
+    auto = _StubAuto(["aux_tower.blocks.0.weight", "something_else.weight"])
+    model = example_utils._from_pretrained_recording(auto, str(tmp_path))
+
+    assert model._modelopt_unplaced_source_keys == [
+        "aux_tower.blocks.0.weight",
+        "something_else.weight",
+    ]

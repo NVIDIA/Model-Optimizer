@@ -47,7 +47,6 @@ from .quant_utils import (
 )
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
-    _add_mtp_exclusions,
     _dispatch_export_handler,
     _fuse_shared_input_modules,
     _prepare_moe_inputs,
@@ -371,7 +370,6 @@ class LayerwiseExporter:
 
         model = self._ctx.model
         quant_config = self._quant_config
-        _add_mtp_exclusions(model, quant_config)
         # No gate/up sync here: export_layer did every layer, and the tail has no experts.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None

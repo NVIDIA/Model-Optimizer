@@ -606,3 +606,53 @@ def test_moe_router_names_handle_root_module():
     block = _FakeMoEBlock(hidden=16)
     # name == "" for the root module; the router must be "gate", not ".gate".
     assert _get_unquantized_moe_router_names(block) == ["gate"]
+
+
+def test_carried_over_weights_are_excluded_from_quantization():
+    """A carried MTP head has no module, so nothing in the quantizer walk can see it.
+
+    Its original-precision weight is copied into the export verbatim, so it must still reach
+    ``exclude_modules`` -- otherwise a deployment framework reads the top-level ``quant_algo``
+    and tries to load ``eh_proj`` as an NVFP4 weight. Same failure as the MoE router above,
+    different cause: no quantizer there, no module at all here.
+    """
+    hidden = 16
+    model = _FakeMoEModel(hidden=hidden)
+    mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
+
+    # The loader could not place these; the exporter copies them straight from the checkpoint.
+    model._modelopt_unplaced_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.eh_proj.bias",
+        "model.mtp.embed_tokens.weight",
+    ]
+
+    quant_config = get_quant_config(model)
+    assert quant_config["quantization"]["quant_algo"] == "NVFP4"
+
+    exclude_modules = quant_config["quantization"]["exclude_modules"]
+    for carried in ("model.mtp.eh_proj", "model.mtp.embed_tokens"):
+        assert any(fnmatch.fnmatch(carried, pattern) for pattern in exclude_modules), (
+            f"carried weight {carried!r} missing from exclude_modules: {exclude_modules}"
+        )
+    # The quantized experts must NOT be excluded.
+    assert not any(fnmatch.fnmatch("block.experts.0", pattern) for pattern in exclude_modules), (
+        f"Quantized expert wrongly excluded: {exclude_modules}"
+    )
+
+
+def test_carried_over_module_names_strip_parameter_and_dedup():
+    """Keys are ``<module>.<param>``; two params of one module yield one module name."""
+    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
+
+    model = torch.nn.Module()
+    # No attribute at all -- the common case, and every non-carry-over caller.
+    assert _get_carried_over_module_names(model) == []
+
+    model._modelopt_unplaced_source_keys = [
+        "a.b.weight",
+        "a.b.bias",  # same module as above
+        "c.weight",
+        "toplevel",  # no dot: no owning module, skipped
+    ]
+    assert _get_carried_over_module_names(model) == ["a.b", "c"]

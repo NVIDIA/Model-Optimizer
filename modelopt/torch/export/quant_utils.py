@@ -1584,6 +1584,28 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 module.weight_quantizer.amax = weight_amax
 
 
+def _get_carried_over_module_names(model: nn.Module) -> list[str]:
+    """Return module names for checkpoint weights carried over without a module.
+
+    Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
+    the export verbatim from the source checkpoint (see
+    :func:`modelopt.torch.export.unified_export_hf._carry_over_unplaced_source_weights`). They
+    have no module in the live model, so the quantizer walk in :func:`get_quant_config` cannot
+    see them and would leave them out of ``exclude_modules`` even though their original-precision
+    weight is written to the checkpoint. A deployment framework then reads the top-level
+    ``quant_algo`` and tries to load e.g. an MTP ``eh_proj`` as an FP8 weight.
+
+    This is the same failure the MoE-router pass above exists to prevent -- only the reason the
+    module is invisible differs (no quantizer there, no module at all here).
+
+    A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
+    its last component removed. Keys without a dot are top-level tensors with no module and are
+    skipped.
+    """
+    keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
+
+
 def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     """Return the names of MoE router/gate submodules left in original precision.
 
@@ -1752,6 +1774,12 @@ def get_quant_config(
     # unquantized so they land in exclude_modules.
     for router_name in _get_unquantized_moe_router_names(model):
         layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
+
+    # Weights carried over from the source checkpoint have no module in the live model, so the
+    # walk above cannot see them. Record them as unquantized too, or a never-quantized MTP head
+    # would be written in original precision yet be absent from exclude_modules.
+    for carried_name in _get_carried_over_module_names(model):
+        layer_config_dict.setdefault(carried_name + ".quantization", QUANTIZATION_NONE)
 
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))

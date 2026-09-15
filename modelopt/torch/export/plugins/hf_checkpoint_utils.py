@@ -18,6 +18,7 @@
 import fnmatch
 import json
 import os
+import re
 import shutil
 import warnings
 from collections.abc import Iterable
@@ -42,20 +43,6 @@ def _as_nonnegative_int(value: Any) -> int | None:
     return None
 
 
-def _count_mtp_layer_prefixes(prefixes: list[Any] | tuple[Any, ...]) -> int | None:
-    """Count actual MTP layer prefixes, excluding broad prefixes like ``mtp``."""
-    layer_prefixes = {
-        prefix
-        for prefix in prefixes
-        if isinstance(prefix, str)
-        and (parts := prefix.split("."))
-        and len(parts) >= 2
-        and parts[-2] == "layers"
-        and parts[-1].isdigit()
-    }
-    return len(layer_prefixes) or None
-
-
 def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> int | None:
     """Get the number of next-token-prediction layers from config metadata."""
     num_nextn_predict_layers = _as_nonnegative_int(config_data.get("num_nextn_predict_layers"))
@@ -69,10 +56,6 @@ def _get_num_nextn_predict_layers(config_data: dict[str, Any], model: Any) -> in
         )
         if num_nextn_predict_layers is not None:
             return num_nextn_predict_layers
-
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if isinstance(mtp_layer_prefixes, (list, tuple)):
-        return _count_mtp_layer_prefixes(mtp_layer_prefixes)
 
     return None
 
@@ -305,6 +288,67 @@ def load_multimodal_components(
 
 def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(file_name, pattern) for pattern in patterns)
+
+
+# Standard HF weight-file names: ``model.safetensors`` or ``model-00001-of-00005.safetensors``.
+_IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
+
+
+def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
+    """Safetensors files in a checkpoint that model loading never opens.
+
+    Transformers reads the shards named in ``model.safetensors.index.json`` -- or the single
+    ``model.safetensors`` when there is no index -- and nothing else. A checkpoint may ship more:
+    GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors``. Those tensors are never loaded,
+    never quantized, and never reported as ``unexpected_keys`` (the loader did not see them to call
+    them unexpected), so they are not "the unquantized source weights" the export must avoid
+    re-emitting -- they are untouched sidecars that happen to be in safetensors format.
+
+    Files named like a main weight shard are excluded whatever the index says. An index that is
+    empty, partial or malformed would otherwise make the source weights look off-index, and
+    copying those into an export would leave unquantized weights beside the quantized ones.
+    """
+    d = Path(src)
+    if not d.is_dir():
+        return []
+    index_file = d / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            read_by_loader = set(json.load(f).get("weight_map", {}).values())
+    else:
+        read_by_loader = {"model.safetensors"}
+
+    return sorted(
+        f.name
+        for f in d.glob("*.safetensors")
+        if f.name not in read_by_loader and not _IS_MAIN_WEIGHT_SHARD.fullmatch(f.name)
+    )
+
+
+def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike") -> list[str]:
+    """Copy the safetensors files model loading never reads, verbatim.
+
+    Copying beats reading them into a state dict and re-serialising: no host memory is spent on
+    tensors the export does not touch, the bytes and the file layout are preserved exactly, and a
+    consumer that finds them by filename (vLLM looks for the MTP sidecar) sees what it saw in the
+    source. See :func:`off_index_safetensors_files` for how "never reads" is decided.
+    """
+    names = off_index_safetensors_files(src)
+    copied = []
+    for name in names:
+        target = Path(dst) / name
+        if target.exists():
+            continue
+        source = Path(src) / name
+        # copy2 follows symlinks, so a checkpoint shipping ``x.safetensors -> /somewhere/else``
+        # would copy that file into the export under an approved-looking name. Only copy what the
+        # listing actually described: a regular file inside the checkpoint directory.
+        if source.is_symlink() or not source.is_file():
+            warnings.warn(f"Skipping {name}: not a regular file in the source checkpoint.")
+            continue
+        shutil.copy2(source, target)
+        copied.append(name)
+    return copied
 
 
 def copy_non_safetensor_files_from_ckpt(
