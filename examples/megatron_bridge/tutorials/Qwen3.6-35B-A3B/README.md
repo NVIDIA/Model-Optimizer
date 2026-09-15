@@ -67,7 +67,7 @@ See [Potential further improvements](#potential-further-improvements) for what w
 | chat 8000/1000 | 128 | 5,571 | 6,138 | **6,370** | **1.14×** |
 | prefill 32000/400 | 128 | 854 | 1,092 | **1,107** | **1.30×** |
 
-Output tokens/s; 6 of the 12 measured shapes shown. **W4A4 beats BF16 in 9 of 12 and beats W4A16 in all 12.** Checkpoint size drops from **67 GiB → 23 GiB (2.9×)**.
+Output tokens/s; 6 of the 12 measured shapes shown. **W4A4 beats BF16 in 9 of 12 and beats W4A16 in all 12.** Checkpoint size drops from **67 GiB → 22 GiB (3.1×)**.
 
 The W4A16 column is why this tutorial targets W4A4 at all: **weight-only NVFP4 is *slower* than BF16** in 10 of 12 shapes. A BF16 activation forces vLLM onto the Marlin dequant-to-BF16 fallback, which never reaches the Blackwell FP4 tensor cores. Only quantizing activations too unlocks them.
 
