@@ -345,9 +345,7 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
         # HF->vLLM name translation load_quantizer_state_as_quant_cfg applies.
         with open(quant_config["recipe_path"]) as f:
             raw_recipe = yaml.safe_load(f) or {}
-        print("raw_recipe: ", raw_recipe)
         if "quantize" in raw_recipe:
-            print("quantize in raw_recipe")
             recipe = load_recipe(quant_config["recipe_path"])
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
@@ -355,7 +353,7 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
             quant_cfg = recipe.quantize
         else:
             from vllm_reload_utils import load_quantizer_state_as_quant_cfg
-            print("load_quantizer_state_as_quant_cfg")
+
             quant_cfg = load_quantizer_state_as_quant_cfg(raw_recipe, model)
     else:
         quant_cfg = (

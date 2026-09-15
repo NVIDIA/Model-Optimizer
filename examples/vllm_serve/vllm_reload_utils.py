@@ -39,6 +39,7 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import _has_routed_experts_cls
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.utils import get_unwrapped_name
 
 # vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
 # submodule of the MoE layer, so merged expert keys need that extra hop. Follow the plugin's
@@ -333,7 +334,9 @@ def convert_modelopt_state_to_vllm(
     return modelopt_state
 
 
-def load_quantizer_state_as_quant_cfg(hf_quantizer_state: dict[str, Any], model: Any) -> dict[str, Any]:
+def load_quantizer_state_as_quant_cfg(
+    hf_quantizer_state: dict[str, Any], model: Any
+) -> dict[str, Any]:
     """Translate a Megatron export's per-quantizer resolved config (HF-named, loaded from
     ``vllm_fq_quantizer_state.yaml``) into a vLLM-native ``quant_cfg`` for ``mtq.quantize``.
 
@@ -350,8 +353,7 @@ def load_quantizer_state_as_quant_cfg(hf_quantizer_state: dict[str, Any], model:
     # Baseline: default_quant_desc_input/weight (enable=True, 8-bit per-tensor) is vLLM's
     # fallback for any quantizer this exported state doesn't cover -- e.g. a module type the
     # Megatron exporter doesn't route through quantizer-state capture (mixer.conv1d as of this
-    # writing). Disable everything first so an uncovered quantizer stays off, matching Megatron,
-    # instead of silently fake-quantizing at a default the export never actually calibrated.
+    # writing).
     quant_cfg_entries: list[dict[str, Any]] = [{"quantizer_name": "*", "enable": False}]
     for name, state in vllm_quantizer_state.items():
         entry: dict[str, Any] = {
@@ -362,9 +364,7 @@ def load_quantizer_state_as_quant_cfg(hf_quantizer_state: dict[str, Any], model:
         if cfg:
             entry["cfg"] = cfg
         quant_cfg_entries.append(entry)
-    # ``algorithm`` is required: mtq.quantize reads it off this dict and calibrate() treats a
-    # missing/None algorithm as "no calibration", leaving every activation quantizer without an
-    # _amax (repr shows amax=dynamic). "max" matches the model presets (e.g. NVFP4_DEFAULT_CFG).
+
     return {"quant_cfg": quant_cfg_entries, "algorithm": "max"}
 
 
@@ -671,14 +671,6 @@ def load_state_dict_from_path(
             f"{sample}{' ... (+{rest} more)' if rest > 0 else ''}"
         )
 
-    # weight_quantizer is never a state_dict key at all for a block_sizes.type="dynamic"
-    # quantizer (its _amax buffer is never registered), so the diff above can't see it and
-    # missing_wq_module_paths misses it. But weight_quantizer amax is *never* in this
-    # checkpoint by construction (see _get_quantized_state's explicit
-    # `if "weight_quantizer" in name: continue`), so disable every weight quantizer directly
-    # too -- a safety net alongside missing_wq_module_paths, not a replacement for it.
-    from modelopt.torch.utils import get_unwrapped_name
-
     unconditional_wq_disabled = 0
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and is_weight_quantizer_state_key(
@@ -704,8 +696,6 @@ def load_state_dict_from_path(
 
     # Update quant values
     saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
-    print("saved_quant_dict keys: ", saved_quant_dict.keys())
-    print("current_state_dict keys: ",  current_state_dict.keys())
     for key, value in saved_quant_dict.items():
         if key in current_state_dict:
             current_state_dict[key] = value.to(current_state_dict[key].device)
