@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.models import QuantConvLinear
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization import nn as qnn
 from modelopt.torch.quantization import utils as quant_utils
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 
 
 class TestMaxCalibrator:
@@ -89,6 +90,49 @@ class TestMaxCalibrator:
 
 
 class TestHistogramCalibrator:
+    @pytest.mark.parametrize("scale", [1e-6, 1.0, 100.0])
+    @pytest.mark.parametrize("zero_batches", [1, 3])
+    def test_initial_zero_batches(self, scale, zero_batches):
+        calibrator = calib.HistogramCalibrator(num_bins=256)
+        batches = [torch.zeros(17)] * zero_batches
+        batches += [torch.linspace(-scale, scale, 101), torch.zeros(13)]
+        for batch in batches:
+            calibrator.collect(batch)
+
+        expected_hist, expected_edges = np.histogram(
+            torch.cat(batches).abs().numpy(), bins=256, range=(0, scale)
+        )
+        np.testing.assert_array_equal(calibrator._calib_hist.numpy(), expected_hist)
+        np.testing.assert_allclose(calibrator._calib_bin_edges.numpy(), expected_edges)
+        assert calibrator.compute_amax("percentile", percentile=99.9) == expected_edges[-2]
+
+    def test_only_zero_batches(self):
+        calibrator = calib.HistogramCalibrator(num_bins=256)
+        for count in [17, 23]:
+            calibrator.collect(torch.zeros(count))
+        assert calibrator._calib_hist[0] == 40
+        assert calibrator._calib_hist.sum() == 40
+        assert calibrator.compute_amax("percentile") == 0
+        calibrator.reset()
+        calibrator.collect(torch.tensor([0.0, 2.0]))
+        assert calibrator._calib_hist.sum() == 2
+        assert calibrator._calib_bin_edges[-1] == 2
+
+    def test_quantizer_calibration_after_zero_batch(self):
+        quantizer = qnn.TensorQuantizer(
+            QuantizerAttributeConfig(calibrator="histogram", axis=None),
+            if_quant=False,
+            if_calib=True,
+        )
+        quantizer(torch.zeros(16))
+        quantizer(torch.linspace(0, 1, 256))
+        quantizer.load_calib_amax(method="percentile")
+        quantizer.disable_calib()
+        quantizer.enable_quant()
+        output = quantizer(torch.linspace(0, 1, 256))
+        assert torch.isfinite(output).all()
+        torch.testing.assert_close(output, torch.linspace(0, 1, 256), atol=0.01, rtol=0)
+
     @pytest.mark.skip(reason="TODO: Fix assertions in test_grow")
     def test_grow(self, verbose):
         x_1 = torch.tensor([0, 255, 255, 255, 255, 255])
