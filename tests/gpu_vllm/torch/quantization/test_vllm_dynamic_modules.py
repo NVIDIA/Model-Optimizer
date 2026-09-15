@@ -28,6 +28,7 @@ TinyDeepseekV3 (+ MLAAttention).
 
 from __future__ import annotations
 
+import builtins
 import gc
 import importlib.util
 from pathlib import Path
@@ -82,6 +83,91 @@ def _calibration_worker(num_blocks: int):
             )
         )
     )
+
+
+def _patch_vllm_imports(monkeypatch, modules):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in modules:
+            imported = modules[name]
+            if isinstance(imported, BaseException):
+                raise imported
+            return imported
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
+    """The current vLLM adapter must forward every warmup reservation argument."""
+    module = _load_example_module("vllm_ptq_utils")
+    reserved_block_count = Mock(return_value=4)
+    _patch_vllm_imports(
+        monkeypatch,
+        {"vllm.v1.worker.gpu.warmup": SimpleNamespace(_reserved_block_count=reserved_block_count)},
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=3),
+        max_model_len=2048,
+    )
+    kv_cache_spec = object()
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, kv_cache_spec) == 4
+    reserved_block_count.assert_called_once_with(
+        128,
+        kv_cache_spec,
+        num_lookahead_tokens=3,
+        max_model_len=2048,
+        max_encoder_len=0,
+    )
+
+
+def test_get_calibration_block_count_uses_vllm_026_reservation_policy(monkeypatch):
+    """The vLLM 0.26 adapter must preserve its cross-attention and Mamba rules."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class CrossAttentionSpec:
+        block_size = 16
+
+    class MambaSpec:
+        block_size = 16
+        mamba_cache_mode = "align"
+        num_speculative_blocks = 2
+
+    cdiv = Mock(
+        side_effect=lambda numerator, denominator: (numerator + denominator - 1) // denominator
+    )
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": ImportError("0.28 helper unavailable"),
+            "vllm.utils.math_utils": SimpleNamespace(cdiv=cdiv),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                CrossAttentionSpec=CrossAttentionSpec,
+                MambaSpec=MambaSpec,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        max_model_len=2048,
+    )
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(33, SimpleNamespace(block_size=16)) == 3
+    assert block_count(33, CrossAttentionSpec()) == 0
+    assert block_count(33, MambaSpec()) == 5
+    assert cdiv.call_args_list == [
+        ((33, 16),),
+        ((0, 16),),
+        ((33, 16),),
+    ]
 
 
 def test_allocate_calibration_blocks_assigns_non_null_blocks(monkeypatch):
