@@ -86,9 +86,10 @@ the output channels are independent and can be handled separately.
 For NVFP4, :math:`s` is not a scalar: each output channel has
 :math:`C_{\mathrm{in}}/16` blocks, one scale each. With :math:`M`
 candidates per block, minimizing :math:`E(s)` jointly means searching
-:math:`M^{C_{\mathrm{in}}/16}` combinations -- this is not tractable. So we
-choose each block's scale in isolation, against the output error that
-block alone contributes. For block :math:`b`,
+:math:`M^{C_{\mathrm{in}}/16}` combinations -- this is not tractable. To make
+the search tractable, Local-Hessian uses a block-diagonal approximation: it adds
+the output error from each block independently and ignores interactions between
+quantization errors in different blocks. For block :math:`b`,
 
 .. math::
    :label: lh-block-error
@@ -230,9 +231,10 @@ Scale Selection Reshapes Distribution
 Figure 2 plots the scaled weights :math:`W/s` -- the values handed to the
 E2M1 cast. Max scaling piles the mass up near 6.0, the largest E2M1 value,
 while MSE and Local-Hessian both cluster it on the representable E2M1 grid
-values. Grid alignment is not the whole story, though: among the scales
-that do align, Local-Hessian picks the ones that hold up better on
-evaluation.
+values. Grid alignment alone does not explain the accuracy gains. Although
+MSE and Local-Hessian both align weights to the E2M1 grid, Local-Hessian's
+layer-output-error objective yields larger downstream accuracy improvements
+in our results.
 
 
 .. image:: assets/qwen3-27b-scaled-weight-distribution.png
@@ -272,11 +274,7 @@ To use it in your own configuration, set the ``algorithm`` field:
        "quant_cfg": [...],  # quantizer configuration
        "algorithm": {
            "method": "local_hessian",
-           "fp8_scale_sweep": True,
-           "layerwise": {
-               "enable": True,
-               "get_qdq_activations_from_prev_layer": True,
-           },
+           "layerwise": {"enable": True},
        },
    }
 
@@ -299,15 +297,12 @@ To reproduce the published Qwen3.8-27B checkpoint end to end:
 
 .. note::
 
-   Calibration is layerwise: each layer is calibrated on the fake-quantized
-   outputs of the one before it, so later layers get an activation
-   distribution that accounts for the quantization of the earlier layers.
-
-.. note::
-
-   We set batch size 1 for calibration that depends on activation
-   statistics -- Local-Hessian, GPTQ and similar -- so that padding
-   tokens do not contaminate those statistics.
+   For Local-Hessian and GPTQ, we recommend enabling
+   :func:`layerwise_calibrate <modelopt.torch.quantization.model_calib.layerwise_calibrate>`
+   with ``"layerwise": {"enable": True}`` and using calibration batch size 1.
+   Layerwise calibration exposes each layer to the fake-quantized outputs of the
+   preceding layer, approximating quantized deployment, while batch size 1 prevents
+   padding tokens from contaminating activation statistics.
 
 
 Next steps

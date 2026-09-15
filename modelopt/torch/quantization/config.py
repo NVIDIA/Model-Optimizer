@@ -723,13 +723,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
     )
 
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "If True (default), capture each layer's next-layer inputs "
             "after it is calibrated, so QDQ error and in-place weight updates "
-            "propagate forward. If False (max/mse default), capture before, so "
-            "the next layer sees the same FP activations as a non-layerwise pass."
+            "propagate forward. If False, capture before calibration, so "
+            "the next layer sees the same FP activations as a non-layerwise pass. "
+            "We recommend setting this to True for GPTQ and Local-Hessian."
         ),
     )
 
@@ -1241,21 +1242,6 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
-
-    @model_validator(mode="after")
-    def _gptq_qdq_default(self):
-        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
-
-        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
-        default differs from the base class. Uses ``model_fields_set`` to detect
-        whether the user explicitly set the field — covers every input shape
-        (empty constructor, bool, dict) without a per-shape special case.
-        """
-        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
-            self.layerwise = self.layerwise.model_copy(
-                update={"get_qdq_activations_from_prev_layer": True}
-            )
-        return self
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
