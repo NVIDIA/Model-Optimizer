@@ -20,10 +20,13 @@ import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import postprocess_state_dict
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
 )
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 
@@ -100,6 +103,27 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+@pytest.mark.parametrize(("num_bits", "payload_bytes"), [("iq1_s", 50), ("iq2_xs", 74)])
+def test_export_iq_payload_as_weight(num_bits, payload_bytes):
+    linear = nn.Linear(256, 4, bias=False, dtype=torch.bfloat16)
+    linear.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=num_bits,
+            block_sizes={-1: 256},
+            backend="psx_luts",
+            backend_extra_args={"search_impl": "auto"},
+        )
+    )
+
+    _export_quantized_weight(linear, torch.bfloat16)
+    state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
+
+    assert state_dict["weight"].shape == (4, 1, payload_bytes)
+    assert state_dict["weight"].dtype == torch.uint8
+    assert "packed_weights" not in state_dict
+    assert "weight_shape" not in state_dict
 
 
 class QuantMoELinear(nn.Module):

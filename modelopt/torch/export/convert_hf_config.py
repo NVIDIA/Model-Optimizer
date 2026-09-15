@@ -117,6 +117,19 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
+    elif quant_algo in ("IQ1_S", "IQ2_XS"):
+        effective_bits, payload_bytes = (1.5625, 50) if quant_algo == "IQ1_S" else (2.3125, 74)
+        return {
+            "weights": {
+                "dynamic": False,
+                "num_bits": 1 if quant_algo == "IQ1_S" else 2,
+                "effective_bits": effective_bits,
+                "type": "int",
+                "group_size": 256,
+                "packing": "ggml",
+                "block_payload_bytes": payload_bytes,
+            }
+        }
     else:
         warnings.warn(
             f"Unsupported quantization algorithm '{quant_algo}' in "
@@ -208,6 +221,10 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
             "targets": ["Linear"],
         }
+        new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value in ("IQ1_S", "IQ2_XS"):
+        config_group_details = _quant_algo_to_group_config(quant_algo_value, 256)
+        config_group_details["targets"] = ["Linear"]
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "NVFP4_SVD":
         # NVFP4 + SVDQuant: NVFP4 weights/activations plus an AWQ-style

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# IQ1_S weight quantizer using the built-in PSX-LUTS-compatible search.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
+num_bits: iq1_s
+effective_bits: 1.5625
+block_sizes:
+  -1: 256
+backend: psx_luts
+backend_extra_args:
+  search_impl: auto
+pass_through_bwd: true

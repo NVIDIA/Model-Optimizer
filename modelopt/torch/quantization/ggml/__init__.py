@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantization package."""
+"""GGML-compatible block quantization formats."""
 
-# Initialize mode and plugins
-from . import mode, plugins, utils
-
-# Add methods to mtq namespace
-from .compress import *
-from .config import *
-from .conversion import *
-from .ggml import *
-from .model_quant import *
-from .nn.modules.quant_module import QuantModuleRegistry
-from .utils import update_quant_cfg_with_kv_cache_quant
+# Importing the backend installs its TensorQuantizer dispatch entry.
+from . import backend as _backend
+from .iq1_s import *
+from .iq2_xs import *

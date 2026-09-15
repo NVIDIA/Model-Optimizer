@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 25 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 27 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -57,6 +57,8 @@ supported combinations.
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
+| `iq1_s` | IQ1_S W1A16, all linears | none | PSX-LUTS auto search (no calibration) |
+| `iq2_xs` | IQ2_XS W2A16, all linears | none | PSX-LUTS auto search (no calibration) |
 
 </details>
 
@@ -135,6 +137,10 @@ activations and tensor-core math are what deliver the throughput.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
+- **`iq1_s` / `iq2_xs`** — GGML-compatible IQ1_S or IQ2_XS weights on all linear
+  layers, with BF16 activations. Unified export stores each logical weight as a packed
+  50- or 74-byte-per-256-values payload plus its original shape. No calibration data is
+  required.
 
 ---
 

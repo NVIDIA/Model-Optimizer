@@ -46,6 +46,9 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.ggml import dequantize_iq1_s, dequantize_iq2_xs
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
 from modelopt.torch.speculative.plugins.megatron_medusa import _DynamicMedusaGPTModel
@@ -84,6 +87,75 @@ def _verify_model_quant_config(
 
         if kv_cache_quant_cfg:
             assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
+
+
+@pytest.mark.parametrize(
+    ("qformat", "payload_bytes", "dequantize"),
+    [("iq1_s", 50, dequantize_iq1_s), ("iq2_xs", 74, dequantize_iq2_xs)],
+)
+def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequantize):
+    """Megatron export writes the same scale-free IQ representation as HF export."""
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
+    linear.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=qformat,
+            block_sizes={-1: 256},
+            backend="psx_luts",
+            backend_extra_args={"search_impl": "auto"},
+        )
+    )
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter._state_dict = {}
+    exporter.exclude_modules = []
+    exporter.layer_config_dict = {}
+
+    exporter._name_remapping(linear, "model.layers.0.mlp.down_proj.")
+
+    packed_key = "model.layers.0.mlp.down_proj.weight"
+    assert exporter._state_dict[packed_key].shape == (2, 1, payload_bytes)
+    assert exporter._state_dict[packed_key].dtype == torch.uint8
+    logical_shape = torch.tensor(
+        [
+            *exporter._state_dict[packed_key].shape[:-2],
+            exporter._state_dict[packed_key].shape[-2] * 256,
+        ]
+    )
+    reconstructed = dequantize(
+        exporter._state_dict[packed_key],
+        logical_shape,
+        dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(reconstructed, linear.weight_quantizer(linear.weight))
+    assert exporter.layer_config_dict == {
+        "model.layers.0.mlp.down_proj.quantization": qformat,
+        "model.layers.0.mlp.down_proj.awq_block_size": 256,
+    }
+
+
+def test_megatron_iq_export_rejects_tensor_parallelism():
+    """IQ packing is intentionally limited to complete TP=1 weights."""
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
+    linear.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits="iq2_xs",
+            block_sizes={-1: 256},
+            backend="psx_luts",
+            backend_extra_args={"search_impl": "auto"},
+        )
+    )
+    exporter = object.__new__(GPTModelExporter)
+    exporter.model = torch.nn.Sequential(linear)
+
+    with (
+        patch.object(exporter, "_is_sidecar_writer_rank", return_value=False),
+        patch.object(uem, "get_pipeline_model_parallel_rank", return_value=0),
+        patch.object(uem, "get_pipeline_model_parallel_world_size", return_value=1),
+        patch.object(uem, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(uem, "get_tensor_model_parallel_world_size", return_value=2),
+        pytest.raises(NotImplementedError, match="tensor model parallel size 1"),
+    ):
+        exporter.save_pretrained("unused", "unused")
 
 
 def _test_unified_export_megatron(
