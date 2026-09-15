@@ -8,3 +8,4 @@ Each one walks through a complete workflow using the scripts in [examples/megatr
 | Tutorial | What it covers |
 | --- | --- |
 | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) | End-to-end optimization of the Nemotron-3-Nano-30B-A3B-BF16 (MoE + Mamba-Transformer hybrid) model: Minitron structured pruning (31.6B/A3.6B → 22B/A3.0B) → two-phase knowledge distillation (100B tokens, 8K then 32K seq length) → quantization → vLLM deployment. Includes data-blend preparation, evaluation setup, and detailed pruning / data-blend / long-context ablations. |
+| [Qwen3.6-35B-A3B](Qwen3.6-35B-A3B/README.md) | End-to-end **W4A4 NVFP4** optimization of the Qwen3.6-35B-A3B (MoE + hybrid linear/full attention VLM) model: NVFP4 W4A4 post-training quantization → quantization-aware distillation (QAD) to recover the accuracy W4A4 costs → evaluation → vLLM deployment. |
