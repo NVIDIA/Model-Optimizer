@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# IQ2_XS weight quantizer using the built-in GGML IQ auto search.
+# IQ2_XS weight quantizer using the built-in fixed-scale codebook search.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: iq2_xs
@@ -10,5 +10,3 @@ effective_bits: 2.3125
 block_sizes:
   -1: 256
 backend: ggml
-backend_extra_args:
-  search_impl: auto
