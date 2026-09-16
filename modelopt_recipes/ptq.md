@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 25 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 26 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -38,6 +38,7 @@ supported combinations.
 | `nvfp4_default-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | max |
 | `nvfp4_act_headroom-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | nvfp4_act_headroom |
 | `nvfp4_default-kv_nvfp4_cast` | NVFP4 W4A4, all linears | NVFP4 (constant amax) | max |
+| `nvfp4_default-kv_none-local_hessian` | NVFP4 W4A4 (static W), all linears | none | local Hessian + FP8 sweep |
 | `nvfp4_default-kv_none-gptq` | NVFP4 W4A4 (static W), all linears | none | GPTQ (layerwise) |
 | `nvfp4_mlp_only-kv_fp8` | NVFP4 W4A4, MLP + MoE experts | FP8 (calibrated) | max |
 | `nvfp4_mlp_only-novit-kv_fp8` | NVFP4 W4A4, MLP + MoE experts (VL vision tower excluded) | FP8 (calibrated) | max |
@@ -196,6 +197,11 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   of the p50/p75 gate. A strong first lever, not a guaranteed fix — and sweep
   `rho`, since headroom above the calibrated range costs resolution inside it.
 
+- **`local_hessian`** (`nvfp4_default-kv_none-local_hessian`) — searches static
+  NVFP4 weight scales by minimizing output reconstruction error using a local
+  Hessian approximation, with an FP8-scale sweep. It can recover accuracy when
+  plain max calibration regresses, but currently supports only single-rank
+  calibration.
 - **`input_scale1`** (`nvfp4_experts_only_input_scale1-kv_fp8_cast`) — pins the
   expert **activation** per-tensor amax to a constant `2688.0`
   (= E2M1_MAX × E4M3_MAX = 6 × 448) via `constant_amax`, so the exported NVFP4
@@ -273,7 +279,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -282,7 +288,7 @@ The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder may carry a `README.md` spelling out that delta.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -353,6 +359,16 @@ checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
 router (`moe.gate`) and `share_expert` on top. Use them, not the general
 recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
 
+- **`qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore`** is the **Megatron-Core** W4A4
+  counterpart of `qwen3_5_moe`'s W4A16 recipe, used as the QAD student in the
+  [Qwen3.6-35B-A3B tutorial](../examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md).
+  MoE routed + shared experts and `lm_head` → NVFP4 W4A4 (block 16); softmax attention and the
+  GatedDeltaNet `in_proj`/`out_proj` → FP8 W8A8; KV cache → FP8 cast; MTP block, routers, `conv1d`,
+  the vision tower and embeddings stay BF16. W4A4 rather than W4A16 because a BF16 activation keeps
+  vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
+  load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
+  `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
+
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
 These quantize the **same layers** as the general recipes; only the
@@ -419,6 +435,14 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
+- **`models/MiniMaxAI/MiniMax-M2.7/ptq/nvfp4_experts_only-kv_fp8_cast`** reproduces
+  `nvidia/MiniMax-M2.7-NVFP4` with max-calibrated NVFP4 W4A4 experts (block size
+  16) and FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
+- **`models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_local_hessian`**
+  reproduces NVFP4 W4A4 mixed precision quantization recipe used for `nvidia/Qwen3.8-27B-NVFP4`:
+  MLP projections and `lm_head` use NVFP4 W4A4, self-attention and
+  linear-attention projections use FP8 W8A8. Static NVFP4 weight
+  scales are calibrated with local-Hessian algorithm.
 - **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:

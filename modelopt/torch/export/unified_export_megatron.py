@@ -125,7 +125,10 @@ class GPTModelExporter:
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
         trust_remote_code: Whether to trust remote code in the HuggingFace pretrained model.
-        moe_router_dtype: The data type of the MoE router. Can be "fp32", "fp64", or None (default to the model dtype).
+        moe_router_dtype: Storage dtype override for the exported MoE router weight, "fp32",
+            "fp64" or None to store it at ``dtype`` like every other unquantized weight.
+            This is not Megatron's ``moe_router_dtype``, which is a routing *compute* dtype;
+            HF checkpoints conventionally store the router at the model dtype.
         clamp_kv_cache_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
     """
 
@@ -551,8 +554,9 @@ class GPTModelExporter:
     def _get_state_dict(self):
         model = self.model
 
-        # Embedding
-        if hasattr(model, "embedding"):
+        # Embedding. MCore also builds `embedding` on the MTP stage, so gating on hasattr
+        # alone would emit a second, orphaned copy of the vocab embedding when PP > 1.
+        if model.pre_process and hasattr(model, "embedding"):
             self.rules["word_embeddings"](model.embedding.word_embeddings)
 
         # Decoder layers

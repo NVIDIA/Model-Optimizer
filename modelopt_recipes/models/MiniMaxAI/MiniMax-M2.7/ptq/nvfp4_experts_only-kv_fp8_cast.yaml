@@ -13,38 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Reproduces the quantization scheme of the published nvidia/MiniMax-M2.7-NVFP4
+# checkpoint from the MiniMaxAI/MiniMax-M2.7 input model.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
   nvfp4: configs/numerics/nvfp4
-  kv_fp8: configs/ptq/units/kv_fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
   recipe_type: ptq
-  description: >
-    NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache,
-    max layerwise calibration with calib_mutates_weights=False for disk-offloaded single-GPU
-    PTQ. Weights stay as meta tensors between layers; export_hf_checkpoint materializes them.
+  description: >-
+    MiniMax M2.7 expert-only NVFP4 weights and activations with max calibration;
+    FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
+    Reproduces the published nvidia/MiniMax-M2.7-NVFP4 checkpoint from
+    MiniMaxAI/MiniMax-M2.7.
+
 quantize:
   algorithm:
     method: max
-    layerwise:
-      enable: true
-      get_qdq_activations_from_prev_layer: false
-      calib_mutates_weights: false
+    layerwise: {enable: false}
   quant_cfg:
     - $import: base_disable_all
-    - quantizer_name: '*.experts.*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*.experts.*input_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*weight_quantizer'
-      cfg:
-        $import: nvfp4
-    - quantizer_name: '*block_sparse_moe*input_quantizer'
-      cfg:
-        $import: nvfp4
-    - $import: kv_fp8
+    - quantizer_name: '*block_sparse_moe.experts.*weight_quantizer'
+      cfg: {$import: nvfp4}
+    - quantizer_name: '*block_sparse_moe.experts.*input_quantizer'
+      cfg: {$import: nvfp4}
+    - $import: kv_fp8_cast
     - $import: default_disabled_quantizers
