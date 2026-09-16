@@ -82,7 +82,14 @@ class AcceptanceRate(Metric):
         # where the acceptance distribution is final, and all three variants
         # (AcceptanceRate / MTBench / SpecBench) route through it, so none can
         # silently stop producing a profile.
-        self._write_speculation_profile()
+        try:
+            self._write_speculation_profile()
+        except Exception as exc:
+            # Additive artifact: acceptance_rate.json / mtbench.json / responses.jsonl
+            # are written *after* this call, so letting it raise would end a multi-hour
+            # run with no acceptance numbers at all. Same rule _consistency_check
+            # follows -- a problem stays inspectable instead of aborting the run.
+            print(f"WARNING: could not write speculation_profile.json: {exc}")
 
     def _write_speculation_profile(self):
         """Write speculation_profile.json — the deployment-facing view of these numbers.
@@ -92,6 +99,13 @@ class AcceptanceRate(Metric):
         """
         metadata = AcceptanceRate.profile_metadata
         if not metadata or not self.directory:
+            return
+        # A non-speculative run (--speculative_algorithm NONE) still completes: every
+        # decode step emits one token, so the histogram is {1: N} and observed_steps > 0.
+        # build_profile would therefore mark it measured=true with all-zero acceptance --
+        # indistinguishable from a genuinely terrible draft, and it passes the mean
+        # consistency check (1 + 0 == 1.0). There is no draft to describe, so emit nothing.
+        if (metadata.get("method") or "none") == "none":
             return
         profile = build_profile(
             self.out,
