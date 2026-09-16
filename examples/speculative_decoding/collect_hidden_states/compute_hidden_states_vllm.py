@@ -80,6 +80,13 @@ def _resolve_aux_layers_standalone(
         # dump must resolve it without modelopt or the documented invocation fails.
         return sorted({1, max(0, num_hidden_layers // 2 - 1), max(0, num_hidden_layers - 4)})
     if spec == "dflash":
+        # build_target_layer_ids raises here; without the same guard the interpolation
+        # below silently collapses to a short deduplicated list (e.g. [1] for a 4-layer
+        # target), dumping fewer aux layers than the draft consumes.
+        if num_hidden_layers < num_draft:
+            raise ValueError(
+                f"num_target_layers ({num_hidden_layers}) must be >= num_draft_layers ({num_draft})"
+            )
         if num_draft == 1:
             return [num_hidden_layers // 2]
         start = min(1, num_hidden_layers - 1)

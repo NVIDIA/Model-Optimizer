@@ -34,6 +34,7 @@ import pytest
 from _test_utils.examples.run_command import MODELOPT_ROOT
 
 from modelopt.torch.speculative.plugins.hf_eagle import default_eagle_aux_layer_ids
+from modelopt.torch.speculative.plugins.modeling_dflash import build_target_layer_ids
 
 _COLLECT = MODELOPT_ROOT / "examples" / "speculative_decoding" / "collect_hidden_states"
 sys.path.insert(0, str(_COLLECT))
@@ -73,6 +74,24 @@ def test_eagle_is_resolvable_because_it_is_the_documented_default():
 
 def test_dflash_preset_still_resolves():
     assert resolve("dflash", 32, num_draft=5) == [1, 8, 15, 22, 29]
+
+
+@pytest.mark.parametrize("num_layers", range(1, 40))
+def test_dflash_preset_matches_the_shared_helper(num_layers):
+    """Same pinning as EAGLE, including where the shared helper *refuses*.
+
+    A target with fewer layers than the draft has no valid assignment, so
+    ``build_target_layer_ids`` raises. Without the matching guard the standalone
+    copy silently deduplicated down to a short list -- e.g. ``[1]`` for a 4-layer
+    target -- and the dump would write fewer aux layers than the draft consumes.
+    """
+    try:
+        expected = sorted(set(build_target_layer_ids(num_layers, 5)))
+    except ValueError:
+        with pytest.raises(ValueError, match="must be >="):
+            resolve("dflash", num_layers, num_draft=5)
+    else:
+        assert resolve("dflash", num_layers, num_draft=5) == expected
 
 
 def test_explicit_id_list_still_resolves():
