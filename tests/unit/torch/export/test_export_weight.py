@@ -113,7 +113,6 @@ def test_export_iq_payload_as_weight(num_bits, payload_bytes):
             num_bits=num_bits,
             block_sizes={-1: 256},
             backend="ggml",
-            backend_extra_args={"search_impl": "auto"},
         )
     )
 

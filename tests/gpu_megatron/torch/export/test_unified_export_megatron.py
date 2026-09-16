@@ -101,7 +101,6 @@ def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequ
             num_bits=qformat,
             block_sizes={-1: 256},
             backend="ggml",
-            backend_extra_args={"search_impl": "auto"},
         )
     )
     exporter = object.__new__(GPTModelExporter)
@@ -141,7 +140,6 @@ def test_megatron_iq_export_rejects_tensor_parallelism():
             num_bits="iq2_xs",
             block_sizes={-1: 256},
             backend="ggml",
-            backend_extra_args={"search_impl": "auto"},
         )
     )
     exporter = object.__new__(GPTModelExporter)

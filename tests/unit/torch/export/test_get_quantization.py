@@ -75,7 +75,6 @@ def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, ef
                         "num_bits": num_bits,
                         "block_sizes": {-1: 256},
                         "backend": "ggml",
-                        "backend_extra_args": {"search_impl": "auto"},
                     },
                 },
             ],
