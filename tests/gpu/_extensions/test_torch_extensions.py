@@ -48,10 +48,6 @@ _IQ_EXTENSIONS = (
     pytest.param(ext.get_cuda_ext_iq1_s, (2048, 8), 50, id="iq1_s"),
     pytest.param(ext.get_cuda_ext_iq2_xs, (512, 8), 74, id="iq2_xs"),
 )
-_IQ_EXTENSION_GRIDS = (
-    pytest.param(ext.get_cuda_ext_iq1_s, (2048, 8), id="iq1_s"),
-    pytest.param(ext.get_cuda_ext_iq2_xs, (512, 8), id="iq2_xs"),
-)
 
 
 @pytest.mark.parametrize(("get_extension", "grid_shape", "payload_bytes"), _IQ_EXTENSIONS)
@@ -66,8 +62,8 @@ def test_cuda_ext_iq_zero_block_layout(get_extension, grid_shape, payload_bytes)
     assert not packed.any()
 
 
-@pytest.mark.parametrize(("get_extension", "grid_shape"), _IQ_EXTENSION_GRIDS)
-def test_cuda_ext_iq_rejects_unsupported_dtype(get_extension, grid_shape):
+@pytest.mark.parametrize(("get_extension", "grid_shape", "_payload_bytes"), _IQ_EXTENSIONS)
+def test_cuda_ext_iq_rejects_unsupported_dtype(get_extension, grid_shape, _payload_bytes):
     extension = get_extension(raise_if_failed=True)
     weight = torch.ones((1, 256), device="cuda").to(torch.float8_e4m3fn)
     grid = torch.zeros(grid_shape, device="cuda", dtype=torch.float32)
@@ -76,8 +72,8 @@ def test_cuda_ext_iq_rejects_unsupported_dtype(get_extension, grid_shape):
         extension.pack(weight, grid)
 
 
-@pytest.mark.parametrize(("get_extension", "grid_shape"), _IQ_EXTENSION_GRIDS)
-def test_cuda_ext_iq_rejects_row_straddling_input(get_extension, grid_shape):
+@pytest.mark.parametrize(("get_extension", "grid_shape", "_payload_bytes"), _IQ_EXTENSIONS)
+def test_cuda_ext_iq_rejects_row_straddling_input(get_extension, grid_shape, _payload_bytes):
     extension = get_extension(raise_if_failed=True)
     weight = torch.ones((512, 384), device="cuda", dtype=torch.bfloat16)
     grid = torch.zeros(grid_shape, device="cuda", dtype=torch.float32)
