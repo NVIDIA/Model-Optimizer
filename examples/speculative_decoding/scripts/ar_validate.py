@@ -84,7 +84,8 @@ def validate_ar(
             input_ids = input_ids.to(device)
 
         try:
-            _, ar, hist = validator.validate_online(osl, input_ids=input_ids, steps=steps)
+            _, ar = validator.validate_online(osl, input_ids=input_ids, steps=steps)
+            hist = validator.last_length_histogram
             results.append((category, ar))
             for length, count in hist.items():
                 length_histogram[length] = length_histogram.get(length, 0) + count
@@ -96,8 +97,21 @@ def validate_ar(
     return results, dict(sorted(length_histogram.items()))
 
 
+# Mirrors specdec_bench.speculation_profile's rule. Chain drafting means the K=3 draft
+# is a prefix of the K=5 draft, so one measurement covers every smaller K; anything else
+# is re-planned per K and must be measured at each. Duplicated rather than imported:
+# specdec_bench is an example package this script cannot depend on.
+_CHAIN_DRAFTING_METHODS = frozenset({"eagle", "eagle1", "eagle2", "eagle3", "draft_model"})
+
+
 def _write_speculation_profile(
-    path, length_histogram, num_speculative_tokens, per_request_mean, osl, num_samples
+    path,
+    length_histogram,
+    num_speculative_tokens,
+    per_request_mean,
+    osl,
+    num_samples,
+    method=None,
 ):
     """Emit the same speculation_profile.json schema specdec_bench produces.
 
@@ -139,6 +153,15 @@ def _write_speculation_profile(
         "schema_version": "1.0",
         "measured": True,
         "producer": "ar_validate",
+        "method": method,
+        # Without this a consumer cannot tell whether K may be extrapolated, and
+        # assuming it can for a measured_per_k draft (DFlash/DSpark) silently scales a
+        # profile that was only ever valid at one K.
+        "accept_length_model": (
+            "chain_analytic"
+            if method and method.lower() in _CHAIN_DRAFTING_METHODS
+            else "measured_per_k"
+        ),
         "num_speculative_tokens": num_speculative_tokens,
         "conditional_accept_rates": [round(x, 6) for x in conditional],
         "marginal_accept_rates": [round(x, 6) for x in marginal],
@@ -255,6 +278,7 @@ def main():
                 per_request_mean=avg_ar,
                 osl=args.osl,
                 num_samples=len(results),
+                method=getattr(getattr(model, "config", None), "speculative_decoding_method", None),
             )
             print(f"  Wrote speculation profile to {args.output_json}")
 

@@ -110,6 +110,13 @@ def has_quant_opt(model: nn.Module):
     return any(mode[0] == "quantize" for mode in opt_modes)
 
 
+#: Schema version emitted by the unmeasured stub. Kept in step with
+#: ``specdec_bench.speculation_profile.SCHEMA_VERSION``; the exporter cannot import
+#: that module, since specdec_bench is an example package and commonly runs in an
+#: engine container without modelopt.
+SPECULATION_PROFILE_SCHEMA_VERSION = "1.0"
+
+
 def read_speculation_profile(speculation_profile: Path | str) -> dict:
     """Read and validate a ``speculation_profile.json``. Needs no model or exporter.
 
@@ -193,14 +200,30 @@ class SpeculativeDecodingExporter(ABC):
         if speculation_profile is not None:
             profile = read_speculation_profile(speculation_profile)
         else:
+            # Same shape specdec_bench's stub_profile() emits, field for field. This
+            # branch runs on every export without --speculation_profile, so it is the
+            # most frequently shipped version of the artifact: a consumer written
+            # against the documented schema must be able to read `measured: false` and
+            # move on, not KeyError on missing keys. schema_version is stated for the
+            # same reason -- `None` would mean "declares no schema", which is exactly
+            # the "predates the schema" ambiguity the stub exists to remove, and it
+            # would not round-trip through this function's own validation.
             profile = {
-                "schema_version": None,
+                "schema_version": SPECULATION_PROFILE_SCHEMA_VERSION,
                 "measured": False,
                 "method": self._profile_method(),
+                "num_speculative_tokens": None,
+                "conditional_accept_rates": None,
+                "marginal_accept_rates": None,
+                "accept_length_model": None,
+                "mean_accept_length": None,
+                "accept_length_by_k": {},
+                "validation": None,
                 "note": (
                     "No acceptance measurement was supplied at export time. Produce one with "
-                    "examples/specdec_bench and re-export with --speculation_profile, or build "
-                    "it from an existing acceptance_rate.json."
+                    "examples/specdec_bench and attach it with "
+                    "examples/speculative_decoding/scripts/attach_speculation_profile.py, "
+                    "or build it from an existing acceptance_rate.json."
                 ),
             }
         return profile

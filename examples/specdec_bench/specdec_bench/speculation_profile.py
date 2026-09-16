@@ -325,10 +325,16 @@ def build_profile(
             # while the all-zero marginal implies 1.0, so the check would always report
             # a discrepancy for a profile that never claimed a measurement. Not
             # applicable rather than failed.
+            # Both checks are defined over the longest-prefix rate vectors. When those
+            # are withheld (block verification), reporting a pass on internal vectors
+            # the profile itself declares undefined would invite exactly the misread
+            # withholding them was meant to prevent.
             "mean_consistency": (
-                _consistency_check(mean_accept_length, marginal) if measured else None
+                _consistency_check(mean_accept_length, marginal)
+                if measured and vectors_apply
+                else None
             ),
-            "marginal_monotonicity": _monotonicity_check(marginal),
+            "marginal_monotonicity": (_monotonicity_check(marginal) if vectors_apply else None),
         },
     }
     return profile

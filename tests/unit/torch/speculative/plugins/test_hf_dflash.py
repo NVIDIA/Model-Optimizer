@@ -721,7 +721,7 @@ class TestValidateOnline:
 
         input_ids = torch.tensor([[1, 2, 3]])
         # osl=3: need 3 new tokens. Step 1: base(1) + draft(2) = 3 tokens → done in 1 step
-        result_ids, ar, _hist = validator.validate_online(osl=3, input_ids=input_ids, steps=2)
+        result_ids, ar = validator.validate_online(osl=3, input_ids=input_ids, steps=2)
         assert ar == 3.0  # 1 step, 3 tokens accepted (1 base + 2 drafts)
 
     def test_all_rejected(self):
@@ -756,7 +756,7 @@ class TestValidateOnline:
         input_ids = torch.tensor([[1, 2, 3]])
         # osl=4: each step produces base(1) + correction(1) = 2 tokens, AR = 1
         # (correction token not counted as accepted)
-        result_ids, ar, _hist = validator.validate_online(osl=4, input_ids=input_ids, steps=2)
+        result_ids, ar = validator.validate_online(osl=4, input_ids=input_ids, steps=2)
         # 2 steps, each producing 1 base token + 0 accepted drafts = 2 total accepted
         # But correction token still advances sequence, so 2 steps produce 4 tokens
         assert ar == 1.0  # total_accepted=2, cnt=2
@@ -1713,13 +1713,46 @@ def test_validate_online_histogram_matches_ar(monkeypatch):
     ever disagree, one of the two is counting something the other is not -- exactly the
     mismatch that made an earlier profile fail its own consistency check.
     """
-    from modelopt.torch.speculative.utils import AcceptanceRateValidation
+    validator = AcceptanceRateValidation.__new__(AcceptanceRateValidation)
+    validator.check_data_consistency_across_ranks = lambda x: x
 
-    hist = {1: 4, 2: 3, 3: 2, 4: 1}
+    mock_model = MagicMock()
+
+    def mock_psg(input_ids, steps=1):
+        return torch.tensor([[100]]), torch.tensor([[10, 20]])
+
+    mock_model.pseudo_speculative_generate = mock_psg
+
+    def mock_base_model(candidate):
+        return SimpleNamespace(last_hidden_state=candidate.unsqueeze(-1).float())
+
+    def mock_lm_head(hidden):
+        bsz, seq_len, _ = hidden.shape
+        logits = torch.zeros(bsz, seq_len, 200)
+        for i in range(seq_len - 1):
+            token_id = int(hidden[0, i + 1, 0].item())
+            if 0 <= token_id < 200:
+                logits[0, i, token_id] = 1.0
+        return logits
+
+    mock_model._base_model = mock_base_model
+    mock_model._base_model_lm_head = mock_lm_head
+    validator.model = mock_model
+
+    _, ar = validator.validate_online(osl=9, input_ids=torch.tensor([[1, 2, 3]]), steps=2)
+    hist = validator.last_length_histogram
+
+    # The scalar and the histogram must describe the same steps, not merely be
+    # individually plausible: ar is a per-step mean, so it is the histogram's
+    # step-weighted mean. A hand-built histogram would assert nothing about that.
     total = sum(hist.values())
-    expected = sum(k * v for k, v in hist.items()) / total
+    assert total > 0
+    assert ar == pytest.approx(sum(k * v for k, v in hist.items()) / total)
 
-    # 1 + sum(marginals) is the identity a per-position profile relies on.
-    marginals = [sum(c for length, c in hist.items() if length >= i + 2) / total for i in range(3)]
-    assert 1 + sum(marginals) == pytest.approx(expected)
-    assert AcceptanceRateValidation is not None
+    # 1 + sum(marginals) is the identity a per-position profile relies on, computed
+    # from the histogram validate_online actually produced.
+    k_max = max(hist)
+    marginals = [
+        sum(c for length, c in hist.items() if length >= i + 2) / total for i in range(k_max - 1)
+    ]
+    assert 1 + sum(marginals) == pytest.approx(ar)

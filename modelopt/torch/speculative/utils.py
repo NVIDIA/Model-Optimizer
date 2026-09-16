@@ -243,6 +243,11 @@ class AcceptanceRateValidation:
     Note: currently it only supports TP.
     """
 
+    #: Acceptance-length histogram from the most recent :meth:`validate_online` call,
+    #: ``{accepted_length: count}``. Empty until one has run. Kept as state rather than
+    #: a third return value so the public 2-tuple signature stays stable.
+    last_length_histogram: dict[int, int] = {}
+
     def __init__(self, model, tokenizer):
         """Init function to take in the model and tokenizer."""
         tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
@@ -500,7 +505,13 @@ class AcceptanceRateValidation:
             length_histogram[1 + accepted] = length_histogram.get(1 + accepted, 0) + 1
 
         ar = total_accepted / cnt if cnt > 0 else 0.0
-        return input_ids, ar, dict(sorted(length_histogram.items()))
+        # Exposed as state rather than a third return value: AcceptanceRateValidation is
+        # public (subclassed by HFARValidation and MegatronARValidation), and widening
+        # the tuple would break `ids, ar = validator.validate_online(...)` with no
+        # deprecation path. It would also leave this method inconsistent in arity with
+        # its sibling validate(), which returns a 2-tuple.
+        self.last_length_histogram = dict(sorted(length_histogram.items()))
+        return input_ids, ar
 
 
 @contextlib.contextmanager
