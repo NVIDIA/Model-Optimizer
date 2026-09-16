@@ -1605,12 +1605,35 @@ def carryable_source_keys(model: nn.Module) -> list[str]:
     if not keys or not ckpt:
         return []
     try:
-        from modelopt.torch.utils.plugins.model_load_utils import weight_map_for
-
-        weight_map = weight_map_for(ckpt)
+        weight_map = _source_weight_map(ckpt)
     except Exception:
         return []
     return sorted(k for k in keys if weight_map.get(k) is not None)
+
+
+def _source_weight_map(ckpt: "str | Path") -> dict[str, str]:
+    """``param name -> shard file`` for a local checkpoint, without the loader's dependencies.
+
+    :func:`modelopt.torch.utils.plugins.model_load_utils.weight_map_for` answers the same
+    question, but that module imports transformers, accelerate and huggingface_hub at module
+    scope. Reaching for it here would make "does a shard back this key" unanswerable wherever
+    those are absent -- the partial-install environments -- and the caller would then conclude
+    there is nothing to carry and skip a guard that should have fired.
+
+    The indexed case, which is every sharded checkpoint, is a stdlib JSON read and needs nothing.
+    Only a single-file ``model.safetensors`` needs safetensors, and only to list its keys.
+    """
+    index = Path(ckpt) / "model.safetensors.index.json"
+    if index.exists():
+        with open(index) as f:
+            return json.load(f).get("weight_map", {})
+    single = Path(ckpt) / "model.safetensors"
+    if single.exists():
+        from safetensors import safe_open
+
+        with safe_open(str(single), framework="pt") as f:
+            return dict.fromkeys(f.keys(), "model.safetensors")
+    return {}
 
 
 def _off_index_source_keys(model: nn.Module) -> list[str]:

@@ -725,3 +725,30 @@ def test_carryable_source_keys_is_quiet_when_nothing_was_recorded():
     from modelopt.torch.export.unified_export_hf import carryable_source_keys
 
     assert carryable_source_keys(torch.nn.Module()) == []
+
+
+def test_carryable_source_keys_works_without_the_loader_dependencies(tmp_path, monkeypatch):
+    """The shard-backed question must be answerable where transformers/accelerate are absent.
+
+    model_load_utils imports them at module scope, so routing through it would make this return
+    "nothing to carry" in the partial-install environments -- and the --vllm_fakequant_export
+    guard would then stay silent on a checkpoint whose weights it really would drop.
+    """
+    import sys as _sys
+
+    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+
+    for mod in ("transformers", "accelerate", "huggingface_hub", "safetensors"):
+        monkeypatch.setitem(_sys.modules, mod, None)
+    monkeypatch.setitem(_sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"model.mtp.eh_proj.weight": "mtp-0001.safetensors"}}'
+    )
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.layers.0.self_attn.rotary_emb.inv_freq",
+    ]
+    assert carryable_source_keys(model) == ["model.mtp.eh_proj.weight"]
