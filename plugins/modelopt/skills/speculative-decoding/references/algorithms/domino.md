@@ -56,7 +56,9 @@ Everything in `dflash.md` applies. Domino adds:
 `dflash_self_logit_distillation` is **false** — Domino trains its own base/final CE
 losses rather than distilling target logits. Recipe defaults also differ from
 DFlash's: `block_size` 16, `num_anchors` 256, `num_train_epochs` 6,
-`training_seq_len` 3072, `warmup_ratio` 0.04, `max_grad_norm` 1.0.
+`training_seq_len` 3072, `warmup_ratio` 0.04, `dflash_loss_decay_factor` 7.0.
+`max_grad_norm: 1.0` is stated explicitly in the recipe but is *not* a delta — it is the
+`transformers.TrainingArguments` default that `dflash.yaml` inherits by not setting it.
 
 `ddp_find_unused_parameters: true` is **required**, not incidental: while
 `lambda_base == 1` the head params are absent from the backward graph and DDP would
@@ -65,6 +67,10 @@ otherwise fail.
 ## Per-model adjustments
 
 Everything in `dflash.md`'s table applies. Additionally:
+
+| Situation | What to change |
+| --- | --- |
+| Any non-Qwen3 base | `domino.yaml` hardcodes `dflash_mask_token_id: 151669`, a Qwen3-specific unused id. `dflash.md`'s "unset falls back to `tokenizer.mask_token_id`" does **not** apply here — the pin is inherited, so a different base silently trains against a token that means something else. Override it. |
 
 | Situation | What to change |
 | --- | --- |

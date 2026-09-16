@@ -57,8 +57,12 @@ produces an in-pipeline metric**, so what you check depends on the sheet:
 
 - **Sheet defines a benchmark metric** (e.g. EAGLE3's MT-Bench AR, DFlash's
   `Average_AL`) — extract it from the benchmark task's log and compare against the
-  threshold. If the log already reports the metric below its lower bound, the run
-  tripped the threshold check itself and exited non-zero.
+  threshold **yourself**. No benchmark step in this repo enforces one:
+  `common/specdec_bench/quick_check.sh` and `run.sh` pass straight through to
+  `specdec_bench/run.py`, which reads no threshold and never exits non-zero on a low
+  metric, and no launcher example sets one. A green benchmark task therefore says the
+  run finished, not that the metric passed. Reporting PASS without having read the
+  number off the log is a false PASS on the run's headline metric.
 - **Sheet defines no inference metric** (currently Domino and DSpark — their eval path
   runs the DFlash backbone with the new head bypassed, and Domino ships no benchmark
   task at all) — do **not** go looking for a benchmark log. Report the training

@@ -33,7 +33,7 @@ alongside training:
 ### Choosing the dump backend
 
 The dump script is shared with EAGLE3, so the backend choice is the same three-way
-pick described in `eagle3.md` (*Choosing the task_1 dump backend*). Both committed
+pick described in `eagle3.md` (*Choosing the dump backend*). Both committed
 offline examples are in play: MiniMax-M2.7 uses `dump_offline_data_vllm.sh`,
 Qwen3-0.6B uses `dump_offline_data_hf.sh`.
 
@@ -62,9 +62,11 @@ capture. See below.
 > the old wording anywhere else, the knob is `--num-draft-layers` (vLLM) or an
 > explicit id list (HF / TRT-LLM).
 
-Offline training additionally needs `data.mode=offline`,
+Offline training additionally needs
 `model.use_fake_base_for_offline=true` (loads only `lm_head` + `embed_tokens` rather
-than the full base), and `data.offline_data_path` pointing at the dump.
+than the full base) and `data.offline_data_path` pointing at the dump. `data.mode` is
+*derived* from which data-source field is set (`_check_mode_requirements` overwrites any
+value passed in), so setting it is a no-op kept only for backward compatibility.
 
 **Streaming** (`hf_streaming_dflash_multi_node.yaml`) — same NIXL RDMA transport as
 streaming EAGLE3, splitting nodes into serve replicas plus DDP trainers. See
@@ -160,7 +162,7 @@ DFlash-specific:
 | `The base model did not return hidden states required for DFlash training` | Base model's top-level forward ignores `output_hidden_states=True` | Usually a multimodal wrapper — needs a model-side fix |
 | `ERROR: DRAFT_CKPT_DIR=... contains no exported-checkpoint-* directory` | Upstream training produced no draft | Fix training; do not chase the smoke test |
 | vLLM rejects the speculative config / no DFlash method | DFlash landed in vLLM v0.22.0 (`vllm/v1/spec_decode/dflash.py`) | Use `vllm/vllm-openai:v0.22.1` or newer |
-| Draft quality plateaus despite clean training | Dump draft depth and `num_hidden_layers` disagree, so the dump captured the wrong layers. Note `--aux-layers dflash` defaults to a 5-layer draft on **every** backend, so a 6-layer draft silently mis-captures unless you override | Re-dump with `--num-draft-layers <N>` (vLLM), or an explicit `--aux-layers` id list (HF / TRT-LLM) |
+| Draft quality plateaus despite clean training | The dump captured the wrong layer *ids* while capturing the right **count**. A depth mismatch fails loudly — `DFlashModule` sizes its fusion layer from `len(config.target_layer_ids)`, so a count mismatch is a shape error. Equal-count-but-wrong-ids is the silent case, and `--aux-layers dflash` defaults to a 5-layer selection on **every** backend | Re-dump with `--num-draft-layers <N>` (vLLM), or an explicit `--aux-layers` id list (HF / TRT-LLM) matching what the draft recomputes from its own depth |
 | Loss stalls high with `answer_only_loss=true` | Chat template lacks `{% generation %}` tags, so no positions contribute loss | Supply a template with generation tags |
 | `dflash_dpace_alpha must be in (0, 1]` | Invalid D-PACE alpha | Correct the value |
 | Qwen3-VL mRoPE / `mm_token_type_ids` errors | Qwen3-VL DFlash needs Transformers 5.3.0 or >=5.4.0 and the AutoProcessor's `mm_token_type_ids` | Match the version; don't drop processor outputs |

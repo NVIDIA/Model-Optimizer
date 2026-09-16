@@ -16,7 +16,7 @@ shared `/scratchspace`.
 | task_2 | `common/eagle3/train_eagle.sh` | Train the draft head, then export | `/scratchspace/eagle3/model.safetensors`, `/scratchspace/export/` |
 | task_3 | `common/specdec_bench/quick_check.sh` | Benchmark acceptance rate and throughput | JSON result files |
 
-### Choosing the task_1 dump backend
+### Choosing the dump backend
 
 | Backend | Script | When to use |
 | --- | --- | --- |
@@ -39,8 +39,8 @@ plain-text model.
 | `data.offline_data_path` | task_1 output directory |
 | `training.output_dir` | Draft checkpoint destination |
 | `training.training_seq_len` | Lower it first when training OOMs |
-| `training.train_bs` | Lower it next when training OOMs |
-| `training.lr` | Lower it when loss is NaN or diverging |
+| `training.per_device_train_batch_size` | Lower it next when training OOMs |
+| `training.learning_rate` | Lower it when loss is NaN or diverging |
 | `training.ar_validate_steps` | Set to run AR validation during training |
 
 `task_3` selects the algorithm at benchmark time with
@@ -51,7 +51,7 @@ plain-text model.
 | Situation | What to change |
 | --- | --- |
 | Requires `--trust-remote-code` | Add to `task_0` server args (before the `--` separator) **and** to `task_3` benchmark args |
-| MoE with large expert hidden dim | Increase `intermediate_size` in `eagle_config.json` to match the model's `moe_intermediate_size` |
+| MoE with large expert hidden dim | Set `intermediate_size` under `eagle.eagle_architecture_config` in the recipe to match the model's `moe_intermediate_size`. There is no `eagle_config.json` — the draft architecture lives in the recipe |
 | Custom tokenizer (e.g. tiktoken) | Set `TIKTOKEN_RS_CACHE_DIR` to a pre-populated cache path in `task_0` and `task_1` |
 | VLM | Use `dump_offline_data_hf.sh` — the text-only path, no vision encoder invoked |
 | Sliding-window attention | TRT-LLM backend won't work; use HF or vLLM |
@@ -80,8 +80,12 @@ The `ratio` field is the acceptance rate (AR).
 | --- | --- |
 | AR (MT-Bench) | >= 2.1 |
 
-If the log shows `AR ... < lower bound`, the run already tripped the threshold check
-and exited non-zero.
+**This gate is not self-enforcing.** `quick_check.sh` is a 27-line pass-through to
+`specdec_bench/run.py`; neither reads a threshold nor exits non-zero on a low AR, and
+no EAGLE3 launcher example sets one. `>= 2.1` is a human review threshold. Extract
+`ratio` from the task_3 log and compare it yourself — a COMPLETED task_3 is not
+evidence the AR passed. (Same caution as the DFlash regression gate below, which runs
+under `|| true`.)
 
 ## Known failures
 
@@ -100,6 +104,6 @@ EAGLE3-specific:
 | Loss is NaN or diverging | LR too high, or data quality issue | Reduce `training.lr`; check the hidden-state data |
 | `export_hf_checkpoint.py` fails | Training produced an incomplete checkpoint | Check `/scratchspace/eagle3/` for `model.safetensors` |
 | Empty `/scratchspace/data/` after task_0 | `query.py` ran but wrote nothing | Check `--data` path exists and contains prompts; check `query.py` logs |
-| Server fails to load the draft model in task_3 | Draft config incompatible with the engine | Check `eagle_config.json` and the engine version |
+| Server fails to load the draft model in task_3 | Draft config incompatible with the engine | Check the exported draft's `config.json` against the engine version |
 | vLLM reports EAGLE3 not supported | vLLM version too old | Use a newer vLLM container |
 | AR below threshold / exit code 1 | Draft quality too low | More epochs or data, or hyperparameter tuning |

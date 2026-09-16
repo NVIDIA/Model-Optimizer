@@ -99,6 +99,10 @@ Everything in `dflash.md`'s table applies. Additionally:
 
 | Situation | What to change |
 | --- | --- |
+| Any non-Qwen3 base | `dspark.yaml` hardcodes `dflash_mask_token_id: 151669`, a Qwen3-specific unused id. `dflash.md`'s "unset falls back to `tokenizer.mask_token_id`" does **not** apply here — the pin is inherited, so a different base silently trains against a token that means something else. Override it. |
+
+| Situation | What to change |
+| --- | --- |
 | Any model | **The DSpark draft does not inherit the base model's GQA/FFN dims.** Set `num_attention_heads`, `num_key_value_heads`, `head_dim`, and `intermediate_size` in `dflash_architecture_config` explicitly, or you get a silently wrong-shaped draft. Kimi-K2.6 uses `num_hidden_layers=6, num_key_value_heads=8, intermediate_size=18432`; MiniMax-M3 uses `intermediate_size=12288`. |
 | Streaming | `EAGLE_CAPTURE_IDS` must be the draft's target layer ids +1 plus the final hidden layer. Kimi-K2.6: `[2,13,25,36,48,59,61]` for a 6-layer draft. Getting the final layer wrong caps acceptance length rather than erroring. |
 | Sparse-attention base (e.g. MiniMax-M3 MSA) | Set `SERVE_BLOCK_SIZE` to the base's `sparse_block_size` (M3: 128) |

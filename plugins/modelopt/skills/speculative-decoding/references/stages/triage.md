@@ -61,7 +61,7 @@ custom-code model needs it everywhere it is loaded:
 | Task type | How to set it |
 | --- | --- |
 | Serving / benchmark | CLI flag before the `--` separator: `--trust-remote-code` (vLLM) or `--trust_remote_code` (trtllm-serve) |
-| Hidden-state dump | `TRUST_REMOTE_CODE: "1"` in the task `environment` |
+| Hidden-state dump | Nothing to set — `dump_offline_data_hf.sh` and `dump_offline_data_vllm.sh` pass `--trust_remote_code` unconditionally. The TRT-LLM `dump_offline_data.sh` passes no such flag and offers no env var, so a custom-code model needs the HF or vLLM backend |
 | Training | `model.trust_remote_code=true` as an OmegaConf override |
 | Streaming serve replicas | `SERVE_EXTRA_ARGS: "--trust-remote-code"` |
 | Export | `EXPORT_EXTRA_ARGS: "--trust_remote_code"` |
