@@ -60,6 +60,11 @@ datasets_available = {
 }
 
 
+# Methods the engine wrappers configure via speculative_num_draft_tokens
+# (``--block_size``) rather than speculative_num_steps (``--draft_length``).
+_BLOCK_CONFIGURED_METHODS = frozenset({"dflash", "dspark"})
+
+
 def _speculation_profile_metadata(args):
     """Describe the measurement for speculation_profile.json.
 
@@ -70,9 +75,11 @@ def _speculation_profile_metadata(args):
     On K -- which flag actually sets it depends on the method, so this mirrors the
     engine wrappers rather than guessing:
 
-    * DFLASH is configured by ``--block_size``. Both the vLLM and SGLang wrappers
-      forward it as ``num_speculative_tokens`` / ``speculative_num_draft_tokens`` and
-      *ignore* ``--draft_length`` (``models/sglang.py`` warns about this explicitly).
+    * The block-parallel methods -- DFLASH and DSPARK -- are configured by
+      ``--block_size``. The vLLM wrapper forwards it as
+      ``speculative_num_draft_tokens`` for both (``models/vllm.py``), and the SGLang
+      wrapper *ignores* ``--draft_length`` (it warns about this explicitly). Keying on
+      one name would truncate the other's vectors to ``--draft_length``.
     * Everything else uses ``--draft_length``, forwarded as ``speculative_num_steps``
       (TRT-LLM turns it into ``max_draft_len``).
 
@@ -88,7 +95,7 @@ def _speculation_profile_metadata(args):
     """
     method = (args.speculative_algorithm or "").lower() or None
     block_size = getattr(args, "block_size", None)
-    if method == "dflash" and block_size:
+    if method in _BLOCK_CONFIGURED_METHODS and block_size:
         num_speculative_tokens = block_size
     else:
         num_speculative_tokens = args.draft_length
