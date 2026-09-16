@@ -215,8 +215,11 @@ def build_profile(
 
     Args:
         acceptance_out: the ``AcceptanceRate.out`` dict, after ``process_final``.
-            Requires ``Conditional_Acceptance_Rate``, ``Joint_Acceptance_Rate`` and
-            ``Average_AL``.
+            Consumes ``Joint_Acceptance_Rate``, ``Acceptance_Length_Histogram``
+            (the canonical per-step mean) and ``Average_AL`` as the fallback.
+            ``Conditional_Acceptance_Rate`` is deliberately *not* read -- conditionals
+            are recomputed from the dense marginals below, so a second producer of
+            this schema need not synthesize that key.
         num_speculative_tokens: K the measurement ran at. Determines vector length.
         method: speculation method (``eagle3``, ``dflash``, ``dspark``, ...). Used to
             pick a default ``accept_length_model``.
@@ -230,7 +233,10 @@ def build_profile(
             these vectors would not describe it -- recorded rather than assumed.
         accept_length_model: ``chain_analytic`` (safe to extrapolate over K) or
             ``measured_per_k``. Defaults from ``method``.
-        per_category: optional {category: {mean_accept_length, ...}}.
+        per_category: optional {category: mean_accept_length}, as
+            ``AcceptanceRate.out["Category_AL"]`` provides it. Serialized verbatim
+            into the published schema, so the shape stated here is the shape
+            consumers will find in the file.
         measurement_conditions: dataset, concurrency, engine, GPU, etc. specdec_bench
             already writes the full record to ``configuration.json``; this carries the
             subset needed to interpret the numbers standalone.
