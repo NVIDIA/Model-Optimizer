@@ -17,6 +17,7 @@
 
 import time
 
+import ml_dtypes
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -31,6 +32,13 @@ from .base_exporter import ONNXQuantExporter
 # when using 1/448 as the Q scale (single fixed value — softmax range is data-independent).
 _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
+
+
+def _torch_from_numpy_for_fp8(array: np.ndarray) -> torch.Tensor:
+    """Convert a NumPy array to the PyTorch dtype used for FP8 normalization."""
+    if array.dtype == ml_dtypes.bfloat16:
+        return torch.from_numpy(array.view(np.int16)).view(torch.bfloat16).float()
+    return torch.from_numpy(array)
 
 
 class FP8QuantExporter(ONNXQuantExporter):
@@ -48,7 +56,7 @@ class FP8QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def compress_weights(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-        """Compresses FP32/FP16 weights to FP8 by folding QDQ nodes to DQ only.
+        """Compresses FP32/FP16/BF16 weights to FP8 by folding QDQ nodes to DQ only.
 
         Even though modelopt supports FP8 onnx export, the weights are represented in fp32 + QDQ.
         The storage is therefore very bad. In this function,
@@ -56,7 +64,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         weights in the output model. TRT custom ops are converted to native ONNX DequantizeLinear.
 
         Parameters:
-            onnx_model: ONNX model with FP32/FP16 weights and TRT_FP8 QDQ nodes.
+            onnx_model: ONNX model with FP32/FP16/BF16 weights and TRT_FP8 QDQ nodes.
 
         Returns:
             ONNX model with FP8 weights and native ONNX DQ nodes for weights (QDQ preserved for activations).
@@ -78,8 +86,8 @@ class FP8QuantExporter(ONNXQuantExporter):
 
                 weights = node.inputs[0]
                 scale = node.inputs[1]
-                torch_weights = torch.from_numpy(weights.values)
-                torch_scale = torch.from_numpy(scale.values)
+                torch_weights = _torch_from_numpy_for_fp8(weights.values)
+                torch_scale = _torch_from_numpy_for_fp8(scale.values)
                 quantizer_name = scale.name.rsplit("/", 1)[0]
                 dq_op = node.outputs[0].outputs[0]
                 if dq_op.op != "TRT_FP8DequantizeLinear":
@@ -194,14 +202,25 @@ class FP8QuantExporter(ONNXQuantExporter):
             if any(out.op == "DequantizeLinear" for out in weight_input.outputs):
                 continue
 
-            torch_weights = torch.from_numpy(weight_input.values.copy())
+            torch_weights = _torch_from_numpy_for_fp8(weight_input.values.copy())
             amax = torch_weights.abs().max().float()
             if amax == 0:
                 continue
             scale_val = (amax / _FP8_E4M3_MAX).item()
+            scale_data = np.array(scale_val, dtype=weight_input.values.dtype)
+            # Round up so normalizing by the serialized scale stays within the FP8 range.
+            if scale_data < scale_val:
+                np.nextafter(
+                    scale_data,
+                    np.array(np.inf, dtype=scale_data.dtype),
+                    out=scale_data,
+                )
+            torch_scale = _torch_from_numpy_for_fp8(scale_data)
 
             # Quantize weights to FP8 (WAR: numpy doesn't support fp8)
-            fp8_data = (torch_weights / scale_val).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+            fp8_data = (
+                (torch_weights / torch_scale).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+            )
             fp8_tensor = onnx.TensorProto()
             fp8_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
             fp8_tensor.dims.extend(fp8_data.shape)
@@ -210,13 +229,16 @@ class FP8QuantExporter(ONNXQuantExporter):
                 node.name + "/weight_quantizer/fp8_weights", LazyValues(fp8_tensor)
             )
 
-            # Scale in FP16 — DQ output type matches scale dtype, must match activation type
             scale_constant = gs.Constant(
                 node.name + "/weight_quantizer/scale",
-                np.array(scale_val, dtype=np.float16),
+                scale_data,
             )
 
-            dq_output = gs.Variable(node.name + "/weight_quantizer/dq_output")
+            dq_output = gs.Variable(
+                node.name + "/weight_quantizer/dq_output",
+                scale_data.dtype,
+                weight_input.values.shape,
+            )
             dq_node = gs.Node(
                 op="DequantizeLinear",
                 name=node.name + "/weight_quantizer/DequantizeLinear",

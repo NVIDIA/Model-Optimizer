@@ -128,6 +128,17 @@ class QuantModule(DynamicModule):
             weight_quantizer = getattr(self, quantizer_attr_names(weight_name).weight_quantizer)
             yield getattr(self, weight_name), weight_quantizer
 
+    def iter_weight_quantizers_for_calibration(self):
+        """Yield just the weight quantizers, without materializing the weight views.
+
+        Callers that only inspect quantizer state must use this rather than discarding the
+        weight from :meth:`iter_weights_for_calibration`. Reading a weight is free here, but a
+        subclass whose weight view costs something -- the fused-MoE modules slice a 3-D DTensor
+        per expert, one redistribute collective each under FSDP2 -- overrides this to skip it.
+        """
+        for _, weight_quantizer in self.iter_weights_for_calibration():
+            yield weight_quantizer
+
     @staticmethod
     @torch.no_grad()
     def _fold_weight_quantizer(

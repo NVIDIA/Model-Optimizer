@@ -264,5 +264,11 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 ## Submitting your code
 
 - Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
+- **Fork PRs:** An authorized vetter must comment `/ok to test <full-head-sha>` to run NVIDIA-hosted CI.
+- **Contributors without write access:** When GitHub requests workflow approval, a reviewer with write permission
+  must select **Approve and run workflows** to start GitHub Actions CI.
 - If any CI/CD checks fail, fix the issues and push again.
 - Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
+- If your PR is a bug fix that should also land in an ongoing release branch, add the
+  `cherry-pick-<X.Y.Z>` label (e.g. `cherry-pick-0.47.0`) matching that release. Labeled PRs are
+  cherry-picked into the release branch so the fix is included in the next release candidate.

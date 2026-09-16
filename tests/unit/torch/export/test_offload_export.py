@@ -36,13 +36,18 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.model_utils import TiedWeightMap
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.quant_format import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
+from modelopt.torch.export.quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    _resolve_kv_cache_format_for_key,
+)
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
+    name_shards_and_write_index,
 )
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
@@ -276,6 +281,62 @@ def test_streaming_shard_writer_accepts_extra_tensors():
             assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
 
 
+def test_streaming_shard_writer_part_tag_keeps_writers_apart():
+    """Two writers sharing a directory must not write to the same part filename."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        w0 = _StreamingShardWriter(tmpdir, max_shard_size=16, part_tag="r00_")
+        w1 = _StreamingShardWriter(tmpdir, max_shard_size=16, part_tag="r01_")
+        w0.add("a", torch.randn(8))
+        w1.add("b", torch.randn(8))
+        names0, _, _ = w0.close()
+        names1, _, _ = w1.close()
+
+        assert names0 and names1
+        assert not set(names0) & set(names1)
+        assert all((Path(tmpdir) / n).exists() for n in names0 + names1)
+
+
+def test_name_shards_and_write_index_merges_disjoint_writers():
+    """Merging every writer's close() result yields one index over the union of their keys.
+
+    This is what rank 0 does after gathering the other ranks' results: only then is the total
+    shard count known, so only then can the parts get canonical ``model-i-of-N`` names.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ref = {
+            "model.layers.0.w": torch.randn(8, 8),
+            "model.layers.0.b": torch.randn(8),
+            "model.layers.1.w": torch.randn(8, 8),
+            "model.embed.weight": torch.randn(16, 8),
+        }
+        owned = [
+            {k: ref[k] for k in ("model.layers.0.w", "model.layers.0.b", "model.embed.weight")},
+            {k: ref[k] for k in ("model.layers.1.w",)},
+        ]
+        closed = []
+        for rank_id, keys in enumerate(owned):
+            writer = _StreamingShardWriter(tmpdir, max_shard_size=64, part_tag=f"r{rank_id:02d}_")
+            for key, tensor in keys.items():
+                writer.add(key, tensor)
+            closed.append(writer.close())
+
+        weight_map = name_shards_and_write_index(tmpdir, closed)
+
+        index = json.loads((Path(tmpdir) / "model.safetensors.index.json").read_text())
+        assert set(index["weight_map"]) == set(ref)
+        assert weight_map == index["weight_map"]
+        assert not list(Path(tmpdir).glob("__shard_part*")), "every part should be renamed"
+        for key, shard in weight_map.items():
+            with safe_open(str(Path(tmpdir) / shard), framework="pt") as f:
+                assert torch.equal(f.get_tensor(key), ref[key])
+
+
+def test_name_shards_and_write_index_with_nothing_written():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        assert name_shards_and_write_index(tmpdir, [([], {}, 0)]) == {}
+        assert not (Path(tmpdir) / "model.safetensors.index.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # _postprocess_single_tensor
 # ---------------------------------------------------------------------------
@@ -317,6 +378,53 @@ def test_postprocess_kv_scale_renamed_and_divided():
     )
     assert key == "model.layers.0.self_attn.k_proj.k_scale"
     assert abs(val.item() - 0.5) < 1e-5
+
+
+@pytest.mark.parametrize(
+    ("layer_name", "quant_algo", "side", "resolved_format"),
+    [
+        ("model.layers.0.self_attn", KV_CACHE_FP8_K_NVFP4_V, "k", KV_CACHE_FP8),
+        ("model.layers.0.self_attn", KV_CACHE_FP8_K_NVFP4_V, "v", KV_CACHE_NVFP4),
+        ("model.layers.1.self_attn", KV_CACHE_NVFP4, "k", KV_CACHE_NVFP4),
+    ],
+)
+def test_postprocess_resolves_mixed_kv_format_per_layer_and_side(
+    layer_name, quant_algo, side, resolved_format
+):
+    quantization = {
+        "kv_cache_quant_algo": "MIXED_PRECISION",
+        "kv_cache_quantized_layers": {layer_name: {"quant_algo": quant_algo}},
+    }
+    postprocess_config = _get_kv_cache_postprocess_config(quantization)
+    original_key = f"{layer_name}.{side}_bmm_quantizer._amax"
+
+    assert _resolve_kv_cache_format_for_key(original_key, postprocess_config) == resolved_format
+
+    key, val = _postprocess_single_tensor(
+        original_key,
+        torch.tensor(224.0),
+        448.0,
+        postprocess_config,
+    )
+
+    assert key == f"{layer_name}.{side}_proj.{side}_scale"
+    assert val.item() == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(("side", "resolved_format"), [("k", KV_CACHE_FP8), ("v", KV_CACHE_NVFP4)])
+def test_postprocess_resolves_uniform_asymmetric_kv_format(side, resolved_format):
+    original_key = f"model.layers.0.self_attn.{side}_bmm_quantizer._amax"
+
+    assert _resolve_kv_cache_format_for_key(original_key, KV_CACHE_FP8_K_NVFP4_V) == resolved_format
+    key, val = _postprocess_single_tensor(
+        original_key,
+        torch.tensor(224.0),
+        448.0,
+        KV_CACHE_FP8_K_NVFP4_V,
+    )
+
+    assert key == f"model.layers.0.self_attn.{side}_proj.{side}_scale"
+    assert val.item() == pytest.approx(0.5)
 
 
 def test_postprocess_scale_squeezed():

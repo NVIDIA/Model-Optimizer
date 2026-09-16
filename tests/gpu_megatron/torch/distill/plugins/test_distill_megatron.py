@@ -16,6 +16,7 @@
 from functools import partial
 
 import torch
+import torch.nn as nn
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference_with_dummy_input
 from _test_utils.torch.misc import set_seed
@@ -23,9 +24,11 @@ from _test_utils.torch.misc import set_seed
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.plugins.megatron import (
     DistillationConfig,
+    _mtp_excluded_from_quantization,
     adjust_distillation_model_for_mcore,
     setup_distillation_config,
 )
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 SEED = 1234
 
@@ -318,3 +321,38 @@ def test_topk_logits_kl_loss(dist_workers, top_k: int = 5):
 def test_skip_lm_loss_with_mtp(dist_workers):
     """Test that skip_lm_loss only zeroes the main LM head, not MTP heads."""
     dist_workers.run(_test_skip_lm_loss_with_mtp)
+
+
+def test_mtp_excluded_from_quantization():
+    """MTP loss is skipped only when the model is quantized and MTP is left out of it."""
+
+    def _quantizer(enabled: bool) -> TensorQuantizer:
+        quantizer = TensorQuantizer()
+        if not enabled:
+            quantizer.disable()
+        return quantizer
+
+    def _model(*, with_mtp: bool, body_quant: bool, mtp_quant: bool) -> nn.Module:
+        model = nn.Module()
+        model.decoder = nn.Module()
+        if body_quant:
+            model.decoder.weight_quantizer = _quantizer(True)
+        if with_mtp:
+            model.mtp = nn.Module()
+            model.mtp.weight_quantizer = _quantizer(mtp_quant)
+        return model
+
+    # Plain distillation (e.g. pruning recovery) still trains the MTP head.
+    assert not _mtp_excluded_from_quantization(
+        _model(with_mtp=True, body_quant=False, mtp_quant=False)
+    )
+    # QAD with MTP excluded from the recipe: no quantization error to recover there.
+    assert _mtp_excluded_from_quantization(_model(with_mtp=True, body_quant=True, mtp_quant=False))
+    # QAD with a quantized MTP head: keep its loss.
+    assert not _mtp_excluded_from_quantization(
+        _model(with_mtp=True, body_quant=True, mtp_quant=True)
+    )
+    # No MTP at all.
+    assert not _mtp_excluded_from_quantization(
+        _model(with_mtp=False, body_quant=True, mtp_quant=False)
+    )

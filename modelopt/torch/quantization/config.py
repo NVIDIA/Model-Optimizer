@@ -759,15 +759,16 @@ class LayerwiseConfig(ModeloptBaseConfig):
         title="Export each layer's quantized checkpoint as soon as it is calibrated.",
         description=(
             "If set, each decoder layer is written to a quantized HF checkpoint shard in "
-            "this directory the moment its calibration finishes, leaving a complete, "
-            "loadable checkpoint when the last layer lands. Removes the separate "
+            "this directory the moment its calibration finishes, replacing the separate "
             "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Calibration writes only the layer shards; the checkpoint does not load until "
+            "``finalize()`` is called on the exporter attached to the model, which adds "
+            "the tail shard, the index and the config artifacts. "
             "Combined with ``checkpoint_dir``, an interrupted run resumes without "
             "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
-            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
-            "weight-tied quantized modules, multimodal and MTP models raise "
-            "NotImplementedError. The model left in memory afterwards is not valid for "
-            "inference if the run resumed."
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs "
+            "and weight-tied quantized modules raise NotImplementedError. Per-layer export "
+            "leaves the model in memory in export form, never valid for inference."
         ),
     )
 

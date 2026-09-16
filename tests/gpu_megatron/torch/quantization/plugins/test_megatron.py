@@ -15,7 +15,6 @@
 
 import copy
 import math
-import re
 import sys
 import types
 from contextlib import nullcontext
@@ -38,7 +37,9 @@ from _test_utils.torch.megatron.utils import (
     get_batch,
     get_forward,
     initialize_for_megatron,
+    load_distributed_checkpoint,
     run_mcore_inference,
+    save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
 from _test_utils.torch.misc import set_seed
@@ -49,9 +50,12 @@ from _test_utils.torch.quantization.quantize_common import (
     data_tensor_context_parallel_test_helper,
     verify_kv_cache_amax_sync,
 )
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
+    get_expert_model_parallel_rank,
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
@@ -62,15 +66,22 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    restore_sharded_modelopt_state,
+    save_sharded_modelopt_state,
+)
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _initialize_grouped_weight_quantizer_state,
+    _output_layer_extra_state_has_data,
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    keep_gpt_output_layer_extra_state,
     megatron_replace_quant_module_hook,
     quant_module_get_extra_state,
 )
@@ -1090,100 +1101,207 @@ def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
     )
 
 
-def _te_grouped_expert_identity_from_sharded_state(module):
-    """Return {local_key: (global_expert_idx, num_global_experts)} for per-expert amax shards.
+def _set_te_grouped_weight_quantizer_state(model, ep_rank, num_local_experts):
+    """Give every local expert distinct quantizer state derived from its global index."""
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                amax = getattr(leaf, "_amax", None)
+                if amax is not None:
+                    amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
+                global_amax = getattr(leaf, "_global_amax", None)
+                if global_amax is not None:
+                    global_amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
 
-    The grouped linear must give each fused expert the same global identity the weights use:
-    the dict key keeps the local expert index (maps to the local buffer on restore) while the
-    ShardedTensor carries the global expert offset. Called with sharded_offsets=() so the expert
-    axis is the (only) prepended axis at index 0.
-    """
-    sharded_sd = module.sharded_state_dict(prefix="", sharded_offsets=(), metadata=None)
-    identity = {}
-    for key, sh_ten in sharded_sd.items():
-        if re.match(r"weight_quantizer\.\d+\..*_amax$", key):
-            assert sh_ten.prepend_axis_num >= 1, f"{key}: expected a prepended expert axis"
-            identity[key] = (int(sh_ten.global_offset[0]), int(sh_ten.global_shape[0]))
-    return identity
+
+def _assert_te_grouped_weight_quantizer_state(model, expected_amax, expect_global_amax):
+    checked = 0
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                amax = getattr(leaf, "_amax", None)
+                assert amax is not None, (
+                    "TEGrouped per-expert weight quantizer amax was not restored"
+                )
+                checked += 1
+                assert torch.equal(amax, torch.full_like(amax, expected_amax[local_expert_idx]))
+                global_amax = getattr(leaf, "_global_amax", None)
+                if expect_global_amax:
+                    assert global_amax is not None, (
+                        "TEGrouped per-expert weight quantizer global_amax was not restored"
+                    )
+                    assert torch.equal(
+                        global_amax,
+                        torch.full_like(global_amax, expected_amax[local_expert_idx]),
+                    )
+    assert checked > 0, "no TEGrouped per-expert weight quantizer amax was checked"
 
 
-def _test_te_grouped_sharded_state_dict_global_expert_identity_helper(
-    tp_size, ep_size, quant_cfg, rank, size
+def test_initialize_grouped_weight_quantizer_state_for_restore():
+    """Missing grouped state inherits the shape and dtype of a populated sibling."""
+    source = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(
+        mtq.nn.TensorQuantizer(amax=torch.tensor([1.0, 2.0])), global_amax=torch.tensor(2.0)
+    )
+    target = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled.disable()
+    mx = mtq.nn.TensorQuantizer(
+        mtq.config.QuantizerAttributeConfig(
+            num_bits=(4, 3), block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+        )
+    )
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.empty(1))
+    model.num_gemms = 4
+    model.weight_quantizer = torch.nn.ModuleList([target, source, disabled, mx])
+
+    _initialize_grouped_weight_quantizer_state(model)
+
+    assert torch.equal(target.amax, torch.zeros_like(source.amax))
+    assert torch.equal(target.global_amax, torch.zeros_like(source.global_amax))
+    assert disabled.amax is None
+    assert disabled.global_amax is None
+    assert mx.amax is None
+    assert not hasattr(mx, "_amax")
+
+
+def _test_te_grouped_sharded_state_dict_reshard_helper(
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+    quant_cfg,
+    expect_global_amax,
+    checkpoint_path,
+    rank,
+    size,
 ):
-    """Per-expert quantizer amax must persist all num_global_experts across EP.
-
-    With EP>1 the base linear emitted ``weight_quantizer.{local_i}._amax`` at the local index with
-    no expert offset, so every rank wrote identical keys and torch_dist dedup collapsed them to a
-    single rank's experts. Assert each rank's fused experts now carry distinct global identities so
-    the union across ranks covers every global expert.
-    """
+    """Round-trip TEGroupedMLP amax through a topology change."""
+    num_experts = 4
+    save_num_local_experts = num_experts // save_ep_size
     initialize_for_megatron(
-        tensor_model_parallel_size=tp_size,
-        expert_model_parallel_size=ep_size,
+        tensor_model_parallel_size=save_tp_size,
+        expert_model_parallel_size=save_ep_size,
         seed=SEED,
     )
-    num_experts = 4
-    num_local = num_experts // ep_size
 
-    te_grouped = _gpt_model_provider(
-        tp_size=tp_size,
-        ep_size=ep_size,
+    source = _gpt_model_provider(
+        tp_size=save_tp_size,
+        ep_size=save_ep_size,
         hidden_size=32,
         moe_grouped_gemm=True,
         transformer_impl="transformer_engine",
         num_moe_experts=num_experts,
     )
-    forward = get_forward(te_grouped, batch_size=8)
-    for module in te_grouped.modules():
+    forward = get_forward(source, batch_size=8)
+    for module in source.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
-    mtq.quantize(te_grouped, quant_cfg, forward)
-
-    grouped_linears = [
-        m for m in te_grouped.modules() if isinstance(m, _QuantMegatronTEGroupedLinear)
-    ]
-    assert grouped_linears, "No grouped quant linears found"
-
-    expected_global = {rank * num_local + i for i in range(num_local)}
-    for linear in grouped_linears:
-        # Give each expert a distinct amax so a value mix-up would also be observable.
-        for i in range(linear.num_gemms):
-            wq = linear.weight_quantizer[i]
-            leaves = list(wq) if isinstance(wq, SequentialQuantizer) else [wq]
-            for leaf in leaves:
-                if hasattr(leaf, "_amax") and leaf._amax is not None:
-                    leaf._amax.fill_(1.0 + rank * num_local + i)
-
-        identity = _te_grouped_expert_identity_from_sharded_state(linear)
-        # One entry per local expert per amax buffer; dict keys keep the LOCAL index.
-        local_keys = {int(re.search(r"weight_quantizer\.(\d+)\.", k).group(1)) for k in identity}
-        assert local_keys == set(range(num_local)), (
-            f"Expected local expert keys {set(range(num_local))}, got {local_keys}"
-        )
-        # ShardedTensor global identity: this rank owns experts {rank*num_local + i}.
-        local_global = {gidx for gidx, _ in identity.values()}
-        assert local_global == expected_global, (
-            f"rank {rank}: expected global experts {expected_global}, got {local_global}"
-        )
-        assert all(total == num_experts for _, total in identity.values()), (
-            f"num_global_experts should be {num_experts}, got {identity}"
-        )
-
-    # Gather the global expert indices across all EP ranks: the union must cover every expert.
-    gathered = [None] * size
-    torch.distributed.all_gather_object(gathered, sorted(expected_global))
-    union = set()
-    for part in gathered:
-        union.update(part)
-    assert union == set(range(num_experts)), (
-        f"Union of global experts across EP ranks should be {set(range(num_experts))}, got {union}"
+    mtq.quantize(source, copy.deepcopy(quant_cfg), forward)
+    _set_te_grouped_weight_quantizer_state(
+        source, get_expert_model_parallel_rank(), save_num_local_experts
     )
+    save_distributed_checkpoint(checkpoint_path, source)
+    save_sharded_modelopt_state([source], checkpoint_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=load_tp_size,
+        expert_model_parallel_size=load_ep_size,
+        seed=SEED,
+    )
+    target = _gpt_model_provider(
+        tp_size=load_tp_size,
+        ep_size=load_ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=num_experts,
+    )
+    target_models = [target]
+    restore_sharded_modelopt_state(target_models, checkpoint_path)
+    target = target_models[0]
+    load_distributed_checkpoint(checkpoint_path, target)
+    load_num_local_experts = num_experts // load_ep_size
+    expected_amax = tuple(
+        range(
+            1 + get_expert_model_parallel_rank() * load_num_local_experts,
+            1 + (get_expert_model_parallel_rank() + 1) * load_num_local_experts,
+        )
+    )
+    _assert_te_grouped_weight_quantizer_state(target, expected_amax, expect_global_amax)
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_sharded_state_dict_global_expert_identity(dist_workers_size_2, quant_cfg):
+@pytest.mark.parametrize(
+    (
+        "quant_cfg",
+        "expect_global_amax",
+        "save_tp_size",
+        "save_ep_size",
+        "load_tp_size",
+        "load_ep_size",
+    ),
+    [
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 2, 1, 1, id="fp8-ep-downsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 1, 2, id="fp8-ep-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 2, 1, id="fp8-tp-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 2, 1, 1, 1, id="fp8-tp-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 2, 1, 1, id="nvfp4-ep-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 1, 2, id="nvfp4-ep-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 2, 1, id="nvfp4-tp-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 2, 1, 1, 1, id="nvfp4-tp-downsize"),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            2,
+            1,
+            1,
+            id="nvfp4-mse-ep-downsize",
+        ),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            1,
+            1,
+            2,
+            id="nvfp4-mse-ep-upsize",
+        ),
+    ],
+)
+def test_te_grouped_sharded_state_dict_reshard(
+    dist_workers_size_2,
+    tmp_path,
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+    quant_cfg,
+    expect_global_amax,
+):
     dist_workers_size_2.run(
-        partial(_test_te_grouped_sharded_state_dict_global_expert_identity_helper, 1, 2, quant_cfg)
+        partial(
+            _test_te_grouped_sharded_state_dict_reshard_helper,
+            save_tp_size,
+            save_ep_size,
+            load_tp_size,
+            load_ep_size,
+            quant_cfg,
+            expect_global_amax,
+            tmp_path,
+        )
     )
 
 
@@ -1925,3 +2043,109 @@ def test_output_layer_untied_not_stamped_onto_teacher_config():
 
     assert student.config.modelopt_output_layer_untied is True
     assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")
+
+
+# Captured at import, before any test can apply the patch, so tests can start from pristine mcore.
+_PRISTINE_GPT_SHARDED_STATE_DICT = GPTModel.sharded_state_dict
+
+
+def _stock_gpt_sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer.
+
+    Copied verbatim from ``GPTModel.sharded_state_dict`` in NVIDIA/Megatron-LM at ``be08ce5b1~1``
+    (Apache-2.0) so the patched path is exercised whichever megatron-core is installed.
+    """
+    sharded_state_dict = super(GPTModel, self).sharded_state_dict(prefix, sharded_offsets, metadata)
+    output_layer_extra_state_key = f"{prefix}output_layer._extra_state"
+    output_extra_state = sharded_state_dict.pop(output_layer_extra_state_key, None)
+    assert not (output_extra_state and output_extra_state.data), (
+        f"Expected output layer extra state to be empty, got: {output_extra_state}"
+    )
+    return sharded_state_dict
+
+
+class TestKeepGptOutputLayerExtraState:
+    """The GPTModel.sharded_state_dict patch that lets a quantized output_layer be checkpointed."""
+
+    @pytest.fixture(autouse=True)
+    def pristine_gpt_model(self):
+        """Run against unpatched megatron-core, then restore whatever the session had."""
+        applied = GPTModel.sharded_state_dict
+        GPTModel.sharded_state_dict = _PRISTINE_GPT_SHARDED_STATE_DICT
+        keep_gpt_output_layer_extra_state.cache_clear()
+        yield
+        GPTModel.sharded_state_dict = applied
+        keep_gpt_output_layer_extra_state.cache_clear()
+
+    @staticmethod
+    def _sharded_state_dict(entries: dict) -> dict:
+        """Run GPTModel.sharded_state_dict over a canned parent state dict, no built model needed."""
+        model = GPTModel.__new__(GPTModel)
+        with patch.object(LanguageModule, "sharded_state_dict", return_value=dict(entries)):
+            return GPTModel.sharded_state_dict(model, prefix="")
+
+    def test_keeps_populated_extra_state(self):
+        """Fails if neither our patch nor megatron-core itself keeps a quantized output_layer."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict(
+            {
+                "output_layer.weight": torch.ones(4),
+                "output_layer._extra_state": SimpleNamespace(data=b"quantizer_state"),
+            }
+        )
+        assert "output_layer._extra_state" in sharded
+
+    @pytest.mark.parametrize("empty", [None, SimpleNamespace(data=None), SimpleNamespace(data=b"")])
+    def test_drops_empty_extra_state(self, empty):
+        """Upstream behaviour for the placeholder an unquantized output_layer contributes."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict({"output_layer._extra_state": empty})
+        assert "output_layer._extra_state" not in sharded
+
+    def test_patches_stock_megatron_core(self):
+        """Pins the patched path: stock mcore matches the fingerprint and stops losing the entry."""
+        GPTModel.sharded_state_dict = _stock_gpt_sharded_state_dict
+        populated = {"output_layer._extra_state": SimpleNamespace(data=b"quantizer_state")}
+        with pytest.raises(AssertionError, match="Expected output layer extra state to be empty"):
+            self._sharded_state_dict(populated)
+
+        assert keep_gpt_output_layer_extra_state()
+        assert "output_layer._extra_state" in self._sharded_state_dict(populated)
+        assert "output_layer._extra_state" not in self._sharded_state_dict(
+            {"output_layer._extra_state": SimpleNamespace(data=b"")}
+        )
+
+    def test_second_call_is_a_no_op(self):
+        """Idempotent: @cache runs the body once, so a repeat call cannot stack a second patch."""
+        first = keep_gpt_output_layer_extra_state()
+        after_first = GPTModel.sharded_state_dict
+        assert keep_gpt_output_layer_extra_state() == first
+        assert keep_gpt_output_layer_extra_state.cache_info().hits >= 1
+        assert GPTModel.sharded_state_dict is after_first
+
+    def test_unrecognised_upstream_is_left_alone(self):
+        """An mcore whose body we do not recognise keeps its own logic, with a warning."""
+
+        def unrecognised(self, prefix="", sharded_offsets=(), metadata=None):
+            return {"untouched": True}
+
+        GPTModel.sharded_state_dict = unrecognised
+        with pytest.warns(UserWarning, match="not the version ModelOpt patches"):
+            assert not keep_gpt_output_layer_extra_state()
+        assert GPTModel.sharded_state_dict is unrecognised
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            (None, False),
+            (torch.empty(0, dtype=torch.uint8), False),
+            (torch.ones(4, dtype=torch.uint8), True),
+            (SimpleNamespace(data=None), False),
+            (SimpleNamespace(data=b""), False),
+            (SimpleNamespace(data=b"quantizer_state"), True),
+            (SimpleNamespace(data=torch.empty(0, dtype=torch.uint8)), False),
+            (SimpleNamespace(data=torch.ones(4, dtype=torch.uint8)), True),
+        ],
+    )
+    def test_extra_state_has_data(self, entry, expected):
+        assert _output_layer_extra_state_has_data(entry) is expected

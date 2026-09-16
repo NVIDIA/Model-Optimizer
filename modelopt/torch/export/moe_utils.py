@@ -75,13 +75,16 @@ def _export_fused_experts(
     dropped by name in ``postprocess_state_dict`` (the single dedup authority).
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
     # Gated experts fuse gate+up into ``gate_up_proj`` and must be split on export;
     is_gated = getattr(module, "_is_gated", True)
     first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
+    # Deferred: the huggingface plugin imports transformers at module scope, and transformers is
+    # an optional extra.
+    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
+
     expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
 
     # 1. Shared input quantizers — one per projection type, shared across all experts.

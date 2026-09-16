@@ -26,6 +26,7 @@ import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, distribution
 
 import onnxruntime as ort
@@ -35,7 +36,7 @@ from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
-from modelopt.onnx.quantization.ort_patching import patch_ort_modules
+from modelopt.onnx.quantization.ort_patching import _configure_session_providers, patch_ort_modules
 
 
 def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
@@ -321,6 +322,7 @@ def _check_for_nv_tensorrt_rtx_libs():
 def _prepare_ep_list(
     calibration_eps: list[str],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ):
     """Prepares the EP list for ORT from the given user input."""
     logger.debug(f"Preparing execution providers list from: {calibration_eps}")
@@ -362,7 +364,34 @@ def _prepare_ep_list(
         elif "cpu" in ep:
             _append_provider(providers, i, "CPUExecutionProvider")
             logger.debug("Added CPU EP")
-        elif "NvTensorRtRtx" in ep:
+        elif ep == "NvTensorRtRtx":
+            if trt_rtx_backend == "abi":
+                try:
+                    trt_rtx_ep = import_module("onnxruntime_ep_nv_tensorrt_rtx")
+                except ImportError as e:
+                    raise ImportError(
+                        "TensorRT-RTX ABI was requested, but "
+                        "onnxruntime-ep-nv-tensorrt-rtx-cu13 is not installed."
+                    ) from e
+
+                ep_name = trt_rtx_ep.get_ep_name()  # "nv_tensorrt_rtx"
+                ep_devices = [
+                    device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                ]
+                if not ep_devices:
+                    ort.register_execution_provider_library(ep_name, trt_rtx_ep.get_library_path())
+                    logger.debug(f"Registered TensorRT-RTX ABI EP: {ep_name}")
+                    ep_devices = [
+                        device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                    ]
+                if not ep_devices:
+                    raise RuntimeError(f"No devices found for TensorRT-RTX ABI EP {ep_name!r}")
+                _append_provider(providers, i, ep_name)
+                logger.debug(f"Added TensorRT-RTX ABI EP: {ep_name}")
+                continue
+            if trt_rtx_backend != "legacy":
+                logger.error(f"Unrecognized trt-rtx backend: {trt_rtx_backend}")
+                raise NotImplementedError(f"Trt-rtx backend {trt_rtx_backend} not recognized!")
             try:
                 _check_for_nv_tensorrt_rtx_libs()
                 _append_provider(providers, i, "NvTensorRTRTXExecutionProvider")
@@ -546,9 +575,13 @@ def create_inference_session(
     onnx_path_or_model: str | bytes,
     calibration_eps: list[str],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ):
     """Create an ORT InferenceSession."""
     logger.info("Creating ORT InferenceSession")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     if input_shapes_profile is not None:
@@ -567,12 +600,13 @@ def create_inference_session(
                     logger.debug(
                         f"Input-Shapes-Profile: EP: {calibration_eps[i]}, key: {k}, value: {v}"
                     )
-    providers = _prepare_ep_list(calibration_eps, input_shapes_profile)
+    providers = _prepare_ep_list(calibration_eps, input_shapes_profile, trt_rtx_backend)
     logger.debug(f"Creating session with providers: {providers}")
+    provider_kwargs = _configure_session_providers(sess_options, providers, trt_rtx_backend)
     return ort.InferenceSession(
         onnx_path_or_model,
         sess_options=sess_options,
-        providers=providers,
+        **provider_kwargs,
     )
 
 
@@ -604,9 +638,12 @@ def configure_ort(
     custom_ops_to_quantize: list[str] = [],
     op_types_needing_output_quant: list[str] | None = None,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ):
     """Configure and patches ORT to support ModelOpt ONNX quantization."""
     logger.info("Configuring ORT for ModelOpt ONNX quantization")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
     if calibration_eps is None:
         calibration_eps = ["cpu", "cuda:0", "trt"]
 
@@ -662,7 +699,7 @@ def configure_ort(
     ]
     if trt_extra_plugin_lib_paths is not None:
         trt_extra_plugin_lib_paths = ";".join(trt_extra_plugin_lib_paths)
-    execution_providers = _prepare_ep_list(calibration_eps, input_shapes_profile)
+    execution_providers = _prepare_ep_list(calibration_eps, input_shapes_profile, trt_rtx_backend)
 
     trt_guided_options = {
         "QuantizeBias": False,
@@ -681,6 +718,7 @@ def configure_ort(
         ),
         "TrtExtraPluginLibraryPaths": trt_extra_plugin_lib_paths,
         "ExecutionProviders": execution_providers,
+        "TrtRtxBackend": trt_rtx_backend,
     }
 
     quantizable_op_types = get_quantizable_op_types(op_types_to_quantize)

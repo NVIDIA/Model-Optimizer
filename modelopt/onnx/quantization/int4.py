@@ -557,7 +557,10 @@ def _quantize_awq_clip(
 
         # Creating inference session and preparing inputs for calibration
         session = create_inference_session(
-            augmented_onnx_path, calibration_eps, input_shapes_profile
+            augmented_onnx_path,
+            calibration_eps,
+            input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         inputs = []
         for inp_d in data_reader:
@@ -1114,7 +1117,10 @@ def _quantize_awq_lite(
 
         # Creating inference session and preparing inputs for calibration
         session = create_inference_session(
-            augmented_onnx_path, calibration_eps, input_shapes_profile
+            augmented_onnx_path,
+            calibration_eps,
+            input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         inputs = []
         for inp_d in data_reader:

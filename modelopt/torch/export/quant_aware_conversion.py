@@ -278,7 +278,7 @@ def build_reverse_name_mapper(model):
 
 
 def revert_quant_config_names(quantization: dict, mapper) -> None:
-    """Revert ``exclude_modules`` / ``quantized_layers`` keys to hub names, in place.
+    """Revert layer-reference keys to hub names, in place.
 
     ``mapper`` is the callable from :func:`build_reverse_name_mapper` (a no-op when
     ``None``). Applies to the ModelOpt ``{"quantization": {...}}`` sub-dict before it is
@@ -293,6 +293,11 @@ def revert_quant_config_names(quantization: dict, mapper) -> None:
     quantized_layers = quantization.get("quantized_layers")
     if isinstance(quantized_layers, dict) and quantized_layers:
         quantization["quantized_layers"] = {mapper(k): v for k, v in quantized_layers.items()}
+    kv_cache_quantized_layers = quantization.get("kv_cache_quantized_layers")
+    if isinstance(kv_cache_quantized_layers, dict) and kv_cache_quantized_layers:
+        quantization["kv_cache_quantized_layers"] = {
+            mapper(k): v for k, v in kv_cache_quantized_layers.items()
+        }
 
 
 def _assert_experts_pre_expanded(
@@ -324,11 +329,14 @@ def _scope_prefixes(rev) -> tuple[str, ...]:
     """Candidate key prefixes a scoped sub-model transform may apply under.
 
     transformers tags a conversion collected from a sub-model with ``scope_prefix`` (the
-    sub-module path) and ``base_model_prefix``, then matches keys against
-    ``base_model_prefix.scope_prefix.`` first and ``scope_prefix.`` second (see
-    ``WeightTransform._scoped_match``). Returned in that same priority order, each with a
-    trailing dot. Empty tuple when the transform is unscoped (owned by the root model),
-    in which case its patterns already address the full key space.
+    sub-module path). Older versions also tagged a ``base_model_prefix`` and matched keys
+    against ``base_model_prefix.scope_prefix.`` first and ``scope_prefix.`` second;
+    transformers>=5.9 dropped ``base_model_prefix`` and ``WeightTransform._scoped_match``
+    now keys off ``scope_prefix`` alone. The ``getattr`` fallback below covers both: an
+    absent ``base_model_prefix`` collapses to just the ``scope_prefix.`` candidate.
+    Returned in priority order, each with a trailing dot. Empty tuple when the transform is
+    unscoped (owned by the root model), in which case its patterns already address the full
+    key space.
     """
     scope = getattr(rev, "scope_prefix", None)
     if scope is None:

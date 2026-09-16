@@ -17,11 +17,16 @@ import json
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 import transformers
-from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_exported_checkpoint_matches,
+    assert_per_expert_experts_complete,
+)
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
@@ -149,8 +154,8 @@ def _test_unified_export_megatron(
             "moe_shared_expert_gate": True,
             # Match the HF layer_types pattern (every Nth layer is full attention, rest GDN).
             "linear_attention_freq": len(text_cfg.layer_types),
-            # Both layouts must reach the same packed HF tensors, via GroupedMLPPacking
-            # (TEGroupedMLP) and PackNameRemapping (SequentialMLP) respectively.
+            # Both layouts must reach the same per-expert HF tensors, via
+            # GroupedGatedMLPSlicing (TEGroupedMLP) and GatedMLPSlicing (SequentialMLP).
             "moe_grouped_gemm": model_type.endswith("grouped"),
         }
     elif model_type == "qwen3_moe":
@@ -244,13 +249,24 @@ def _test_unified_export_megatron(
 
     if rank == 0 and extra_module is None:
         # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
+        allow_missing = ()
+        # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
+        allow_unexpected = ("mlp.gate.expert_bias",)
+        if model_type.startswith("qwen3_5_moe_vl"):
+            # The BF16 source packs routed experts; quantized export writes them per expert, as
+            # the released NVFP4 checkpoints do. Both sides of that expansion differ from the
+            # reference, so assert_per_expert_experts_complete below carries the real coverage.
+            allow_missing = ("mlp.experts.gate_up_proj", "mlp.experts.down_proj")
+            allow_unexpected += ("mlp.experts.",)
         assert_exported_checkpoint_matches(
             tmp_export_dir,
             model_dir,
             check_values=False,
-            # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
-            allow_unexpected=("mlp.gate.expert_bias",),
+            allow_missing=allow_missing,
+            allow_unexpected=allow_unexpected,
         )
+        if model_type.startswith("qwen3_5_moe_vl"):
+            assert_per_expert_experts_complete(tmp_export_dir)
 
     if model_type == "qwen3vl" and rank == 0:
         # try to load the model and run a forward pass
@@ -650,6 +666,25 @@ class _FakeTEGroupedMLP:
         return dict(self._weights)
 
 
+def test_verify_exported_keys_cannot_see_a_dropped_sibling_under_an_expanded_container(tmp_path):
+    """Documented limit: the check is prefix-level, so a sibling dropped under a container that
+    was already expanded is invisible here. assert_per_expert_experts_complete covers that.
+    """
+    source, export = tmp_path / "src", tmp_path / "exp"
+    _write_index(
+        source, ["model.layers.0.mlp.experts.gate_up_proj", "model.layers.0.mlp.experts.down_proj"]
+    )
+    _write_index(
+        export,
+        [
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            "model.layers.0.mlp.experts.0.up_proj.weight",
+        ],
+    )  # down_proj dropped
+
+    _make_exporter_for_key_check(num_layers=1)._verify_exported_keys(str(export), str(source))
+
+
 def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
     exporter = object.__new__(GPTModelExporter)
     exporter.dtype = torch.bfloat16
@@ -657,6 +692,7 @@ def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
     exporter._get_quantized_state = lambda *a, **k: ({}, None, 0)
     exporter._get_weight_scales = lambda *a, **k: (None, None)
     exporter._record_layer_quant_config = lambda *a, **k: None
+    exporter.exclude_modules = []
     return exporter
 
 
@@ -690,6 +726,94 @@ def test_grouped_mlp_slicing_normalizes_tensor_local_expert_indices():
 
     assert "experts.6.gate_up_proj.weight" in exporter._state_dict
     assert "experts.7.gate_up_proj.weight" in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_splits_gate_up_per_expert():
+    """Quantized Qwen3.5 export writes gate_proj / up_proj / down_proj per expert."""
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=2, hidden=8, ffn=16, local_expert_indices=[0, 1])
+
+    exporter._grouped_mlp_slicing(
+        module, "experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
+    )
+
+    for expert in (0, 1):
+        gate = exporter._state_dict[f"experts.{expert}.gate_proj.weight"]
+        up = exporter._state_dict[f"experts.{expert}.up_proj.weight"]
+        assert gate.shape == (8, 8) and up.shape == (8, 8)
+        torch.testing.assert_close(gate, module.state_dict()[f"weight{expert}"][:8])
+        torch.testing.assert_close(up, module.state_dict()[f"weight{expert}"][8:])
+
+
+def test_grouped_mlp_slicing_splits_per_block_scale_and_replicates_scale_2():
+    """A per-block weight_scale is sliced with the weight; the scalar weight_scale_2 is shared."""
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=1, hidden=8, ffn=16, local_expert_indices=[0])
+    weight_scale = torch.arange(16, dtype=torch.float32).reshape(16, 1)
+    weight_scale_2 = torch.tensor(0.5)
+    exporter._get_weight_scales = lambda *a, **k: (weight_scale, weight_scale_2)
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": None}, "NVFP4", 16)
+    recorded: list[str] = []
+    exporter._record_layer_quant_config = lambda prefix, *a, **k: recorded.append(prefix)
+
+    with patch(
+        "modelopt.torch.export.unified_export_megatron.to_quantized_weight",
+        side_effect=lambda w, *a, **k: w,
+    ):
+        exporter._grouped_mlp_slicing(
+            module, "experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
+        )
+
+    torch.testing.assert_close(
+        exporter._state_dict["experts.0.gate_proj.weight_scale"], weight_scale[:8]
+    )
+    torch.testing.assert_close(
+        exporter._state_dict["experts.0.up_proj.weight_scale"], weight_scale[8:]
+    )
+    for proj in ("gate_proj", "up_proj"):
+        torch.testing.assert_close(
+            exporter._state_dict[f"experts.0.{proj}.weight_scale_2"], weight_scale_2
+        )
+    assert set(recorded) == {"experts.0.gate_proj.", "experts.0.up_proj."}
+
+
+def test_grouped_mlp_slicing_scalar_scale_is_shared_by_both_shards():
+    """A 0-dim scale has no output dim to slice, so both projections reuse it."""
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=1, hidden=8, ffn=16, local_expert_indices=[0])
+    scale = torch.tensor(0.25)
+    exporter._get_weight_scales = lambda *a, **k: (scale, None)
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": None}, "FP8", 0)
+
+    with patch(
+        "modelopt.torch.export.unified_export_megatron.to_quantized_weight",
+        side_effect=lambda w, *a, **k: w,
+    ):
+        exporter._grouped_mlp_slicing(
+            module, "experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
+        )
+
+    for proj in ("gate_proj", "up_proj"):
+        torch.testing.assert_close(exporter._state_dict[f"experts.0.{proj}.weight_scale"], scale)
+
+
+def test_grouped_mlp_slicing_records_unquantized_experts_as_excluded():
+    """exclude_modules is an explicit list: unquantized experts must be named in it, or a
+    mixed-precision checkpoint leaves the runtime no signal for them.
+    """
+    exporter = _make_exporter_for_grouped_mlp()  # stub yields qformat None
+    module = _FakeTEGroupedMLP(num_gemms=2, local_expert_indices=[0, 1])
+
+    exporter._grouped_mlp_slicing(
+        module, "experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
+    )
+
+    assert set(exporter.exclude_modules) == {
+        "experts.0.gate_proj",
+        "experts.0.up_proj",
+        "experts.1.gate_proj",
+        "experts.1.up_proj",
+    }
 
 
 def test_grouped_mlp_slicing_collects_all_missing_expert_weights():
@@ -731,3 +855,39 @@ def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
     monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
     monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 1)
     assert GPTModelExporter._is_sidecar_writer_rank(True) is False
+
+
+def _make_exporter_for_key_check(num_layers: int) -> GPTModelExporter:
+    exporter = object.__new__(GPTModelExporter)
+    exporter.model = SimpleNamespace(config=SimpleNamespace(num_layers=num_layers))
+    return exporter
+
+
+def _write_index(dir_path: Path, keys) -> None:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys(keys, "model-00001.safetensors")})
+    )
+
+
+@pytest.mark.parametrize(
+    ("exported", "raises"),
+    [
+        # Packed source expanded into per-expert entries: not a drop.
+        (["model.layers.0.mlp.experts.0.gate_proj.weight"], False),
+        # Module genuinely absent: nothing lives under its prefix.
+        (["model.layers.0.self_attn.q_proj.weight"], True),
+    ],
+)
+def test_verify_exported_keys_accepts_expansion_but_still_catches_drops(tmp_path, exported, raises):
+    """The self-check must tolerate one source module expanding into several exported ones."""
+    source, export = tmp_path / "src", tmp_path / "exp"
+    _write_index(source, ["model.layers.0.mlp.experts.gate_up_proj"])
+    _write_index(export, exported)
+    exporter = _make_exporter_for_key_check(num_layers=1)
+
+    if raises:
+        with pytest.raises(RuntimeError, match="Export dropped"):
+            exporter._verify_exported_keys(str(export), str(source))
+    else:
+        exporter._verify_exported_keys(str(export), str(source))

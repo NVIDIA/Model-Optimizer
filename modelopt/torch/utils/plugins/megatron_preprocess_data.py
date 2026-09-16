@@ -203,11 +203,9 @@ class _Encoder:
                 try:
                     text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
                 except Exception as e:
-                    print(
-                        f"apply_chat_template failed: {e}\nData:\n{json.dumps(data, indent=2, default=str)}",
-                        flush=True,
-                    )
-                    raise
+                    # Skip as above: raising here escapes the worker and deadlocks the pool.
+                    print(f"[WARN] Skipping record whose chat template failed: {e}", flush=True)
+                    return {}, {}, (0, 0)
                 # chat template already embeds all special tokens; don't add BOS again
                 add_special_tokens = False
             else:

@@ -224,6 +224,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "head_dim": 8,
         "max_position_embeddings": 32,
         "vocab_size": 32,
+        "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
     # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
     # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.
@@ -419,9 +420,9 @@ def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) 
 def _pack_qwen3_5_moe_experts(dir_path: Path | str) -> None:
     """Repack a saved Qwen3.5-MoE fixture's experts the way released checkpoints store them.
 
-    transformers unpacks routed experts into per-expert ``experts.{i}.*`` on save, but every real
-    Qwen3.5 checkpoint stores them packed as ``experts.gate_up_proj`` / ``experts.down_proj``.
-    Without this the fixture would push the exporter toward a layout no real checkpoint uses.
+    transformers unpacks routed experts on save, but the released BF16 Qwen3.5 checkpoints store
+    them packed as ``experts.gate_up_proj`` / ``experts.down_proj``, so the fixture matches those.
+    Quantized export deliberately writes per-expert instead, matching the NVFP4 releases.
     """
     dir_path = Path(dir_path)
     shards = sorted(dir_path.glob("*.safetensors"))

@@ -62,9 +62,15 @@ venv/
 **.pickle
 **.tar.gz
 
-# Ignore claude local settings
+# Ignore claude local settings and runtime agent state
 .claude/settings.local.json
-.claude/agents/
+.claude/agents/*
+!.claude/agents/modelopt-model-deployer.md
+!.claude/agents/modelopt-model-downloader.md
+!.claude/agents/modelopt-model-evaluator.md
+!.claude/agents/modelopt-model-performance-benchmarker.md
+!.claude/agents/modelopt-model-quantize-recipe-searcher.md
+!.claude/agents/modelopt-model-quantizer.md
 CLAUDE.local.md
 AGENTS.override.md
 

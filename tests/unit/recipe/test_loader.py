@@ -28,14 +28,22 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
+    AutoQuantizeCost,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
     ModelOptPTQRecipe,
     RecipeType,
 )
-from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
-from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
+from modelopt.recipe.loader import _apply_dotlist, _resolve_recipe_path, load_config, load_recipe
+from modelopt.torch.opt.config_loader import (
+    _alias_builtin_recipe_prefix,
+    _load_raw_config,
+    _resolve_config_path,
+    _schema_type,
+)
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 
@@ -157,26 +165,140 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
+def _first_builtin_ptq_recipe(root: Path, glob_pattern: str) -> Path:
+    """Deterministically pick the first built-in *PTQ* recipe matching *glob_pattern*.
+
+    ``glob`` order is filesystem-dependent (NTFS returns entries sorted, ext4 does not), and
+    recipe directories also hold non-recipe ``$import`` fragments (e.g. ``*.quant_cfg.yaml``,
+    ``disabled_quantizers.yaml``) that are not loadable on their own. Sorting makes the pick
+    stable across platforms; skipping anything that does not load as a PTQ recipe keeps those
+    fragments from being mistaken for one.
+    """
+    for path in sorted(root.glob(glob_pattern)):
+        rel = str(path.relative_to(root).with_suffix(""))
+        try:
+            if load_recipe(rel).recipe_type == RecipeType.PTQ:
+                return path
+        except Exception:
+            continue
+    raise AssertionError(f"no built-in PTQ recipe matched {glob_pattern!r} under {root}")
+
+
+def test_load_recipe_huggingface_arch_backward_compat_alias():
+    """Old ``huggingface/<model_type>/...`` recipe paths resolve to the renamed
+    ``model_type/`` tier.
+
+    ``huggingface/`` was renamed to ``model_type/``. A source checkout keeps a
+    ``huggingface`` -> ``model_type`` symlink, but symlinks don't survive into built
+    wheels, so the loader rewrites the prefix directly. This guards that saved
+    ``--recipe huggingface/<model_type>/...`` paths keep working for pip-installed
+    users, not just source checkouts.
+    """
+    root = Path(str(files("modelopt_recipes")))
+    sample = _first_builtin_ptq_recipe(root, "model_type/*/ptq/*.yaml")
+    new_path = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
+    old_path = "huggingface/" + new_path[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
+
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(old_path)
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
 def test_load_recipe_huggingface_models_backward_compat_alias():
     """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
     top-level ``models/`` tier.
 
-    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
-    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
-    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
-    pip-installed users, not just source checkouts.
+    The ``huggingface/models/`` prefix is more specific than the ``huggingface/`` ->
+    ``model_type/`` rename and must win: checkpoint mirrors moved all the way out to
+    the top-level ``models/`` tier. A source checkout keeps the
+    ``huggingface`` -> ``model_type`` -> ``models`` symlink chain, but symlinks don't
+    survive into built wheels, so the loader rewrites the prefix directly. This guards
+    that saved ``--recipe huggingface/models/...`` paths keep working for pip-installed
+    users, not just source checkouts.
     """
-    from modelopt.recipe.loader import _resolve_recipe_path
-
     root = Path(str(files("modelopt_recipes")))
-    sample = next(root.glob("models/*/*/ptq/*.yaml"))
+    sample = _first_builtin_ptq_recipe(root, "models/*/*/ptq/*.yaml")
     new_path = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
     old_path = "huggingface/" + new_path  # huggingface/models/<org>/<model>/ptq/<file>
 
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(old_path)
     assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
-    recipe = load_recipe(old_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def test_load_recipe_model_type_models_alias_resolves_like_wheel():
+    """``model_type/models/<org>/<model_id>/...`` resolves to the top-level ``models/`` tier.
+
+    ``model_type/models`` is a source-only ``../models`` symlink that packaging prunes, so
+    without the loader alias the path would resolve in a checkout but 404 from a built wheel.
+    The alias rewrites the prefix to ``models/`` so both behave identically.
+    """
+    root = Path(str(files("modelopt_recipes")))
+    sample = _first_builtin_ptq_recipe(root, "models/*/*/ptq/*.yaml")
+    canonical = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
+    aliased = "model_type/" + canonical  # model_type/models/<org>/<model>/ptq/<file>
+
+    with pytest.warns(FutureWarning, match="deprecated recipe-tier prefix"):
+        recipe = load_recipe(aliased)
+    assert str(_resolve_recipe_path(aliased)) == str(_resolve_recipe_path(canonical))
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def test_load_recipe_local_tree_overrides_builtin_even_on_name_collision(tmp_path, monkeypatch):
+    """A local recipe tree overrides a built-in of the same name — even when the name
+    collides with a shipped ``model_type``.
+
+    ``_resolve_recipe_path`` probes the filesystem before the built-in library (matching
+    ``config_loader._resolve_config_path``), so a user who keeps their own recipe tree on disk
+    is never silently shadowed by the deprecated-tier alias. This uses a *shipped* recipe's
+    exact relative path, spelled with the old ``huggingface/`` prefix that aliases to it, to
+    prove the local file wins over the built-in — the collision case a non-shipped name misses.
+    """
+    root = Path(str(files("modelopt_recipes")))
+    shipped = _first_builtin_ptq_recipe(root, "model_type/*/ptq/*.yaml")
+    # The path a user would keep locally: the shipped recipe's own relative path, but under the
+    # deprecated ``huggingface/`` tier that the alias rewrites to ``model_type/``.
+    old_rel = Path("huggingface") / shipped.relative_to(root).relative_to("model_type")
+
+    local = tmp_path / old_rel
+    local.parent.mkdir(parents=True)
+    local.write_text(
+        "metadata:\n  recipe_type: ptq\nquantize:\n  quant_cfg: {}\n  algorithm: max\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_recipe_path(str(old_rel.with_suffix("")))
+    assert Path(resolved).resolve() == local.resolve()
+
+
+def test_import_resolution_honors_huggingface_alias():
+    """``$import`` resolution rewrites deprecated tier prefixes just like ``load_recipe``.
+
+    ``$import`` paths go through ``config_loader._resolve_config_path`` (not the recipe-path
+    alias), so a custom recipe that imports a shipped snippet by its old ``huggingface/...``
+    path must still resolve from a wheel where the ``huggingface`` symlink is gone.
+    """
+    # Prefix-rewrite mapping: architecture rename plus both checkpoint-mirror aliases.
+    assert _alias_builtin_recipe_prefix("huggingface/qwen3_vl/ptq/x") == "model_type/qwen3_vl/ptq/x"
+    assert (
+        _alias_builtin_recipe_prefix("huggingface/models/nvidia/m/ptq/x") == "models/nvidia/m/ptq/x"
+    )
+    assert (
+        _alias_builtin_recipe_prefix("model_type/models/nvidia/m/ptq/x") == "models/nvidia/m/ptq/x"
+    )
+    assert _alias_builtin_recipe_prefix("general/ptq/x") == "general/ptq/x"  # untouched
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("model_type/*/ptq/*.yaml"))
+    canonical = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
+    old = "huggingface/" + canonical[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
+
+    assert str(_resolve_config_path(old)) == str(_resolve_config_path(canonical))
 
 
 def _all_shipped_ptq_recipe_paths():
@@ -198,7 +320,7 @@ def _all_shipped_ptq_recipe_paths():
 
 
 # Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
-# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# recipe — general/, model_type/<model_type>/, and models/<org>/<model_id>/ — and
 # never drift as recipes are added, moved, or removed.
 _BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
 
@@ -1799,6 +1921,22 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.module_search_spaces == []
 
 
+def test_autoquantize_constraints_use_effective_bits_for_kv_cost_model():
+    assert AutoQuantizeConstraints.model_fields["effective_bits"].default == 4.8
+    assert AutoQuantizeConstraints().effective_bits == 4.8
+
+    constraints = AutoQuantizeConstraints(effective_bits=5.4, cost_model="kv_cache")
+    assert constraints.effective_bits == 5.4
+    assert constraints.cost_model == "kv_cache"
+
+    with pytest.raises(ValueError, match="does not accept weight cost settings"):
+        AutoQuantizeConstraints(
+            effective_bits=5.4,
+            cost_model="kv_cache",
+            cost=AutoQuantizeCost(active_moe_expert_ratio=0.5),
+        )
+
+
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
     """cost_model + cost.active_moe_expert_ratio parse and dump to the mtq constraints dict shape."""
     recipe_file = tmp_path / "aq.yml"
@@ -1886,10 +2024,10 @@ def test_load_recipe_autoquantize_builtin_active_moe():
 def test_load_recipe_autoquantize_module_search_spaces():
     """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
     recipe = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     aq = recipe.auto_quantize
-    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    model_ptq = load_recipe("model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
     assert recipe.quantize is not None
     assert recipe.quantize == model_ptq.quantize
     assert aq.candidate_formats == []
@@ -1938,6 +2076,7 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
     [
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
         "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe",
@@ -1949,11 +2088,45 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
-    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
-    # them unconditionally, so a general recipe is the migration target and must match it. Without
-    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
     assert "*output_layer*" in recipe.auto_quantize.disabled_layers
-    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+    if recipe.auto_quantize.constraints.cost_model == "kv_cache":
+        assert "*mtp*" in recipe.auto_quantize.disabled_layers
+        assert recipe.auto_quantize.cost_excluded_layers == []
+    else:
+        assert recipe.auto_quantize.cost_excluded_layers == [
+            "*visual*",
+            "*mtp*",
+            "*vision_tower*",
+        ]
+
+
+def test_load_recipe_kv_autoquantize_contract():
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    aq = recipe.auto_quantize
+
+    assert aq.constraints.effective_bits == 5.4
+    assert aq.constraints.cost_model == "kv_cache"
+    assert aq.auto_quantize_method == "kl_div"
+    assert "*mtp*" in aq.disabled_layers
+    assert aq.cost_excluded_layers == []
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
+    for fmt in aq.candidate_formats:
+        for entry in fmt.quant_cfg:
+            assert entry.quantizer_name == "*[kv]_bmm_quantizer"
+            assert not entry.cfg.use_constant_amax
+            assert entry.cfg.constant_amax == 448.0
+        assert fmt.algorithm is None
+
+
+def test_kv_autoquantize_rejects_cost_excluded_layers():
+    with pytest.raises(ValueError, match=r"cost_excluded_layers.*disabled_layers"):
+        AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(effective_bits=8.0, cost_model="kv_cache"),
+            candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], effective_bits=8.0)],
+            auto_quantize_method="kl_div",
+            cost_excluded_layers=["*mtp*"],
+        )
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)

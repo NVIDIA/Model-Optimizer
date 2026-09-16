@@ -461,6 +461,7 @@ class HFDSparkModel(HFDFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
+        self._require_autocast_for_promoted_draft(device)
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
