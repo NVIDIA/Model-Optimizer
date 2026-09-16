@@ -153,7 +153,7 @@ Set `RANK`/`WORLD_SIZE`/`LOCAL_RANK` from `SLURM_PROCID`/`SLURM_NTASKS`/`SLURM_L
 
 QAD fine-tunes the quantized student against the BF16 teacher, so the student learns weights that survive 4-bit rounding. See the [QAD section of the Megatron-Bridge README](../../README.md#quantization-aware-distillation-qad).
 
-Minimum hardware: the student and teacher are both resident, plus an fp32 gradient buffer and optimizer state — roughly 124 GB/GPU of the 185 GiB on a GB200 at the settings below. We used **32 nodes × 4 GB200 (128 GPUs)**; 500 iterations took **5.7 hours wall-clock (~735 GB200 GPU-hours)**. Steady-state training is ~37 s/iter (3.1 h of the total); the remaining ~35 min is per-job startup, loading the 67 GiB teacher and the student — the run was split across two 4-hour jobs, so that cost is paid twice.
+Minimum hardware: the student and teacher are both resident, plus an fp32 gradient buffer and optimizer state — roughly 124 GB/GPU of the 185 GiB on a GB200 at the settings below. We used **32 nodes × 4 GB200 (128 GPUs)**; 500 iterations took **5.7 hours wall-clock (~735 GB200 GPU-hours)**. Steady-state training is ~37 s/iter (~5.1 h of the total); the remaining ~35 min is per-job startup, loading the 67 GiB teacher and the student — the run was split across two 4-hour jobs, so that cost is paid twice.
 
 <details>
 <summary>QAD command (click to expand)</summary>
