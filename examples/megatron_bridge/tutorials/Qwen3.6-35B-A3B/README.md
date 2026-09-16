@@ -23,8 +23,11 @@ It closes with [potential further improvements](#potential-further-improvements)
 | Model | MMMU-Pro | GPQA Diamond | SciCode (Subtask) | AA-LCR | IFBench | tau2-bench Telecom | Average |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **BF16** (teacher) | 74.6 ± 0.2 | 84.7 | 39.9 ± 0.6 | 69.1 ± 0.8 | 60.0 ± 0.5 | 94.2 ± 1.0 | 70.4 |
+| [W4A16 NVFP4 PTQ](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) (published)<sup>1</sup> | 73.8 ± 0.2 | 84.4 | 38.5 ± 0.5 | 66.3 ± 1.0 | 59.4 ± 0.5 | 96.4 ± 0.4 | 69.8 |
 | **W4A4 NVFP4 PTQ** (QAD student) | 73.4 ± 0.2 | 84.7 | 39.1 ± 0.7 | 70.0 ± 1.1 | 57.9 ± 0.5 | 94.2 ± 1.2 | 69.9 |
 | **↳ + QAD 500 iters** | **73.9 ± 0.2** | **84.2** | **40.2 ± 0.6** | **69.4 ± 1.5** | **59.6 ± 0.5** | **93.4 ± 0.4** | **70.1** |
+
+><sup>1</sup> The W4A16 NVFP4 row is the published checkpoint re-evaluated here with the same evaluation harness.
 
 ### Where QAD actually helps
 
@@ -292,6 +295,20 @@ done
 </details>
 
 For more details on NeMo Evaluator, see the [GitHub repo](https://github.com/NVIDIA-NeMo/evaluator) and [documentation](https://docs.nvidia.com/nemo/evaluator/latest/).
+
+#### Output length
+
+Accuracy is only half the serving cost — a model that scores the same while emitting more tokens is slower end to end. Mean completion tokens per benchmark (`response_stats.avg_completion_tokens`, same runs as the results table):
+
+| Benchmark | BF16 | W4A16 NVFP4 | W4A4 NVFP4 PTQ | + QAD 500 iters | runs/side |
+| --- | --- | --- | --- | --- | --- |
+| SciCode (Subtask) | 5,348 | +22.9% | +25.5% | **+90.9%** | 8 |
+| IFBench | 12,177 | +7.0% | +9.3% | +17.4% | 8 |
+| AA-LCR | 2,560 | +7.1% | +6.9% | +9.8% | 8 |
+| MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
+| GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
+
+Two things to take from this. **4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, nearly double BF16 for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. If your workload resembles SciCode, budget for that: the throughput gain above is measured at fixed output length and does not account for generating more tokens.
 
 ---
 
