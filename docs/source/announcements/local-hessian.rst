@@ -288,7 +288,7 @@ To reproduce the published Qwen3.8-27B checkpoint end to end:
 
    python examples/hf_ptq/hf_ptq.py \
        --pyt_ckpt_path Qwen/Qwen3.8-27B \
-       --recipe modelopt_recipes/models/Qwen/Qwen3.8-27B/ptq/nvfp4_local_hessian-fp8_attn-kv_fp8_cast.yaml \
+       --recipe modelopt_recipes/models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_local_hessian.yaml \
        --dataset nemotron-post-training-v3 \
        --calib_size 512 \
        --calib_seq 2048 \
