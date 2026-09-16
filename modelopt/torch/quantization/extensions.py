@@ -89,7 +89,7 @@ def get_cuda_ext_iq1_s(raise_if_failed: bool = False):
             name="modelopt_cuda_ext_iq1_s",
             sources=[kernels_ggml / "iq1_s.cpp", kernels_ggml / "iq1_s.cu"],
             cuda_version_specifiers=">=11.8",
-            fail_msg="IQ1_S CUDA packing is unavailable; using the PyTorch reference encoder.",
+            fail_msg="IQ1_S CUDA packing extension is unavailable.",
             extra_cuda_cflags=["-O3"],
             raise_if_failed=raise_if_failed,
         )
@@ -105,7 +105,7 @@ def get_cuda_ext_iq2_xs(raise_if_failed: bool = False):
             name="modelopt_cuda_ext_iq2_xs",
             sources=[kernels_ggml / "iq2_xs.cpp", kernels_ggml / "iq2_xs.cu"],
             cuda_version_specifiers=">=11.8",
-            fail_msg="IQ2_XS CUDA packing is unavailable; using the PyTorch reference encoder.",
+            fail_msg="IQ2_XS CUDA packing extension is unavailable.",
             extra_cuda_cflags=["-O3"],
             raise_if_failed=raise_if_failed,
         )
