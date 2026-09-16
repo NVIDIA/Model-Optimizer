@@ -22,6 +22,10 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Layerwise calibration now uses prior-layer QDQ activations by default
+  (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
+  preserve full-precision activations for subsequent layers (the default behavior for
+  max calibration without layerwise calibration).
 - Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
 - ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
 

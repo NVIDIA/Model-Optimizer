@@ -613,23 +613,17 @@ class TestLayerwiseNestedConfig:
         """Not an error: with enable=False nothing reads them."""
         assert MaxCalibConfig(layerwise={"checkpoint_dir": "/x"}).layerwise.enable is False
 
-    @pytest.mark.parametrize(
-        ("cfg_cls", "expected_qdq"),
-        [(MaxCalibConfig, False), (GPTQCalibConfig, True)],
-    )
-    def test_per_algorithm_qdq_default(self, cfg_cls, expected_qdq):
-        assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+    @pytest.mark.parametrize("cfg_cls", [MaxCalibConfig, GPTQCalibConfig, LocalHessianCalibConfig])
+    def test_qdq_default(self, cfg_cls):
+        assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is True
 
     @pytest.mark.parametrize(
         ("layerwise_input", "expected_qdq"),
         [
-            # GPTQ default kicks in for user dict that doesn't mention qdq.
+            # The layerwise default applies when a user dict does not mention QDQ.
             ({"enable": True}, True),
-            # User-explicit False overrides the GPTQ default.
+            # An explicit False overrides the layerwise default.
             ({"enable": True, "get_qdq_activations_from_prev_layer": False}, False),
-            # ``LayerwiseConfig`` instance: ``_coerce_layerwise_input`` must
-            # preserve ``model_fields_set`` so the GPTQ default still kicks in
-            # for fields the user didn't explicitly set.
             (LayerwiseConfig(enable=True), True),
             (
                 LayerwiseConfig(enable=True, get_qdq_activations_from_prev_layer=False),
@@ -637,15 +631,15 @@ class TestLayerwiseNestedConfig:
             ),
         ],
     )
-    def test_gptq_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):
-        cfg = GPTQCalibConfig(layerwise=layerwise_input)
+    def test_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):
+        cfg = MaxCalibConfig(layerwise=layerwise_input)
         assert cfg.layerwise.get_qdq_activations_from_prev_layer is expected_qdq
 
     def test_default_dump_shape(self):
         dumped = MaxCalibConfig().model_dump()
         assert dumped["layerwise"] == {
             "enable": False,
-            "get_qdq_activations_from_prev_layer": False,
+            "get_qdq_activations_from_prev_layer": True,
             "checkpoint_dir": None,
             "save_every": 1,
             "export_dir": None,

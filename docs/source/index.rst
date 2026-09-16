@@ -16,6 +16,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag" type="button" data-tag="quantization" aria-pressed="false">Quantization</button>
          <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
+         <button class="announcement-tag" type="button" data-tag="local-hessian" aria-pressed="false">Local-Hessian</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -32,6 +33,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
        <p>Weight-only NVFP4 is <em>slower</em> than BF16 on Blackwell. W4A4 beats it in 9 of 12 shapes, and QAD recovers the accuracy W4A4 costs on Qwen3.6-35B-A3B.</p>
        <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>w4a4</span><span>qad</span><span>distillation</span><span>megatron-bridge</span></div>
+     </article>
+     <article class="announcement-card" data-date="2026-09-09" data-title="Improving NVFP4 Accuracy with Local-Hessian Weight Scales" data-summary="How Local-Hessian selects NVFP4 block scales to minimize layer output error, and how it compares with max, MSE, Four-over-six, and GPTQ." data-tags="local-hessian quantization nvfp4 calibration modelopt">
+       <div class="announcement-card-meta">September 9, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/local-hessian.html">Improving NVFP4 Accuracy with Local-Hessian Weight Scales</a></h2>
+       <p>How Local-Hessian selects NVFP4 block scales to minimize layer output error, and how it compares with max, MSE, Four-over-six, and GPTQ.</p>
+       <div class="announcement-card-tags"><span>local-hessian</span><span>quantization</span><span>nvfp4</span><span>calibration</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-08-24" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">August 24, 2026 &middot; Model Optimizer Team</div>
