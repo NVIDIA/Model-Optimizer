@@ -25,6 +25,8 @@ imports:
 algorithm:
   method: local_hessian
   fp8_scale_sweep: true
+  layerwise:
+    enable: true
 quant_cfg:
   - $import: base_disable_all
   - quantizer_name: '*weight_quantizer'

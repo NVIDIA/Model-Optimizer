@@ -32,7 +32,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe, presets
 from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
 
 
 def _yaml_basenames(subdir: str) -> set[str]:
@@ -82,6 +82,17 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
+
+
+def test_local_hessian_preset_enables_layerwise_calibration():
+    # Local-Hessian is only accurate layer by layer; the preset feeds the general recipe,
+    # mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG and --qformat, so a missing layerwise block
+    # silently degrades all of them.
+    algorithm = presets.QUANT_CFG_CHOICES["nvfp4_w4a4_weight_local_hessian"]["algorithm"]
+    layerwise = LocalHessianCalibConfig(**algorithm).layerwise
+
+    assert layerwise.enable
+    assert layerwise.get_qdq_activations_from_prev_layer
 
 
 @pytest.mark.parametrize(
