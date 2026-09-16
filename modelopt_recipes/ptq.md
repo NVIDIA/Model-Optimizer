@@ -335,7 +335,7 @@ recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
   the vision tower and embeddings stay BF16. W4A4 rather than W4A16 because a BF16 activation keeps
   vLLM on the Marlin dequant fallback, which measured *slower* than BF16. The `_mcore` suffix is
   load-bearing: selectors are Megatron-Core leaf names (`mlp.experts.linear_fc1`,
-  `self_attention.linear_qkv`), so it does nothing under `hf_ptq.py`.
+  `self_attention.linear_qkv`), so under `hf_ptq.py` nothing matches and `mtq.quantize` raises.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 

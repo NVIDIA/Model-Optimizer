@@ -17,8 +17,8 @@
 # Used as the QAD student in examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B.
 #
 # This is architecture-level, not a mirror of a released checkpoint, so it lives under
-# huggingface/<model_type>/ rather than models/<org>/<checkpoint>/. It is the W4A4 counterpart of
-# huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast, which covers the same family for
+# model_type/<model_type>/ rather than models/<org>/<checkpoint>/. It is the W4A4 counterpart of
+# model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast, which covers the same family for
 # the HuggingFace flow.
 #
 # `_mcore` in the filename is load-bearing: the selectors below are **Megatron-Core leaf names**,

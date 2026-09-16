@@ -97,7 +97,7 @@ Tokenize with the [token-budgeted blend workflow](../../../dataset/MEGATRON_DATA
 | swe | 0.31B | 1.8 |
 | safety | 0.003B | 0.02 |
 
-Weights are each split's share of the dataset's own token count — a single pass over the natural mixture, not a tuned blend. The 500-iteration schedule consumes **8.4B tokens, about half an epoch**, so nothing is resampled. Note the agent/SWE splits total under 9%, which is relevant to the tau2-bench behaviour in Section 3.
+Weights are each split's share of the dataset's own token count — a single pass over the natural mixture, not a tuned blend. The 500-iteration schedule consumes **8.4B tokens, about half an epoch**, so nothing is resampled. Note the agent/SWE splits total under 9%, which is relevant to the agentic coverage discussed under [potential further improvements](#potential-further-improvements).
 
 ---
 

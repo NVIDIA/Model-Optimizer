@@ -4,7 +4,7 @@ Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation
 ###################################################################
 
 :Author: Model Optimizer Team
-:Date: September 11, 2026
+:Date: September 16, 2026
 :Tags: quantization, nvfp4, w4a4, qad, distillation, megatron-bridge
 
 Weight-only NVFP4 does not make this model faster. On Blackwell, a BF16 activation forces vLLM onto
