@@ -88,11 +88,24 @@ def test_local_hessian_preset_enables_layerwise_calibration():
     # Local-Hessian is only accurate layer by layer; the preset feeds the general recipe,
     # mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG and --qformat, so a missing layerwise block
     # silently degrades all of them.
-    algorithm = presets.QUANT_CFG_CHOICES["nvfp4_w4a4_weight_local_hessian"]["algorithm"]
-    layerwise = LocalHessianCalibConfig(**algorithm).layerwise
+    qformat = "nvfp4_w4a4_weight_local_hessian"
+
+    # ``--qformat`` has no argparse ``choices=``; hf_ptq.py gates it on membership in
+    # QUANT_CFG_CHOICES, so this mapping is the CLI allowlist the preset basename lands in.
+    assert qformat in presets.QUANT_CFG_CHOICES
+    layerwise = LocalHessianCalibConfig(**presets.QUANT_CFG_CHOICES[qformat]["algorithm"]).layerwise
 
     assert layerwise.enable
     assert layerwise.get_qdq_activations_from_prev_layer
+
+    # The exported constant is a separately-loaded dict, and it is what library users (and the
+    # blog) reach for, so pin it rather than trusting it to track the CLI mapping.
+    exported = LocalHessianCalibConfig(
+        **mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG["algorithm"]
+    ).layerwise
+
+    assert exported.enable
+    assert exported.get_qdq_activations_from_prev_layer
 
 
 @pytest.mark.parametrize(
