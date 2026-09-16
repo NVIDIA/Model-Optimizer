@@ -312,7 +312,10 @@ def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
     GLM-4.7 keeps its MTP head in a standalone ``mtp.safetensors``. Those tensors are never loaded,
     never quantized, and never reported as ``unexpected_keys`` (the loader did not see them to call
     them unexpected), so they are not "the unquantized source weights" the export must avoid
-    re-emitting -- they are untouched sidecars that happen to be in safetensors format.
+    re-emitting -- they are untouched sidecars that happen to be in safetensors format. See
+    :func:`~modelopt.torch.utils.plugins.model_load_utils.record_unplaced_source_keys` for why
+    "never opened" is a property of the FILE rather than of the individual tensor: a tensor the
+    index omits from a file it DOES open is reported, and is carried rather than copied.
 
     Files named like a main weight shard are excluded whatever the index says. An index that is
     empty, partial or malformed would otherwise make the source weights look off-index, and

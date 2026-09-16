@@ -335,9 +335,30 @@ def record_unplaced_source_keys(
     unlike re-deriving the set afterwards, which has to replay the conversion plan to avoid
     mistaking a renamed key for an unplaced one.
 
-    Covers only keys the loader read and rejected. Tensors in safetensors files it never
-    opened are handled by :func:`~modelopt.torch.export.plugins.hf_checkpoint_utils.copy_off_index_safetensors`,
-    which copies those files whole rather than paying host memory to re-serialise them.
+    How Transformers decides what it has seen
+    -----------------------------------------
+    The index (``model.safetensors.index.json``) selects which FILES the loader opens, not which
+    TENSORS it sees. Within a file it opens, it enumerates every tensor present and reports the
+    ones the architecture does not expect. Two consequences, both load-bearing here:
+
+    * A tensor missing from ``weight_map`` but physically present in a shard the index names for
+      OTHER tensors is still reported. An MTP head stored inside a main shard is exactly this
+      shape -- when MTP is not quantized the model never declares it, so it arrives here like any
+      other unplaced key. The corollary is the one that is easy to get wrong: the index is not an
+      inventory of the checkpoint, so looking such a key up in ``weight_map`` to find its file
+      returns nothing. :func:`~modelopt.torch.export.unified_export_hf._locate_source_keys` falls
+      back to scanning shard headers for precisely this reason; resolving through ``weight_map``
+      alone used to drop these tensors from the export silently.
+    * A tensor in a file the index never names is NOT reported -- the loader never opened it, so
+      it had no opportunity to call anything unexpected. Those are handled by
+      :func:`~modelopt.torch.export.plugins.hf_checkpoint_utils.copy_off_index_safetensors`, which
+      copies the file whole rather than paying host memory to re-serialise it.
+
+    This is observed behaviour, established by experiment against transformers 5.3.0 (a shard
+    holding one tensor the index omitted reported it; a file the index never named reported
+    nothing), not a published contract. Nothing here depends on it holding: a key that the loader does report is
+    located by header scan whether or not the index lists it, and a file the loader ignores is
+    copied verbatim regardless.
 
     Prefer this over :func:`unplaced_source_keys` whenever the loading info is available.
     """

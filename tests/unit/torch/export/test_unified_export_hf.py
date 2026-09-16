@@ -789,3 +789,59 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
     assert seen["keys"] == ["model.mtp.eh_proj.weight"], (
         f"finalize() saw {seen['keys']!r}; the carried set must be recorded before dispatch"
     )
+
+
+def test_carries_a_key_the_index_does_not_list(tmp_path):
+    """A tensor inside a main shard but absent from weight_map must still be carried.
+
+    model.safetensors.index.json is not a complete inventory. Transformers enumerates the contents
+    of each shard it opens, so it reports such a tensor in unexpected_keys and it reaches
+    _modelopt_unplaced_source_keys -- but resolving the file purely through weight_map finds
+    nothing and used to drop it silently, with the --vllm_fakequant_export guard staying quiet
+    too because it shared that lookup. An MTP head stored in a main shard is exactly this shape:
+    when MTP is not quantized the loader never places it, so it is the case the carry-over exists
+    for.
+    """
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import (
+        _carry_over_unplaced_source_weights,
+        carryable_source_keys,
+    )
+
+    shard, extra = "model-00001-of-00001.safetensors", "model.mtp.eh_proj.weight"
+    save_file({"a.weight": torch.zeros(2), extra: torch.full((2,), 7.0)}, str(tmp_path / shard))
+    # The index deliberately omits `extra`.
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = [extra]
+
+    carried = _carry_over_unplaced_source_weights(model)
+    assert extra in carried, f"un-indexed key dropped from the export: {sorted(carried)}"
+    assert torch.equal(carried[extra], torch.full((2,), 7.0))
+
+    # The guard must see it too, or it stays silent on the very weights that would be lost.
+    assert carryable_source_keys(model) == [extra]
+
+
+def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
+    """A key in neither the index nor any file is reported, not silently ignored."""
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import _carry_over_unplaced_source_weights
+
+    shard = "model-00001-of-00001.safetensors"
+    save_file({"a.weight": torch.zeros(2)}, str(tmp_path / shard))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = ["ghost.weight"]
+
+    with pytest.warns(UserWarning, match="in no safetensors file"):
+        assert _carry_over_unplaced_source_weights(model) == {}
