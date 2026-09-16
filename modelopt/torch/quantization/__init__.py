@@ -15,6 +15,8 @@
 
 """Quantization package."""
 
+from importlib import import_module as _import_module
+
 # Initialize mode and plugins
 from . import mode, plugins, utils
 
@@ -25,3 +27,7 @@ from .conversion import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
 from .utils import update_quant_cfg_with_kv_cache_quant
+
+# Loading this before the core imports above creates a cycle through quantization.qtensor.
+ggml = _import_module(".ggml", __name__)
+del _import_module
