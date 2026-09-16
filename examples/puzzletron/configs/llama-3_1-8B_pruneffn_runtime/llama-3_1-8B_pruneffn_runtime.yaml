@@ -16,6 +16,12 @@ calc_subblock_stats:
     enabled: true
     num_warmup_iters: 2
     num_iters: 10
+    data_parallel_size: 1
+    tensor_parallel_size: 1
+    prefill_context_parallel_size: 1
+    decode_context_parallel_size: 1
+    enable_expert_parallel: false
+    extra_args: ""
 
 # FFN intermediate sizes to search over (heterogeneous architecture)
 pruning:
