@@ -31,6 +31,8 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
+from modelopt.torch.export.shard_cast_utils import resolve_checkpoint_file
+
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
 
 
@@ -392,12 +394,21 @@ def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike
         target = Path(dst) / name
         if target.exists():
             continue
-        source = Path(src) / name
-        # copy2 follows symlinks, so a checkpoint shipping ``x.safetensors -> /somewhere/else``
-        # would copy that file into the export under an approved-looking name. Only copy what the
-        # listing actually described: a regular file inside the checkpoint directory.
-        if source.is_symlink() or not source.is_file():
-            warnings.warn(f"Skipping {name}: not a regular file in the source checkpoint.")
+        # copy2 follows symlinks, so a checkpoint shipping ``x.safetensors -> /etc/passwd`` would
+        # copy whatever that names into the export under an approved-looking name. The question
+        # is where the link LANDS, not whether it is a link: a Hugging Face snapshot stores every
+        # file as a symlink into ``../../blobs/<sha>``, so refusing links outright drops the
+        # sidecar of every hub-downloaded checkpoint -- the GLM-4.7 ``mtp.safetensors`` this path
+        # exists to carry included.
+        #
+        # resolve_checkpoint_file already draws that line and is tested against both shapes: it
+        # resolves strictly, demands a regular file, and demands the target sit under the
+        # checkpoint dir or its sibling ``blobs/``. max_bytes=None because its default bounds
+        # metadata, and these are weight files.
+        try:
+            source = resolve_checkpoint_file(Path(src), name, max_bytes=None)
+        except ValueError as exc:
+            warnings.warn(f"Skipping {name}: {exc}")
             continue
         shutil.copy2(source, target)
         copied.append(name)

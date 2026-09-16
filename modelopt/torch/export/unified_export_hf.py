@@ -35,6 +35,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
 from modelopt.torch.models import hf_model_type, is_moe
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
@@ -1629,8 +1630,6 @@ def _source_weight_map(ckpt: "str | Path") -> dict[str, str]:
             return json.load(f).get("weight_map", {})
     single = Path(ckpt) / "model.safetensors"
     if single.exists():
-        from safetensors import safe_open
-
         with safe_open(str(single), framework="pt") as f:
             return dict.fromkeys(f.keys(), "model.safetensors")
     return {}
@@ -1653,10 +1652,6 @@ def _off_index_source_keys(model: nn.Module) -> list[str]:
     if not ckpt:
         return []
     try:
-        from safetensors import safe_open
-
-        from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
-
         names: list[str] = []
         for file_name in off_index_safetensors_files(ckpt):
             with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
@@ -1692,9 +1687,12 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
         # already answered, and re-deriving would be wasted work.
         #
         # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
-        # there is nothing to carry must not depend on an optional import succeeding. safetensors
-        # is absent in the partial-install environments, and letting that ImportError fall into the
-        # handler would emit the very "will be missing them" warning this guard exists to avoid.
+        # there is nothing to carry must not depend on an optional import succeeding. The import
+        # below reaches model_load_utils, which pulls in transformers and accelerate at module
+        # scope; those are absent in the partial-install environments, and letting that ImportError
+        # fall into the handler would emit the very "will be missing them" warning this guard
+        # exists to avoid. (safetensors itself is a module-scope dependency here, so it is always
+        # present by the time this runs.)
         ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
         if not ckpt or not Path(ckpt).is_dir():
             # A hub id rather than a local path, or no provenance at all -- nothing to read.
@@ -1709,8 +1707,6 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
             return {}
 
     try:
-        from safetensors import safe_open
-
         from modelopt.torch.utils.plugins.model_load_utils import (
             unplaced_source_keys,
             weight_map_for,

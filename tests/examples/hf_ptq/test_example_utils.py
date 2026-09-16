@@ -14,8 +14,10 @@
 # limitations under the License.
 """Unit tests for ``examples/hf_ptq/example_utils`` helpers.
 
-One test per supported on-disk MTP convention (inlined-orphaned, inlined-in-state-dict,
-separate-file-standalone, separate-file-indexed) plus a negative case.
+The per-MTP-convention tests are gone with ``load_mtp_weights``: weights the loader could not
+place are now identified from Transformers' own ``unexpected_keys`` rather than by recognising
+storage layouts, so there is no convention matrix left to enumerate. What remains covers the
+recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
 from contextlib import nullcontext

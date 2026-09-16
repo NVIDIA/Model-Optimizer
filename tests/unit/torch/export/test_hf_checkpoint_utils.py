@@ -19,6 +19,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
+from safetensors.torch import save_file
+
+from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+    copy_off_index_safetensors,
+    off_index_safetensors_files,
+)
 
 pytest.importorskip("huggingface_hub")
 hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
@@ -408,9 +415,6 @@ def test_copy_does_not_overwrite_what_the_export_already_wrote(tmp_path):
 
 def _write_st(path, tensors):
     """Minimal real safetensors file so header reads work."""
-    import torch
-    from safetensors.torch import save_file
-
     save_file({k: torch.zeros(1) for k in tensors}, str(path))
 
 
@@ -421,7 +425,6 @@ def test_off_index_skips_mistral_consolidated_copy(tmp_path):
     mistral load-format looks for that filename specifically -- so it can be served instead of
     what we quantized.
     """
-    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
 
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
@@ -434,7 +437,6 @@ def test_off_index_skips_mistral_consolidated_copy(tmp_path):
 
 def test_off_index_skips_peft_adapter(tmp_path):
     """A PEFT adapter's tensor names do NOT overlap the index, so only the name rule catches it."""
-    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
 
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
@@ -447,7 +449,6 @@ def test_off_index_skips_peft_adapter(tmp_path):
 
 def test_off_index_skips_unknown_name_that_reships_indexed_weights(tmp_path):
     """The name rules only know the conventions we have seen; overlap catches the rest."""
-    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
 
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors",'
@@ -461,7 +462,6 @@ def test_off_index_skips_unknown_name_that_reships_indexed_weights(tmp_path):
 
 def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
     """The whole point: a real sidecar holds names the index does NOT have, and must be kept."""
-    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
 
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
@@ -470,3 +470,72 @@ def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
     _write_st(tmp_path / "mtp.safetensors", ["model.mtp.eh_proj.weight"])
 
     assert off_index_safetensors_files(tmp_path) == ["mtp.safetensors"]
+
+
+def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
+    """A hub-downloaded checkpoint stores EVERY file as a symlink into ``../../blobs/<sha>``.
+
+    Rejecting symlinks outright therefore skips the sidecar of every checkpoint loaded by hub id
+    -- including the GLM-4.7 ``mtp.safetensors`` this path exists to carry -- which is the
+    silent-missing-MTP failure the carry-over was written to prevent. The guard must look at what
+    the link resolves to, not at whether it is a link.
+    """
+    blobs = tmp_path / "blobs"
+    snapshot = tmp_path / "snapshots" / "deadbeef"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+
+    save_file({"model.mtp.eh_proj.weight": torch.zeros(1)}, str(blobs / "sha123"))
+    save_file({"a.weight": torch.zeros(1)}, str(blobs / "sha456"))
+    (snapshot / "mtp.safetensors").symlink_to("../../blobs/sha123")
+    (snapshot / "model-00001-of-00001.safetensors").symlink_to("../../blobs/sha456")
+    (snapshot / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+
+    assert off_index_safetensors_files(snapshot) == ["mtp.safetensors"]
+
+    dst = tmp_path / "export"
+    dst.mkdir()
+    assert copy_off_index_safetensors(snapshot, dst) == ["mtp.safetensors"]
+    assert (dst / "mtp.safetensors").is_file()
+
+
+def _indexed_ckpt(src):
+    src.mkdir(parents=True, exist_ok=True)
+    save_file({"a.weight": torch.zeros(1)}, str(src / "model-00001-of-00001.safetensors"))
+    (src / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    return src
+
+
+def test_skips_a_sidecar_whose_link_dangles(tmp_path):
+    """A link to nothing copies nothing rather than raising out of the export."""
+    src = _indexed_ckpt(tmp_path / "ckpt")
+    (src / "mtp.safetensors").symlink_to(tmp_path / "does-not-exist")
+
+    dst = tmp_path / "export"
+    dst.mkdir()
+    with pytest.warns(UserWarning, match="not a readable regular file"):
+        assert copy_off_index_safetensors(src, dst) == []
+    assert not (dst / "mtp.safetensors").exists()
+
+
+def test_skips_a_sidecar_pointing_outside_the_checkpoint(tmp_path):
+    """The original hardening, restored: a link out of the tree is refused, not followed.
+
+    Accepting hub blobs must not mean accepting any target at all -- a checkpoint shipping
+    ``mtp.safetensors -> /etc/passwd`` would otherwise land that file in the export under a name
+    that looks like model weights.
+    """
+    outside = tmp_path / "secret.txt"
+    outside.write_text("not model weights")
+    src = _indexed_ckpt(tmp_path / "ckpt")
+    (src / "mtp.safetensors").symlink_to(outside)
+
+    dst = tmp_path / "export"
+    dst.mkdir()
+    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
+        assert copy_off_index_safetensors(src, dst) == []
+    assert not (dst / "mtp.safetensors").exists()

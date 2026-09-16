@@ -43,6 +43,7 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     postprocess_state_dict,
+    seed_carried_over_exclusions,
 )
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 
@@ -665,8 +666,6 @@ def test_carried_over_names_prefer_what_the_export_actually_wrote():
     must reach ``exclude_modules`` -- the same requirement as a carried weight, via the other
     mechanism. The export records both under ``_modelopt_carried_source_keys``.
     """
-    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
-
     model = torch.nn.Module()
     model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
     # What the export actually wrote: the carried weight plus the copied sidecar's tensors.
@@ -682,8 +681,6 @@ def test_carried_over_names_prefer_what_the_export_actually_wrote():
 
 def test_carried_over_names_fall_back_before_the_export_records():
     """Callers that never ran the export still get the wider unplaced answer."""
-    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
-
     model = torch.nn.Module()
     model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
     assert _get_carried_over_module_names(model) == ["model.mtp.eh_proj"]
@@ -696,8 +693,6 @@ def test_carried_over_names_fall_back_before_the_export_records():
 
 def test_seed_carried_over_exclusions_adds_missing_names():
     """The layerwise exporter snapshots its config before the carried set exists, so it re-seeds."""
-    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
-
     model = torch.nn.Module()
     model._modelopt_carried_source_keys = [
         "model.mtp.eh_proj.weight",
@@ -716,8 +711,6 @@ def test_seed_carried_over_exclusions_adds_missing_names():
 
 def test_seed_carried_over_exclusions_respects_existing_wildcards():
     """A recipe that already excluded mtp* must not gain redundant per-module entries."""
-    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
-
     model = torch.nn.Module()
     model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["model.mtp*"]}}
@@ -728,8 +721,6 @@ def test_seed_carried_over_exclusions_respects_existing_wildcards():
 
 def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
     """No single quant_algo means nothing for a deployment framework to misapply."""
-    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
-
     model = torch.nn.Module()
     model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
     for algo in (None, "MIXED_PRECISION"):

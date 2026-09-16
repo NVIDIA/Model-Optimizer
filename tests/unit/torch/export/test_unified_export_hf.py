@@ -683,16 +683,21 @@ def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recw
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
 
 
-def test_carry_over_is_quiet_without_safetensors_installed(tmp_path, monkeypatch, recwarn):
-    """The quiet path must not depend on safetensors being importable.
+def test_carry_over_is_quiet_without_the_loader_dependencies(tmp_path, monkeypatch, recwarn):
+    """The quiet path must not depend on the loader's optional imports.
 
-    The partial-install CI environments have no safetensors, so if the short-circuit sat below
-    the import, the ImportError would land in the handler and emit the very "will be missing
-    them" warning the short-circuit exists to avoid.
+    model_load_utils imports transformers and accelerate at module scope, and the partial-install
+    environments have neither. If the short-circuit sat below that import, the ImportError would
+    land in the handler and emit the very "will be missing them" warning it exists to avoid.
+
+    Blocking safetensors here would prove nothing: this module binds ``safe_open`` at import time,
+    so patching sys.modules afterwards cannot affect it.
     """
     import sys as _sys
 
-    monkeypatch.setitem(_sys.modules, "safetensors", None)  # makes `from safetensors import` raise
+    monkeypatch.setitem(_sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
+    monkeypatch.setitem(_sys.modules, "transformers", None)
+    monkeypatch.setitem(_sys.modules, "accelerate", None)
     (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
     model = _ProvenanceModel(name_or_path=tmp_path)
 
