@@ -80,8 +80,9 @@ The input second-moment matrix
 half the Hessian of the output error,
 :math:`\partial^2E(s)/\partial\Delta(W,s)^2=2XX^{\top}`: it weights each
 weight error by how much that input coordinate actually moves the
-output. The trace sums one such quadratic form per output channel, so
-the output channels are independent and can be handled separately.
+output. The trace operator :math:`\operatorname{tr}(\cdot)` sums one
+quadratic-error term per output channel, allowing the channels to be optimized
+independently.
 
 For NVFP4, :math:`s` is not a scalar: each output channel has
 :math:`C_{\mathrm{in}}/16` blocks, one scale each. With :math:`M`
