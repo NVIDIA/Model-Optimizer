@@ -919,6 +919,32 @@ def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
             )
 
 
+def assert_fakequant_export_carries_everything(args, full_model) -> None:
+    """Refuse --vllm_fakequant_export up front when real weights would be dropped.
+
+    export_hf_vllm_fq_checkpoint writes model-backed state only, so weights the loader could not
+    place are lost -- and a fake-quant checkpoint is evaluated, where an absent MTP head moves the
+    score instead of failing. Checked here rather than at export time: everything needed is set by
+    the loader, and raising after quantization would throw away the whole PTQ run, hours of it on
+    a large MoE.
+
+    Buffers a checkpoint merely happens to ship are not weights to lose. ``rotary_emb.inv_freq``
+    is the common one: older Llama/Mistral-lineage conversions list it in the index, so it IS
+    shard-backed, and whether it reaches ``unexpected_keys`` depends on the architecture declaring
+    it in ``_keys_to_ignore_on_load_unexpected``. Transformers recomputes it, so refusing an
+    export over it would reject checkpoints that export correctly today.
+    """
+    if not args.vllm_fakequant_export:
+        return
+    droppable = [k for k in carryable_source_keys(full_model) if not k.endswith(".inv_freq")]
+    if droppable:
+        raise NotImplementedError(
+            f"--vllm_fakequant_export cannot carry the {len(droppable)} checkpoint weight(s) the "
+            f"model has no parameter for (e.g. {droppable[0]}); the exported model would be "
+            "incomplete. Use the unified HF export instead."
+        )
+
+
 def export_quantized(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
@@ -979,7 +1005,15 @@ def export_quantized(
             )
 
             # Copy custom model files (Python files and JSON configs) for TensorRT-LLM export
-            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+            # TRT-LLM checkpoints are rank<N>.safetensors plus their own config; nothing
+            # there reads an off-index sidecar, and the exclude_modules seeding that gives
+            # one meaning happens only inside export_hf_checkpoint.
+            copy_custom_model_files(
+                args.pyt_ckpt_path,
+                export_path,
+                args.trust_remote_code,
+                copy_off_index_weights=False,
+            )
         else:
             # Check arguments for unified_hf export format and set to default if unsupported arguments are provided
             assert args.sparsity_fmt == "dense", (
@@ -999,15 +1033,6 @@ def export_quantized(
                 # could not place would be dropped. Refuse the combination when there ARE such
                 # weights rather than write a checkpoint that is quietly missing them -- a
                 # fake-quant export is evaluated, and an absent MTP head changes the answer.
-                # Only weights a shard actually provides: a checkpoint listing a stale
-                # rotary_emb.inv_freq buffer has nothing to lose, and must keep exporting.
-                _droppable = carryable_source_keys(full_model)
-                if _droppable:
-                    raise NotImplementedError(
-                        f"--vllm_fakequant_export cannot carry the {len(_droppable)} checkpoint "
-                        f"weight(s) the model has no parameter for (e.g. {_droppable[0]}); the "
-                        "exported model would be incomplete. Use the unified HF export instead."
-                    )
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
@@ -1045,6 +1070,7 @@ def export_quantized(
                 export_path,
                 args.trust_remote_code,
                 exclude_files=exclude_files,
+                copy_off_index_weights=not is_tensorrt_llm_export,
             )
 
         args.checkpoint_exported = True
@@ -1846,6 +1872,8 @@ def main(args: argparse.Namespace):
                 default_pad_token,
                 device,
             ) = load_model(args)
+
+            assert_fakequant_export_carries_everything(args, full_model)
 
             if args.sparsity_fmt != "dense":
                 # Sparse

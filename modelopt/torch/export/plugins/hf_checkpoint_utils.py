@@ -15,6 +15,7 @@
 
 """Hugging Face checkpoint utility."""
 
+import contextlib
 import fnmatch
 import json
 import os
@@ -333,6 +334,13 @@ def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
         indexed_tensors = set(weight_map)
     else:
         read_by_loader = {"model.safetensors"}
+        single = d / "model.safetensors"
+        if single.exists():
+            # Same reason the indexed branch fills this in: without the loaded tensor names,
+            # _without_reshipped_weights has nothing to compare against and silently becomes a
+            # no-op, leaving a second full copy under an unrecognised name to be copied verbatim.
+            with contextlib.suppress(Exception), safe_open(str(single), framework="pt") as f:
+                indexed_tensors = set(f.keys())
 
     candidates = [
         f.name

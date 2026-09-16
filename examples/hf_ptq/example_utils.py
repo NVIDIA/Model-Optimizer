@@ -990,6 +990,7 @@ def copy_custom_model_files(
     export_path: str,
     trust_remote_code: bool = False,
     exclude_files: Iterable[str] | None = None,
+    copy_off_index_weights: bool = True,
 ):
     """Copy source checkpoint sidecar files to an HF PTQ export.
 
@@ -1009,6 +1010,11 @@ def copy_custom_model_files(
         export_path: Path to the exported model directory
         trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
         exclude_files: Additional source file names to skip.
+        copy_off_index_weights: Copy safetensors the loader never opens (GLM-4.7's
+            ``mtp.safetensors``). Only the unified-HF export gives them meaning -- it seeds their
+            tensor names into ``quantization_config.ignore`` -- so a TensorRT-LLM export, whose
+            checkpoint is ``rank<N>.safetensors`` plus its own ``config.json``, should pass False
+            rather than carry gigabytes nothing there reads.
     """
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
@@ -1044,7 +1050,9 @@ def copy_custom_model_files(
     # Safetensors the loader never opens are sidecars too: untouched by quantization and absent
     # from the export, so copy them rather than leave them behind. Skipped by the call above,
     # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
-    copied_weights = copy_off_index_safetensors(source_dir, export_dir)
+    copied_weights = (
+        copy_off_index_safetensors(source_dir, export_dir) if copy_off_index_weights else []
+    )
     copied_files = [*copied_files, *copied_weights]
     if copied_files:
         for file_name in copied_files:

@@ -779,7 +779,9 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
 
     model = torch.nn.Module()
     setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
-    monkeypatch.setattr(uehf, "_carry_over_unplaced_source_weights", lambda m: {})
+    # Accepts **kwargs because the call site passes keys_only: non-writing ranks resolve
+    # names without reading tensors, and a stub that ignores that would hide a signature drift.
+    monkeypatch.setattr(uehf, "_carry_over_unplaced_source_weights", lambda m, **kw: {})
     monkeypatch.setattr(uehf, "_off_index_source_keys", lambda m: ["model.mtp.eh_proj.weight"])
 
     uehf.export_hf_checkpoint(model, export_dir=tmp_path)

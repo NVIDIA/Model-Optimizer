@@ -1648,8 +1648,14 @@ def _off_index_source_keys(model: nn.Module) -> list[str]:
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
-    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
-    if not ckpt:
+    # Same fallback as _carry_over_unplaced_source_weights: a model that reached the export
+    # without going through record_unplaced_source_keys still knows its own provenance, and the
+    # two halves of the mechanism must agree about where the source checkpoint is -- otherwise
+    # its weights are carried but its sidecar tensors never reach exclude_modules.
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None) or getattr(
+        getattr(model, "config", None), "_name_or_path", None
+    )
+    if not ckpt or not Path(ckpt).is_dir():
         return []
     try:
         names: list[str] = []
@@ -1661,7 +1667,13 @@ def _off_index_source_keys(model: nn.Module) -> list[str]:
         return []
 
 
-def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Tensor]:
+# Placeholder for keys_only resolution: the name is real, the tensor is never read.
+_NO_TENSOR: Any = None
+
+
+def _carry_over_unplaced_source_weights(
+    model: nn.Module, *, keys_only: bool = False
+) -> dict[str, torch.Tensor]:
     """Read back checkpoint weights the model never loaded, so the export stays complete.
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
@@ -1676,6 +1688,11 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
 
     Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
     the rest of the weights are already correct.
+
+    With ``keys_only`` the shard lookup still runs -- so the answer matches what a real read would
+    carry -- but no tensor is loaded and the values are ``None``. Ranks that do not write the extra
+    state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
+    rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
     keys = getattr(model, "_modelopt_unplaced_source_keys", None)
     ckpt = getattr(model, "_modelopt_source_checkpoint", None)
@@ -1728,6 +1745,13 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
             if shard is not None:
                 by_file.setdefault(shard, []).append(k)
 
+        if keys_only:
+            # The caller wants the names, not the bytes: every rank needs an identical key list
+            # to build an identical quant config, but only the writing rank should pay the memory.
+            return dict.fromkeys(
+                (k for shard_keys in by_file.values() for k in shard_keys), _NO_TENSOR
+            )
+
         out: dict[str, torch.Tensor] = {}
         for shard, shard_keys in by_file.items():
             with safe_open(str(Path(ckpt) / shard), framework="pt") as f:
@@ -1743,7 +1767,7 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
             "the checkpoint will be missing them."
         )
         return {}
-    if out:
+    if out and not keys_only:
         print_rank_0(
             f"Carrying {len(out)} source weight(s) the model never loaded into the export "
             f"(e.g. {min(out)})"
@@ -1790,8 +1814,20 @@ def export_hf_checkpoint(
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
     # wins on conflict: the caller asked for that tensor by name.
-    _carried = _carry_over_unplaced_source_weights(model)
-    if _carried:
+    # Only the rank that writes extra_state_dict should read it. _export_fsdp2_checkpoint_streaming
+    # emits it from rank 0 alone, so on the other ranks a full read is host memory spent and thrown
+    # away -- and the carried set is the large stuff. The KEY list is still resolved everywhere,
+    # because get_quant_config runs per rank and the configs have to agree.
+    _writes_extra = (
+        not (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and is_fsdp2_model(model)
+        )
+        or torch.distributed.get_rank() == 0
+    )
+    _carried = _carry_over_unplaced_source_weights(model, keys_only=not _writes_extra)
+    if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
     # Everything the export writes in original precision straight from the source, by either
     # mechanism: tensors carried above, and the off-index sidecars copied verbatim alongside.
