@@ -293,6 +293,13 @@ def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
 # Standard HF weight-file names: ``model.safetensors`` or ``model-00001-of-00005.safetensors``.
 _IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
 
+# Off-index files that re-ship weights rather than add new ones. ``consolidated*.safetensors``
+# is Mistral's second full copy of the model (vLLM's mistral load-format looks for it BY NAME,
+# so copying it into an export is not inert -- it can be served in place of the quantized
+# weights). ``adapter_model.safetensors`` is a PEFT adapter, whose tensor names do not overlap
+# the index, so only a name rule catches it.
+_IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetensors")
+
 
 def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
     """Safetensors files in a checkpoint that model loading never opens.
@@ -307,22 +314,68 @@ def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
     Files named like a main weight shard are excluded whatever the index says. An index that is
     empty, partial or malformed would otherwise make the source weights look off-index, and
     copying those into an export would leave unquantized weights beside the quantized ones.
+
+    Files that re-ship the indexed weights are excluded too, by name for the conventions we know
+    (``consolidated.safetensors``, ``adapter_model.safetensors``) and by tensor-name overlap for
+    the ones we do not. See :func:`_without_reshipped_weights`.
     """
     d = Path(src)
     if not d.is_dir():
         return []
     index_file = d / "model.safetensors.index.json"
+    indexed_tensors: set[str] = set()
     if index_file.exists():
         with open(index_file) as f:
-            read_by_loader = set(json.load(f).get("weight_map", {}).values())
+            weight_map = json.load(f).get("weight_map", {})
+        read_by_loader = set(weight_map.values())
+        indexed_tensors = set(weight_map)
     else:
         read_by_loader = {"model.safetensors"}
 
-    return sorted(
+    candidates = [
         f.name
         for f in d.glob("*.safetensors")
-        if f.name not in read_by_loader and not _IS_MAIN_WEIGHT_SHARD.fullmatch(f.name)
-    )
+        if f.name not in read_by_loader
+        and not _IS_MAIN_WEIGHT_SHARD.fullmatch(f.name)
+        and not _IS_WEIGHT_DUPLICATE.fullmatch(f.name)
+    ]
+    return sorted(_without_reshipped_weights(d, candidates, indexed_tensors))
+
+
+def _without_reshipped_weights(
+    d: Path, candidates: list[str], indexed_tensors: set[str]
+) -> list[str]:
+    """Drop candidates that re-ship weights the index already covers.
+
+    The name rules above only catch conventions we know. A checkpoint free to invent its own
+    filename can still carry a second copy of the indexed weights, and copying that into an
+    export puts unquantized tensors beside the quantized ones. Overlapping tensor names are the
+    general signal: a genuine sidecar (an MTP head) holds names the index does not have, which
+    is exactly why the loader never placed them.
+
+    Best-effort. Reads safetensors headers, never tensor data, and keeps any candidate whose
+    header cannot be read: refusing to copy a real sidecar because of an unreadable header would
+    silently drop weights from the export, which is the failure this whole path exists to avoid.
+    """
+    if not candidates or not indexed_tensors:
+        return candidates
+
+    kept = []
+    for name in candidates:
+        try:
+            with safe_open(str(d / name), framework="pt") as f:
+                names = set(f.keys())
+        except Exception:
+            kept.append(name)
+            continue
+        if names and names <= indexed_tensors:
+            warnings.warn(
+                f"Skipping {name}: it re-ships {len(names)} weight(s) the checkpoint index "
+                "already covers, so copying it would duplicate unquantized weights."
+            )
+            continue
+        kept.append(name)
+    return kept
 
 
 def copy_off_index_safetensors(src: "str | os.PathLike", dst: "str | os.PathLike") -> list[str]:

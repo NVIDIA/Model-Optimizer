@@ -44,6 +44,7 @@ from .quant_utils import (
     _postprocess_single_tensor,
     get_quant_config,
     get_quantization_format,
+    seed_carried_over_exclusions,
 )
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
@@ -377,6 +378,17 @@ class LayerwiseExporter:
         if self._name_mapper is not None and quant_config:
             with contextlib.suppress(Exception):
                 revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
+        # After the reversal, not before: carried names are source-checkpoint names already, so
+        # passing them through the mapper would rewrite names that are correct as they stand.
+        # bind() snapshotted this config during calibration, so the carried set -- which
+        # export_hf_checkpoint records immediately before calling us -- is only visible now.
+        if quant_config:
+            seeded = seed_carried_over_exclusions(model, quant_config)
+            if seeded:
+                print(
+                    f"Excluding {len(seeded)} carried-over module(s) from the layerwise "
+                    f"quantization config (e.g. {seeded[0]})"
+                )
 
         names = module_name_maps(model)
         # Recomputed, not snapshotted in __init__: calibration adds modules inside the

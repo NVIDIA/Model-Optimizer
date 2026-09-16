@@ -752,3 +752,35 @@ def test_carryable_source_keys_works_without_the_loader_dependencies(tmp_path, m
         "model.layers.0.self_attn.rotary_emb.inv_freq",
     ]
     assert carryable_source_keys(model) == ["model.mtp.eh_proj.weight"]
+
+
+def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
+    """The layerwise fix depends on an ordering: record the carried set, THEN call finalize().
+
+    LayerwiseExporter.bind() snapshots its quant config during calibration, so finalize() is the
+    only point where it can learn what the export carried. If export_hf_checkpoint ever records
+    _modelopt_carried_source_keys after dispatching to the exporter -- or stops recording it on
+    that path -- the sidecar exclusions silently go missing again, with nothing else to catch it.
+    """
+    from modelopt.torch.export import unified_export_hf as uehf
+    from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    seen = {}
+
+    class _Exporter:
+        def finalize(self, extra_state_dict=None):
+            seen["keys"] = getattr(model, "_modelopt_carried_source_keys", "<unset>")
+            return {}
+
+    model = torch.nn.Module()
+    setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
+    monkeypatch.setattr(uehf, "_carry_over_unplaced_source_weights", lambda m: {})
+    monkeypatch.setattr(
+        uehf, "_off_index_source_keys", lambda m: ["model.mtp.eh_proj.weight"]
+    )
+
+    uehf.export_hf_checkpoint(model, export_dir=tmp_path)
+
+    assert seen["keys"] == ["model.mtp.eh_proj.weight"], (
+        f"finalize() saw {seen['keys']!r}; the carried set must be recorded before dispatch"
+    )

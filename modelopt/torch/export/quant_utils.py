@@ -15,6 +15,7 @@
 
 """Utils for quantization including scaling factors adjustments."""
 
+import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
@@ -1582,6 +1583,35 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
             )
             for module in modules:
                 module.weight_quantizer.amax = weight_amax
+
+
+def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
+    """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
+
+    :func:`get_quant_config` seeds these itself, but the layerwise exporter snapshots its config
+    during ``bind()`` -- while calibration is still running, long before ``export_hf_checkpoint``
+    records what it carried. A layerwise export would otherwise copy GLM-4.7's
+    ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
+    NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+
+    Returns the names it added. No-op when the export is not uniformly quantized -- there is no
+    single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
+    a weight from.
+    """
+    names = _get_carried_over_module_names(model)
+    if not names:
+        return []
+    quantization = quant_config.get("quantization")
+    if not isinstance(quantization, dict):
+        return []
+    if quantization.get("quant_algo") in (None, QUANTIZATION_NONE, "MIXED_PRECISION"):
+        return []
+    exclude_modules = quantization.setdefault("exclude_modules", [])
+    added = [n for n in names if not any(fnmatch.fnmatch(n, p) for p in exclude_modules)]
+    if added:
+        exclude_modules.extend(added)
+        exclude_modules.sort()
+    return added
 
 
 def _get_carried_over_module_names(model: nn.Module) -> list[str]:

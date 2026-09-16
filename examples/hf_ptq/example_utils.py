@@ -614,9 +614,9 @@ def _resolved_local_dir(ckpt_path: str) -> str:
     """
     if Path(ckpt_path).is_dir():
         return str(ckpt_path)
+    if snapshot_download is None:
+        return str(ckpt_path)
     try:
-        from huggingface_hub import snapshot_download
-
         return snapshot_download(ckpt_path, local_files_only=True)
     except Exception:
         # No snapshot to point at; the export falls back to its own provenance handling.

@@ -404,3 +404,69 @@ def test_copy_does_not_overwrite_what_the_export_already_wrote(tmp_path):
 
     assert hf_checkpoint_utils.copy_off_index_safetensors(src, dst) == []
     assert (dst / "mtp.safetensors").read_text() == "already exported"
+
+
+def _write_st(path, tensors):
+    """Minimal real safetensors file so header reads work."""
+    import torch
+    from safetensors.torch import save_file
+
+    save_file({k: torch.zeros(1) for k in tensors}, str(path))
+
+
+def test_off_index_skips_mistral_consolidated_copy(tmp_path):
+    """Mistral ships consolidated.safetensors: a SECOND full copy of the indexed weights.
+
+    Copying it into an export puts unquantized weights beside the quantized ones, and vLLM's
+    mistral load-format looks for that filename specifically -- so it can be served instead of
+    what we quantized.
+    """
+    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    _write_st(tmp_path / "model-00001-of-00001.safetensors", ["a.weight"])
+    _write_st(tmp_path / "consolidated.safetensors", ["a.weight"])
+
+    assert off_index_safetensors_files(tmp_path) == []
+
+
+def test_off_index_skips_peft_adapter(tmp_path):
+    """A PEFT adapter's tensor names do NOT overlap the index, so only the name rule catches it."""
+    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    _write_st(tmp_path / "model-00001-of-00001.safetensors", ["a.weight"])
+    _write_st(tmp_path / "adapter_model.safetensors", ["base_model.a.lora_A.weight"])
+
+    assert off_index_safetensors_files(tmp_path) == []
+
+
+def test_off_index_skips_unknown_name_that_reships_indexed_weights(tmp_path):
+    """The name rules only know the conventions we have seen; overlap catches the rest."""
+    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors",'
+        ' "b.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    _write_st(tmp_path / "model-00001-of-00001.safetensors", ["a.weight", "b.weight"])
+    _write_st(tmp_path / "backup-copy.safetensors", ["a.weight", "b.weight"])
+
+    assert off_index_safetensors_files(tmp_path) == []
+
+
+def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
+    """The whole point: a real sidecar holds names the index does NOT have, and must be kept."""
+    from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}'
+    )
+    _write_st(tmp_path / "model-00001-of-00001.safetensors", ["a.weight"])
+    _write_st(tmp_path / "mtp.safetensors", ["model.mtp.eh_proj.weight"])
+
+    assert off_index_safetensors_files(tmp_path) == ["mtp.safetensors"]

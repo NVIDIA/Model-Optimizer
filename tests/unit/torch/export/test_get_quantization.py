@@ -692,3 +692,47 @@ def test_carried_over_names_fall_back_before_the_export_records():
     # wider list and claim exclusions for weights the checkpoint does not contain.
     model._modelopt_carried_source_keys = []
     assert _get_carried_over_module_names(model) == []
+
+
+def test_seed_carried_over_exclusions_adds_missing_names():
+    """The layerwise exporter snapshots its config before the carried set exists, so it re-seeds."""
+    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
+
+    model = torch.nn.Module()
+    model._modelopt_carried_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",
+    ]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["lm_head"]}}
+    added = seed_carried_over_exclusions(model, cfg)
+
+    assert added == ["model.mtp.eh_proj", "model.mtp.embed_tokens"]
+    assert cfg["quantization"]["exclude_modules"] == [
+        "lm_head",
+        "model.mtp.eh_proj",
+        "model.mtp.embed_tokens",
+    ]
+
+
+def test_seed_carried_over_exclusions_respects_existing_wildcards():
+    """A recipe that already excluded mtp* must not gain redundant per-module entries."""
+    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
+
+    model = torch.nn.Module()
+    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["model.mtp*"]}}
+
+    assert seed_carried_over_exclusions(model, cfg) == []
+    assert cfg["quantization"]["exclude_modules"] == ["model.mtp*"]
+
+
+def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
+    """No single quant_algo means nothing for a deployment framework to misapply."""
+    from modelopt.torch.export.quant_utils import seed_carried_over_exclusions
+
+    model = torch.nn.Module()
+    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    for algo in (None, "MIXED_PRECISION"):
+        cfg = {"quantization": {"quant_algo": algo}}
+        assert seed_carried_over_exclusions(model, cfg) == []
+        assert "exclude_modules" not in cfg["quantization"]
