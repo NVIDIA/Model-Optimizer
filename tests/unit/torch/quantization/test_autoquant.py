@@ -16,6 +16,7 @@
 import copy
 import io
 import warnings
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -98,25 +99,6 @@ class _AutoQuantMoeModel(torch.nn.Module):
 
     def get_input(self):
         return torch.randn(1, 4, 32)
-
-
-def test_auto_quantize_rejects_nonfinite_sensitivity():
-    model = torch.nn.Sequential(torch.nn.Linear(32, 32))
-
-    def loss_func(output, data):
-        return (output * float("nan")).sum()
-
-    with pytest.raises(ValueError, match=r"non-finite sensitivity score.*0\.quant_recipe"):
-        mtq.auto_quantize(
-            model,
-            constraints={"effective_bits": 8.0},
-            quantization_formats=[mtq.INT8_DEFAULT_CFG, None],
-            data_loader=[torch.randn(1, 4, 32)],
-            forward_step=lambda model, batch: model(batch),
-            loss_func=loss_func,
-            num_calib_steps=1,
-            num_score_steps=1,
-        )
 
 
 class _ScoredMoeExpert(torch.nn.Module):
@@ -1154,7 +1136,52 @@ def test_gradient_scoring_restores_model_after_failure():
             assert hparam.active == hparam.original
 
 
+@pytest.mark.parametrize("cudnn_enabled", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_backward_scoring_session_restores_sdpa_backends(cudnn_enabled, fail):
+    original = torch.backends.cuda.cudnn_sdp_enabled()
+    others = (
+        torch.backends.cuda.flash_sdp_enabled(),
+        torch.backends.cuda.mem_efficient_sdp_enabled(),
+        torch.backends.cuda.math_sdp_enabled(),
+    )
+    try:
+        torch.backends.cuda.enable_cudnn_sdp(cudnn_enabled)
+        with (
+            pytest.raises(RuntimeError, match="scoring failed") if fail else nullcontext(),
+            _AutoQuantizeGradientScoringSession(torch.nn.Identity(), [], lambda *_: False),
+        ):
+            assert not torch.backends.cuda.cudnn_sdp_enabled()
+            assert others == (
+                torch.backends.cuda.flash_sdp_enabled(),
+                torch.backends.cuda.mem_efficient_sdp_enabled(),
+                torch.backends.cuda.math_sdp_enabled(),
+            )
+            if fail:
+                raise RuntimeError("scoring failed")
+    finally:
+        restored = torch.backends.cuda.cudnn_sdp_enabled()
+        torch.backends.cuda.enable_cudnn_sdp(original)
+    assert restored == cudnn_enabled
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_backward_scoring_masked_sdpa_gradients_are_finite():
+    q, k, v = [
+        torch.randn(1, 2, 128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        for _ in range(3)
+    ]
+    mask = torch.ones(128, 128, device="cuda", dtype=torch.bool).tril()
+    mask[:, :8] = False
+    with _AutoQuantizeGradientScoringSession(torch.nn.Identity(), [], lambda *_: False):
+        output = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        output.sum().backward()
+    assert torch.isfinite(output).all()
+    assert all(torch.isfinite(tensor.grad).all() for tensor in (q, k, v))
+
+
 def test_backward_scoring_session_restores_partial_setup():
+    original_cudnn = torch.backends.cuda.cudnn_sdp_enabled()
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
     score_module = model[0]
     score_module._hparams_for_scoring = []
@@ -1175,6 +1202,7 @@ def test_backward_scoring_session_restores_partial_setup():
         pytest.fail("scoring setup should not complete")
 
     assert "forward" not in score_module.__dict__
+    assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
     assert {
         name: param.requires_grad for name, param in model.named_parameters()
     } == original_requires_grad

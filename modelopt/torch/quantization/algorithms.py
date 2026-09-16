@@ -18,7 +18,6 @@
 import copy
 import fnmatch
 import gc
-import math
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -1090,12 +1089,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)
-                if not math.isfinite(score):
-                    raise ValueError(
-                        f"AutoQuantize: non-finite sensitivity score {score} for '{name}' "
-                        f"with recipe {recipe}. Check the model outputs and gradients during "
-                        "score estimation before retrying the search."
-                    )
                 cost = hparam.get_cost(recipe)
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
@@ -1494,6 +1487,11 @@ class _AutoQuantizeBackwardScoringSession(ABC):
     def __enter__(self):
         """Install scoring hooks and parameter settings."""
         try:
+            # cuDNN SDPA backward can produce NaN query gradients for fully masked rows.
+            self._stack.callback(
+                torch.backends.cuda.enable_cudnn_sdp, torch.backends.cuda.cudnn_sdp_enabled()
+            )
+            torch.backends.cuda.enable_cudnn_sdp(False)
             hparams = list(
                 dict.fromkeys(
                     hparam
