@@ -69,6 +69,15 @@ for IQ1_S and 74 for IQ2_XS. No separate shape tensor is stored: a loader recove
 shape as ``[*weight.shape[:-2], weight.shape[-2] * 256]``. This is unambiguous because IQ export
 requires the logical last dimension to be divisible by 256.
 
+Megatron fused-MoE export packs each expert's logical ``[out_features, in_features]`` matrix before
+stacking the payloads. Such tensors therefore have shape
+``[num_experts, out_features, in_features // 256, payload_bytes]``; packed blocks are never
+transposed across the contraction axis.
+
+The generated configuration records ``quant_method: modelopt``, ``packing: ggml``, the 256-value
+block size, and the payload byte count. IQ payloads are not represented as compressed-tensors
+integer ``weights`` groups because all scales and indices are embedded in each packed block.
+
 Each 74-byte IQ2_XS block represents 256 logical weights:
 
 * bytes 0--1 are the little-endian FP16 super-block scale ``d``;

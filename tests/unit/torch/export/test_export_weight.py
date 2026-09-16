@@ -119,6 +119,7 @@ def test_export_iq_payload_as_weight(num_bits, payload_bytes):
     _export_quantized_weight(linear, torch.bfloat16)
     state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
 
+    assert isinstance(linear.weight, nn.Parameter)
     assert state_dict["weight"].shape == (4, 1, payload_bytes)
     assert state_dict["weight"].dtype == torch.uint8
     assert "packed_weights" not in state_dict

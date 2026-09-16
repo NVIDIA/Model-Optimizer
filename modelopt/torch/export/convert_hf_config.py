@@ -19,6 +19,15 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
+from modelopt.torch.quantization.ggml import (
+    IQ1_S_BLOCK_BYTES,
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_BYTES,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+)
+
 
 def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
     """Map a per-layer quant_algo string to compressed-tensors config group details.
@@ -29,7 +38,8 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
 
     Returns:
         Dictionary with ``input_activations`` and ``weights`` entries suitable for
-        a compressed-tensors ``config_groups`` entry.
+        a compressed-tensors ``config_groups`` entry, or ModelOpt-owned metadata for
+        self-contained IQ payloads.
     """
     if quant_algo == "FP8":
         return {
@@ -118,17 +128,24 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
     elif quant_algo in ("IQ1_S", "IQ2_XS"):
-        effective_bits, payload_bytes = (1.5625, 50) if quant_algo == "IQ1_S" else (2.3125, 74)
+        if quant_algo == "IQ1_S":
+            block_size = IQ1_S_BLOCK_SIZE
+            payload_bytes = IQ1_S_BLOCK_BYTES
+            effective_bits = IQ1_S_EFFECTIVE_BITS
+        else:
+            block_size = IQ2_XS_BLOCK_SIZE
+            payload_bytes = IQ2_XS_BLOCK_BYTES
+            effective_bits = IQ2_XS_EFFECTIVE_BITS
+        if group_size not in (None, block_size):
+            raise ValueError(f"{quant_algo} requires group size {block_size}, got {group_size}")
+        # IQ payloads are self-contained blocks, not compressed-tensors integer groups.
+        # Keep their format marker outside a ``weights`` quantization scheme.
         return {
-            "weights": {
-                "dynamic": False,
-                "num_bits": 1 if quant_algo == "IQ1_S" else 2,
-                "effective_bits": effective_bits,
-                "type": "int",
-                "group_size": 256,
-                "packing": "ggml",
-                "block_payload_bytes": payload_bytes,
-            }
+            "quant_algo": quant_algo,
+            "effective_bits": effective_bits,
+            "group_size": block_size,
+            "packing": "ggml",
+            "block_payload_bytes": payload_bytes,
         }
     else:
         warnings.warn(
@@ -223,9 +240,8 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value in ("IQ1_S", "IQ2_XS"):
-        config_group_details = _quant_algo_to_group_config(quant_algo_value, 256)
-        config_group_details["targets"] = ["Linear"]
-        new_config["config_groups"] = {"group_0": config_group_details}
+        iq_metadata = _quant_algo_to_group_config(quant_algo_value)
+        new_config.update(iq_metadata)
     elif quant_algo_value == "NVFP4_SVD":
         # NVFP4 + SVDQuant: NVFP4 weights/activations plus an AWQ-style
         # pre_quant_scale and a low-rank residual (svdquant_lora_a/b) stored as

@@ -26,6 +26,14 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.quantization.ggml import (
+    IQ1_S_BLOCK_BYTES,
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_BYTES,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+)
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -730,10 +738,22 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            payload_bytes = 50 if v == QUANTIZATION_IQ1_S else 74
+            if v == QUANTIZATION_IQ1_S:
+                block_size = IQ1_S_BLOCK_SIZE
+                payload_bytes = IQ1_S_BLOCK_BYTES
+                effective_bits = IQ1_S_EFFECTIVE_BITS
+            else:
+                block_size = IQ2_XS_BLOCK_SIZE
+                payload_bytes = IQ2_XS_BLOCK_BYTES
+                effective_bits = IQ2_XS_EFFECTIVE_BITS
+            if block_size_value != block_size:
+                raise ValueError(
+                    f"{v.upper()} requires block size {block_size}, got {block_size_value}"
+                )
             layer_config = {
                 "quant_algo": v.upper(),
-                "group_size": 256,
+                "group_size": block_size,
+                "effective_bits": effective_bits,
                 "block_payload_bytes": payload_bytes,
                 "packing": "ggml",
             }
@@ -1167,7 +1187,6 @@ def postprocess_state_dict(
         # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
         weight_suffixes = (
             "weight",
-            "weight_shape",
             "weight_scale",
             "weight_scale_2",
             "input_scale",

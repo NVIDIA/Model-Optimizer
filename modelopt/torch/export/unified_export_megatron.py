@@ -1116,8 +1116,8 @@ class GPTModelExporter:
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
         # IQ formats derive all block metadata directly from the weight and do not use amax or
-        # separately exported scaling tensors. Keep the weight on-device until its final HF layout
-        # has been produced, so the CUDA packer can be used.
+        # separately exported scaling tensors. Keep the weight on-device until it can be packed
+        # along its contraction axis, so the CUDA packer can be used.
         if is_iq:
             return name_to_value, qformat, block_size
         # Getting the weight scales
@@ -1156,13 +1156,18 @@ class GPTModelExporter:
         return weight_scale, weight_scale_2
 
     @staticmethod
-    def _get_iq_weight_state(
-        weight_key: str, weight: torch.Tensor, qformat: str
-    ) -> dict[str, torch.Tensor]:
-        """Pack one final-layout weight into the IQ unified-checkpoint representation."""
+    def _pack_iq_weight(weight: torch.Tensor, qformat: str) -> torch.Tensor:
+        """Pack one ``[out, in]`` weight and return its CPU payload."""
         quantize_iq = quantize_iq1_s if qformat == QUANTIZATION_IQ1_S else quantize_iq2_xs
         packed_weight, _ = quantize_iq(weight)
-        return {weight_key: packed_weight.detach().cpu()}
+        return packed_weight.detach().cpu()
+
+    @classmethod
+    def _get_iq_weight_state(
+        cls, weight_key: str, weight: torch.Tensor, qformat: str
+    ) -> dict[str, torch.Tensor]:
+        """Pack one ``[out, in]`` weight into the IQ checkpoint representation."""
+        return {weight_key: cls._pack_iq_weight(weight, qformat)}
 
     def _record_layer_quant_config(self, prefix: str, qformat: str | None, block_size: int | None):
         """Record per-HF-layer quantization metadata for mixed precision exports."""
@@ -1878,16 +1883,19 @@ class GPTModelExporter:
                 name_to_value.pop("input_scale") if "input_scale" in name_to_value else None
             )
 
+            if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+                weight = self._pack_iq_weight(weight, qformat)
             weight_list.append(weight)
             weight_scale_list.append(weight_scale)
             weight_scale_2_list.append(weight_scale_2)
             input_scale_list.append(input_scale)
             self._record_layer_quant_config(prefix, qformat, block_size)
 
+        is_iq = qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Megatron is [num_experts, out, in]; most HF layouts want [num_experts, in, out].
-        if transpose:
+        if transpose and not is_iq:
             merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
         if weight_scale_2_list[0] is None:
@@ -1910,9 +1918,7 @@ class GPTModelExporter:
             merged_input_scale = None
 
         # Save the merged weights
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            self._state_dict.update(self._get_iq_weight_state(prefix, merged_weight, qformat))
-        elif merged_weight_scale is None:
+        if is_iq or merged_weight_scale is None:
             self._state_dict[prefix] = merged_weight
         else:
             self._state_dict[prefix] = to_quantized_weight(
@@ -1950,6 +1956,14 @@ class GPTModelExporter:
                 name_to_value.pop("input_scale") if "input_scale" in name_to_value else None
             )
 
+            if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+                if layer_type == "linear_fc1":
+                    half_out = weight.shape[0] // 2
+                    interleaved_weight = torch.empty_like(weight)
+                    interleaved_weight[::2] = weight[:half_out]
+                    interleaved_weight[1::2] = weight[half_out:]
+                    weight = interleaved_weight
+                weight = self._pack_iq_weight(weight, qformat)
             weight_list.append(weight)
             weight_scale_list.append(weight_scale)
             weight_scale_2_list.append(weight_scale_2)
@@ -1957,6 +1971,7 @@ class GPTModelExporter:
             bias_list.append(bias)
             self._record_layer_quant_config(prefix, qformat, block_size)
 
+        is_iq = qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Transpose the last two dimensions to match HuggingFace format (except for GptOssForCausalLM)
@@ -1964,10 +1979,11 @@ class GPTModelExporter:
         # HF format: [num_experts, in_features, out_features]
 
         # TODO: Need to decide if we want to transpose the weight or not.
-        merged_weight = merged_weight.transpose(-2, -1).contiguous()
+        if not is_iq:
+            merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
         # Apply interleaving for GptOssForCausalLM linear_fc1 to match HF format
-        if layer_type == "linear_fc1":
+        if layer_type == "linear_fc1" and not is_iq:
             # Megatron has de-interleaved format, need to interleave for HF
             # Pattern: first half -> even indices, second half -> odd indices
             num_experts, in_features, out_features = merged_weight.shape
@@ -2023,8 +2039,8 @@ class GPTModelExporter:
             merged_input_scale = None
 
         # Save the merged weights
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            self._state_dict.update(self._get_iq_weight_state(prefix, merged_weight, qformat))
+        if is_iq:
+            self._state_dict[prefix] = merged_weight
         elif merged_weight_scale is None:
             # TODO: May need to modify the key name later.
             self._state_dict[prefix] = merged_weight

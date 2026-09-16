@@ -218,10 +218,7 @@ def _export_fused_experts(
             _export_quantized_weight(wrapper, dtype)
 
             proj = nn.Module()
-            if isinstance(wrapper.weight, nn.Parameter):
-                proj.weight = wrapper.weight
-            else:
-                proj.register_buffer("weight", wrapper.weight)
+            proj.weight = wrapper.weight
             for attr in ("weight_scale", "weight_scale_2", "input_scale"):
                 if hasattr(wrapper, attr):
                     proj.register_buffer(attr, getattr(wrapper, attr))

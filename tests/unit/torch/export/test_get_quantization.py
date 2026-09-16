@@ -44,6 +44,7 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     postprocess_state_dict,
+    process_layer_quant_config,
 )
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 
@@ -86,11 +87,47 @@ def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, ef
     config = get_quant_config(model)
     assert config["quantization"]["quant_algo"] == num_bits.upper()
     assert config["quantization"]["block_payload_bytes"] == payload_bytes
+    assert config["quantization"]["effective_bits"] == effective_bits
     hf_config = convert_hf_quant_config_format(config)
-    weights = hf_config["config_groups"]["group_0"]["weights"]
-    assert weights["group_size"] == 256
-    assert weights["effective_bits"] == effective_bits
-    assert weights["packing"] == "ggml"
+    assert "config_groups" not in hf_config
+    assert hf_config["group_size"] == 256
+    assert hf_config["effective_bits"] == effective_bits
+    assert hf_config["packing"] == "ggml"
+    assert hf_config["block_payload_bytes"] == payload_bytes
+
+
+def test_mixed_iq_config_group_does_not_claim_integer_weight_schema():
+    converted = convert_hf_quant_config_format(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.0.mlp.down_proj": {
+                        "quant_algo": "IQ2_XS",
+                        "group_size": 256,
+                        "effective_bits": 2.3125,
+                        "packing": "ggml",
+                        "block_payload_bytes": 74,
+                    }
+                },
+            }
+        }
+    )
+
+    group = converted["config_groups"]["group_0"]
+    assert "weights" not in group
+    assert group["quant_algo"] == "IQ2_XS"
+    assert group["packing"] == "ggml"
+
+
+def test_iq_quantization_config_rejects_mismatched_block_size():
+    with pytest.raises(ValueError, match="IQ2_XS requires block size 256, got 128"):
+        process_layer_quant_config(
+            {
+                "model.layers.0.mlp.down_proj.quantization": "iq2_xs",
+                "model.layers.0.mlp.down_proj.awq_block_size": 128,
+            }
+        )
 
 
 class _FakeKVCacheQuantizer(torch.nn.Module):

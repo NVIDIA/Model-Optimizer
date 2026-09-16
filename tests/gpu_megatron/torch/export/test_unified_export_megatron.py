@@ -47,7 +47,12 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import dequantize_iq1_s, dequantize_iq2_xs
+from modelopt.torch.quantization.ggml import (
+    dequantize_iq1_s,
+    dequantize_iq2_xs,
+    quantize_iq1_s,
+    quantize_iq2_xs,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
@@ -130,6 +135,214 @@ def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequ
         "model.layers.0.mlp.down_proj.quantization": qformat,
         "model.layers.0.mlp.down_proj.awq_block_size": 256,
     }
+
+
+def _make_iq_experts(qformat, layer_type, *, bias=False):
+    experts = torch.nn.ModuleList()
+    generator = torch.Generator().manual_seed(1234)
+    for _ in range(2):
+        expert = torch.nn.Module()
+        linear = torch.nn.Linear(256, 4, bias=bias, dtype=torch.bfloat16)
+        with torch.no_grad():
+            linear.weight.copy_(torch.randn(linear.weight.shape, generator=generator))
+            if linear.bias is not None:
+                linear.bias.copy_(torch.randn(linear.bias.shape, generator=generator))
+        linear.weight_quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=qformat,
+                block_sizes={-1: 256},
+                backend="ggml",
+            )
+        )
+        expert.add_module(layer_type, linear)
+        experts.append(expert)
+    return experts
+
+
+def _make_iq_exporter():
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter._state_dict = {}
+    exporter.exclude_modules = []
+    exporter.layer_config_dict = {}
+    return exporter
+
+
+def _make_iq_weight(rows):
+    return torch.linspace(-1, 1, rows * 256, dtype=torch.float32).reshape(rows, 256).bfloat16()
+
+
+def _assert_iq2_payload_matches(packed, logical_weight):
+    expected, _ = quantize_iq2_xs(logical_weight)
+    torch.testing.assert_close(packed, expected.cpu(), rtol=0, atol=0)
+
+
+def test_megatron_gated_mlp_slicing_exports_iq_payloads():
+    weight = _make_iq_weight(8)
+    module = SimpleNamespace(config=SimpleNamespace(ffn_hidden_size=4))
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+
+    exporter._gated_mlp_slicing(module, "model.layers.0.mlp.")
+
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mlp.gate_proj.weight"], weight[:4]
+    )
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mlp.up_proj.weight"], weight[4:]
+    )
+
+
+def test_megatron_grouped_mlp_slicing_exports_iq_payloads():
+    weight = _make_iq_weight(8)
+    module = SimpleNamespace(
+        num_gemms=1,
+        weight0=weight,
+        local_expert_indices=[0],
+        state_dict=lambda: {"weight0": weight},
+    )
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: (
+        {"weight": module.weight},
+        "iq2_xs",
+        256,
+    )
+
+    exporter._grouped_mlp_slicing(
+        module,
+        "model.layers.0.mlp.experts.{}",
+        gate_proj_name="gate_proj",
+        up_proj_name="up_proj",
+    )
+
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mlp.experts.0.gate_proj.weight"], weight[:4]
+    )
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mlp.experts.0.up_proj.weight"], weight[4:]
+    )
+
+
+def test_megatron_qkv_slicing_exports_iq_payloads():
+    weight = _make_iq_weight(8)
+    module = SimpleNamespace(
+        config=SimpleNamespace(
+            hidden_size=256,
+            num_query_groups=1,
+            num_attention_heads=2,
+            kv_channels=2,
+            attention_output_gate=False,
+        )
+    )
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+
+    exporter._qkv_slicing(module, "model.layers.0.self_attn.")
+
+    reshaped = weight.reshape(4, 2, 256)
+    expected = {
+        "q_proj": reshaped[:2].reshape(4, 256),
+        "k_proj": reshaped[2].reshape(2, 256),
+        "v_proj": reshaped[3].reshape(2, 256),
+    }
+    for projection, logical_weight in expected.items():
+        _assert_iq2_payload_matches(
+            exporter._state_dict[f"model.layers.0.self_attn.{projection}.weight"],
+            logical_weight,
+        )
+
+
+def test_megatron_gated_delta_net_slicing_exports_iq_payloads():
+    weight = _make_iq_weight(12)
+    module = SimpleNamespace(
+        in_proj=object(),
+        in_proj_split_names=("query", "key", "value", "z", "beta", "alpha"),
+        in_proj_split_sections=(2, 2, 2, 2, 2, 2),
+    )
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+
+    exporter._gated_delta_net_slicing(module, "model.layers.0.mixer.")
+
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mixer.in_proj_qkv.weight"], weight[:6]
+    )
+    _assert_iq2_payload_matches(
+        exporter._state_dict["model.layers.0.mixer.in_proj_z.weight"], weight[6:8]
+    )
+    torch.testing.assert_close(
+        exporter._state_dict["model.layers.0.mixer.in_proj_b.weight"], weight[8:10]
+    )
+    torch.testing.assert_close(
+        exporter._state_dict["model.layers.0.mixer.in_proj_a.weight"], weight[10:]
+    )
+
+
+@pytest.mark.parametrize(
+    ("qformat", "payload_bytes", "quantize", "dequantize"),
+    [
+        ("iq1_s", 50, quantize_iq1_s, dequantize_iq1_s),
+        ("iq2_xs", 74, quantize_iq2_xs, dequantize_iq2_xs),
+    ],
+)
+def test_megatron_packed_experts_keep_iq_blocks_on_input_axis(
+    qformat, payload_bytes, quantize, dequantize
+):
+    experts = _make_iq_experts(qformat, "linear_fc2")
+    expected_packed = torch.stack(
+        [quantize(expert.linear_fc2.weight)[0].cpu() for expert in experts]
+    )
+    expected = torch.stack(
+        [expert.linear_fc2.weight_quantizer(expert.linear_fc2.weight) for expert in experts]
+    )
+    exporter = _make_iq_exporter()
+
+    exporter._pack_name_remapping(
+        experts,
+        "model.layers.0.mlp.experts.down_proj",
+        layer_type="linear_fc2",
+    )
+
+    packed = exporter._state_dict["model.layers.0.mlp.experts.down_proj"]
+    assert packed.shape == (2, 4, 1, payload_bytes)
+    assert packed.device.type == "cpu"
+    torch.testing.assert_close(packed, expected_packed, rtol=0, atol=0)
+    reconstructed = dequantize(packed, torch.tensor([2, 4, 256]), dtype=torch.bfloat16)
+    torch.testing.assert_close(reconstructed, expected, rtol=0.02, atol=0.005)
+
+
+def test_megatron_gpt_oss_packed_experts_interleave_before_iq_packing():
+    experts = _make_iq_experts("iq2_xs", "linear_fc1", bias=True)
+    interleave = torch.tensor([0, 2, 1, 3])
+    expected_packed = torch.stack(
+        [quantize_iq2_xs(expert.linear_fc1.weight[interleave])[0].cpu() for expert in experts]
+    )
+    expected_weight = torch.stack(
+        [
+            expert.linear_fc1.weight_quantizer(expert.linear_fc1.weight)[interleave]
+            for expert in experts
+        ]
+    )
+    expected_bias = torch.stack([expert.linear_fc1.bias[interleave] for expert in experts])
+    exporter = _make_iq_exporter()
+
+    exporter._pack_name_remapping_gpt_oss(
+        experts,
+        "model.layers.0.mlp.experts.gate_up_proj",
+        layer_type="linear_fc1",
+    )
+
+    prefix = "model.layers.0.mlp.experts.gate_up_proj"
+    packed = exporter._state_dict[prefix]
+    assert packed.shape == (2, 4, 1, 74)
+    torch.testing.assert_close(packed, expected_packed, rtol=0, atol=0)
+    reconstructed = dequantize_iq2_xs(
+        packed,
+        torch.tensor([2, 4, 256]),
+        dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(reconstructed, expected_weight, rtol=0.02, atol=0.005)
+    torch.testing.assert_close(exporter._state_dict[prefix + "_bias"], expected_bias)
 
 
 def test_megatron_iq_export_rejects_tensor_parallelism():
