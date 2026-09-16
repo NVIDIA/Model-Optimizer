@@ -141,12 +141,14 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
     config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
     """
-    try:
-        from vllm.attention.layer import MLAAttention
-    except ImportError:
-        return kv_quant_cfg
+    # Resolved via the quant plugin, which handles the MLAAttention module
+    # moving across vLLM releases (vllm.attention.layer no longer exists in
+    # vLLM >= 0.26).
+    from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
-    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+    if VllmMLAAttention is None or not any(
+        isinstance(m, VllmMLAAttention) for m in model.modules()
+    ):
         return kv_quant_cfg
 
     kv_entry = next(

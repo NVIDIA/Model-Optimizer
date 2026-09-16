@@ -143,6 +143,14 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         )
         return ("group", group_key, value)
 
+    # MLA latent quantizers: self_attn.kv_c/k_pe_bmm_quantizer ->
+    # self_attn.mla_attn.mla_attn.* (DeepSeek-style wrapper nesting in vLLM).
+    # vLLM-native keys that already carry the mla_attn prefix copy as-is below.
+    mla_bmm_match = re.search(r"(.*\.self_attn)\.((?:kv_c|k_pe)_bmm_quantizer.*)$", key)
+    if mla_bmm_match:
+        new_key = mla_bmm_match.group(1) + ".mla_attn.mla_attn." + mla_bmm_match.group(2)
+        return ("copy", new_key, value)
+
     # Transform bmm_quantizer keys: self_attn.q/k/v_bmm_quantizer -> self_attn.attn.q/k/v_bmm_quantizer
     bmm_match = re.search(r"(.*\.self_attn)\.([qkv]_bmm_quantizer.*)$", key) or re.search(
         r"(.*\.mixer)\.([qkv]_bmm_quantizer.*)$", key

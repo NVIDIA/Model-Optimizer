@@ -12,6 +12,8 @@ Changelog
 - Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
 - Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.
 
+- Add fused NVFP4/FP8 Q/K/P/V and 2:4 attention quantization for MLA models (DeepSeek-family) on the vLLM ``TRITON_MLA`` backend, served through ``examples/vllm_serve`` (``QuantSparseAttnWorker`` / ``install_vllm_nvfp4_attention``). Each attention BMM operand is fake-quantized in-kernel from a raw latent cache — decode quantizes K (feature axis) and V (token axis) on read and P after the softmax row-sum; prefill quantizes the projected operands. Optional checkpoint N:M score sparsity applies to prefill new-token attention. Requires ``--attention-backend TRITON_MLA`` and ``--enforce-eager``.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
