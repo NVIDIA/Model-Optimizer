@@ -321,8 +321,17 @@ def build_profile(
         "per_category": per_category,
         "measurement_conditions": measurement_conditions,
         "validation": {
-            "mean_consistency": _consistency_check(mean_accept_length, marginal),
-            "marginal_monotonicity": _monotonicity_check(marginal),
+            # Both checks are defined over the longest-prefix rate vectors. An
+            # unmeasured profile has an empty histogram (mean 0.0 against an implied
+            # 1.0), and under block verification the vectors are withheld entirely --
+            # reporting a pass or a failure on either would describe data the profile
+            # does not claim to provide.
+            "mean_consistency": (
+                _consistency_check(mean_accept_length, marginal)
+                if measured and vectors_apply
+                else None
+            ),
+            "marginal_monotonicity": (_monotonicity_check(marginal) if vectors_apply else None),
         },
     }
     return profile

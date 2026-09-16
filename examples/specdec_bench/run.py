@@ -111,7 +111,16 @@ def _speculation_profile_metadata(args):
         ),
         "target_model": {"id": checkpoint_id(args.model_dir)},
         "measurement_conditions": {
-            "dataset": args.dataset or ("mtbench" if args.mtbench else None),
+            # Mirrors run_simple's dispatch order below. Missing a selector here
+            # publishes dataset: null, and acceptance is strongly dataset-dependent --
+            # a profile that cannot say what produced it is hard to compare against
+            # another. --specbench is also the run that populates per_category.
+            "dataset": (
+                args.dataset
+                or ("mtbench" if args.mtbench else None)
+                or ("random" if args.random_isl is not None else None)
+                or ("specbench" if args.specbench is not None else None)
+            ),
             "concurrency": args.concurrency,
             "temperature": args.temperature,
             "engine": args.engine,

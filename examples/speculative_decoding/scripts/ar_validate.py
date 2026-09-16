@@ -84,7 +84,8 @@ def validate_ar(
             input_ids = input_ids.to(device)
 
         try:
-            _, ar, hist = validator.validate_online(osl, input_ids=input_ids, steps=steps)
+            _, ar = validator.validate_online(osl, input_ids=input_ids, steps=steps)
+            hist = validator.last_length_histogram
             results.append((category, ar))
             for length, count in hist.items():
                 length_histogram[length] = length_histogram.get(length, 0) + count
@@ -96,8 +97,21 @@ def validate_ar(
     return results, dict(sorted(length_histogram.items()))
 
 
+# Mirrors specdec_bench.speculation_profile's rule. Chain drafting means the K=3 draft
+# is a prefix of the K=5 draft, so one measurement covers every smaller K; anything else
+# is re-planned per K and must be measured at each. Duplicated rather than imported:
+# specdec_bench is an example package this script cannot depend on.
+_CHAIN_DRAFTING_METHODS = frozenset({"eagle", "eagle1", "eagle2", "eagle3", "draft_model"})
+
+
 def _write_speculation_profile(
-    path, length_histogram, num_speculative_tokens, per_request_mean, osl, num_samples
+    path,
+    length_histogram,
+    num_speculative_tokens,
+    per_request_mean,
+    osl,
+    num_samples,
+    method=None,
 ):
     """Emit the same speculation_profile.json schema specdec_bench produces.
 
@@ -113,6 +127,7 @@ def _write_speculation_profile(
     is the point to extract it properly.
     """
     import json
+    from itertools import pairwise
 
     total = sum(length_histogram.values())
     if total == 0:
@@ -139,12 +154,36 @@ def _write_speculation_profile(
         "schema_version": "1.0",
         "measured": True,
         "producer": "ar_validate",
+        "method": method,
+        # Without this a consumer cannot tell whether K may be extrapolated, and
+        # assuming it can for a measured_per_k draft (DFlash/DSpark) silently scales a
+        # profile that was only ever valid at one K.
+        "accept_length_model": (
+            "chain_analytic"
+            if method and method.lower() in _CHAIN_DRAFTING_METHODS
+            else "measured_per_k"
+        ),
         "num_speculative_tokens": num_speculative_tokens,
         "conditional_accept_rates": [round(x, 6) for x in conditional],
         "marginal_accept_rates": [round(x, 6) for x in marginal],
         "mean_accept_length": round(per_step_mean, 6),
         "mean_accept_length_per_request": round(per_request_mean, 6),
         "acceptance_length_histogram": length_histogram,
+        # The remaining build_profile keys are emitted rather than omitted: a consumer
+        # that cannot find a key falls back to its own default, and for several of these
+        # the optimistic default is the unsafe one -- extrapolating a measured_per_k
+        # draft over K is the silent misread this schema exists to prevent.
+        "max_supported_k": num_speculative_tokens,
+        "verification_method": "longest_prefix",
+        "vectors_unavailable_reason": None,
+        # This producer runs inside the training loop with no serving engine and no
+        # checkpoint paths in hand, so these are genuinely unknown here rather than
+        # defaulted: absent-but-declared is the honest shape.
+        "block_size": None,
+        "draft_checkpoint": None,
+        "target_model": None,
+        "per_category": None,
+        "accept_length_by_k": {},
         "measurement_conditions": {
             "dataset": "mt_bench",
             "osl": osl,
@@ -152,8 +191,24 @@ def _write_speculation_profile(
             "validation": "online (ground truth recomputed after each accepted token)",
         },
     }
+    # Same guards build_profile runs, so both producers' profiles carry the same
+    # evidence rather than one of them silently skipping the checks.
+    implied_mean = 1.0 + sum(marginal)
+    profile["validation"] = {
+        "mean_consistency": {
+            "passed": abs(implied_mean - per_step_mean) < 1e-6,
+            "reported_mean": round(per_step_mean, 6),
+            "implied_mean": round(implied_mean, 6),
+        },
+        "marginal_monotonicity": {
+            "passed": all(a >= b for a, b in pairwise(marginal)),
+        },
+    }
     with open(path, "w") as f:
         json.dump(profile, f, indent=2)
+    # Printed here, not at the call site: the early return above leaves no file, and a
+    # caller-side print would announce success for the one case it exists to handle.
+    print(f"  Wrote speculation profile to {path}")
 
 
 def main():
@@ -255,8 +310,8 @@ def main():
                 per_request_mean=avg_ar,
                 osl=args.osl,
                 num_samples=len(results),
+                method=getattr(getattr(model, "config", None), "speculative_decoding_method", None),
             )
-            print(f"  Wrote speculation profile to {args.output_json}")
 
         # Bound check last: an out-of-bounds AR is still worth having on disk, and
         # raising first would discard the measurement that explains the failure.

@@ -117,6 +117,12 @@ class AcceptanceRate(Metric):
         with open(path, "w") as f:
             json.dump(profile, f, indent=2)
         validation = profile.get("validation") or {}
+        # Monotonicity is computed and serialized either way; surfacing only the mean
+        # check left a malformed histogram -- per _monotonicity_check's own docstring,
+        # a data problem rather than a draft-quality one -- silent in the log.
+        monotonicity = validation.get("marginal_monotonicity") or {}
+        if monotonicity.get("passed") is False:
+            print(f"WARNING: speculation profile marginal_monotonicity failed: {monotonicity}")
         consistency = validation.get("mean_consistency") or {}
         if not consistency.get("passed", True):
             # Loud, because a failure here means the vectors do not describe the

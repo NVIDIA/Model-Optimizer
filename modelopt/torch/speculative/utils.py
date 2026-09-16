@@ -243,6 +243,15 @@ class AcceptanceRateValidation:
     Note: currently it only supports TP.
     """
 
+    #: Acceptance-length histogram from the most recent :meth:`validate_online` call,
+    #: ``{accepted_length: count}``, counting the base token plus accepted drafts --
+    #: *not* every token emitted in the step. On a rejection the loop also appends a
+    #: target correction token, so this must not be used to reconstruct output-token
+    #: counts. Steps cut short by the output budget are excluded entirely. Empty until
+    #: a call has run. Kept as state rather than a third return value so the public
+    #: 2-tuple signature stays stable.
+    last_length_histogram: dict[int, int] = {}
+
     def __init__(self, model, tokenizer):
         """Init function to take in the model and tokenizer."""
         tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
@@ -426,7 +435,8 @@ class AcceptanceRateValidation:
             steps: number of draft tokens per step
 
         Returns:
-            ``(input_ids, ar, length_histogram)`` where ``length_histogram`` maps
+            ``(input_ids, ar)``. The acceptance-length histogram is available on
+            ``self.last_length_histogram`` and maps
             acceptance length (tokens emitted in one step, including the target's
             bonus token) to how often it occurred. The histogram is what a
             per-position acceptance profile is built from; ``ar`` alone cannot
@@ -450,6 +460,9 @@ class AcceptanceRateValidation:
         length_histogram: dict[int, int] = {}
 
         while input_ids.shape[1] < max_len:
+            # A step cut short by the output budget under-reports what the draft would
+            # have achieved, so it is excluded from the histogram (but not from `ar`).
+            truncated_by_budget = False
             cnt += 1
 
             # Generate base token + draft tokens
@@ -462,7 +475,12 @@ class AcceptanceRateValidation:
 
             if draft_tokens is None or input_ids.shape[1] >= max_len:
                 total_accepted += 1  # base token
-                length_histogram[1] = length_histogram.get(1, 0) + 1
+                # Deliberately not recorded in the histogram: the loop stopped because
+                # the output budget ran out, not because a draft was rejected. Counting
+                # it as length 1 would report a rejection that was never verified, and
+                # the bias lands entirely in the low-length bins -- distorting the shape
+                # of the survival function the profile publishes, not just its mean.
+                # `ar` keeps counting it, preserving existing behaviour and tests.
                 continue
 
             # Build candidate sequence with draft tokens appended
@@ -492,15 +510,23 @@ class AcceptanceRateValidation:
                     break
 
                 if input_ids.shape[1] >= max_len:
+                    truncated_by_budget = True
                     break
 
             total_accepted += 1 + accepted  # base token + accepted drafts
             # Length counts the target's bonus token, matching how specdec_bench and
             # the model cards define acceptance length.
-            length_histogram[1 + accepted] = length_histogram.get(1 + accepted, 0) + 1
+            if not truncated_by_budget:
+                length_histogram[1 + accepted] = length_histogram.get(1 + accepted, 0) + 1
 
         ar = total_accepted / cnt if cnt > 0 else 0.0
-        return input_ids, ar, dict(sorted(length_histogram.items()))
+        # Exposed as state rather than a third return value: AcceptanceRateValidation is
+        # public (subclassed by HFARValidation and MegatronARValidation), and widening
+        # the tuple would break `ids, ar = validator.validate_online(...)` with no
+        # deprecation path. It would also leave this method inconsistent in arity with
+        # its sibling validate(), which returns a 2-tuple.
+        self.last_length_histogram = dict(sorted(length_histogram.items()))
+        return input_ids, ar
 
 
 @contextlib.contextmanager
