@@ -15,6 +15,7 @@
 
 """Tests for modelopt/torch/export/plugins/hf_checkpoint_utils.py"""
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -472,6 +473,7 @@ def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
     assert off_index_safetensors_files(tmp_path) == ["mtp.safetensors"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
     """A hub-downloaded checkpoint stores EVERY file as a symlink into ``../../blobs/<sha>``.
 
@@ -510,6 +512,7 @@ def _indexed_ckpt(src):
     return src
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_skips_a_sidecar_whose_link_dangles(tmp_path):
     """A link to nothing copies nothing rather than raising out of the export."""
     src = _indexed_ckpt(tmp_path / "ckpt")
@@ -522,6 +525,7 @@ def test_skips_a_sidecar_whose_link_dangles(tmp_path):
     assert not (dst / "mtp.safetensors").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_skips_a_sidecar_pointing_outside_the_checkpoint(tmp_path):
     """The original hardening, restored: a link out of the tree is refused, not followed.
 
