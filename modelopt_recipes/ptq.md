@@ -170,6 +170,31 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   (amax) calibrated as in the default recipes. Costs more calibration time but
   recovers accuracy NVFP4 W4A4 can lose under plain max. Reach for it when a
   `max` recipe regresses.
+- **`nvfp4_act_headroom`** (`nvfp4_act_headroom-kv_fp8_cast`) — leaves headroom
+  on the NVFP4 **activation** global scale. Plain `max` anchors that scale to the
+  largest per-block amax seen during calibration, so any larger activation at
+  inference saturates. This variant instead sets `amax = max(rho * anchor, upper)`
+  from the per-block amaxes at `anchor_percentile` (default 1) and
+  `upper_percentile` (default 99.99), with headroom factor `rho` (default 16384):
+  calibrated blocks sit low in the FP8 block-scale range, leaving the rest for
+  unseen outliers. Costs one calibration pass and exports a standard NVFP4
+  checkpoint; coverage matches `nvfp4_default-kv_fp8_cast`, and the nested
+  `weight_scale_algorithm` still accepts `mse` / `local_hessian`. Affects NVFP4
+  **input** quantizers only — a no-op for FP8 and weight-only recipes.
+
+  Reach for it when a W4A4 recipe regresses and the **activations**, not the
+  weights, are to blame: an A16 ablation of the same scope clears it while `mse`
+  does not; the symptom is behavioral (verbose or runaway generations, hitting
+  the generation cap) rather than a flat score drop; inference contexts run
+  longer than the calibration set; or a few rare blocks dominate the activation
+  error. MoE experts-only scopes are the common case — one observer covers every
+  expert in a layer, and `down_proj` inputs clip first. On a GLM-5.3-Flash
+  experts-only W4A4 study (SciCode, temperature 1.0) it cut the median
+  generation-length regression from +38% to +19% and the mean from +19% to +4%
+  with no capped generations: the best strict-W4A4 result there, but still short
+  of the p50/p75 gate. A strong first lever, not a guaranteed fix — and sweep
+  `rho`, since headroom above the calibrated range costs resolution inside it.
+
 - **`input_scale1`** (`nvfp4_experts_only_input_scale1-kv_fp8_cast`) — pins the
   expert **activation** per-tensor amax to a constant `2688.0`
   (= E2M1_MAX × E4M3_MAX = 6 × 448) via `constant_amax`, so the exported NVFP4
@@ -215,7 +240,8 @@ These can also be **stacked** when a single method isn't enough — e.g. `mse` +
    target requires, checking accuracy as you go.
 3. **Recover accuracy via calibration before backing off the scope.** If a
    wider-scope recipe regresses, switch its `max` to the `mse` variant before
-   retreating to a narrower scope.
+   retreating to a narrower scope. If `mse` doesn't clear it but an A16 ablation
+   does, the **activations** are the problem: try `nvfp4_act_headroom` next.
 4. **Pick KV by deployment.** `kv_fp8_cast` is the safe default (usually as
    accurate as calibrated `kv_fp8`); use `kv_nvfp4_cast` for maximum KV
    compression.
