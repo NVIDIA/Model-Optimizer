@@ -15,7 +15,9 @@
 #   - YaRN rope_scaling at export for long context (factor = 196608/4096 = 48).
 #
 # Capture ids: build_target_layer_ids(num_orig=62, num_draft=5)=[1,16,30,44,59]
-# -> +1 for embedding = [2,17,31,45,60], append final layer 62.
+# -> +1 for embedding = [2,17,31,45,60], append true final layer 62.
+# (62 = true final hidden; requires a vLLM with the aux-capture fix vllm#46788.
+#  Without it use 61 -- the 2nd-to-last layer -- which caps acceptance length.)
 # 6 captured = 5 aux layers + final output for self-logit distillation.
 #
 # 3-step pipeline:
@@ -75,10 +77,15 @@ pipeline:
       - training.logging_steps=100
       - training.save_steps=400
       - training.ddp_timeout=3600
-      # dp_shard_size=1 stops main.py from creating a ParallelismConfig; the
-      # accelerate config below owns FSDP2 sharding.
+      # dp_shard_size=1 stops main.py from creating a ParallelismConfig. It is also
+      # the dflash.yaml default, kept explicit so the intent survives a recipe change.
+      #
+      # No accelerate config on this path: train_eagle_streaming.sh launches via
+      # launch_train.sh, which hardcodes `accelerate launch --mixed_precision bf16`
+      # and never passes --config_file. bf16 is therefore left at the recipe default;
+      # forcing it false here would give fp32 draft params under accelerate's bf16
+      # autocast, with TrainingArguments disagreeing with ACCELERATE_MIXED_PRECISION.
       - training.dp_shard_size=1
-      - training.bf16=false
       # vLLM container has no tensorboard -> init crash.
       - training.report_to=none
       - dflash.dflash_self_logit_distillation=true
@@ -110,9 +117,7 @@ pipeline:
       - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
       - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
       - OVERRIDE_TRANSFORMERS: "4.57.1"
-      - ACCELERATE_CONFIG: examples/MiniMax/MiniMax-M2.7-DFlash/accelerate_fsdp2_hybrid.yaml
       - PATCH_FSDP2_BUFFERS_TF457: "1"
-      - MIXED_PRECISION: "no"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 4
