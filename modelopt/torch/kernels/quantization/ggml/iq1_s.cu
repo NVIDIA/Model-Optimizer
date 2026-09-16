@@ -257,8 +257,10 @@ at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid) {
   TORCH_CHECK(input_type == at::kFloat || input_type == at::kDouble || input_type == at::kHalf ||
                   input_type == at::kBFloat16,
               "IQ1_S packing supports float32, float64, float16, and bfloat16 inputs");
-  TORCH_CHECK(input.numel() > 0 && input.numel() % kBlockSize == 0,
-              "input size must be a positive multiple of 256");
+  TORCH_CHECK(input.numel() > 0, "input must be non-empty");
+  TORCH_CHECK(input.dim() > 0 && input.size(-1) % kBlockSize == 0,
+              "input's innermost dimension must be a multiple of 256 so blocks do not straddle "
+              "rows");
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == kEntries &&
                   grid.size(1) == kVectorSize,
               "grid must be float32 [2048, 8]");

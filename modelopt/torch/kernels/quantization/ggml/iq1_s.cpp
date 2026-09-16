@@ -28,7 +28,7 @@ at::Tensor iq1_s_pack(at::Tensor input, at::Tensor grid) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pack", &iq1_s_pack,
-             "Pack a float32, float64, float16, or bfloat16 CUDA tensor whose numel is a positive "
-             "multiple of 256. The grid must be float32 [2048, 8]. Returns uint8 [numel / 256, "
-             "50] on the input device.");
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [2048, 8]. Returns uint8 "
+             "[numel / 256, 50] on the input device.");
 }
