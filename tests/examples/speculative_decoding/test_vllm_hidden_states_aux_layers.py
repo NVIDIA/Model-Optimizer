@@ -29,14 +29,13 @@ guard written against its own copy would guard nothing.
 
 import importlib.util
 import sys
-from pathlib import Path
 
 import pytest
+from _test_utils.examples.run_command import MODELOPT_ROOT
 
 from modelopt.torch.speculative.plugins.hf_eagle import default_eagle_aux_layer_ids
 
-_DIR = Path(__file__).resolve().parents[3] / "examples" / "speculative_decoding"
-_COLLECT = _DIR / "collect_hidden_states"
+_COLLECT = MODELOPT_ROOT / "examples" / "speculative_decoding" / "collect_hidden_states"
 sys.path.insert(0, str(_COLLECT))
 
 _SPEC = importlib.util.spec_from_file_location(
