@@ -308,7 +308,23 @@ Accuracy is only half the serving cost — a model that scores the same while em
 | MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
 | GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
 
-Two things to take from this. **4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, nearly double BF16 for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. If your workload resembles SciCode, budget for that: the throughput gain above is measured at fixed output length and does not account for generating more tokens.
+**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
+
+<details>
+<summary><b>What the SciCode number actually is — worth reading before running QAD on another model</b></summary>
+
+It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps**:
+
+- Sub-steps that hit the 131,072-token cap inside `<think>` go from **0.7% (20/2704, BF16) to 3.6% (96/2704, QAD 500)**. Almost all return **zero answer tokens** (93 of those 96) — the model writes a complete solution, says *"I think I've been going in circles"*, and writes it again. In the case we inspected, a 20-word window repeats **352 times** and 97.7% of the trace's 20-word windows are duplicates.
+- Those 3.6% of sub-steps burn **45.7% of all completion tokens**, so they dominate the mean: excluding them it is **+30.4%** rather than +90.9%.
+- The **median** also roughly doubles (+91.6%), so the whole distribution shifted right — this is not *only* a tail effect.
+- Capped rate peaks at **iteration 50** (4.3%) and settles at 3.1% / 3.6% by 300 / 500; it is not gradual drift.
+
+The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
+
+**For the next QAD run**, three things follow: track the **length-capped rate** as a first-class metric alongside accuracy (a benchmark score can stay flat while 3.6% of responses return nothing); consider **top-p instead of top-k** for the KD loss so coverage adapts to the teacher's entropy rather than a fixed rank; and if memory allows, **full-vocab KL** — at 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here, but more GPU memory or a smaller model or shorter sequence may afford it.
+
+</details>
 
 ---
 
