@@ -110,6 +110,27 @@ def has_quant_opt(model: nn.Module):
     return any(mode[0] == "quantize" for mode in opt_modes)
 
 
+def read_speculation_profile(speculation_profile: Path | str) -> dict:
+    """Read and validate a ``speculation_profile.json``. Needs no model or exporter.
+
+    Attaching a *measured* profile is pure file I/O -- the only reason the exporter
+    owns a copy of this is the unmeasured-stub branch, which needs the model to name
+    its speculation method. Kept module-level so a profile can be attached to an
+    existing export without reloading multi-GB weights just to write one JSON file.
+    """
+    source = Path(speculation_profile)
+    if not source.is_file():
+        raise FileNotFoundError(f"--speculation_profile not found: {source}")
+    with open(source) as f:
+        profile = json.load(f)
+    if not isinstance(profile, dict) or "schema_version" not in profile:
+        raise ValueError(
+            f"{source} is not a speculation profile: expected a JSON object with a "
+            "'schema_version' field. Generate one with examples/specdec_bench."
+        )
+    return profile
+
+
 class SpeculativeDecodingExporter(ABC):
     """Export a modelopt speculative decoding checkpoint to deployment format."""
 
@@ -170,16 +191,7 @@ class SpeculativeDecodingExporter(ABC):
         not leave a partial checkpoint with a stale profile beside it.
         """
         if speculation_profile is not None:
-            source = Path(speculation_profile)
-            if not source.is_file():
-                raise FileNotFoundError(f"--speculation_profile not found: {source}")
-            with open(source) as f:
-                profile = json.load(f)
-            if not isinstance(profile, dict) or "schema_version" not in profile:
-                raise ValueError(
-                    f"{source} is not a speculation profile: expected a JSON object with a "
-                    "'schema_version' field. Generate one with examples/specdec_bench."
-                )
+            profile = read_speculation_profile(speculation_profile)
         else:
             profile = {
                 "schema_version": None,
