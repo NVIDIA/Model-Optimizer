@@ -103,7 +103,7 @@ Weights are each split's share of the dataset's own token count — a single pas
 
 ### 2. Quantization
 
-W4A4 NVFP4 PTQ using the recipe at [`modelopt_recipes/huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml`](../../../../modelopt_recipes/huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml). See [examples/megatron_bridge/README.md](../../README.md) for full PTQ documentation.
+W4A4 NVFP4 PTQ using the recipe at [`modelopt_recipes/model_type/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml`](../../../../modelopt_recipes/model_type/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore.yaml). See [examples/megatron_bridge/README.md](../../README.md) for full PTQ documentation.
 
 PTQ takes **~9 min on 2 GB200 nodes (1.2 GPU-hours)** at EP=8.
 
@@ -130,7 +130,7 @@ PTQ takes **~9 min on 2 GB200 nodes (1.2 GPU-hours)** at EP=8.
 # SBATCH --nodes=2 --ntasks-per-node=4 --gpus-per-node=4
 srun ... python /opt/Model-Optimizer/examples/megatron_bridge/quantize.py \
     --hf_model_name_or_path Qwen/Qwen3.6-35B-A3B \
-    --recipe huggingface/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore \
+    --recipe model_type/qwen3_6_moe/ptq/w4a4_nvfp4-fp8_attn-kv_fp8_cast_mcore \
     --tp_size 1 --ep_size 8 --pp_size 1 \
     --calib_dataset_name cnn_nemotron_v2_mix \
     --calib_num_samples 1024 \
