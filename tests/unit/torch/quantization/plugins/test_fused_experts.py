@@ -502,6 +502,37 @@ class TestExportFusedExperts:
 
         self._cleanup_registry(expert_type)
 
+    def test_export_registers_packed_weight_buffers(self, monkeypatch):
+        """Packed expert weights must remain present in the exported state dict."""
+        model = _TinyMoEModel()
+        expert_type = type(model.moe.experts)
+        self._cleanup_registry(expert_type)
+        register_fused_experts_on_the_fly(model)
+
+        try:
+            converted = QuantModuleRegistry.convert(model.moe.experts)
+
+            def _pack_weight_as_buffer(wrapper, dtype):
+                packed = torch.zeros((*wrapper.weight.shape, 1), dtype=torch.uint8)
+                del wrapper.weight
+                wrapper.register_buffer("weight", packed)
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _pack_weight_as_buffer,
+            )
+
+            _export_fused_experts(converted, torch.float16)
+
+            state_dict = converted.state_dict()
+            for idx in range(NUM_EXPERTS):
+                for projection in ("gate_proj", "up_proj", "down_proj"):
+                    key = f"{idx}.{projection}.weight"
+                    assert key in state_dict
+                    assert state_dict[key].dtype == torch.uint8
+        finally:
+            self._cleanup_registry(expert_type)
+
     def test_uncalibrated_expert_gate_up_share_amax(self, monkeypatch):
         """gate_proj and up_proj must share weight_scale_2 even when an expert
         was never routed during calibration.
