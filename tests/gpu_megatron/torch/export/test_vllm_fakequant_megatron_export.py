@@ -18,6 +18,7 @@ from functools import partial
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 
 import modelopt.torch.quantization as mtq
@@ -97,6 +98,26 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
     # check if quant_amax.pth file exists
     quant_amax_file = export_dir / "quantizer_state.pth"
     assert quant_amax_file.exists(), f"quantizer_state.pth file should be created in {export_dir}"
+
+    # Recipes take the same export mapping path as quantizer tensors. Every tensor-side
+    # quantizer must therefore have a recipe at its final exported module path, and the
+    # temporary routing markers must not leak into either sidecar.
+    quantizer_state = torch.load(quant_amax_file, weights_only=True, map_location="cpu")
+    quantizer_recipe_file = export_dir / "vllm_fq_quantizer_state.yaml"
+    assert quantizer_recipe_file.exists()
+    with open(quantizer_recipe_file) as f:
+        quantizer_recipe = yaml.safe_load(f)
+
+    marker_suffix = "._vllm_fq_recipe_marker"
+    assert not any(key.endswith(marker_suffix) for key in quantizer_state)
+    assert not any(key.endswith(marker_suffix) for key in quantizer_recipe)
+
+    state_quantizer_names = {key.rsplit(".", 1)[0] for key in quantizer_state if "quantizer" in key}
+    missing_recipe_names = state_quantizer_names - quantizer_recipe.keys()
+    assert not missing_recipe_names, (
+        "Exported quantizer tensors are missing matching recipe entries: "
+        f"{sorted(missing_recipe_names)}"
+    )
 
     # make sure hf_quant_config.json file does not exist
     hf_quant_config_file = export_dir / "hf_quant_config.json"

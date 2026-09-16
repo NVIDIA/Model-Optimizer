@@ -125,6 +125,42 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 class VllmFqGPTModelExporter(GPTModelExporter):
     """VLLM fakequant GPTModel exporter."""
 
+    _RECIPE_MARKER_SUFFIX = "._vllm_fq_recipe_marker"
+
+    def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
+        """Store one resolved recipe, requiring repeated routes to agree."""
+        previous = self._quantizer_state_for_recipe.get(name)
+        if previous is not None and previous != recipe:
+            raise ValueError(f"Conflicting quantizer recipes routed to {name}")
+        self._quantizer_state_for_recipe[name] = recipe
+
+    def _extract_quantizer_recipe_markers(
+        self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
+    ) -> None:
+        """Resolve temporary recipe markers after the normal export mapping has routed them."""
+        routed_marker_ids: set[int] = set()
+        for state_dict in layer_state_dicts.values():
+            for key in list(state_dict):
+                if not key.endswith(self._RECIPE_MARKER_SUFFIX):
+                    continue
+
+                marker = state_dict.pop(key)
+                marker_ids = [int(i) for i in marker.detach().cpu().reshape(-1).tolist()]
+                recipes = [self._quantizer_recipe_markers[i][1] for i in marker_ids]
+                if any(recipe != recipes[0] for recipe in recipes[1:]):
+                    raise ValueError(f"Conflicting packed quantizer recipes routed to {key}")
+
+                recipe_name = key[: -len(self._RECIPE_MARKER_SUFFIX)]
+                self._store_quantizer_recipe(recipe_name, recipes[0])
+                routed_marker_ids.update(marker_ids)
+
+        # Packed expert mappings currently consume only selected tensor fields instead of
+        # forwarding arbitrary name_to_value entries. Their supplied prefix is already final,
+        # so use the normalized source name for markers that were not emitted into a shard.
+        for marker_id, (source_name, recipe) in enumerate(self._quantizer_recipe_markers):
+            if marker_id not in routed_marker_ids:
+                self._store_quantizer_recipe(source_name, recipe)
+
     @staticmethod
     def _pop_quantizer_keys(state_dict: dict) -> None:
         """Remove quantizer tensors from an export shard (OrderedDict-safe)."""
@@ -153,13 +189,17 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             "Exporting extra modules is not supported for vLLM fakequant"
         )
 
-        # Populated by _get_quantized_state as a side effect of the layer_state_dicts build below.
+        # Temporary scalar markers carry each recipe through the same export mapping as amax.
         self._quantizer_state_for_recipe: dict[str, dict] = {}
-        gather_mcore_vllm_fq_quantized_state_dict(self.model, self.layer_state_dicts, save_dir)
+        self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        layer_state_dicts = self.layer_state_dicts
+        self._extract_quantizer_recipe_markers(layer_state_dicts)
+
+        gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_dir)
         gather_mcore_vllm_fq_quantizer_state(self._quantizer_state_for_recipe, save_dir)
 
         self._pop_quantizer_keys(self.state_dict)
-        for _layer_sd in self.layer_state_dicts.values():
+        for _layer_sd in layer_state_dicts.values():
             self._pop_quantizer_keys(_layer_sd)
 
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
@@ -186,10 +226,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         Returns:
             Tuple: state_dict, quantization format, and block_size of the module.
         """
-        for qname, qstate in _quantizer_configs(module).items():
-            self._quantizer_state_for_recipe[prefix + qname] = qstate
-
         name_to_value = {}
+        source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
+        for qname, qstate in _quantizer_configs(module).items():
+            marker_id = len(self._quantizer_recipe_markers)
+            self._quantizer_recipe_markers.append((source_prefix + qname, qstate))
+            name_to_value[qname + self._RECIPE_MARKER_SUFFIX] = torch.tensor(
+                marker_id, dtype=torch.int64
+            )
+
         qformat: str = self._get_quantization_format(module)
         if qformat is None and "norm" not in prefix:
             # Add exclude layers for vllm fakequant config. Note that if the prefix is not an empty

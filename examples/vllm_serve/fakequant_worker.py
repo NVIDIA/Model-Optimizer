@@ -36,7 +36,6 @@ from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_
 from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
-    validate_quant_cfg_against_vllm_quant_method,
 )
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
@@ -132,7 +131,6 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             # falling through to default_quant_desc_input/weight (enable=True, 8-bit per-tensor)
             # on every quantizer -- that would fake-quantize already-quantized NVFP4 weights.
             quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
-        validate_quant_cfg_against_vllm_quant_method(model, quant_cfg.get("quant_cfg", []))
 
         # Before calibration, which is the run this artifact is most wanted for if it dies.
         mlflow_tracker.log_quant_config(quant_cfg)
