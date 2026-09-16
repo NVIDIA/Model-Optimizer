@@ -30,13 +30,24 @@
 
 namespace {
 
+// Packed layout and format constants follow the GGML definition at:
+// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
 constexpr int kBlockSize = 256;
 constexpr int kVectorSize = 8;
 constexpr int kEntries = 512;
 constexpr int kGroups = 16;
 constexpr int kLocalScales = 16;
-constexpr int kPayloadBytes = 74;
-constexpr float kNativeMax = 166.625f;
+constexpr int kScaleOffset = 0;
+constexpr int kCodeOffset = 2;
+constexpr int kCodeBytes = 2 * (kBlockSize / kVectorSize);
+constexpr int kLocalScaleOffset = kCodeOffset + kCodeBytes;
+constexpr int kPayloadBytes = kLocalScaleOffset + kGroups / 2;
+constexpr float kMaxMagnitude = 43.0f;
+constexpr float kMaxLocalScale = 31.0f / 8.0f;
+constexpr float kNativeMax = kMaxMagnitude * kMaxLocalScale; // 166.625.
+constexpr float kPeakToRmsSlope = 0.035f;
+constexpr float kMinScaleAnchor = 0.65f;
+constexpr float kMaxScaleAnchor = 0.92f;
 
 template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
   return static_cast<float>(*input);
@@ -47,6 +58,8 @@ __device__ __forceinline__ float quant_error(float xnorm, float dot, float qnorm
 }
 
 __device__ __forceinline__ float even_parity_dot(const float *x, const float *q, bool odd_parity) {
+  // The format stores seven sign bits. For odd parity, flip the coordinate with the smallest
+  // |x| * q penalty; the eighth sign is recovered from even parity during decoding.
   float dot = 0.0f;
   float weakest = FLT_MAX;
 #pragma unroll
@@ -79,7 +92,10 @@ __global__ void find_scale(const scalar_t *input, int64_t num_blocks, int64_t *s
   }
   const float rms = sqrtf(sumsq / kBlockSize);
   const float peak_to_rms = rms > 0.0f ? amax / rms : 0.0f;
-  const float anchor = fminf(0.92f, fmaxf(0.65f, 1.0f - 0.035f * peak_to_rms));
+  // Match the reference encoder's empirical predictor. Peaky blocks get a smaller anchor so
+  // outliers do not set the entire scale, while the clamp bounds the adjustment.
+  const float anchor =
+      fminf(kMaxScaleAnchor, fmaxf(kMinScaleAnchor, 1.0f - kPeakToRmsSlope * peak_to_rms));
   const __half scale = __float2half_rn(fminf((amax / kNativeMax) * anchor, 65504.0f));
   scale_bits[block] = static_cast<int64_t>(__half_as_ushort(scale));
 }
@@ -125,8 +141,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     return;
   }
   if (tid == 0) {
-    payload[0] = static_cast<uint8_t>(d_bits);
-    payload[1] = static_cast<uint8_t>(d_bits >> 8);
+    payload[kScaleOffset] = static_cast<uint8_t>(d_bits);
+    payload[kScaleOffset + 1] = static_cast<uint8_t>(d_bits >> 8);
   }
 
 #pragma unroll 1
@@ -254,7 +270,7 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
           sign_mask |= static_cast<int>(is_negative) << j;
         }
         const uint16_t code = static_cast<uint16_t>(entry | ((sign_mask & 0x7f) << 9));
-        const int code_offset = 2 + 2 * (group * 2 + vector);
+        const int code_offset = kCodeOffset + 2 * (group * 2 + vector);
         payload[code_offset] = static_cast<uint8_t>(code);
         payload[code_offset + 1] = static_cast<uint8_t>(code >> 8);
       }
@@ -263,7 +279,7 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
   }
 
   if (tid < 8)
-    payload[66 + tid] = locals[2 * tid] | (locals[2 * tid + 1] << 4);
+    payload[kLocalScaleOffset + tid] = locals[2 * tid] | (locals[2 * tid + 1] << 4);
 }
 
 } // namespace

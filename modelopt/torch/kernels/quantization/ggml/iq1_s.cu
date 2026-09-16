@@ -30,15 +30,23 @@
 
 namespace {
 
+// Packed layout and format constants follow the GGML definition at:
+// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
 constexpr int kBlockSize = 256;
 constexpr int kVectorSize = 8;
 constexpr int kEntries = 2048;
 constexpr int kGroups = 8;
-constexpr int kLocalScales = 8;
 constexpr int kChoices = 16;
-constexpr int kPayloadBytes = 50;
-constexpr float kDelta = 0.125f;
-constexpr float kNativeMax = 16.875f;
+constexpr int kScaleOffset = 0;
+constexpr int kIndexOffset = 2;
+constexpr int kIndexBytes = kBlockSize / kVectorSize;
+constexpr int kMetadataOffset = kIndexOffset + kIndexBytes;
+constexpr int kPayloadBytes = kMetadataOffset + 2 * kGroups;
+constexpr float kDelta = 0.125f;        // The metadata shift bit selects +1/8 or -1/8.
+constexpr float kMaxLocalScale = 15.0f; // Largest multiplier: 2 * 7 + 1.
+constexpr float kMaxShiftedMagnitude = 1.0f + kDelta;
+constexpr float kNativeMax = kMaxLocalScale * kMaxShiftedMagnitude; // 16.875.
+constexpr float kScaleAnchor = 0.61f;
 
 template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
   return static_cast<float>(*input);
@@ -71,7 +79,9 @@ __global__ void find_scale(const scalar_t *input, int64_t num_blocks, int64_t *s
 #pragma unroll 1
   for (int i = 0; i < kBlockSize; ++i)
     amax = fmaxf(amax, fabsf(load_float(values + i)));
-  const __half scale = __float2half_rn(fminf((amax / kNativeMax) * 0.61f, 65504.0f));
+  // Match the reference encoder's empirical predictor. The 0.61 anchor favors most values
+  // instead of forcing the block's largest value to be exactly representable.
+  const __half scale = __float2half_rn(fminf((amax / kNativeMax) * kScaleAnchor, 65504.0f));
   scale_bits[block] = static_cast<int64_t>(__half_as_ushort(scale));
 }
 
@@ -101,8 +111,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     return;
   }
   if (tid == 0) {
-    payload[0] = static_cast<uint8_t>(d_bits);
-    payload[1] = static_cast<uint8_t>(d_bits >> 8);
+    payload[kScaleOffset] = static_cast<uint8_t>(d_bits);
+    payload[kScaleOffset + 1] = static_cast<uint8_t>(d_bits >> 8);
   }
 
 #pragma unroll 1
@@ -222,7 +232,7 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
           key = warp_keys[w] < key ? warp_keys[w] : key;
         const uint16_t entry = static_cast<uint16_t>(key & 0x7ff);
         selected_entries[vector] = entry;
-        payload[2 + group * 4 + vector] = static_cast<uint8_t>(entry);
+        payload[kIndexOffset + group * 4 + vector] = static_cast<uint8_t>(entry);
       }
       __syncthreads();
     }
@@ -232,8 +242,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
           ((selected_entries[0] >> 8) & 7) | (((selected_entries[1] >> 8) & 7) << 3) |
           (((selected_entries[2] >> 8) & 7) << 6) | (((selected_entries[3] >> 8) & 7) << 9) |
           (selected_local << 12) | ((selected_choice >> 3) << 15));
-      payload[34 + 2 * group] = static_cast<uint8_t>(qh);
-      payload[35 + 2 * group] = static_cast<uint8_t>(qh >> 8);
+      payload[kMetadataOffset + 2 * group] = static_cast<uint8_t>(qh);
+      payload[kMetadataOffset + 2 * group + 1] = static_cast<uint8_t>(qh >> 8);
     }
     __syncthreads();
   }
