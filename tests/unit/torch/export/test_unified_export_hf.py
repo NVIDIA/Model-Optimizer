@@ -845,3 +845,35 @@ def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
 
     with pytest.warns(UserWarning, match="in no safetensors file"):
         assert _carry_over_unplaced_source_weights(model) == {}
+
+
+def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch):
+    """Recorded keys must carry where transformers/accelerate are absent.
+
+    Only the `keys is None` fallback needs model_load_utils. Importing it unconditionally made the
+    recorded-keys path -- which needs nothing from it -- fail in the partial-install environments,
+    where the handler reported "could not copy" and dropped every carried weight. The sibling test
+    pins this for carryable_source_keys; this pins the carry itself, which is what actually writes.
+    """
+    import sys as _sys
+
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import _carry_over_unplaced_source_weights
+
+    for mod in ("transformers", "accelerate", "huggingface_hub"):
+        monkeypatch.setitem(_sys.modules, mod, None)
+    monkeypatch.setitem(_sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
+
+    shard = "model-00001-of-00001.safetensors"
+    save_file({"model.mtp.eh_proj.weight": torch.full((2,), 3.0)}, str(tmp_path / shard))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"model.mtp.eh_proj.weight": "model-00001-of-00001.safetensors"}}'
+    )
+
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
+
+    carried = _carry_over_unplaced_source_weights(model)
+    assert "model.mtp.eh_proj.weight" in carried, "recorded keys must not need the loader imports"

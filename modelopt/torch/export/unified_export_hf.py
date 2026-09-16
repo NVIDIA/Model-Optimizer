@@ -1774,13 +1774,18 @@ def _carry_over_unplaced_source_weights(
             return {}
 
     try:
-        from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
-
         # Narrowed here rather than below so the call site can see that `ckpt` is a real path;
         # the guards above only narrow it inside the `keys is None` branch.
         if not ckpt:
             return {}
         if keys is None:
+            # Imported in the branch that needs it, not above: model_load_utils pulls in
+            # transformers and accelerate at module scope, and importing it unconditionally made
+            # the RECORDED-keys path -- the common one, which needs nothing from it -- fail wherever
+            # those are absent. The handler below then reported "could not copy" and dropped every
+            # carried weight in the partial-install environments.
+            from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+
             keys = unplaced_source_keys(model, ckpt)
         if not keys:
             return {}
