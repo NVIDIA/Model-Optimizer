@@ -130,6 +130,7 @@ class SpeculativeDecodingExporter(ABC):
         self,
         export_dir: Path | str,
         speculation_profile: Path | str | None = None,
+        profile: dict | None = None,
     ):
         """Attach a ``speculation_profile.json`` describing this draft's acceptance.
 
@@ -156,7 +157,18 @@ class SpeculativeDecodingExporter(ABC):
         """
         export_dir = Path(export_dir)
         target = export_dir / "speculation_profile.json"
+        if profile is None:
+            profile = self.load_speculation_profile(speculation_profile)
+        with open(target, "w") as f:
+            json.dump(profile, f, indent=2)
 
+    def load_speculation_profile(self, speculation_profile: Path | str | None = None):
+        """Read and validate a profile, or build the unmeasured stub. Touches no weights.
+
+        Split out so callers can validate *before* an export writes anything: a bad
+        ``--speculation_profile`` should fail while the destination is still empty,
+        not leave a partial checkpoint with a stale profile beside it.
+        """
         if speculation_profile is not None:
             source = Path(speculation_profile)
             if not source.is_file():
@@ -179,9 +191,7 @@ class SpeculativeDecodingExporter(ABC):
                     "it from an existing acceptance_rate.json."
                 ),
             }
-
-        with open(target, "w") as f:
-            json.dump(profile, f, indent=2)
+        return profile
 
     def _profile_method(self):
         """Best-effort speculation method name for the stub profile."""

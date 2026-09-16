@@ -321,7 +321,13 @@ def build_profile(
         "per_category": per_category,
         "measurement_conditions": measurement_conditions,
         "validation": {
-            "mean_consistency": _consistency_check(mean_accept_length, marginal),
+            # An unmeasured profile has an empty histogram: mean_accept_length is 0.0
+            # while the all-zero marginal implies 1.0, so the check would always report
+            # a discrepancy for a profile that never claimed a measurement. Not
+            # applicable rather than failed.
+            "mean_consistency": (
+                _consistency_check(mean_accept_length, marginal) if measured else None
+            ),
             "marginal_monotonicity": _monotonicity_check(marginal),
         },
     }

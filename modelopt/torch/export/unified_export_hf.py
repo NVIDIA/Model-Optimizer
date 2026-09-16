@@ -1656,11 +1656,15 @@ def export_speculative_decoding(
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
 
     exporter: SpeculativeDecodingExporter = model.get_exporter()
+    # Validate before exporting: a bad --speculation_profile should fail while the
+    # destination is still empty, rather than after the weights are on disk, where a
+    # stale speculation_profile.json could also survive beside overwritten weights.
+    profile = exporter.load_speculation_profile(speculation_profile)
     exporter.export(export_dir, dtype)
-    # Called here rather than inside each exporter's export(): one call site covers
+    # Written here rather than inside each exporter's export(): one call site covers
     # Eagle, EagleMedusa, DFlash, Domino and DSpark, so a new method cannot silently
     # ship without a profile.
-    exporter.write_speculation_profile(export_dir, speculation_profile)
+    exporter.write_speculation_profile(export_dir, profile=profile)
 
 
 def _write_hf_export_config(
