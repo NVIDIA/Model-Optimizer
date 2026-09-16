@@ -77,6 +77,19 @@ def test_iq2_xs_round_trip_and_payload_fields():
     assert torch.all((codes >> 9) < 128)
 
 
+def test_iq2_xs_dequantizes_pinned_scale_factor():
+    packed = torch.zeros((1, 1, 74), dtype=torch.uint8)
+    packed[0, 0, :2] = torch.tensor([1.0], dtype=torch.float16).view(torch.uint8)
+    packed[0, 0, 2:66:2] = 0xFF
+    packed[0, 0, 3:66:2] = 0x01
+    packed[0, 0, 66:] = 0xFF
+
+    decoded = dequantize_iq2_xs(packed, torch.tensor([1, 256]), dtype=torch.float32)
+
+    # Entry 511 contains eight 43s and local code 15 gives (2 * 15 + 1) / 8.
+    assert torch.equal(decoded, torch.full((1, 256), 43 * 31 / 8, dtype=torch.float32))
+
+
 def test_iq2_xs_requires_complete_last_dimension_blocks():
     with pytest.raises(ValueError, match="last weight dimension"):
         quantize_iq2_xs(torch.ones(2, 257))
@@ -85,7 +98,6 @@ def test_iq2_xs_requires_complete_last_dimension_blocks():
 def test_iq2_xs_fake_quant_has_pass_through_gradient():
     class Quantizer:
         num_bits = "iq2_xs"
-        backend_extra_args = {"search_impl": "auto"}
 
     weight = torch.randn(1, 256, requires_grad=True)
     output = iq2_xs_fake_quant(weight, Quantizer())

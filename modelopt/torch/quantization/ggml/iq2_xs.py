@@ -40,8 +40,10 @@
 
 """IQ2_XS fake quantization and GGML-compatible block packing.
 
-The encoder follows the canonical search_impl="auto" search. Every 256
-logical values become one 74-byte block_iq2_xs payload:
+The encoder performs a single-pass squared-error grid search at a fixed,
+empirically anchored super-block scale. It does not iteratively refine the
+scale or apply importance weights. Every 256 logical values become one 74-byte
+block_iq2_xs payload:
 
 * bytes 0..1: little-endian FP16 super-block scale d
 * bytes 2..65: 32 little-endian uint16 codes (9-bit grid + 7-bit sign)
@@ -49,6 +51,8 @@ logical values become one 74-byte block_iq2_xs payload:
 
 The canonical 512 x 8 magnitude grid below comes from llama.cpp
 ggml-common.h revision 9b05354ec6fb58b4e665e9a39ebc40285c015638.
+The matching dequantization formula is in ggml-quants.c at the same revision:
+https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-quants.c#L2516-L2538
 """
 
 import base64
@@ -56,6 +60,7 @@ from functools import cache
 
 import torch
 
+from ..extensions import get_cuda_ext_iq2_xs
 from .common import GGML_BLOCK_SIZE, validate_packed_weights, validate_weight
 
 __all__ = [
@@ -71,6 +76,12 @@ __all__ = [
 IQ2_XS_BLOCK_SIZE = GGML_BLOCK_SIZE
 IQ2_XS_BLOCK_BYTES = 74
 IQ2_XS_EFFECTIVE_BITS = IQ2_XS_BLOCK_BYTES * 8 / IQ2_XS_BLOCK_SIZE
+_IQ2_XS_NATIVE_MAX = 43 * 31 / 8
+_IQ2_XS_SCALE_ANCHOR_MIN = 0.65
+_IQ2_XS_SCALE_ANCHOR_MAX = 0.92
+_IQ2_XS_PEAK_TO_RMS_TAPER = 0.035
+# At 256 blocks, the largest IQ2_XS search temporary is about 64 MiB in FP32.
+_DEFAULT_BLOCK_CHUNK_SIZE = 256
 
 # Compact byte representation of the canonical [512, 8] grid. Values are only
 # 8, 25, and 43. Keeping this as checkpoint-independent package data avoids
@@ -162,8 +173,12 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     amax = x.abs().amax(dim=1)
     rms = x.square().mean(dim=1).sqrt()
     peak_to_rms = torch.where(rms > 0, amax / rms, torch.zeros_like(rms))
-    anchor_ratio = (1.0 - 0.035 * peak_to_rms).clamp(0.65, 0.92)
-    d = ((amax / 166.625) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
+    # The fixed-scale search favors a compressed super-block scale. This
+    # empirical predictor tapers the anchor for outlier-heavy blocks.
+    anchor_ratio = (1.0 - _IQ2_XS_PEAK_TO_RMS_TAPER * peak_to_rms).clamp(
+        _IQ2_XS_SCALE_ANCHOR_MIN, _IQ2_XS_SCALE_ANCHOR_MAX
+    )
+    d = ((amax / _IQ2_XS_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
     d_float = d.float()
 
     xnorm = vectors.square().sum(dim=-1)
@@ -214,25 +229,23 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq2_xs(
-    weight: torch.Tensor, *, block_chunk_size: int = 64
+    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XS blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 74]``
-    and ``[weight.ndim]``. Both tensors remain on the weight's device.
+    and ``[weight.ndim]``. The packed payload remains on the weight's device;
+    the logical-shape metadata is kept on CPU.
     """
     validate_weight(weight, "IQ2_XS")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
-    logical_shape = torch.tensor(weight.shape, dtype=torch.int64, device=weight.device)
+    logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ2_XS_BLOCK_SIZE)
     grid = iq2_xs_grid(weight.device)
     if weight.is_cuda:
-        from .. import extensions
-
-        get_extension = getattr(extensions, "get_cuda_ext_iq2_xs", None)
-        extension = get_extension() if get_extension is not None else None
+        extension = get_cuda_ext_iq2_xs()
         if extension is not None:
             packed = extension.pack(blocks, grid)
             packed_shape = (
@@ -283,6 +296,7 @@ def dequantize_iq2_xs(
     local = torch.empty((blocks.shape[0], 16), dtype=torch.int64, device=blocks.device)
     local[:, 0::2] = scale_bytes & 0x0F
     local[:, 1::2] = scale_bytes >> 4
+    # Pinned format rule: d * (0.5 + local) * 0.25 == d * (2 * local + 1) / 8.
     scales = d.unsqueeze(-1) * (2 * local + 1).float() / 8.0
     values = iq2_xs_grid(blocks.device)[entries] * signs
     decoded = values * scales.repeat_interleave(2, dim=1).unsqueeze(-1)
@@ -293,10 +307,6 @@ def iq2_xs_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     """IQ2_XS backend for TensorQuantizer, with pass-through backward."""
     if getattr(quantizer, "num_bits", None) != "iq2_xs":
         raise ValueError("The ggml IQ2_XS backend requires num_bits='iq2_xs'")
-    extra_args = getattr(quantizer, "backend_extra_args", None) or {}
-    search_impl = extra_args.get("search_impl", extra_args.get("iq_search_impl", "auto"))
-    if search_impl != "auto":
-        raise NotImplementedError("Only IQ2_XS search_impl='auto' is currently supported")
     packed, shape = quantize_iq2_xs(inputs)
     reconstructed = dequantize_iq2_xs(packed, shape, dtype=inputs.dtype)
     return inputs + (reconstructed - inputs).detach()

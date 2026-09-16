@@ -90,6 +90,21 @@ def test_iq1_s_round_trip_and_payload_fields():
     assert torch.all((qh & 0xFFF) < 0x1000)
 
 
+def test_iq1_s_search_is_independent_of_default_dtype():
+    generator = torch.Generator().manual_seed(0)
+    weight = torch.randn((8, 256), generator=generator, dtype=torch.float32)
+    expected, _ = quantize_iq1_s(weight)
+
+    default_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.bfloat16)
+        actual, _ = quantize_iq1_s(weight)
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+    assert torch.equal(actual, expected)
+
+
 def test_iq1_s_requires_complete_last_dimension_blocks():
     with pytest.raises(ValueError, match="last weight dimension"):
         quantize_iq1_s(torch.ones(2, 257))
@@ -98,7 +113,6 @@ def test_iq1_s_requires_complete_last_dimension_blocks():
 def test_iq1_s_fake_quant_has_pass_through_gradient():
     class Quantizer:
         num_bits = "iq1_s"
-        backend_extra_args = {"search_impl": "auto"}
 
     weight = torch.randn(1, 256, requires_grad=True)
     output = iq1_s_fake_quant(weight, Quantizer())

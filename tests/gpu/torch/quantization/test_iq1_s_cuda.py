@@ -15,7 +15,7 @@
 
 import torch
 
-import modelopt.torch.quantization.extensions as extensions
+import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 from modelopt.torch.quantization.extensions import get_cuda_ext_iq1_s
 from modelopt.torch.quantization.ggml.iq1_s import dequantize_iq1_s, iq1_s_grid, quantize_iq1_s
 
@@ -38,6 +38,7 @@ def test_iq1_s_cuda_pack_is_deterministic_and_decodable():
     assert packed.shape == (8, 1, 50)
     assert torch.equal(packed, packed_again)
     assert torch.equal(packed, dispatched)
+    assert shape.device.type == "cpu"
     normalized_mse = (
         reconstructed.float() - weight.float()
     ).square().mean() / weight.float().square().mean()
@@ -54,7 +55,7 @@ def test_iq1_s_cuda_zero_encoding_matches_ggml_block_layout():
 
 
 def test_iq1_s_cuda_falls_back_to_pytorch_encoder(monkeypatch):
-    monkeypatch.setattr(extensions, "get_cuda_ext_iq1_s", lambda: None)
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 

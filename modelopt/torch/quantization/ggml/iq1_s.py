@@ -40,8 +40,10 @@
 
 """IQ1_S fake quantization and GGML-compatible block packing.
 
-The encoder follows the canonical ``search_impl="auto"`` search. Every 256
-logical values become one 50-byte ``block_iq1_s`` payload:
+The encoder performs a single-pass squared-error grid search at a fixed,
+empirically anchored super-block scale. It does not iteratively refine the
+scale or apply importance weights. Every 256 logical values become one 50-byte
+``block_iq1_s`` payload:
 
 * bytes 0..1: little-endian FP16 super-block scale ``d``
 * bytes 2..33: low eight bits of 32 codebook indices
@@ -60,6 +62,7 @@ from functools import cache
 
 import torch
 
+from ..extensions import get_cuda_ext_iq1_s
 from .common import GGML_BLOCK_SIZE, validate_packed_weights, validate_weight
 
 __all__ = [
@@ -77,6 +80,9 @@ IQ1_S_BLOCK_BYTES = 50
 IQ1_S_EFFECTIVE_BITS = IQ1_S_BLOCK_BYTES * 8 / IQ1_S_BLOCK_SIZE
 _IQ1_S_DELTA = 0.125
 _IQ1_S_NATIVE_MAX = 16.875
+_IQ1_S_SCALE_ANCHOR = 0.61
+# At 1024 blocks, each largest IQ1_S search temporary is about 16 MiB in FP32.
+_DEFAULT_BLOCK_CHUNK_SIZE = 1024
 
 # zlib-compressed little-endian bytes of the canonical uint64_t table. The
 # decoded int8 values are -1, 0, and 1.
@@ -161,10 +167,12 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     xsum = vectors.sum(dim=-1)
 
     amax = x.abs().amax(dim=1)
-    d = ((amax / _IQ1_S_NATIVE_MAX) * 0.61).clamp(max=65504.0).to(torch.float16)
+    # The fixed-scale search favors a compressed super-block scale. This
+    # empirical anchor initializes d below the full-range value.
+    d = ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
     d_float = d.float()
 
-    best_error = torch.full((block_count, 32, 16), torch.inf, device=x.device)
+    best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
     best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=x.device)
     grid_norm = grid.square().sum(dim=-1)
     grid_sum = grid.sum(dim=-1)
@@ -223,25 +231,23 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def quantize_iq1_s(
-    weight: torch.Tensor, *, block_chunk_size: int = 64
+    weight: torch.Tensor, *, block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ1_S blocks.
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 50]``
-    and ``[weight.ndim]``. Both tensors remain on the weight's device.
+    and ``[weight.ndim]``. The packed payload remains on the weight's device;
+    the logical-shape metadata is kept on CPU.
     """
     validate_weight(weight, "IQ1_S")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
-    logical_shape = torch.tensor(weight.shape, dtype=torch.int64, device=weight.device)
+    logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
     grid = iq1_s_grid(weight.device)
     if weight.is_cuda:
-        from .. import extensions
-
-        get_extension = getattr(extensions, "get_cuda_ext_iq1_s", None)
-        extension = get_extension() if get_extension is not None else None
+        extension = get_cuda_ext_iq1_s()
         if extension is not None:
             packed = extension.pack(blocks, grid)
             packed_shape = (
@@ -295,10 +301,6 @@ def iq1_s_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     """IQ1_S backend for TensorQuantizer, with pass-through backward."""
     if getattr(quantizer, "num_bits", None) != "iq1_s":
         raise ValueError("The ggml IQ1_S backend requires num_bits='iq1_s'")
-    extra_args = getattr(quantizer, "backend_extra_args", None) or {}
-    search_impl = extra_args.get("search_impl", extra_args.get("iq_search_impl", "auto"))
-    if search_impl != "auto":
-        raise NotImplementedError("Only IQ1_S search_impl='auto' is currently supported")
     packed, shape = quantize_iq1_s(inputs)
     reconstructed = dequantize_iq1_s(packed, shape, dtype=inputs.dtype)
     return inputs + (reconstructed - inputs).detach()

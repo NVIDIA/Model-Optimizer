@@ -15,7 +15,7 @@
 
 import torch
 
-import modelopt.torch.quantization.extensions as extensions
+import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 from modelopt.torch.quantization.extensions import get_cuda_ext_iq2_xs
 from modelopt.torch.quantization.ggml.iq2_xs import dequantize_iq2_xs, iq2_xs_grid, quantize_iq2_xs
 
@@ -38,6 +38,7 @@ def test_iq2_xs_cuda_pack_is_deterministic_and_decodable():
     assert packed.shape == (8, 2, 74)
     assert torch.equal(packed, packed_again)
     assert torch.equal(packed, dispatched)
+    assert shape.device.type == "cpu"
     normalized_mse = (
         reconstructed.float() - weight.float()
     ).square().mean() / weight.float().square().mean()
@@ -61,7 +62,7 @@ def test_iq2_xs_cuda_underflowed_scale_has_canonical_zero_encoding():
 
 
 def test_iq2_xs_cuda_falls_back_to_pytorch_encoder(monkeypatch):
-    monkeypatch.setattr(extensions, "get_cuda_ext_iq2_xs", lambda: None)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 

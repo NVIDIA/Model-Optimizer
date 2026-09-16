@@ -28,6 +28,7 @@ from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
 from .utils import update_quant_cfg_with_kv_cache_quant
 
-# Loading this before the core imports above creates a cycle through quantization.qtensor.
+# Imported last to register the backend without cycling through quantization.qtensor.
+# A dynamic import prevents isort from hoisting it into the import block above.
 ggml = _import_module(".ggml", __name__)
 del _import_module

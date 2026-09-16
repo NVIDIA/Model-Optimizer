@@ -23,7 +23,7 @@ GGML_BLOCK_SIZE = 256
 
 
 def validate_weight(weight: torch.Tensor, format_name: str) -> None:
-    """Validate a weight accepted by the current GGML block encoders."""
+    """Validate weight metadata accepted by the current GGML block encoders."""
     if weight.numel() == 0:
         raise ValueError(f"{format_name} requires a non-empty weight")
     if weight.dim() == 0 or weight.shape[-1] % GGML_BLOCK_SIZE:
@@ -33,8 +33,6 @@ def validate_weight(weight: torch.Tensor, format_name: str) -> None:
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
-    if not torch.isfinite(weight).all():
-        raise ValueError(f"{format_name} requires finite weight values")
 
 
 def validate_packed_weights(
