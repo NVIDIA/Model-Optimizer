@@ -84,28 +84,30 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
     } <= disabled_quantizers
 
 
-def test_local_hessian_preset_enables_layerwise_calibration():
-    # Local-Hessian is only accurate layer by layer; the preset feeds the general recipe,
-    # mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG and --qformat, so a missing layerwise block
-    # silently degrades all of them.
-    qformat = "nvfp4_w4a4_weight_local_hessian"
-
-    # ``--qformat`` has no argparse ``choices=``; hf_ptq.py gates it on membership in
-    # QUANT_CFG_CHOICES, so this mapping is the CLI allowlist the preset basename lands in.
-    assert qformat in presets.QUANT_CFG_CHOICES
-    layerwise = LocalHessianCalibConfig(**presets.QUANT_CFG_CHOICES[qformat]["algorithm"]).layerwise
+def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():
+    # Layerwise calibration needs identifiable decoder layers, so it belongs to the model
+    # recipe the published numbers come from -- not to the shared preset, which also backs
+    # mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG and --qformat and therefore has to stay usable
+    # on models with no decoder layers (a plain nn.Sequential, say).
+    recipe = load_recipe("models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_local_hessian")
+    layerwise = LocalHessianCalibConfig(**recipe.quantize.model_dump()["algorithm"]).layerwise
 
     assert layerwise.enable
     assert layerwise.get_qdq_activations_from_prev_layer
 
-    # The exported constant is a separately-loaded dict, and it is what library users (and the
-    # blog) reach for, so pin it rather than trusting it to track the CLI mapping.
-    exported = LocalHessianCalibConfig(
-        **mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG["algorithm"]
-    ).layerwise
+    # ``--qformat`` has no argparse ``choices=``; hf_ptq.py gates it on membership in
+    # QUANT_CFG_CHOICES, so this mapping is the CLI allowlist the preset basename lands in.
+    qformat = "nvfp4_w4a4_weight_local_hessian"
+    assert qformat in presets.QUANT_CFG_CHOICES
+    preset_cfg = LocalHessianCalibConfig(**presets.QUANT_CFG_CHOICES[qformat]["algorithm"])
 
-    assert exported.enable
-    assert exported.get_qdq_activations_from_prev_layer
+    assert not preset_cfg.layerwise.enable
+
+    # The exported constant is a separately-loaded dict, so pin it rather than trusting it to
+    # track the CLI mapping.
+    exported = LocalHessianCalibConfig(**mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG["algorithm"])
+
+    assert not exported.layerwise.enable
 
 
 @pytest.mark.parametrize(
