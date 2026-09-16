@@ -26,18 +26,19 @@ def _extension():
     return extension
 
 
-def test_iq2_xs_cuda_pack_is_deterministic_and_decodable():
+def test_iq2_xs_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((8, 512), generator=generator, device="cuda", dtype=torch.bfloat16)
 
     packed = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(8, 2, 74)
     packed_again = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(8, 2, 74)
-    dispatched, shape = quantize_iq2_xs(weight)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
+    reference, shape = quantize_iq2_xs(weight)
     reconstructed = dequantize_iq2_xs(packed, shape)
 
     assert packed.shape == (8, 2, 74)
     assert torch.equal(packed, packed_again)
-    assert torch.equal(packed, dispatched)
+    assert torch.equal(packed, reference)
     assert shape.device.type == "cpu"
     normalized_mse = (
         reconstructed.float() - weight.float()
