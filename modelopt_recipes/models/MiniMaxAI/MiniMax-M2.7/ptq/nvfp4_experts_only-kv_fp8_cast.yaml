@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Reproduces the quantization scheme of the published nvidia/MiniMax-M2.7-NVFP4
+# checkpoint from the MiniMaxAI/MiniMax-M2.7 input model.
+
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -24,7 +27,8 @@ metadata:
   description: >-
     MiniMax M2.7 expert-only NVFP4 weights and activations with max calibration;
     FP8 KV-cache cast mode; attention projections, router, and LM head stay BF16.
-    Used for nvidia/MiniMax-M2.7-NVFP4.
+    Reproduces the published nvidia/MiniMax-M2.7-NVFP4 checkpoint from
+    MiniMaxAI/MiniMax-M2.7.
 
 quantize:
   algorithm:
