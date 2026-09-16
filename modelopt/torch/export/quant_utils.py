@@ -1598,11 +1598,23 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
     This is the same failure the MoE-router pass above exists to prevent -- only the reason the
     module is invisible differs (no quantizer there, no module at all here).
 
+    Prefers ``_modelopt_carried_source_keys``, which the export records once it knows what it
+    actually wrote -- carried tensors plus the off-index sidecars copied verbatim. Those sidecars
+    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
+
     A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
     its last component removed. Keys without a dot are top-level tensors with no module and are
     skipped.
     """
-    keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    keys = getattr(model, "_modelopt_carried_source_keys", None)
+    if keys is None:
+        # Export has not recorded yet (or this model never went through it). The recorded unplaced
+        # list is the best available answer; it is wider than what gets written, so it can name a
+        # module the export did not emit. That way round is harmless -- a deployment framework
+        # ignores an exclusion it finds no weight for, but fails loading one it was never told
+        # about.
+        keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
     return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
 
 

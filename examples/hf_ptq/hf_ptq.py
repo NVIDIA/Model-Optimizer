@@ -86,6 +86,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
+from modelopt.torch.export.unified_export_hf import carryable_source_keys
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -998,11 +999,13 @@ def export_quantized(
                 # could not place would be dropped. Refuse the combination when there ARE such
                 # weights rather than write a checkpoint that is quietly missing them -- a
                 # fake-quant export is evaluated, and an absent MTP head changes the answer.
-                _unplaced = getattr(full_model, "_modelopt_unplaced_source_keys", None)
-                if _unplaced:
+                # Only weights a shard actually provides: a checkpoint listing a stale
+                # rotary_emb.inv_freq buffer has nothing to lose, and must keep exporting.
+                _droppable = carryable_source_keys(full_model)
+                if _droppable:
                     raise NotImplementedError(
-                        f"--vllm_fakequant_export cannot carry the {len(_unplaced)} checkpoint "
-                        f"weight(s) the model has no parameter for (e.g. {min(_unplaced)}); the "
+                        f"--vllm_fakequant_export cannot carry the {len(_droppable)} checkpoint "
+                        f"weight(s) the model has no parameter for (e.g. {_droppable[0]}); the "
                         "exported model would be incomplete. Use the unified HF export instead."
                     )
                 export_hf_vllm_fq_checkpoint(

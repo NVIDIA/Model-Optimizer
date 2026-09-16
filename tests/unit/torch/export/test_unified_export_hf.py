@@ -698,3 +698,30 @@ def test_carry_over_is_quiet_without_safetensors_installed(tmp_path, monkeypatch
 
     assert _carry_over_unplaced_source_weights(model) == {}
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
+
+
+def test_carryable_source_keys_skips_keys_no_shard_backs(tmp_path):
+    """Unplaced != carryable. A stale buffer listed by the model is not a weight to lose.
+
+    ``--vllm_fakequant_export`` refuses to run when real weights would be dropped, so this
+    distinction decides whether working exports keep working.
+    """
+    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+
+    (tmp_path / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"model.mtp.eh_proj.weight": "mtp-0001.safetensors"}}'
+    )
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = [
+        "model.mtp.eh_proj.weight",  # a shard has it -- losing it matters
+        "model.layers.0.self_attn.rotary_emb.inv_freq",  # nothing backs it
+    ]
+    assert carryable_source_keys(model) == ["model.mtp.eh_proj.weight"]
+
+
+def test_carryable_source_keys_is_quiet_when_nothing_was_recorded():
+    """No provenance, no answer -- and no exception from a diagnostic helper."""
+    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+
+    assert carryable_source_keys(torch.nn.Module()) == []

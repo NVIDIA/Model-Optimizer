@@ -655,3 +655,40 @@ def test_carried_over_module_names_strip_parameter_and_dedup():
         "toplevel",  # no dot: no owning module, skipped
     ]
     assert _get_carried_over_module_names(model) == ["a.b", "c"]
+
+
+def test_carried_over_names_prefer_what_the_export_actually_wrote():
+    """Off-index sidecars never appear in unexpected_keys, so the unplaced list alone misses them.
+
+    GLM-4.7 ships its MTP head in a standalone ``mtp.safetensors`` that the loader never opens.
+    The export copies it verbatim, so its tensors are in the checkpoint in original precision and
+    must reach ``exclude_modules`` -- the same requirement as a carried weight, via the other
+    mechanism. The export records both under ``_modelopt_carried_source_keys``.
+    """
+    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
+
+    model = torch.nn.Module()
+    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
+    # What the export actually wrote: the carried weight plus the copied sidecar's tensors.
+    model._modelopt_carried_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",  # only in the sidecar
+    ]
+    assert _get_carried_over_module_names(model) == [
+        "model.mtp.eh_proj",
+        "model.mtp.embed_tokens",
+    ]
+
+
+def test_carried_over_names_fall_back_before_the_export_records():
+    """Callers that never ran the export still get the wider unplaced answer."""
+    from modelopt.torch.export.quant_utils import _get_carried_over_module_names
+
+    model = torch.nn.Module()
+    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
+    assert _get_carried_over_module_names(model) == ["model.mtp.eh_proj"]
+
+    # An export that wrote nothing is an answer, not a missing one -- do not fall back to the
+    # wider list and claim exclusions for weights the checkpoint does not contain.
+    model._modelopt_carried_source_keys = []
+    assert _get_carried_over_module_names(model) == []

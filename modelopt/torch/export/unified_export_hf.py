@@ -1588,6 +1588,61 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
+def carryable_source_keys(model: nn.Module) -> list[str]:
+    """Unplaced checkpoint keys a shard actually provides.
+
+    ``_modelopt_unplaced_source_keys`` answers "does the model have a parameter for this key",
+    which is a wider question than "is there a tensor to carry". Checkpoints routinely list keys
+    no shard backs -- a stale ``rotary_emb.inv_freq`` buffer, leftovers after a
+    ``conversion_mapping`` rename -- and those carry nothing. Callers that want to know whether
+    real weights would be dropped must ask this, not the raw recorded list.
+
+    Best-effort by design: it is used to decide how loudly to complain, so an unreadable index
+    answers "nothing to carry" rather than raising from inside a diagnostic.
+    """
+    keys = getattr(model, "_modelopt_unplaced_source_keys", None)
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
+    if not keys or not ckpt:
+        return []
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import weight_map_for
+
+        weight_map = weight_map_for(ckpt)
+    except Exception:
+        return []
+    return sorted(k for k in keys if weight_map.get(k) is not None)
+
+
+def _off_index_source_keys(model: nn.Module) -> list[str]:
+    """Tensor names in the checkpoint's off-index safetensors sidecars.
+
+    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim rather than
+    loaded, so they are never ``unexpected_keys`` and :func:`carryable_source_keys` cannot see
+    them -- yet their tensors land in the export in original precision exactly like a carried
+    weight, and must reach ``exclude_modules`` the same way. Before this mechanism existed
+    ``_add_mtp_exclusions`` covered them by globbing for ``mtp*``.
+
+    Reads safetensors headers only, never tensor data, and stays silent when the sidecars or the
+    library cannot be read: an absent exclusion is a deployment problem, but so is an export that
+    dies while computing one.
+    """
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
+    if not ckpt:
+        return []
+    try:
+        from safetensors import safe_open
+
+        from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+
+        names: list[str] = []
+        for file_name in off_index_safetensors_files(ckpt):
+            with safe_open(str(Path(ckpt) / file_name), framework="pt") as f:
+                names.extend(f.keys())
+        return sorted(set(names))
+    except Exception:
+        return []
+
+
 def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Tensor]:
     """Read back checkpoint weights the model never loaded, so the export stays complete.
 
@@ -1719,6 +1774,12 @@ def export_hf_checkpoint(
     _carried = _carry_over_unplaced_source_weights(model)
     if _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
+    # Everything the export writes in original precision straight from the source, by either
+    # mechanism: tensors carried above, and the off-index sidecars copied verbatim alongside.
+    # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
+    # that, and because only this point knows what was actually written rather than what was
+    # merely unplaced.
+    model._modelopt_carried_source_keys = sorted({*_carried, *_off_index_source_keys(model)})
 
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 
