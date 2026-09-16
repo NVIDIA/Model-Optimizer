@@ -39,7 +39,13 @@ from modelopt.recipe.config import (
     RecipeMetadataConfig,
     RecipeType,
 )
-from modelopt.recipe.loader import _apply_dotlist, _resolve_recipe_path, load_config, load_recipe
+from modelopt.recipe.loader import (
+    _apply_dotlist,
+    _peek_recipe_type,
+    _resolve_recipe_path,
+    load_config,
+    load_recipe,
+)
 from modelopt.torch.opt.config_loader import (
     _MODELOPT_SCHEMA_RE,
     _alias_builtin_recipe_prefix,
@@ -327,13 +333,10 @@ def _all_shipped_ptq_recipe_paths():
         # List-shaped fragments (layer-pattern units) are not recipes.
         if not isinstance(raw, dict):
             continue
-        declared = peek_declared_schema(path)
-        delegates = "$import" in raw  # a checkpoint alias inherits its kind from its base
-        if (
-            declared == _PTQ_SCHEMA
-            or (raw.get("metadata") or {}).get("recipe_type") == "ptq"
-            or delegates
-        ):
+        # Ask the loader's own resolver rather than re-deriving the rules here: a
+        # top-level ``$import`` does not imply PTQ (an alias of a speculative recipe
+        # delegates the same way), and this cannot drift from what load_recipe does.
+        if _peek_recipe_type(path) == RecipeType.PTQ:
             paths.append(str(rel.with_suffix("")))
     return paths
 

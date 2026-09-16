@@ -380,7 +380,9 @@ Reusable snippets are stored under ``modelopt_recipes/configs/``:
 Metadata section
 ================
 
-Every recipe must contain a ``metadata`` mapping with at least a ``recipe_type`` field:
+Every recipe contains a ``metadata`` mapping.  ``recipe_type`` is optional and
+**deprecated** -- a recipe may instead declare its kind with a ``# modelopt-schema:``
+comment, or inherit it from the recipe it delegates to; see `Declaring a recipe's kind`_:
 
 .. list-table::
    :header-rows: 1
@@ -403,7 +405,7 @@ Type-specific configuration sections
 =====================================
 
 Each recipe type defines its own configuration section.  The section name and
-schema depend on the ``recipe_type`` value in the metadata.
+schema depend on the recipe's kind, however it is declared.
 
 PTQ (``recipe_type: ptq``)
 --------------------------
@@ -515,14 +517,6 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
      - NVFP4 for output projection + MLP layers, FP8 KV cache
    * - ``general/ptq/nvfp4_weight_only-kv_fp8_cast``
      - NVFP4 W4A16 weight-only, FP8 KV cache with constant amax
-   * - ``general/ptq/fp8_default-kv_fp16``
-     - FP8 per-tensor W8A8, KV cache left unquantized
-   * - ``general/ptq/nvfp4_default-kv_fp16``
-     - NVFP4 W4A4, KV cache left unquantized
-   * - ``general/ptq/nvfp4_mlp_only-kv_fp16``
-     - NVFP4 for MLP layers only, KV cache left unquantized
-   * - ``general/ptq/nvfp4_experts_only-kv_fp16``
-     - NVFP4 for MoE expert layers only, KV cache left unquantized
 
 See `modelopt_recipes/ptq.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/ptq.md>`_
 for the full list and for guidance on choosing between them.
@@ -582,6 +576,8 @@ inherited unchanged:
    metadata:
      description: What this checkpoint uses the base recipe for.
 
+.. _Declaring a recipe's kind:
+
 Note the missing ``recipe_type``.  A recipe states its kind in whichever of these it
 likes, and the loader takes the first that answers: a ``# modelopt-schema:`` comment
 naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
@@ -608,7 +604,7 @@ Python API
 
 Use :func:`~modelopt.recipe.load_recipe` to load a recipe.  The path is resolved
 against the built-in library first, then the filesystem.  The returned object's
-type depends on the ``recipe_type`` in the metadata:
+type depends on the recipe's kind, however it is declared:
 
 .. code-block:: python
 

@@ -86,6 +86,43 @@ def test_general_ptq_recipe_count_in_ptq_md():
     )
 
 
+def test_documented_recipe_paths_resolve():
+    """Every ``general/ptq/<name>`` a doc names must exist on disk.
+
+    The existing checks run doc-from-disk: they catch a recipe that no doc mentions.
+    This is the other direction -- a doc naming a recipe that was never landed, or was
+    moved to another branch after the doc row was written. A recipe path is the
+    user-facing ``--recipe`` interface, so a phantom row sends users to
+    ``Recipe path '...' is not a valid YAML file or directory``.
+    """
+    docs = {
+        "modelopt_recipes/ptq.md": PTQ_MD,
+        "docs/source/guides/10_recipes.rst": Path(__file__).resolve().parents[3]
+        / "docs"
+        / "source"
+        / "guides"
+        / "10_recipes.rst",
+    }
+    missing = []
+    for label, path in docs.items():
+        if not path.is_file():
+            continue
+        for name in sorted(set(re.findall(r"general/ptq/([A-Za-z0-9._-]+)", path.read_text()))):
+            stem = name.removesuffix(".yaml").removesuffix(".yml")
+            if (GENERAL_PTQ_DIR / f"{stem}.yaml").is_file():
+                continue
+            # Prose also names a recipe *family* -- e.g. ``general/ptq/nvfp4_mlp_only``
+            # standing for its -kv_* variants -- which is not a phantom path.
+            if any(GENERAL_PTQ_DIR.glob(f"{stem}-*.yaml")):
+                continue
+            missing.append(f"{label} -> general/ptq/{name}")
+    assert not missing, (
+        "Docs name general/ptq recipes that do not exist on disk:\n  "
+        + "\n  ".join(missing)
+        + "\nAdd the recipe, or remove the row if it belongs to a different change."
+    )
+
+
 def test_every_model_specific_ptq_dir_is_mentioned():
     """Every model-specific PTQ recipe must be identifiable in ptq.md.
 

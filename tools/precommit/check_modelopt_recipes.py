@@ -199,6 +199,11 @@ def _is_recipe_file(path: Path) -> bool:
         return False  # not a recipe file at all
     if _declares_recipe_schema(path):
         return True
+    if "$import" in data:
+        # A delegating alias declares neither a schema comment nor a recipe_type: its
+        # kind comes from the recipe it imports. Validate it so a typo in ``imports:``
+        # or a ``$import`` naming an undeclared import fails here rather than at use.
+        return True
     metadata = data.get("metadata")
     if not isinstance(metadata, dict) or "recipe_type" not in metadata:
         return False  # not a recipe file at all
