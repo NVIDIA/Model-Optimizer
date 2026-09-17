@@ -56,6 +56,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fail fast on non-finite AutoQuantize output gradients with an actionable error before accumulating sensitivity scores, without changing attention backend settings.
 - Fix ONNX INT8 entropy calibration failing or producing invalid quantization parameters for FP16 activations.
 - Speed up ``mtq.quantize`` on FSDP2-sharded fused-MoE models. Promoting static-block weight quantizers gathered each expert's slice of the fused weight across ranks even though only quantizer state is read, adding a collective per expert to calibration.
 - Fix ONNX AutoCast failing on models with external initializers larger than 2 GiB.
