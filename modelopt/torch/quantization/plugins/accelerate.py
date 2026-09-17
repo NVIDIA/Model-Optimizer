@@ -50,7 +50,8 @@ def _writeback_params_to_weights_map(module, align_hook):
             continue
         if isinstance(align_hook.weights_map, PrefixedDataset):
             key = align_hook.weights_map.prefix + name
-            w_map = align_hook.weights_map.dataset.state_dict
+            dataset = align_hook.weights_map.dataset
+            w_map = getattr(dataset, "state_dict", dataset)
         else:
             w_map = align_hook.weights_map
             key = name

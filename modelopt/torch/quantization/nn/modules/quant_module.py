@@ -145,6 +145,8 @@ class QuantModule(DynamicModule):
         quantizer: TensorQuantizer,
         weights: Iterable[torch.Tensor],
         keep_attrs: bool = False,
+        *,
+        quantize_dtype: torch.dtype = torch.float32,
     ):
         """Fold ``quantizer`` into each weight view in place, then disable and clean it once.
 
@@ -156,7 +158,7 @@ class QuantModule(DynamicModule):
             return
 
         for weight in weights:
-            weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
+            weight.data.copy_(quantizer(weight.to(quantize_dtype).contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
         if keep_attrs and hasattr(quantizer, "_pre_quant_scale"):
