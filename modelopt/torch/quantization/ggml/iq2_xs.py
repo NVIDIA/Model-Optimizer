@@ -37,6 +37,7 @@ from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
+    narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
@@ -80,7 +81,7 @@ def iq2_xs_grid(device: torch.device | str | None = None) -> torch.Tensor:
 
 def _predict_iq2_xs_scales(blocks: torch.Tensor) -> torch.Tensor:
     """Predict one FP16 super-block scale for each flattened block."""
-    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    x = narrow_to_float32(blocks)
     amax = x.abs().amax(dim=1)
     rms = x.square().mean(dim=1).sqrt()
     peak_to_rms = torch.where(rms > 0, amax / rms, torch.zeros_like(rms))
@@ -96,7 +97,7 @@ def _encode_blocks(
     blocks: torch.Tensor, grid: torch.Tensor, scales: torch.Tensor | None = None
 ) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
-    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, 32, 8)
     magnitudes = vectors.abs()

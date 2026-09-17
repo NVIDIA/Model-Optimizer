@@ -162,3 +162,22 @@ def test_iq1_s_fake_quant_has_pass_through_gradient():
     output.sum().backward()
 
     assert torch.equal(weight.grad, torch.ones_like(weight))
+
+
+def test_iq1_s_saturates_finite_values_above_the_float32_range():
+    """float64 weights are accepted, so a finite value too large for float32 must saturate.
+
+    Converting before sanitizing would turn it into infinity and then zero, which silently
+    encodes a large weight as nothing and diverges from the CUDA ``load_float`` policy.
+    """
+    weight = torch.randn(1, 256, dtype=torch.float64)
+    weight[0, 7] = 1e100
+    saturated = weight.clone()
+    saturated[0, 7] = torch.finfo(torch.float32).max
+    zeroed = weight.clone()
+    zeroed[0, 7] = 0.0
+
+    packed, _ = quantize_iq1_s(weight)
+
+    assert torch.equal(packed, quantize_iq1_s(saturated)[0])
+    assert not torch.equal(packed, quantize_iq1_s(zeroed)[0])

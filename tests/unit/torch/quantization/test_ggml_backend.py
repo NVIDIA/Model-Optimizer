@@ -23,6 +23,7 @@ import modelopt.torch.quantization.ggml.backend as backend_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
+from modelopt.torch.quantization.ggml.common import narrow_to_float32
 
 
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
@@ -119,3 +120,18 @@ def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(
         weight.add_(0.01)
     fake_quant(weight, quantizer, block_chunk_size=2)
     assert call_count == 3
+
+
+def test_narrow_to_float32_matches_the_cuda_load_float_policy():
+    """Non-finite elements become zero; finite out-of-range elements saturate."""
+    largest = torch.finfo(torch.float32).max
+    values = torch.tensor(
+        [torch.nan, torch.inf, -torch.inf, 1e100, -1e100, 1.5], dtype=torch.float64
+    )
+
+    narrowed = narrow_to_float32(values)
+
+    assert narrowed.dtype is torch.float32
+    assert torch.equal(
+        narrowed, torch.tensor([0.0, 0.0, 0.0, largest, -largest, 1.5], dtype=torch.float32)
+    )

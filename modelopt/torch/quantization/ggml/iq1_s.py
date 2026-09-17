@@ -39,6 +39,7 @@ from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
+    narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
@@ -82,7 +83,7 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
 
 def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
-    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    x = narrow_to_float32(blocks)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, 32, 8)
     xnorm = vectors.square().sum(dim=-1)

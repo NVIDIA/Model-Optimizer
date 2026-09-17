@@ -92,3 +92,34 @@ def test_iq2_xs_cuda_falls_back_to_pytorch_encoder(monkeypatch):
 
     assert packed.shape == (2, 1, 74)
     assert normalized_mse < 0.1
+
+
+def test_iq2_xs_cuda_float64_matches_pytorch_encoder():
+    """float64 weights inside the float32 range must pack identically on both paths."""
+    weight = torch.randn(4, 256, dtype=torch.float64, generator=torch.Generator().manual_seed(7))
+
+    reference, _ = quantize_iq2_xs(weight)
+    packed, _ = quantize_iq2_xs(weight.cuda())
+
+    assert torch.equal(reference, packed.cpu())
+
+
+def test_iq2_xs_cuda_saturates_finite_values_above_the_float32_range():
+    """The extension saturates such values rather than dropping them to zero.
+
+    Byte parity with the reference encoder is not asserted here: at these magnitudes the
+    squared-error objective overflows to infinity in float32, so every codebook candidate ties
+    and the two search implementations break that tie differently. The saturation policy is
+    what both paths must agree on.
+    """
+    weight = torch.randn(1, 256, dtype=torch.float64, device="cuda")
+    weight[0, 7] = 1e100
+    saturated = weight.clone()
+    saturated[0, 7] = torch.finfo(torch.float32).max
+    zeroed = weight.clone()
+    zeroed[0, 7] = 0.0
+
+    packed, _ = quantize_iq2_xs(weight)
+
+    assert torch.equal(packed, quantize_iq2_xs(saturated)[0])
+    assert not torch.equal(packed, quantize_iq2_xs(zeroed)[0])

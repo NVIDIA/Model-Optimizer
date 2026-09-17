@@ -95,6 +95,24 @@ def fake_quantize_with_cache(
     return inputs + (reconstructed - inputs).detach()
 
 
+def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
+    """Narrow ``blocks`` to float32 the way the CUDA ``load_float`` helper does.
+
+    Non-finite elements become zero, and finite elements outside the float32 range saturate
+    instead of overflowing to infinity and then being zeroed. Sanitizing at the source precision
+    is what keeps the reference encoders byte-identical to the extension for float64 weights;
+    converting first would turn a finite 1e100 into zero on this path and into the float32
+    maximum on the CUDA one.
+    """
+    finite = torch.nan_to_num(blocks, nan=0.0, posinf=0.0, neginf=0.0)
+    if finite.dtype == torch.float64:
+        # Only float64 can hold a finite value the narrowing would overflow. The float32 bounds
+        # do not fit in the narrower dtypes, so clamping them would raise rather than no-op.
+        info = torch.finfo(torch.float32)
+        finite = finite.clamp(info.min, info.max)
+    return finite.float()
+
+
 def validate_weight(weight: torch.Tensor, format_name: str) -> None:
     """Validate weight metadata accepted by the current GGML block encoders."""
     if weight.numel() == 0:
