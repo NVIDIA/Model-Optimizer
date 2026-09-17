@@ -462,8 +462,17 @@ def _without_reshipped_weights(
     return kept
 
 
-def source_weight_map(ckpt: "str | Path") -> dict[str, str]:
-    """``param name -> shard file`` for a local checkpoint, without the loader's dependencies.
+def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
+    """``param name -> shard file`` as the checkpoint INDEX declares it.
+
+    Named for what it returns rather than for the question callers want answered. For a sharded
+    checkpoint this is ``weight_map`` verbatim: it describes what the loader will look for, not
+    what the shards physically contain, and the two differ -- a tensor present in a shard but
+    absent from the index is invisible here. :func:`locate_source_keys` exists to cover that gap
+    and should be preferred by anything asking "where does this key actually live". Only the
+    single-file case is exhaustive, because there is no index for it to disagree with.
+
+    Independent of the loader's dependencies, deliberately.
 
     :func:`modelopt.torch.utils.plugins.model_load_utils.weight_map_for` answers the same
     question, but that module imports transformers, accelerate and huggingface_hub at module
@@ -498,7 +507,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     The index answers for everything it lists, at no cost. Only the leftovers trigger a header
     scan -- names, never tensor data -- and only when there are any, which is the rare case.
     """
-    # _source_weight_map, not model_load_utils.weight_map_for: that module imports transformers
+    # indexed_weight_map, not model_load_utils.weight_map_for: that module imports transformers
     # and accelerate at module scope, and reaching for it here would make this answer "nothing to
     # carry" wherever they are absent -- the partial-install environments -- silencing the
     # --vllm_fakequant_export guard in exactly the case it exists for. Pinned by
@@ -510,7 +519,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
         # would report a missing directory as a missing tensor.
         raise ValueError(f"source checkpoint is not a directory: {ckpt}")
 
-    weight_map = source_weight_map(ckpt)
+    weight_map = indexed_weight_map(ckpt)
     located = {k: weight_map[k] for k in keys if k in weight_map}
     remaining = {k for k in keys if k not in located}
     if not remaining:
