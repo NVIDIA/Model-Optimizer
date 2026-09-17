@@ -42,6 +42,7 @@ quantize:
     method: max
     layerwise:
       enable: true
+      get_qdq_activations_from_prev_layer: false
       # max only updates _amax, so the exported shard stays valid for its layer.
       calib_mutates_weights: false
       # Presence enables per-layer export; the value is replaced with --export_path.

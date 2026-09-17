@@ -33,6 +33,7 @@ from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.utils.core_utils import (
     _get_fsdp2_mesh,
     enable_weight_access_and_writeback,
@@ -431,7 +432,15 @@ def _export_transformers_checkpoint_streaming(
     # --- Stream tensors to shard files ---
     shard_size_bytes = _parse_shard_size(max_shard_size)
     writer = _StreamingShardWriter(export_dir, shard_size_bytes)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    # No export handler reads model_type today -- only the prepare handlers do, and this
+    # path prepares from the root model above. Carried anyway so all three ExportContext
+    # constructions agree and a future handler cannot silently receive None here.
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     seen_keys: set[str] = set()
 
     _stream_tensor = _make_tensor_sink(
@@ -579,7 +588,12 @@ def collect_export_tensors(
     _assert_fsdp2_owns_every_mesh_dim(model)
     my_rank, world = _dist.rank(), _dist.size()
     names = module_name_maps(model)
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     owned: list[tuple[str, torch.Tensor]] = []
     seen_keys: set[str] = set()
 

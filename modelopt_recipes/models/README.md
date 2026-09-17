@@ -4,7 +4,7 @@ This folder holds model-optimization recipes (e.g. PTQ recipes) tuned for a
 **specific published model instance** — one checkpoint released on a model hub
 such as the [Hugging Face Hub](https://huggingface.co/),
 [ModelScope](https://modelscope.cn/), or similar. Unlike
-[`../huggingface/`](../huggingface/), which keys recipes by a transformers
+[`../model_type/`](../model_type/), which keys recipes by a transformers
 `model_type` (an architecture shared by many checkpoints), a recipe here mirrors
 **one checkpoint's** quantization scheme verbatim.
 
@@ -48,7 +48,7 @@ Prefer the most specific entry that applies to your model:
 1. **`models/<org>/<model_id>/`** — if there is an entry for your **exact**
    checkpoint. It reproduces a validated, often per-component mixed-precision
    scheme for that release; use it to match a published quantized checkpoint.
-2. **[`huggingface/<model_type>/`](../huggingface/)** — an architecture-level
+2. **[`model_type/<model_type>/`](../model_type/)** — an architecture-level
    recipe that applies to every checkpoint of that `model_type`.
 3. **[`general/`](../general/)** — model-agnostic recipes; a good starting point
    for any model without a more specific entry.
@@ -75,7 +75,7 @@ A recipe earns a place here only when it mirrors **one specific released (or
 planned) checkpoint** — a hand-mapped, usually per-layer or per-component
 precision scheme tuned to match that exact release. If the tuning generalizes to
 every checkpoint of an architecture, it belongs under
-[`../huggingface/<model_type>/`](../huggingface/) instead; if it is
+[`../model_type/<model_type>/`](../model_type/) instead; if it is
 model-agnostic, it belongs under [`../general/`](../general/). See
 [`../ptq.md`](../ptq.md) for what each checkpoint mirror does and how it compares
 to its general baseline.

@@ -25,6 +25,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
@@ -34,7 +35,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
 
-from .layer_utils import is_moe, sync_moe_gate_up_amax
+from .layer_utils import sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
 from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
@@ -216,9 +217,10 @@ class LayerwiseExporter:
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
+        model_type = hf_model_type(model)
         for _, sub_module in model.named_modules():
             if (
-                is_moe(sub_module)
+                is_moe(sub_module, model_type)
                 and hasattr(sub_module, "experts")
                 and PrepareMoEInputsRegistry.match(sub_module.experts) is None
             ):
@@ -247,7 +249,12 @@ class LayerwiseExporter:
             if idx is not None:
                 self._layer_names[idx] = name
 
-        self._ctx = ExportContext(model=model, dtype=_resolve_export_dtype(model, self._dtype))
+        # model_type is threaded in so the per-model spec lookups resolve: this path hands
+        # single decoder layers to helpers that would otherwise try to read config.model_type
+        # off them.
+        self._ctx = ExportContext(
+            model=model, dtype=_resolve_export_dtype(model, self._dtype), model_type=model_type
+        )
         # get_quant_config reports on the quantizer modules, which export_layer replaces as
         # it goes, so by finalize() the model would look unquantized.
         self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
@@ -297,7 +304,9 @@ class LayerwiseExporter:
 
         # Order matters at both seams: scales derive from amax, so they must be final
         # before packing, and the restack consumes packed per-expert tensors.
-        _prepare_moe_inputs(layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora)
+        _prepare_moe_inputs(
+            layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora, self._ctx.model_type
+        )
         self._unify_shared_quantization_params(layer_module, layer_inputs)
 
         for sub_name, sub_mod in layer_module.named_modules():
@@ -324,7 +333,7 @@ class LayerwiseExporter:
         # FP8-attention/NVFP4-expert layer would report fp8 and skip fusing entirely.
         if _module_formats(layer_module) - FUSION_FREE_FORMATS:
             self._fuse_shared_input_scales(layer_module, layer_inputs)
-        sync_moe_gate_up_amax(layer_module)
+        sync_moe_gate_up_amax(layer_module, self._ctx.model_type)
 
     def _fuse_shared_input_scales(self, layer_module: nn.Module, layer_inputs: list | None) -> None:
         """Rediscover the groups that share an input, on real activations, and fuse them."""

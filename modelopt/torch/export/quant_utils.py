@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
+from modelopt.torch.models import get_spec, list_all_possible
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -1342,40 +1343,57 @@ def _update_svdquant(modules, new_pre_quant_scale):
         finish_stats_collection(module.weight_quantizer)
 
 
-# Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
-PQS_FUSE_MODULE_MAPPING = [
-    # Attention: Fuse o_proj's pre_quant_scale into v_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
-    #   After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
-    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention"], ("v_proj", "o_proj")),
-    # MLP: Fuse down_proj's pre_quant_scale into up_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: down_proj_out = {[act_fn(self.gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
-    #   After:  down_proj_out = {[act_fn(self.gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
-    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP"], ("up_proj", "down_proj")),
-]
+# AWQ pre_quant_scale fusion rules are per-model data and live in modelopt/torch/models/*:
+#   - Attention: fold o_proj's pre_quant_scale into v_proj's output dimension.
+#       Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
+#       After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
+#   - MLP: fold down_proj's pre_quant_scale into up_proj's output dimension.
+#       Before: down_proj_out = {[act_fn(gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
+#       After:  down_proj_out = {[act_fn(gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
+# Each rule is a (module_class_substrings, fuse_into, fuse_from) triple.
 
 
-def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
+def _pqs_fuse_rules(model_type: str | None):
+    """The AWQ pre_quant_scale fusion rules to try, preferring the model's own.
+
+    A rule asserts a mathematical equivalence for one model's modules, so a registered
+    model uses only what its own spec declares. The aggregate across every spec is the
+    fallback for a model with no spec, or one whose spec declares no rules -- which is
+    what this did for every model before. That fallback is safe rather than merely
+    tolerated, because each rule is keyed on class-name substrings (``LlamaAttention``,
+    ``Qwen3MoeMLP``) that cannot match another family's modules.
+    """
+    spec = get_spec(model_type) if model_type else None
+    export_spec = spec.export_spec if spec is not None else None
+    if export_spec is not None and export_spec.pqs_fuse_rules:
+        return export_spec.pqs_fuse_rules
+    return list_all_possible("pqs_fuse_rules")
+
+
+def fuse_prequant_to_linear(
+    model: torch.nn.Module, fuse_grouped_heads=False, model_type: str | None = None
+):
     """Fuse pre_quant_scale to the linear weights if possible.
 
     Args:
         model: The model to fuse pre_quant_scale to.
         fuse_grouped_heads: If True, fuse the pre_quant_scale even if dimension between pre_quant_scale
             and linear weights is not the same.
+        model_type: The root model's HF model type, used to prefer its own fusion rules.
 
     Returns:
         fused_modules: A list of modules of which pre_quant_scale is fused to the previous linear layer.
     """
+    # Resolved once: this is a fixed vocabulary for the whole walk, and recomputing it per
+    # module rescans every registered spec.
+    fuse_rules = _pqs_fuse_rules(model_type)
+
     # Fuse pre_quant_scale to the linear weights
     for _, module in model.named_modules():
-        for module_map in PQS_FUSE_MODULE_MAPPING:
-            target_module_list = module_map[0]
-            linear_pair = module_map[1]
+        for target_module_list, fuse_into, fuse_from in fuse_rules:
             if any(module_name in type(module).__name__ for module_name in target_module_list):
-                linear_fuse_into = module.get_submodule(linear_pair[0])
-                linear_pqs_from = module.get_submodule(linear_pair[1])
+                linear_fuse_into = module.get_submodule(fuse_into)
+                linear_pqs_from = module.get_submodule(fuse_from)
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
@@ -1436,10 +1454,23 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    if any(
-        name in type(module).__name__
-        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-    ):
+    """Whether this norm stores ``w - 1``, so export must fold scales into ``weight + 1``.
+
+    The names are per-model data (``ExportSpec.weight_plus_one_norm_names``) but the match
+    is by *substring*, not exact name, which is what the hardcoded list this replaced did.
+    That is load-bearing rather than sloppy: the convention travels by family, and
+    transformers derives several norms whose names embed a registered one --
+    ``DiffusionGemmaRMSNorm``, ``RecurrentGemmaRMSNorm``, ``T5GemmaRMSNorm``,
+    ``T5Gemma2RMSNorm``, ``VaultGemmaRMSNorm`` all carry the Gemma convention. Exact
+    matching would drop them silently, and the failure is wrong numerics in an exported
+    checkpoint rather than an error.
+
+    Checked against every class in the MRO so quantized subclasses still match.
+    ``zero_centered_gamma`` is the structural fallback for norms that announce it.
+    """
+    registered = [n.lower() for n in list_all_possible("weight_plus_one_norm_names")]
+    mro_names = [cls.__name__.lower() for cls in type(module).__mro__]
+    if any(name in cls_name for cls_name in mro_names for name in registered):
         return True
 
     return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)

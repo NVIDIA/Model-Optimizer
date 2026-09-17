@@ -9,6 +9,13 @@ Changelog
 *Quantization*
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
+- Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
+- Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.
+- Add a reusable local-Hessian NVFP4 PTQ recipe and the quantization recipe used for ``nvidia/Qwen3.8-27B-NVFP4``.
+
+*Megatron Framework (M-LM / M-Bridge)*
+
+- Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
 
 *Misc*
 
@@ -16,12 +23,24 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Layerwise calibration now uses prior-layer QDQ activations by default
+  (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
+  preserve full-precision activations for subsequent layers (the default behavior for
+  max calibration without layerwise calibration).
+- Unified HuggingFace export now fails with ``NotImplementedError`` when it meets an MoE block whose expert projection names it does not know, instead of assuming Mixtral's ``w1``/``w2``/``w3``. If you hit this, register a ``ModelSpec`` for the model under ``modelopt/torch/models/``. Every MoE architecture ModelOpt exported correctly before this change is registered, so no supported model regresses.
+- ``--recipe`` (and ``modelopt.recipe.load_recipe``) now resolve a recipe path **filesystem-first**: a recipe of the same relative path in the current working directory takes precedence over the shipped built-in of that name, matching how recipe ``$import`` paths already resolve. Previously the built-in won.
+
 **Deprecations**
 
+- Rename the architecture-specific recipe tier from ``modelopt_recipes/huggingface/`` to ``modelopt_recipes/model_type/`` to clarify that it holds recipes shared across every checkpoint of a Hugging Face ``model_type``. Saved ``--recipe huggingface/<model_type>/...`` paths still resolve via a backward-compatibility alias but now emit a ``FutureWarning``, so update them to ``model_type/<model_type>/...`` as the ``huggingface/`` prefix is deprecated.
+- The single-format quantization CLI flags are deprecated in favour of ``--recipe`` and will be removed in a future release; passing one now emits a ``FutureWarning``. ``examples/hf_ptq``: ``--qformat`` and ``--kv_cache_qformat``. ``examples/megatron_bridge/quantize.py``: ``--quant_cfg``, ``--kv_cache_quant`` and ``--weight_only``. ``examples/torch_onnx/torch_quant_to_onnx.py``: ``--qformat``. A recipe carries the quantization config, the calibration algorithm and the KV-cache setting in one file, so they cannot drift apart the way separate flags can -- and ``--recipe`` already took precedence over all six, silently on ``hf_ptq`` and with a warning on ``megatron_bridge`` -- with one gap the recipe closes rather than inherits: a weight AutoQuantize recipe that omits ``kv_cache`` still falls back to ``--kv_cache_qformat``, so set ``kv_cache`` in the recipe when migrating. Use a recipe from ``modelopt_recipes/general/ptq/``, an architecture-specific one under ``modelopt_recipes/model_type/<model_type>/``, or a checkpoint-specific one under ``modelopt_recipes/models/``. The warning fires only when a flag is passed explicitly: ``--qformat`` defaults to ``fp8`` and ``--kv_cache_qformat`` to ``fp8_cast``, so warning on the defaults would fire on every run, including runs that correctly use ``--recipe``. ``examples/speculative_decoding/scripts/quantize_drafter.py`` keeps ``--qformat`` undeprecated: it has no ``--recipe`` alternative yet.
 - The TensorRT-LLM checkpoint export format is deprecated and will be removed in 0.49.0: ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning`` on use. Use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang. Its implementation moved to ``modelopt.torch.export.trtllm``, so import those two functions from there and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``; both functions remain importable from ``modelopt.torch.export`` for this release only.
 
 **Bug Fixes**
 
+- Fix ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` storing the MoE router at Megatron's ``moe_router_dtype``, which is a routing *compute* dtype, not a storage one. The router now exports at the export ``dtype`` like every other unquantized weight, matching what ``hf_ptq.py`` and the released NVFP4 checkpoints contain; pass ``moe_router_dtype`` to ``export_mcore_gpt_to_hf`` explicitly if you want the old fp32 storage.
+- Fix unified Megatron export writing a second, unreferenced copy of the vocab embedding when a model with MTP layers is exported with pipeline parallelism. The duplicate was never loaded but inflated the checkpoint by the size of the embedding (about 1 GB for Qwen3.6-35B-A3B); re-export to reclaim the space.
+- Fix ONNX INT8 entropy calibration failing or producing invalid quantization parameters for FP16 activations.
 - Fix ``--use_fsdp2`` HuggingFace checkpoint export gathering the whole model onto rank 0, which made export the dominant phase of a PTQ run and could exhaust host memory on large models. The model is now split into per-decoder-layer units dealt round-robin across ranks; each rank gathers every unit but keeps, packs, and writes only the ones it owns, so a rank buffers roughly ``model / world_size`` instead of the whole checkpoint, and rank 0 writes the combined index. Export configurations that cannot be split this way now raise instead of producing a mismatched checkpoint: FSDP2 combined with another DTensor parallelism (for example FSDP2 + tensor parallel on a 2-D mesh; HSDP is supported), models whose decoder layers cannot be discovered, a decoder layer object reused across layers, and a module that holds the decoder layers while owning parameters of its own.
 - Speed up ``mtq.quantize`` on FSDP2-sharded fused-MoE models. Promoting static-block weight quantizers gathered each expert's slice of the fused weight across ranks even though only quantizer state is read, adding a collective per expert to calibration.
 - Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
@@ -53,7 +72,7 @@ Changelog
 - Fix ``training.gradient_checkpointing`` to reach the DFlash draft. Previously the flag applied only to the frozen target model, saving no activations; the draft now honours it in its decoder-layer loop.
 - Add optional **grouped sublayer convolutions for LiLiCorr**, reusing DFlash2's ``DFlashGroupedConv``; enabled by ``conv_kernel_size`` and ``conv_group_size`` in ``dflash_architecture_config``. Requires the DFlash2 branch. Recipe at ``modelopt_recipes/general/speculative_decoding/lilicorr_conv.yaml``.
 
-- Add PTQ support for Step-3.7 (``stepfun-ai/Step-3.7-Flash``), whose routed experts were previously left unquantized. Quantize with the new ``huggingface/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast`` or ``huggingface/step3p7/ptq/nvfp4_mlp_only-kv_fp8`` recipes rather than the general ones, which select experts by module names Step does not use.
+- Add PTQ support for Step-3.7 (``stepfun-ai/Step-3.7-Flash``), whose routed experts were previously left unquantized. Quantize with the new ``model_type/step3p7/ptq/nvfp4_experts_only-kv_fp8_cast`` or ``model_type/step3p7/ptq/nvfp4_mlp_only-kv_fp8`` recipes rather than the general ones, which select experts by module names Step does not use.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -84,6 +103,7 @@ Changelog
 - Remove in-trainer quantization via ``QuantizationArguments.quant_cfg`` / ``--quant_cfg`` (deprecated in 0.45); use ``--recipe``. New recipes ``general/ptq/mxfp4_mlp_weight_only`` and ``general/ptq/nvfp4_mlp_weight_only`` replace ``MXFP4_MLP_WEIGHT_ONLY_CFG`` / ``NVFP4_MLP_WEIGHT_ONLY_CFG`` in the ``examples/gpt-oss`` QAT flow.
 - Remove the ``QuantizationArgumentsWithConfig`` alias in ``modelopt.torch.quantization.plugins.transformers_trainer`` (deprecated in 0.45). Use ``QuantizationArguments``.
 - Transformer Engine ``TEGroupedLinear`` (fused MoE experts) now uses **per-expert** weight quantization (one ``amax`` per expert) instead of a single shared ``amax``, so ModelOpt checkpoints containing quantized ``TEGroupedLinear`` modules saved before 0.47 are **not compatible** with 0.47. Re-run PTQ to regenerate compatible checkpoints.
+- ``mtq.quantize`` now raises when a config asks for weight quantization but none of its weight-quantizer patterns match the model, instead of calibrating and exporting a silently unquantized checkpoint (``"quant_algo": null``). Configs that quantize activations or the KV cache only are unaffected, as are patterns that match and are then disabled by a later entry. If this fires, use the recipe for that architecture under ``modelopt_recipes/huggingface/<model_type>/`` or fix the module patterns. Set ``MODELOPT_SKIP_WEIGHT_QUANT_CHECK=1`` to disable the check process-wide, e.g. for a pipeline-parallel rank whose local stage legitimately has none of the targeted modules.
 
 **Deprecations**
 

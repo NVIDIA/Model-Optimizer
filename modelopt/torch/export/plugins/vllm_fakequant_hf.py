@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (
@@ -45,7 +46,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
 
-from ..layer_utils import get_experts_list, is_moe
+from ..layer_utils import get_experts_list
 from ..quant_utils import get_quantization_format
 from ..unified_export_hf import collect_shared_input_modules
 
@@ -416,7 +417,7 @@ def _resmooth_experts_for_export(
 
     names = module_name_maps(model) if inplace else None
 
-    model_type = type(model).__name__.lower()
+    model_type = hf_model_type(model)
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
     out: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
     requant_weights: set[str] = set()
@@ -474,7 +475,7 @@ def _resmooth_experts_for_export(
     # different tokens to each expert, so forward hooks cannot detect them as
     # sharing the same input tensor.
     for _, module in model.named_modules():
-        if not is_moe(module):
+        if not is_moe(module, model_type):
             continue
         try:
             expert_groups = get_experts_list(module, model_type)

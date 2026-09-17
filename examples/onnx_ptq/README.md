@@ -111,7 +111,7 @@ The model can be quantized as an FP8, INT8 or INT4 model using either the CLI or
 
 > *For NVFP4 and MXFP8 ONNX, see the [PyTorch to ONNX example](../torch_onnx/).*
 
-> *Minimum opset requirements: int8 (13+), fp8 (21+), int4 (21+). ModelOpt will automatically upgrade lower opset versions to meet these requirements.*
+> *Minimum opset requirements: int8 (19+), fp8 (19+), int4 (21+). ModelOpt will automatically upgrade lower opset versions to meet these requirements.*
 
 #### Option 1: Command-line interface
 
@@ -119,7 +119,7 @@ The model can be quantized as an FP8, INT8 or INT4 model using either the CLI or
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
     --quantize_mode=<fp8|int8|int4> \
-    --calibration_data=calib.npy \
+    --calibration_data_path=calib.npy \
     --calibration_method=<max|entropy|awq_clip|rtn_dq> \
     --output_path=vit_base_patch16_224.quant.onnx
 ```
@@ -127,12 +127,14 @@ python -m modelopt.onnx.quantization \
 #### Option 2: Python API
 
 ```python
+import numpy as np
+
 from modelopt.onnx.quantization import quantize
 
 quantize(
     onnx_path="vit_base_patch16_224.onnx",
     quantize_mode="int8",       # fp8, int8, int4 etc.
-    calibration_data="calib.npy",
+    calibration_data=np.load("calib.npy"),
     calibration_method="max",   # max, entropy, awq_clip, rtn_dq etc.
     output_path="vit_base_patch16_224.quant.onnx",
 )
@@ -161,6 +163,10 @@ Inference latency of the model is <X> ms
 ### FAR3D 3D object detection
 
 The [FAR3D example](./far3d/) exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
+
+### BEVFormer 3D object detection
+
+The [BEVFormer example](./bevformer/) exports BEVFormer-tiny to ONNX, generates temporal calibration data, quantizes the model to INT8 or FP8, builds TensorRT engines, and evaluates NDS and mAP on the nuScenes validation set.
 
 ### PETR 3D object detection
 
@@ -198,7 +204,7 @@ To enable per node calibration, add the `--calibrate_per_node` flag to your quan
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
     --quantize_mode=<int8/fp8> \
-    --calibration_data=calib.npy \
+    --calibration_data_path=calib.npy \
     --calibrate_per_node \
     --output_path=vit_base_patch16_224.quant.onnx
 ```
@@ -253,9 +259,9 @@ To access this feature in the ONNX quantization workflow, simply add `--autotune
 ```bash
 python -m modelopt.onnx.quantization \
     --onnx_path=vit_base_patch16_224.onnx \
-    --quantize_mode=<fp8|int8|int4> \
-    --calibration_data=calib.npy \
-    --calibration_method=<max|entropy|awq_clip|rtn_dq> \
+    --quantize_mode=<fp8|int8> \
+    --calibration_data_path=calib.npy \
+    --calibration_method=<max|entropy> \
     --output_path=vit_base_patch16_224.quant.onnx \
     --autotune=<quick,default,extensive>
 ```

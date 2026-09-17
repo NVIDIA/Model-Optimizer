@@ -68,7 +68,12 @@ from transformers import AutoProcessor
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
-from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.recipe.presets import (
+    KV_CACHE_NONE,
+    KV_QUANT_CFG_CHOICES,
+    QUANT_CFG_CHOICES,
+    RecipeSupersededAction,
+)
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.plugins.mbridge import (
@@ -137,9 +142,11 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quant_cfg",
+        action=RecipeSupersededAction,
         type=str,
         default=None,
         help=(
+            "(deprecated: use --recipe) "
             f"Quantization config. Preset names: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
@@ -147,15 +154,25 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--kv_cache_quant",
+        action=RecipeSupersededAction,
         type=str,
         default=KV_CACHE_NONE,
         choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
-        help="KV-cache quantization config to apply on top of --quant_cfg. Ignored when --recipe is set.",
+        help=(
+            "(deprecated: use --recipe) KV-cache quantization config to apply on top of "
+            "--quant_cfg. Ignored when --recipe is set."
+        ),
     )
     parser.add_argument(
         "--weight_only",
-        action="store_true",
-        help="Disable input (activation) quantization, i.e. weight-only quantization.",
+        action=RecipeSupersededAction,
+        nargs=0,
+        const=True,
+        default=False,
+        help=(
+            "(deprecated: use --recipe) Disable input (activation) quantization, i.e. "
+            "weight-only quantization."
+        ),
     )
     parser.add_argument(
         "--compress",

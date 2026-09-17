@@ -28,11 +28,12 @@ try:
 except Exception:
     warn("Cannot find transformers package. Hugginface modules cannot be exported.")
 
+from modelopt.torch.models import is_moe
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import import_plugin
 
 from ...quantization.nn import SequentialQuantizer, TensorQuantizer
-from ..layer_utils import _get_expert_attr, is_layernorm, is_moe, set_expert_quantizer_amax
+from ..layer_utils import _get_expert_attr, is_layernorm, set_expert_quantizer_amax
 from ..quant_format import QUANTIZATION_FP8, QUANTIZATION_NONE, QUANTIZATION_NVFP4
 from ..quant_utils import (
     get_activation_scaling_factor,
