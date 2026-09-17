@@ -510,7 +510,11 @@ class AcceptanceRateValidation:
                     break
 
                 if input_ids.shape[1] >= max_len:
-                    truncated_by_budget = True
+                    # Only a *short* step is unrepresentative: the budget stopped it before
+                    # it ran out of drafts. A step that accepted every draft token and then
+                    # landed on the budget measured exactly what it would have measured
+                    # with room to spare, so it belongs in the histogram.
+                    truncated_by_budget = i < draft_tokens.shape[-1] - 1
                     break
 
             total_accepted += 1 + accepted  # base token + accepted drafts
