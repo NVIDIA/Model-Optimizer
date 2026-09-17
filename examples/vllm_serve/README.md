@@ -308,6 +308,6 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 ## Known Problems
 
-1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
+1. **MCore reload uses export sidecars rather than `MODELOPT_STATE_PATH`**. Current exports write both `quantizer_state.pth` and `vllm_fq_quantizer_state.yaml`; serving the export directory auto-detects both. For a legacy export without the YAML sidecar, pass `QUANT_FILE_PATH` and set `QUANT_CFG` to match the original MCore quantization recipe.
 2. KV cache quantization export and reload is not supported in MCore yet.
 3. **`NVFP4_KV_CFG` and `NVFP4_AFFINE_KV_CFG` require `--enforce-eager`**; these configs use a dynamic-block Triton kernel for KV-cache quantization that is incompatible with CUDA graph capture (the kernel grid is computed from Python-level tensor shapes, which get baked in at capture time). Without `--enforce-eager`, the captured grid will be wrong for different batch sizes, producing incorrect outputs.
