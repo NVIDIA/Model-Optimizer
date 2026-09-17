@@ -112,16 +112,20 @@ def _parser_has_argument(parser, dest: str) -> bool:
     return any(action.dest == dest for action in parser._actions)
 
 
-def _vllm_supports_moe_backend() -> bool:
+def _make_vllm_serve_parser():
     try:
         from vllm.entrypoints.openai.cli_args import make_arg_parser
     except ImportError:
         # vLLM 0.29 moved the serve parser out of the OpenAI entrypoint package.
         from vllm.entrypoints.cli.serve import make_arg_parser
 
-    probe = FlexibleArgumentParser(add_help=False)
-    make_arg_parser(probe)
-    return _parser_has_argument(probe, "moe_backend")
+    parser = FlexibleArgumentParser(add_help=False)
+    make_arg_parser(parser)
+    return parser
+
+
+def _vllm_supports_moe_backend() -> bool:
+    return _parser_has_argument(_make_vllm_serve_parser(), "moe_backend")
 
 
 def _bool_env(key: str) -> bool:
@@ -216,7 +220,10 @@ def _autodetect_fakequant_paths(args) -> None:
     """
     model = args.model
     manual_ptq_requested = bool(
-        args.modelopt_quant_cfg or args.modelopt_kv_quant_cfg or args.modelopt_recipe_path
+        args.modelopt_quant_cfg
+        or args.modelopt_kv_quant_cfg
+        or args.modelopt_quant_file_path
+        or args.modelopt_recipe_path
     )
     if manual_ptq_requested:
         return
@@ -272,15 +279,16 @@ def _default_to_serve(rest_argv: list) -> list:
 
 
 def _find_serve_model(rest_argv: list) -> str | None:
-    """Best-effort recovery of ``vllm serve <model>``'s positional model, for mlflow's
-    default experiment name. Only meaningful under the ``serve`` subcommand; any other
-    subcommand (bench, chat, run-batch, ...) returns ``None``."""
+    """Resolve the model from ``vllm serve`` arguments using vLLM's own parser.
+
+    Options may legally precede the positional model, so scanning for the first non-option
+    token would mistake values such as ``--port 8000`` for the model path.
+    """
     if not rest_argv or rest_argv[0] != "serve":
         return None
-    for tok in rest_argv[1:]:
-        if not tok.startswith("-"):
-            return tok
-    return _find_flag_value(rest_argv, "--model")
+
+    args, _ = _make_vllm_serve_parser().parse_known_args(rest_argv[1:])
+    return getattr(args, "model_tag", None) or getattr(args, "model", None)
 
 
 def main():

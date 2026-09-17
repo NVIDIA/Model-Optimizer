@@ -66,14 +66,13 @@ vllm serve <model_path> -tp 8 --host 0.0.0.0 --port 8000 \
   --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
   --modelopt-quant-dataset cnn_dailymail \
   --modelopt-quant-calib-size 512
-  --worker_cls fakequant_worker.FakeQuantWorker
 ```
 
 For an exported HF or Megatron fakequant directory containing the standard sidecars, no
 ModelOpt path flags are required:
 
 ```bash
-vllm serve <export_dir> -tp 8 --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
+vllm serve <export_dir> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 When fakequant is requested explicitly or auto-detected, the shim selects
@@ -82,7 +81,7 @@ environment settings, or recognized sidecars, it delegates to the stock vLLM CLI
 The legacy direct invocation remains available:
 
 ```bash
-python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
+python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
@@ -91,7 +90,7 @@ Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26
 ```bash
 KV_QUANT_CFG=NVFP4_KV_CFG QUANT_CALIB_SIZE=512 \
   python vllm_serve_fakequant.py <nemotron3_nano_model_path> -tp 8 \
-  --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
+  --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000
 ```
 
 Calibration uses dedicated scratch KV-cache blocks, so reducing `--max-num-batched-tokens`

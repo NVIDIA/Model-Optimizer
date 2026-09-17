@@ -70,6 +70,48 @@ def _load_example_module(name: str):
     return module
 
 
+def _load_fakequant_launcher(monkeypatch):
+    examples_dir = Path(__file__).parents[4] / "examples/vllm_serve"
+    monkeypatch.syspath_prepend(str(examples_dir))
+    return _load_example_module("vllm_serve_fakequant")
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["serve", "/models/qwen", "--port", "8000"], "/models/qwen"),
+        (["serve", "--port", "8000", "/models/qwen"], "/models/qwen"),
+        (["serve", "--host", "0.0.0.0", "--model", "/models/qwen"], "/models/qwen"),
+    ],
+)
+def test_fakequant_launcher_finds_model_with_options_before_or_after_it(
+    monkeypatch, argv, expected
+):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    assert launcher._find_serve_model(argv) == expected
+
+
+def test_explicit_quantizer_state_prevents_conflicting_full_state_autodetection(
+    monkeypatch, tmp_path
+):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    explicit_quantizer_state = "/explicit/quantizer_state.pth"
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg=None,
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=explicit_quantizer_state,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert args.modelopt_quant_file_path == explicit_quantizer_state
+    assert args.modelopt_state_path is None
+
+
 def _calibration_worker(
     num_blocks: int,
     *,
