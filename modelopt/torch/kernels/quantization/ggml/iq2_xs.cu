@@ -42,15 +42,10 @@ constexpr int kCodeOffset = 2;
 constexpr int kCodeBytes = 2 * (kBlockSize / kVectorSize);
 constexpr int kLocalScaleOffset = kCodeOffset + kCodeBytes;
 constexpr int kPayloadBytes = kLocalScaleOffset + kGroups / 2;
-constexpr float kMaxMagnitude = 43.0f;
-constexpr float kMaxLocalScale = 31.0f / 8.0f;
-constexpr float kNativeMax = kMaxMagnitude * kMaxLocalScale; // 166.625.
-constexpr float kPeakToRmsSlope = 0.035f;
-constexpr float kMinScaleAnchor = 0.65f;
-constexpr float kMaxScaleAnchor = 0.92f;
 
 template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
-  return static_cast<float>(*input);
+  const float value = static_cast<float>(*input);
+  return isfinite(value) ? value : 0.0f;
 }
 
 __device__ __forceinline__ float quant_error(float xnorm, float dot, float qnorm, float scale) {
@@ -72,37 +67,8 @@ __device__ __forceinline__ float even_parity_dot(const float *x, const float *q,
 }
 
 template <typename scalar_t>
-__global__ void find_scale(const scalar_t *input, int64_t num_blocks, int64_t *scale_bits) {
-  const int64_t block = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (block >= num_blocks)
-    return;
-
-  float amax = 0.0f;
-  float sumsq = 0.0f;
-  const scalar_t *values = input + block * kBlockSize;
-#pragma unroll 1
-  for (int i = 0; i < kBlockSize; ++i) {
-    const float value = load_float(values + i);
-    amax = fmaxf(amax, fabsf(value));
-    sumsq = fmaf(value, value, sumsq);
-  }
-  if (amax == 0.0f) {
-    scale_bits[block] = 0;
-    return;
-  }
-  const float rms = sqrtf(sumsq / kBlockSize);
-  const float peak_to_rms = rms > 0.0f ? amax / rms : 0.0f;
-  // Match the reference encoder's empirical predictor. Peaky blocks get a smaller anchor so
-  // outliers do not set the entire scale, while the clamp bounds the adjustment.
-  const float anchor =
-      fminf(kMaxScaleAnchor, fmaxf(kMinScaleAnchor, 1.0f - kPeakToRmsSlope * peak_to_rms));
-  const __half scale = __float2half_rn(fminf((amax / kNativeMax) * anchor, 65504.0f));
-  scale_bits[block] = static_cast<int64_t>(__half_as_ushort(scale));
-}
-
-template <typename scalar_t>
 __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *grid,
-                       const int64_t *scale_bits, uint8_t *output) {
+                       const __half *scales, uint8_t *output) {
   __shared__ float shared_grid[kEntries * kVectorSize];
   __shared__ float grid_norm[kEntries];
   __shared__ float warp_best[8 * kLocalScales];
@@ -133,8 +99,9 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     return;
   const scalar_t *source = input + block * kBlockSize;
   uint8_t *payload = output + block * kPayloadBytes;
-  const uint16_t d_bits = static_cast<uint16_t>(scale_bits[block]);
-  const float d = __half2float(__ushort_as_half(d_bits));
+  const __half d_half = scales[block];
+  const uint16_t d_bits = __half_as_ushort(d_half);
+  const float d = __half2float(d_half);
   if (d_bits == 0) {
     if (tid < kPayloadBytes)
       payload[tid] = 0;
@@ -284,8 +251,9 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
 
 } // namespace
 
-at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid) {
-  TORCH_CHECK(input.is_contiguous() && grid.is_contiguous(), "inputs must be contiguous");
+at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
+  TORCH_CHECK(input.is_contiguous() && grid.is_contiguous() && scales.is_contiguous(),
+              "inputs must be contiguous");
   const auto input_type = input.scalar_type();
   TORCH_CHECK(input_type == at::kFloat || input_type == at::kDouble || input_type == at::kHalf ||
                   input_type == at::kBFloat16,
@@ -297,23 +265,23 @@ at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid) {
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == kEntries &&
                   grid.size(1) == kVectorSize,
               "grid must be float32 [512, 8]");
-  TORCH_CHECK(input.get_device() == grid.get_device(), "input and grid must share a device");
-  c10::cuda::CUDAGuard guard(input.device());
   const int64_t num_blocks = input.numel() / kBlockSize;
+  TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
+                  scales.numel() == num_blocks,
+              "scales must be float16 [numel / 256]");
+  TORCH_CHECK(input.get_device() == grid.get_device() && input.get_device() == scales.get_device(),
+              "input, grid, and scales must share a device");
+  c10::cuda::CUDAGuard guard(input.device());
   TORCH_CHECK(num_blocks <= std::numeric_limits<int>::max(), "IQ2_XS CUDA grid is too large");
-  auto scales = at::empty({num_blocks}, input.options().dtype(at::kLong));
   auto output = at::empty({num_blocks, kPayloadBytes}, input.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
-  const int scale_grid = static_cast<int>((num_blocks + 255) / 256);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(), "iq2_xs_pack", [&] {
-        find_scale<scalar_t><<<scale_grid, 256, 0, stream>>>(input.data_ptr<scalar_t>(), num_blocks,
-                                                             scales.data_ptr<int64_t>());
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
         encode<scalar_t><<<static_cast<int>(num_blocks), 256, 0, stream>>>(
             input.data_ptr<scalar_t>(), num_blocks, grid.data_ptr<float>(),
-            scales.data_ptr<int64_t>(), output.data_ptr<uint8_t>());
+            reinterpret_cast<const __half *>(scales.data_ptr<at::Half>()),
+            output.data_ptr<uint8_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return output;

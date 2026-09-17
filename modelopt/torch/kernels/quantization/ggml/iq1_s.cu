@@ -49,7 +49,8 @@ constexpr float kNativeMax = kMaxLocalScale * kMaxShiftedMagnitude; // 16.875.
 constexpr float kScaleAnchor = 0.61f;
 
 template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
-  return static_cast<float>(*input);
+  const float value = static_cast<float>(*input);
+  return isfinite(value) ? value : 0.0f;
 }
 
 __device__ __forceinline__ float quant_error(float xnorm, float xsum, const float *x,
