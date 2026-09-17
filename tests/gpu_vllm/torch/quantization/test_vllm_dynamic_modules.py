@@ -70,16 +70,19 @@ def _load_example_module(name: str):
     return module
 
 
-def _calibration_worker(num_blocks: int):
-    cache_groups = [
-        SimpleNamespace(kv_cache_spec="attention"),
-        SimpleNamespace(kv_cache_spec="mamba"),
-    ]
+def _calibration_worker(
+    num_blocks: int,
+    *,
+    cache_specs=("attention", "mamba"),
+    needs_kv_cache_zeroing=True,
+):
+    cache_groups = [SimpleNamespace(kv_cache_spec=spec) for spec in cache_specs]
     return SimpleNamespace(
         model_runner=SimpleNamespace(
             kv_cache_config=SimpleNamespace(
                 kv_cache_groups=cache_groups,
                 num_blocks=num_blocks,
+                needs_kv_cache_zeroing=needs_kv_cache_zeroing,
             )
         )
     )
@@ -200,6 +203,30 @@ def test_allocate_calibration_blocks_assigns_non_null_blocks(monkeypatch):
     expected_blocks_to_zero = (
         [1, 2, 3, 4, 5, 6] if "new_block_ids_to_zero" in scheduler_fields else None
     )
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_skips_zeroing_for_attention_only_cache(monkeypatch):
+    """Attention-only caches have no block zeroer and must receive an empty zeroing list."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(return_value=1)),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(
+            num_blocks=4,
+            cache_specs=("attention",),
+            needs_kv_cache_zeroing=False,
+        ),
+        sequence_lengths=[8],
+    )
+
+    assert block_tables == [([1],)]
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = [] if "new_block_ids_to_zero" in scheduler_fields else None
     assert blocks_to_zero == expected_blocks_to_zero
 
 

@@ -122,7 +122,12 @@ def _allocate_calibration_blocks(
         )
 
     scheduler_fields = {field.name for field in dataclasses.fields(SchedulerOutput)}
-    blocks_to_zero = allocated_block_ids if "new_block_ids_to_zero" in scheduler_fields else None
+    if "new_block_ids_to_zero" in scheduler_fields:
+        blocks_to_zero = (
+            allocated_block_ids if getattr(kv_cache_config, "needs_kv_cache_zeroing", False) else []
+        )
+    else:
+        blocks_to_zero = None
     return block_ids_batch, blocks_to_zero
 
 
