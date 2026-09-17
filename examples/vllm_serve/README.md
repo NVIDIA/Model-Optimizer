@@ -18,8 +18,8 @@ docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
 
 ```bash
-docker build --build-arg VLLM_VERSION=0.26.0 \
-  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.26.0 .
+docker build --build-arg VLLM_VERSION=0.29.0 \
+  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.29.0 .
 ```
 
 For a direct installation from the ModelOpt repository root, install the tested vLLM
@@ -66,13 +66,14 @@ vllm serve <model_path> -tp 8 --host 0.0.0.0 --port 8000 \
   --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
   --modelopt-quant-dataset cnn_dailymail \
   --modelopt-quant-calib-size 512
+  --worker_cls fakequant_worker.FakeQuantWorker
 ```
 
 For an exported HF or Megatron fakequant directory containing the standard sidecars, no
 ModelOpt path flags are required:
 
 ```bash
-vllm serve <export_dir> -tp 8 --host 0.0.0.0 --port 8000
+vllm serve <export_dir> -tp 8 --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
 ```
 
 When fakequant is requested explicitly or auto-detected, the shim selects
@@ -81,7 +82,7 @@ environment settings, or recognized sidecars, it delegates to the stock vLLM CLI
 The legacy direct invocation remains available:
 
 ```bash
-python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
 ```
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
@@ -90,7 +91,7 @@ Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26
 ```bash
 KV_QUANT_CFG=NVFP4_KV_CFG QUANT_CALIB_SIZE=512 \
   python vllm_serve_fakequant.py <nemotron3_nano_model_path> -tp 8 \
-  --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000
+  --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000 --worker_cls fakequant_worker.FakeQuantWorker
 ```
 
 Calibration uses dedicated scratch KV-cache blocks, so reducing `--max-num-batched-tokens`

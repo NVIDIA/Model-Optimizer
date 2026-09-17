@@ -113,7 +113,11 @@ def _parser_has_argument(parser, dest: str) -> bool:
 
 
 def _vllm_supports_moe_backend() -> bool:
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    try:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+    except ImportError:
+        # vLLM 0.29 moved the serve parser out of the OpenAI entrypoint package.
+        from vllm.entrypoints.cli.serve import make_arg_parser
 
     probe = FlexibleArgumentParser(add_help=False)
     make_arg_parser(probe)
