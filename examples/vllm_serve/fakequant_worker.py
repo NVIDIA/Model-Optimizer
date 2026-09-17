@@ -125,12 +125,6 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
         calibrate_loop = calibrate_fun(calib_dataloader, self)
 
         quant_cfg = get_quant_config(quant_config, model)
-        if not quant_cfg.get("quant_cfg"):
-            # No QUANT_CFG/KV_QUANT_CFG/RECIPE_PATH set: still wrap every module (structural
-            # replace_quant_module is unconditional), but leave everything disabled rather than
-            # falling through to default_quant_desc_input/weight (enable=True, 8-bit per-tensor)
-            # on every quantizer -- that would fake-quantize already-quantized NVFP4 weights.
-            quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
 
         # Before calibration, which is the run this artifact is most wanted for if it dies.
         mlflow_tracker.log_quant_config(quant_cfg)

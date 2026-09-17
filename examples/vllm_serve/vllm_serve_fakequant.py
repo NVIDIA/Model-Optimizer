@@ -200,6 +200,7 @@ def _fakequant_requested(modelopt_args) -> bool:
         or modelopt_args.modelopt_kv_quant_cfg
         or modelopt_args.modelopt_state_path
         or modelopt_args.modelopt_recipe_path
+        or modelopt_args.modelopt_quant_file_path
     )
 
 
@@ -213,17 +214,17 @@ def _autodetect_fakequant_paths(args) -> None:
     manual_ptq_requested = bool(
         args.modelopt_quant_cfg or args.modelopt_kv_quant_cfg or args.modelopt_recipe_path
     )
+    if manual_ptq_requested:
+        return
     if (
         not args.modelopt_state_path
-        and not manual_ptq_requested
         and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth")
     ):
         args.modelopt_state_path = str(Path(model) / "vllm_fq_modelopt_state.pth")
 
-    elif not args.modelopt_quant_file_path and not args.modelopt_state_path:
-        if os.path.exists(f"{model}/quantizer_state.pth"):
+    if not args.modelopt_quant_file_path and not args.modelopt_state_path:
+        if os.path.exists(f"{model}/quantizer_state.pth") and os.path.exists(f"{model}/vllm_fq_quantizer_state.yaml"):
             args.modelopt_quant_file_path = str(Path(model) / "quantizer_state.pth")
-        if os.path.exists(f"{model}/vllm_fq_quantizer_state.yaml"):
             args.modelopt_recipe_path = str(Path(model) / "vllm_fq_quantizer_state.yaml")
 
 
@@ -315,12 +316,9 @@ def main():
 
         _register_ray_env_vars()
 
-        # ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are
-        # visible during calibration -- but only when weight quantization (QUANT_CFG) is
-        # actually requested; a KV-cache-only quant_cfg never touches expert weights.
-        # Default to triton; an explicit --moe_backend still wins (and the flag is moot on
-        # dense models, where nothing dispatches through it).
-        if modelopt_args.modelopt_quant_cfg and _vllm_supports_moe_backend():
+        # Match the fakequant launcher default: use the decomposed Triton MoE backend when
+        # this vLLM version exposes the option. An explicit user selection still wins.
+        if _vllm_supports_moe_backend():
             if _find_flag_value(rest_argv, "--moe-backend", "--moe_backend") is None:
                 rest_argv = [*rest_argv, "--moe_backend", "triton"]
 
