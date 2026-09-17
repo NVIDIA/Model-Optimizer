@@ -1,30 +1,5 @@
-# This file includes the IQ2_XS codebook adapted from:
-# https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
-#
-# MIT License
-#
-# Copyright (c) 2023-2026 The ggml authors
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-#
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,18 +24,16 @@ block_iq2_xs payload:
 * bytes 2..65: 32 little-endian uint16 codes (9-bit grid + 7-bit sign)
 * bytes 66..73: 16 four-bit local scales, two per byte
 
-The canonical 512 x 8 magnitude grid below comes from llama.cpp
-ggml-common.h revision 9b05354ec6fb58b4e665e9a39ebc40285c015638.
+The canonical 512 x 8 magnitude grid lives in :mod:`.codebooks`, carried from
+llama.cpp ggml-common.h revision 9b05354ec6fb58b4e665e9a39ebc40285c015638.
 The matching dequantization formula is in ggml-quants.c at the same revision:
 https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-quants.c#L2516-L2538
 """
 
-import base64
-from functools import cache
-
 import torch
 
 from ..extensions import get_cuda_ext_ggml
+from .codebooks import iq2_xs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
@@ -90,73 +63,8 @@ _IQ2_XS_PEAK_TO_RMS_TAPER = 0.035
 _DEFAULT_BLOCK_CHUNK_SIZE = 256
 _SCALE_BLOCK_CHUNK_SIZE = 4096
 
-# Compact byte representation of the canonical [512, 8] grid. Values are only
-# 8, 25, and 43. Keeping this as checkpoint-independent package data avoids
-# adding a pickle-backed torch.save artifact to the wheel.
-_IQ2_XS_GRID_B64 = (
-    "CAgICAgICAgrCAgICAgICBkZCAgICAgICCsICAgICAgrKwgICAgICBkIGQgICAgICBkZCAgICAgrGRkICAgICBkrGQgICAgICAgr"
-    "CAgICAgrCCsICAgICBkZKwgICAgICCsrCAgICAgZCAgZCAgICAgZCBkICAgIKxkIGQgICAgZKwgZCAgICAgIGRkICAgIKwgZGQgI"
-    "CAgZGRkZCAgICAgrGRkICAgIGQgrGQgICAgIGSsZCAgICAgICCsICAgIKwgIKwgICAgZGQgrCAgICAgrCCsICAgIGQgZKwgICAgI"
-    "GRkrCAgICBkrGSsICAgICAgrKwgICAgZCAgIGQgICAgZCAgZCAgIKxkICBkICAgZKwgIGQgICAgIGQgZCAgIKwgZCBkICAgZGRkI"
-    "GQgICAgrGQgZCAgIKysZCBkICAgZCCsIGQgICAgZKwgZCAgICAgIGRkICAgrCAgZGQgICBkZCBkZCAgICCsIGRkICAgZCBkZGQgI"
-    "CAgZGRkZCAgICAgrGRkICAgIKysZGQgICBkICCsZCAgICBkIKxkICAgICBkrGQgICAgICAgrCAgIKwgICCsICAgZGQgIKwgICAgr"
-    "CAgrCAgIGQgZCCsICAgIGRkIKwgICAgIKwgrCAgIGQgIGSsICAgIGQgZKwgICAgIGRkrCAgIGRkZGSsICAgICAgrKwgICCsrCCsr"
-    "CAgIGQgICAgZCAgIGQgICBkICCsZCAgIGQgIGSsICAgZCAgICBkICBkICCsIGQgIGQgIGRkZCAgZCAgIKxkICBkICBkIKwgIGQgI"
-    "CBkrCAgZCAgICAgZCBkICCsICBkIGQgIGRkIGQgZCAgIKwgZCBkICBkIGRkIGQgICBkZGQgZCAgrGRkZCBkICAgIKxkIGQgIGQgI"
-    "KwgZCAgIGQgrCBkICAgIGSsIGQgICAgICBkZCAgrCAgIGRkICBkZCAgZGQgICCsICBkZCAgZCBkIGRkICAgZGQgZGQgICAgrCBkZ"
-    "CAgZCAgZGRkICAgZCBkZGQgICAgZGRkZCAgZCCsZGRkICAgICCsZGQgIGQgICCsZCAgIGQgIKxkICAgIGQgrGQgIKxkrCCsZCAgI"
-    "CAgZKxkICCsICBkrGQgICBkIKysZCAgICAgICCsICCsICAgIKwgIGRkICAgrCAgIKwgICCsICCsrCAgIKwgIGQgZCAgrCAgIGRkI"
-    "CCsICAgIKwgIKwgIGRkrCAgrCAgZCAgZCCsICAgZCBkIKwgICAgZGQgrCAgIKxkZCCsICAgICCsIKwgICAgrKwgrCAgrKysrCCsI"
-    "CBkICAgZKwgICBkICBkrCAgICBkIGSsICAgICBkZKwgIGQgIKxkrCAgZKwgrGSsICAgICAgrKwgICAgrCCsrCAgIKysIKysICCsZ"
-    "GSsrKwgICAgrKysrCAgZCAgICAgZCAgZCAgICBkIKxkICAgIGQgZKwgICAgZCAgIGQgICBkIKwgZCAgIGQgZGRkICAgZCAgrGQgI"
-    "CBkIGQgrCAgIGQgIGSsICAgZCAgICBkICBkIKwgIGQgIGQgZGQgZCAgZCAgrCBkICBkIGQgZGQgIGQgIGRkZCAgZCAgIKxkICBkI"
-    "KysrGQgIGQgZCAgrCAgZCAgZCCsICBkICAgZKwgIGQgICAgIGQgZCCsICAgZCBkIGRkICBkIGQgIKwgIGQgZCBkIGQgZCBkICBkZ"
-    "CBkIGQgICCsIGQgZCBkICBkZCBkICBkIGRkIGQgICBkZGQgZCAgICCsZCBkICBkZKxkIGQgrGRkrGQgZCBkICAgrCBkICBkICCsI"
-    "GQgrGQgIKwgZCAgIGQgrCBkICAgIGSsIGQgICCsZKwgZCAgICAgIGRkIKwgICAgZGQgZGQgICBkZCAgrCAgIGRkIGQgZCAgZGQgI"
-    "GRkICBkZCAgIKwgIGRkIGQgIGQgZGQgIGQgZCBkZCBkrCBkIGRkICAgZGQgZGQgIGSsZCBkZCAgICCsIGRkIGQgICBkZGQgIGQgI"
-    "GRkZCAgIGQgZGRkICAgIGRkZGQgICAgIKxkZCAgZGQgrGRkIGSsIGSsZGQgZCAgICCsZCAgZCAgIKxkICAgZCAgrGQgrCBkICCsZ"
-    "CAgICBkIKxkICBkZGQgrGQgrGQgrCCsZCAgICAgZKxkIGRkICBkrGQgrGSsZGSsZCBkIGRkrKxkIGSsrKysrGQgICAgICAgrCCsI"
-    "CAgICCsIGRkICAgIKwgIKwgICAgrCCsrCAgICCsIGQgZCAgIKwgIGRkICAgrCAgIKwgICCsIGQgIGQgIKwgIGQgZCAgrCAgIGRkI"
-    "CCsICAgIKwgIKwgICCsrCAgrCBkICAgZCCsICBkICBkIKwgICBkIGQgrCAgICBkZCCsICCsIGRkIKwgZGSsZGQgrCAgICAgrCCsI"
-    "KwgrCCsIKwgICAgrKwgrCAgrKysrCCsIGQgICAgZKwgIGQgICBkrCAgIGQgIGSsIGSsrCAgZKwgICAgZCBkrCAgICAgZGSsIGQgI"
-    "GRkZKwgrCBkZGRkrCBkrGSsZGSsIGQgICCsZKwgrKxkIKxkrCCsZKysrGSsICAgICAgrKwgIKwgICCsrCCsrCAgIKysICAgrCAgr"
-    "KwgZGRkZCCsrCAgrCCsIKysIKwgrKwgrKwgIKysZGSsrCAgIGSsZKysICCsICCsrKwgICCsIKysrCCsICCsrKysICCsIKysrKwgr"
-    "KwgrKysrCBkICAgICAgZCBkICAgICBkrGQgICAgIGRkrCAgICAgZCAgZCAgICBkrCBkICAgIGRkZGQgICAgZCCsZCAgICBkZCCsI"
-    "CAgIGQgZKwgICAgZCAgIGQgICBkrCAgZCAgIGRkZCBkICAgZCCsIGQgICBkrKwgZCAgIGRkIGRkICAgZCBkZGQgICBkICCsZCAgI"
-    "GRkZKxkICAgZGQgIKwgICBkIGQgrCAgIGQgIGSsICAgZCAgICBkICBkrCAgIGQgIGRkZCAgZCAgZCCsICBkICBkZCBkIGQgIGQgZ"
-    "GQgZCAgZCAgrCBkICBkZCAgZGQgIGQgZCBkZCAgZCAgZGRkICBkICAgrGQgIGRkZCCsZCAgZKwgrKxkICBkZCAgIKwgIGQgZCAgr"
-    "CAgZCAgZCCsICBkrCBkIKwgIGRkrKwgrCAgZCAgIGSsICBkICAgICBkIGSsICAgIGQgZGRkICAgZCBkIKwgICBkIGRkIGQgIGQgZ"
-    "CBkZCAgZCBkZKxkICBkIGQgIKwgIGQgZGQgIGQgZCBkIGQgZCBkIGQgIGRkIGQgZCAgIKwgZCBkIGRkrCBkIGRkICAgZGQgZCBkI"
-    "CBkZCBkICBkIGRkIGQgZKwgZGQgZCAgIGRkZCBkrKxkrGRkIGQgICAgrGQgZKysICCsZCBkIGQgZKxkIGQgIGRkrGQgZGQgICAgr"
-    "CBkIGQgICCsIGQgIGQgIKwgZCAgIGQgrCBkZGQgZCCsIGQgZGRkIKwgZKwgrGQgrCBkICAgIGSsIGRkIGQgZKwgZCBkIGRkrCBkI"
-    "CBkZGSsIGRkrKxkZKwgZCBkICCsrCBkICAgICAgZGSsICAgICBkZGRkICAgIGRkIKwgICAgZGRkIGQgICBkZCBkZCAgIGRkICCsI"
-    "CAgZGQgrKwgICBkZGQgIGQgIGRkIGQgZCAgZGQgIGRkICBkZCAgIKwgIGRkZCAgIGQgZGQgZCAgZCBkZCAgZCBkIGRkZGRkIGQgZ"
-    "GQgICBkZCBkZKwgIGRkIGRkICAgIKwgZGQgZCBkrCBkZKysrKysIGRkZCAgICBkZGQgZCAgIGRkZCAgZCAgZGRkZCCsICBkZGQgI"
-    "CBkIGRkZCAgrGQgZGRkZCAgrCBkZGRkIKysIGRkZCAgICBkZGRkIKwgIGRkZGQgICCsZGRkZCCsIKxkZGRkZCCsIKxkZGQgrKxkr"
-    "GRkZGQgrKysZGRkICAgICCsZGQgZGQgIKxkZGQgIGQgrGRkICBkZCCsZGRkrGSsIKxkZKysZCBkrGRkICAgZGSsZGSsICBkZKxkZ"
-    "GRkIKysrGRkZCAgICAgrGQgZCAgICCsZCAgZCAgIKxkICAgZCAgrGQgZGRkICCsZKwgrGQgIKxkrGQgrCAgrGRkrKysICCsZCAgI"
-    "CBkIKxkIGSsIKwgrGSsrCBkrCCsZKwgZKysIKxkICAgICBkrGSsZGQgIGSsZCAgZCBkZKxkICAgZGRkrGRkZCBkZGSsZCBkrKxkZ"
-    "KxkZCAgICCsrGSsrKxkIKysZGRkrCBkrKxkrGQgIKysrGQgZGRkrKysZKwgrGSsrKxkICAgICAgIKysICAgICAgrGRkICAgICCsI"
-    "KwgICAgIKxkIGQgICAgrCBkZCAgICCsICCsICAgIKysrKwgICAgrGQgIGQgICCsIGQgZCAgIKwgIGRkICAgrCAgIKwgICCsrCAgr"
-    "CAgIKwgrKysICAgrKysrKwgICCsZCAgIGQgIKwgZCAgZCAgrKxkICBkICCsICBkIGQgIKwgICBkZCAgrGQgZGRkICCsZKxkZGQgI"
-    "KwgICAgrCAgrCAgrCCsICCsICAgrKwgIKysICCsrCAgrCAgrKysICCsIKysrKwgIKxkICAgIGQgrCBkICAgZCCsICBkICBkIKysI"
-    "GQgIGQgrGRkZCAgZCCsICAgZCBkIKwgIKxkIGQgrGSsIKwgZCCsICAgIGRkIKwgZCBkZGQgrGRkrKxkZCCsIKxkIKxkIKysrKxkr"
-    "GQgrCAgICAgrCCsIKwgICCsIKxkZKwgIKwgrKysZGQgrCCsICAgrCCsIKysICCsIKwgrCCsrKwgrCCsrGQgIGSsIKysIKwgrKwgr"
-    "CAgIKysrCCsIKwgrKysIKysZGSsrKwgrCCsrKysrCCsZCAgICAgZKwgZCAgICBkrCAgZCAgIGSsICAgZCAgZKysZGRkICBkrCBkI"
-    "KwgIGSsICAgIGQgZKysIKwgZCBkrCBkrGRkIGSsrGRkZKwgZKxkrCCsrCBkrCAgICAgZGSsZGQgICBkZKwgZCBkIGRkrCAgZGQgZ"
-    "GSsIKxkZCBkZKxkrKwgZGRkrCAgZKxkZGSsrCBkrGRkZKxkICBkrGRkrGQgZGQgrGSsrGSsrCCsZKxkrCBkZKxkrGRkZCCsrGSsI"
-    "CCsZKysZKwgICAgICCsrKwgICAgIKysIKwgICAgrKysrCAgICCsrCAgrCAgIKysrKysICAgrKwgIKysICCsrGQgZGRkIKysZKxkZ"
-    "GQgrKysZKysZCCsrCAgICCsIKysrCAgIKwgrKwgrCAgrCCsrKysrCCsIKysICAgrKwgrKwgIKysrCCsrCAgIGQgZKysZGRkrCBkr"
-    "KxkZKxkrGSsrCCsZKysZKysrKwgICCsrKwgIKwgIKysrKwgrCAgrKysIKysICCsrKwgIKysIKysrCCsrKwgrKysIGQgIGSsrKwgZ"
-    "CCsZKysrKxkIKxkrKysIKysIKysrKysrKwgrKysrGQgZKysrKysrKysrKysrKw=="
-)
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
-
-
-@cache
-def _grid_bytes() -> bytes:
-    return base64.b64decode(_IQ2_XS_GRID_B64)
 
 
 def iq2_xs_grid(device: torch.device | str | None = None) -> torch.Tensor:
@@ -165,7 +73,7 @@ def iq2_xs_grid(device: torch.device | str | None = None) -> torch.Tensor:
     if resolved_device.type == "cuda" and resolved_device.index is None:
         resolved_device = torch.device("cuda", torch.cuda.current_device())
     if resolved_device not in _GRID_CACHE:
-        values = torch.tensor(list(_grid_bytes()), dtype=torch.float32)
+        values = torch.tensor(list(iq2_xs_grid_bytes()), dtype=torch.float32)
         _GRID_CACHE[resolved_device] = values.reshape(512, 8).to(device=resolved_device)
     return _GRID_CACHE[resolved_device]
 
