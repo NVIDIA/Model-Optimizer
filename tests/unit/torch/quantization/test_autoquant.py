@@ -1138,7 +1138,7 @@ def test_gradient_scoring_restores_model_after_failure():
 
 @pytest.mark.parametrize("cudnn_enabled", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-def test_backward_scoring_session_restores_sdpa_backends(cudnn_enabled, fail):
+def test_backward_scoring_session_preserves_sdpa_backends(cudnn_enabled, fail):
     original = torch.backends.cuda.cudnn_sdp_enabled()
     others = (
         torch.backends.cuda.flash_sdp_enabled(),
@@ -1151,7 +1151,7 @@ def test_backward_scoring_session_restores_sdpa_backends(cudnn_enabled, fail):
             pytest.raises(RuntimeError, match="scoring failed") if fail else nullcontext(),
             _AutoQuantizeGradientScoringSession(torch.nn.Identity(), [], lambda *_: False),
         ):
-            assert not torch.backends.cuda.cudnn_sdp_enabled()
+            assert torch.backends.cuda.cudnn_sdp_enabled() == cudnn_enabled
             assert others == (
                 torch.backends.cuda.flash_sdp_enabled(),
                 torch.backends.cuda.mem_efficient_sdp_enabled(),
@@ -1165,19 +1165,44 @@ def test_backward_scoring_session_restores_sdpa_backends(cudnn_enabled, fail):
     assert restored == cudnn_enabled
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_backward_scoring_masked_sdpa_gradients_are_finite():
-    q, k, v = [
-        torch.randn(1, 2, 128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-        for _ in range(3)
-    ]
-    mask = torch.ones(128, 128, device="cuda", dtype=torch.bool).tril()
-    mask[:, :8] = False
-    with _AutoQuantizeGradientScoringSession(torch.nn.Identity(), [], lambda *_: False):
-        output = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        output.sum().backward()
-    assert torch.isfinite(output).all()
-    assert all(torch.isfinite(tensor.grad).all() for tensor in (q, k, v))
+@pytest.mark.parametrize("bad_gradient", [float("nan"), float("inf"), -float("inf")])
+def test_auto_quantize_fails_fast_on_nonfinite_gradients(bad_gradient):
+    model = SimpleLinear()
+    original_cudnn = torch.backends.cuda.cudnn_sdp_enabled()
+
+    def loss_func(output, _data):
+        output.register_hook(lambda grad: torch.full_like(grad, bad_gradient))
+        return output.sum()
+
+    with pytest.raises(RuntimeError, match="Non-finite output gradients in module") as exc_info:
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=loss_func,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert "torch.backends.cuda.enable_cudnn_sdp(False)" in str(exc_info.value)
+    assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
+    assert any(
+        f"module '{name}'" in str(exc_info.value)
+        for name, module in model.named_modules()
+        if getattr(module, "_hparams_for_scoring", [])
+    )
+    for name, module in model.named_modules():
+        for hparam in getattr(module, "_hparams_for_scoring", []):
+            assert "forward" not in module.__dict__
+            assert hparam.active == hparam.original
+            for recipe in hparam.choices:
+                importance = hparam._importance_dict[recipe][module]
+                if f"module '{name}'" in str(exc_info.value):
+                    assert importance is None
+                else:
+                    assert importance is None or torch.isfinite(importance).all()
 
 
 def test_backward_scoring_session_restores_partial_setup():
