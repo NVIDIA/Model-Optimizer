@@ -35,6 +35,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _OutsideQuantizerCalibrator,
     _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -1029,6 +1030,9 @@ def local_hessian_calibrate(
     metric where a weight pairs with its input activations (dense linears and HF fused-MoE
     experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
     unsupported and left at their max-calibrated scale.
+
+    We recommend using Local-Hessian with layerwise calibration enabled
+    (``"layerwise": {"enable": True}``) and a calibration batch size of 1.
 
     Args:
         model: Model to be calibrated.
@@ -2063,13 +2067,14 @@ def layerwise_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
 
-    Every knob arrives through ``calib_kwargs`` from :class:`LayerwiseConfig`, which
+    Every knob arrives through ``calib_kwargs`` from
+    :class:`LayerwiseConfig <modelopt.torch.quantization.config.LayerwiseConfig>`, which
     documents them; ``export_dir`` additionally leaves the model in export form, so it
     must not be used for inference afterwards.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     export_dir = calib_kwargs.pop("export_dir", None)
-    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", True)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
@@ -2084,6 +2089,20 @@ def layerwise_calibrate(
         raise ValueError(
             "Could not find transformer layers in model. "
             "Layerwise calibration requires a model with identifiable transformer layers."
+        )
+
+    outside_calibrator = _OutsideQuantizerCalibrator(
+        model,
+        transformer_layers,
+        forward_loop,
+        calib_func,
+        calib_kwargs,
+        qdq_from_prev,
+    )
+    if export_dir is not None and outside_calibrator.enabled:
+        raise ValueError(
+            "Layerwise export does not support enabled quantizers outside transformer layers. "
+            "Calibrate without export_dir, then export the completed model separately."
         )
 
     num_layers = len(transformer_layers)
@@ -2217,6 +2236,8 @@ def layerwise_calibrate(
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
 
+    outside_calibrator.calibrate()
+
     if exporter is not None:
         warn_rank_0(
             f"Layerwise export: wrote every layer shard to {exporter.export_dir}.{finalize_hint}"
@@ -2247,6 +2268,9 @@ def gptq(
       more accurate Hessian estimates.
     * **Non-layerwise** (``layerwise.enable=False``): called once on the full
       model. All layers are quantized in parallel from the original activations.
+
+    We recommend enabling layerwise calibration
+    (``"layerwise": {"enable": True}``) and using a calibration batch size of 1.
 
     Per-module steps:
 

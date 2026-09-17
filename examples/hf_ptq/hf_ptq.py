@@ -71,7 +71,12 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
-from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.recipe.presets import (
+    KV_CACHE_NONE,
+    KV_QUANT_CFG_CHOICES,
+    QUANT_CFG_CHOICES,
+    RecipeSupersededAction,
+)
 from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
@@ -1523,8 +1528,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--qformat",
+        action=RecipeSupersededAction,
         help="Quantization format for single-format PTQ. For mixed-precision search, use an "
-        "AutoQuantize recipe via --recipe.",
+        "AutoQuantize recipe via --recipe. (deprecated: use --recipe)",
         default="fp8",
     )
     parser.add_argument(
@@ -1586,6 +1592,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--kv_cache_qformat",
+        action=RecipeSupersededAction,
         required=False,
         default="fp8_cast",
         choices=[KV_CACHE_NONE, *KV_QUANT_CFG_CHOICES],
@@ -1596,7 +1603,7 @@ def parse_args() -> argparse.Namespace:
             "calibration; all other formats (fp8, nvfp4, ...) use data-driven calibration. "
             "With --recipe, the source depends on the recipe type: a PTQ recipe is "
             "authoritative for KV cache and ignores this flag; an AutoQuantize recipe "
-            "falls back to this flag unless it sets an explicit kv_cache field."
+            "falls back to this flag unless it sets an explicit kv_cache field. (deprecated: use --recipe)"
         ),
     )
     parser.add_argument(

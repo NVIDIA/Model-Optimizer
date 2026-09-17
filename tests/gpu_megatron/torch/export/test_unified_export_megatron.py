@@ -532,6 +532,48 @@ def test_unified_export_megatron_pp2_mtp_metadata_matches_shards(dist_workers_si
     )
 
 
+def _test_export_pp2_mtp_no_duplicate_tensors(tmp_path, model_dir, rank, size):
+    """MCore builds an embedding on the MTP stage too; export must still write it exactly once."""
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_query_groups=config.num_key_value_heads,
+        ffn_hidden_size=config.intermediate_size,
+        max_sequence_length=config.max_position_embeddings,
+        vocab_size=config.vocab_size,
+        activation_func="swiglu",
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+        mtp_num_layers=1,
+    ).cuda()
+
+    export_dir = tmp_path / "export_pp2_mtp_dedup"
+    export_mcore_gpt_to_hf(model, model_dir, dtype=torch.bfloat16, export_dir=str(export_dir))
+
+    if rank == 0:
+        shard_of = {}
+        duplicated = {}
+        for shard in sorted(export_dir.glob("model-*.safetensors")):
+            with safe_open(str(shard), framework="pt", device="cpu") as sf:
+                for key in sf.keys():  # noqa: SIM118
+                    if key in shard_of:
+                        duplicated[key] = (shard_of[key], shard.name)
+                    shard_of[key] = shard.name
+        assert not duplicated, f"tensors written to more than one shard: {duplicated}"
+        assert "model.embed_tokens.weight" in shard_of
+
+
+def test_unified_export_megatron_pp2_mtp_no_duplicate_tensors(dist_workers_size_2, tmp_path):
+    model_dir = create_tiny_llama_dir(tmp_path)
+    dist_workers_size_2.run(partial(_test_export_pp2_mtp_no_duplicate_tensors, tmp_path, model_dir))
+
+
 def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
     """Unquantized fused MCore linear_qkv should become HF q/k/v excludes."""
     exporter = object.__new__(GPTModelExporter)
