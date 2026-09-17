@@ -35,7 +35,10 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from modelopt.torch.export.plugins.hf_checkpoint_utils import off_index_safetensors_files
+from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+    locate_source_keys,
+    off_index_safetensors_files,
+)
 from modelopt.torch.models import hf_model_type, is_moe
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
@@ -1589,56 +1592,6 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
-def _locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
-    """Map each key to the safetensors file holding it, for keys the index may not list.
-
-    ``model.safetensors.index.json`` is not a complete inventory of the checkpoint. Transformers
-    enumerates the CONTENTS of each shard it opens, so it reports a tensor the index omits -- an
-    MTP head stored inside a main shard is exactly that case, and it reaches
-    ``_modelopt_unplaced_source_keys`` like any other unplaced key. Resolving purely through
-    ``weight_map`` then finds no shard for it and drops it silently, which is the failure the
-    carry-over exists to prevent.
-
-    The index answers for everything it lists, at no cost. Only the leftovers trigger a header
-    scan -- names, never tensor data -- and only when there are any, which is the rare case.
-    """
-    # _source_weight_map, not model_load_utils.weight_map_for: that module imports transformers
-    # and accelerate at module scope, and reaching for it here would make this answer "nothing to
-    # carry" wherever they are absent -- the partial-install environments -- silencing the
-    # --vllm_fakequant_export guard in exactly the case it exists for. Pinned by
-    # test_carryable_source_keys_works_without_the_loader_dependencies, which caught this.
-    if not Path(ckpt).is_dir():
-        # A checkpoint that is not there is a different failure from a key that is not in it, and
-        # the caller's handler already says the right thing about the first ("could not copy ...
-        # the checkpoint will be missing them"). Collapsing both into "in no safetensors file"
-        # would report a missing directory as a missing tensor.
-        raise ValueError(f"source checkpoint is not a directory: {ckpt}")
-
-    weight_map = _source_weight_map(ckpt)
-    located = {k: weight_map[k] for k in keys if k in weight_map}
-    remaining = {k for k in keys if k not in located}
-    if not remaining:
-        return located
-
-    for shard in sorted(Path(ckpt).glob("*.safetensors")):
-        if not remaining:
-            break
-        try:
-            with safe_open(str(shard), framework="pt") as f:
-                found = remaining.intersection(f.keys())
-        except Exception:
-            continue
-        located.update(dict.fromkeys(found, shard.name))
-        remaining -= found
-
-    if remaining:
-        warnings.warn(
-            f"{len(remaining)} checkpoint key(s) the loader reported are in no safetensors file "
-            f"of {ckpt} (e.g. {min(remaining)}); they cannot be carried into the export."
-        )
-    return located
-
-
 def carryable_source_keys(model: nn.Module) -> list[str]:
     """Unplaced checkpoint keys a shard actually provides.
 
@@ -1656,33 +1609,10 @@ def carryable_source_keys(model: nn.Module) -> list[str]:
     if not keys or not ckpt:
         return []
     try:
-        located = _locate_source_keys(ckpt, list(keys))
+        located = locate_source_keys(ckpt, list(keys))
     except Exception:
         return []
     return sorted(located)
-
-
-def _source_weight_map(ckpt: "str | Path") -> dict[str, str]:
-    """``param name -> shard file`` for a local checkpoint, without the loader's dependencies.
-
-    :func:`modelopt.torch.utils.plugins.model_load_utils.weight_map_for` answers the same
-    question, but that module imports transformers, accelerate and huggingface_hub at module
-    scope. Reaching for it here would make "does a shard back this key" unanswerable wherever
-    those are absent -- the partial-install environments -- and the caller would then conclude
-    there is nothing to carry and skip a guard that should have fired.
-
-    The indexed case, which is every sharded checkpoint, is a stdlib JSON read and needs nothing.
-    Only a single-file ``model.safetensors`` needs safetensors, and only to list its keys.
-    """
-    index = Path(ckpt) / "model.safetensors.index.json"
-    if index.exists():
-        with open(index) as f:
-            return json.load(f).get("weight_map", {})
-    single = Path(ckpt) / "model.safetensors"
-    if single.exists():
-        with safe_open(str(single), framework="pt") as f:
-            return dict.fromkeys(f.keys(), "model.safetensors")
-    return {}
 
 
 def _off_index_source_keys(model: nn.Module) -> list[str]:
@@ -1791,7 +1721,7 @@ def _carry_over_unplaced_source_weights(
             return {}
 
         by_file: dict[str, list[str]] = {}
-        for k, shard in _locate_source_keys(ckpt, list(keys)).items():
+        for k, shard in locate_source_keys(ckpt, list(keys)).items():
             by_file.setdefault(shard, []).append(k)
 
         if keys_only:
