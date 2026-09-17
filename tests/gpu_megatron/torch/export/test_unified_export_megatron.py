@@ -47,12 +47,7 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import (
-    dequantize_iq1_s,
-    dequantize_iq2_xs,
-    quantize_iq1_s,
-    quantize_iq2_xs,
-)
+from modelopt.torch.quantization.ggml import dequantize_iq1_s, dequantize_iq2_xs, quantize_iq2_xs
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
@@ -278,71 +273,31 @@ def test_megatron_gated_delta_net_slicing_exports_iq_payloads():
     )
 
 
-@pytest.mark.parametrize(
-    ("qformat", "payload_bytes", "quantize", "dequantize"),
-    [
-        ("iq1_s", 50, quantize_iq1_s, dequantize_iq1_s),
-        ("iq2_xs", 74, quantize_iq2_xs, dequantize_iq2_xs),
-    ],
-)
-def test_megatron_packed_experts_keep_iq_blocks_on_input_axis(
-    qformat, payload_bytes, quantize, dequantize
-):
+@pytest.mark.parametrize("qformat", ["iq1_s", "iq2_xs"])
+def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
-    expected_packed = torch.stack(
-        [quantize(expert.linear_fc2.weight)[0].cpu() for expert in experts]
-    )
-    expected = torch.stack(
-        [expert.linear_fc2.weight_quantizer(expert.linear_fc2.weight) for expert in experts]
-    )
     exporter = _make_iq_exporter()
 
-    exporter._pack_name_remapping(
-        experts,
-        "model.layers.0.mlp.experts.down_proj",
-        layer_type="linear_fc2",
-    )
-
-    packed = exporter._state_dict["model.layers.0.mlp.experts.down_proj"]
-    assert packed.shape == (2, 4, 1, payload_bytes)
-    assert packed.device.type == "cpu"
-    torch.testing.assert_close(packed, expected_packed, rtol=0, atol=0)
-    reconstructed = dequantize(packed, torch.tensor([2, 4, 256]), dtype=torch.bfloat16)
-    torch.testing.assert_close(reconstructed, expected, rtol=0.02, atol=0.005)
+    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+        exporter._pack_name_remapping(
+            experts,
+            "model.layers.0.mlp.experts.down_proj",
+            layer_type="linear_fc2",
+        )
+    assert exporter._state_dict == {}
 
 
-def test_megatron_gpt_oss_packed_experts_interleave_before_iq_packing():
+def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader():
     experts = _make_iq_experts("iq2_xs", "linear_fc1", bias=True)
-    interleave = torch.tensor([0, 2, 1, 3])
-    expected_packed = torch.stack(
-        [quantize_iq2_xs(expert.linear_fc1.weight[interleave])[0].cpu() for expert in experts]
-    )
-    expected_weight = torch.stack(
-        [
-            expert.linear_fc1.weight_quantizer(expert.linear_fc1.weight)[interleave]
-            for expert in experts
-        ]
-    )
-    expected_bias = torch.stack([expert.linear_fc1.bias[interleave] for expert in experts])
     exporter = _make_iq_exporter()
 
-    exporter._pack_name_remapping_gpt_oss(
-        experts,
-        "model.layers.0.mlp.experts.gate_up_proj",
-        layer_type="linear_fc1",
-    )
-
-    prefix = "model.layers.0.mlp.experts.gate_up_proj"
-    packed = exporter._state_dict[prefix]
-    assert packed.shape == (2, 4, 1, 74)
-    torch.testing.assert_close(packed, expected_packed, rtol=0, atol=0)
-    reconstructed = dequantize_iq2_xs(
-        packed,
-        torch.tensor([2, 4, 256]),
-        dtype=torch.bfloat16,
-    )
-    torch.testing.assert_close(reconstructed, expected_weight, rtol=0.02, atol=0.005)
-    torch.testing.assert_close(exporter._state_dict[prefix + "_bias"], expected_bias)
+    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+        exporter._pack_name_remapping_gpt_oss(
+            experts,
+            "model.layers.0.mlp.experts.gate_up_proj",
+            layer_type="linear_fc1",
+        )
+    assert exporter._state_dict == {}
 
 
 def test_megatron_iq_export_rejects_tensor_parallelism():

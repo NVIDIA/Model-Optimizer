@@ -69,10 +69,13 @@ for IQ1_S and 74 for IQ2_XS. No separate shape tensor is stored: a loader recove
 shape as ``[*weight.shape[:-2], weight.shape[-2] * 256]``. This is unambiguous because IQ export
 requires the logical last dimension to be divisible by 256.
 
-Megatron fused-MoE export packs each expert's logical ``[out_features, in_features]`` matrix before
-stacking the payloads. Such tensors therefore have shape
-``[num_experts, out_features, in_features // 256, payload_bytes]``; packed blocks are never
-transposed across the contraction axis.
+.. warning::
+   Megatron fused-MoE IQ export is not currently supported. Its packed tensor would require the
+   deployment consumer to understand
+   ``[num_experts, out_features, in_features // 256, payload_bytes]`` rather than the ordinary HF
+   fused-expert order. The exporter raises ``NotImplementedError`` until a deployment loader owns
+   this layout and is covered by an integration test. Dense and individually named expert weights
+   continue to use the representation above.
 
 The generated configuration records ``quant_method: modelopt``, ``packing: ggml``, the 256-value
 block size, and the payload byte count. IQ payloads are not represented as compressed-tensors
