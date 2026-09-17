@@ -59,8 +59,9 @@ class _IqFormat(NamedTuple):
     entries: int
     payload_bytes: int
     needs_scales: bool
-    # Value alphabet the codebook is built from: signed ternary for IQ1_S, and the non-negative
-    # magnitudes IQ2_XS stores (its signs live in the packed code).
+    # Value alphabet the codebook is built from, as GGML defines it: signed ternary bytes
+    # {0x00, 0x01, 0xff} for IQ1_S, and the non-negative magnitudes {0x08, 0x19, 0x2b} for
+    # IQ2_XS, whose signs live in the packed code instead.
     grid_values: tuple[float, ...]
     # Largest magnitude the format can represent at a block scale of 1.
     native_max: float
@@ -71,7 +72,7 @@ _IQ_EXTENSIONS = (
         _IqFormat(ext.get_cuda_ext_iq1_s, 2048, 50, False, (-1.0, 0.0, 1.0), 16.875), id="iq1_s"
     ),
     pytest.param(
-        _IqFormat(ext.get_cuda_ext_iq2_xs, 512, 74, True, (1.0, 8.0, 25.0, 43.0), 166.625),
+        _IqFormat(ext.get_cuda_ext_iq2_xs, 512, 74, True, (8.0, 25.0, 43.0), 166.625),
         id="iq2_xs",
     ),
 )

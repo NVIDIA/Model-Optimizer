@@ -15,34 +15,6 @@
  * limitations under the License.
  */
 
-/*
- * The packed block layouts and format constants used by this header and by the IQ1_S / IQ2_XS
- * packers beside it are defined by GGML, pinned at
- * https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
- *
- * MIT License
- *
- * Copyright (c) 2023-2026 The ggml authors
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
-
 #pragma once
 
 #include <ATen/ATen.h>
@@ -64,14 +36,17 @@
 namespace modelopt::ggml {
 
 // Block geometry shared by every IQ format: 256 values are encoded as 8-element codebook vectors
-// behind one fp16 block scale that occupies the first two payload bytes.
+// behind one fp16 block scale that occupies the first two payload bytes. These follow GGML's
+// QK_K, its uint64 grid entry width, and the leading ggml_half of each block struct:
+// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
 constexpr int kBlockSize = 256;
 constexpr int kVectorSize = 8;
 constexpr int kScaleOffset = 0;
 constexpr int kScaleBytes = 2;
 
-// Codebook sizes. Defined here so the pybind wrappers that validate them and the kernels that
-// index with them cannot drift apart.
+// Codebook sizes, from GGML's NGRID_IQ1S and the length of its iq2xs_grid table (see the link
+// above). Defined here so the pybind wrappers that validate them and the kernels that index with
+// them cannot drift apart.
 constexpr int kIq1sEntries = 2048;
 constexpr int kIq2xsEntries = 512;
 
