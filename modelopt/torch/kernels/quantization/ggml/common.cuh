@@ -138,7 +138,8 @@ __device__ __forceinline__ void block_min_accumulate(const float (&local)[kSlots
 }
 
 // Block-wide minimum of key, valid on thread 0 only. scratch must hold kWarps entries. Barriers
-// are internal, so every thread of the block must call this.
+// are internal -- including a trailing one, so scratch is free to reuse on return, matching
+// block_min_accumulate above -- and every thread of the block must call this.
 __device__ __forceinline__ unsigned long long block_min_key(unsigned long long key,
                                                             unsigned long long *scratch) {
   const int tid = threadIdx.x;
@@ -157,15 +158,18 @@ __device__ __forceinline__ unsigned long long block_min_key(unsigned long long k
     for (int w = 1; w < kWarps; ++w)
       key = scratch[w] < key ? scratch[w] : key;
   }
+  __syncthreads();
   return key;
 }
 
 // Writes the fp16 block scale into the payload, or zeroes the whole payload when the block scale
-// rounded to zero. Returns false once the payload is final and the caller should stop. The branch
-// is uniform across the block, so returning on false is barrier-safe.
+// rounded to zero. Negative zero counts: it reconstructs every element as zero, so it takes the
+// same branch instead of running a search whose candidates all score identically. Returns false
+// once the payload is final and the caller should stop. The branch is uniform across the block, so
+// returning on false is barrier-safe.
 template <int kPayloadBytes>
 __device__ __forceinline__ bool store_block_scale(uint8_t *payload, uint16_t d_bits) {
-  if (d_bits == 0) {
+  if ((d_bits & 0x7FFF) == 0) {
     if (threadIdx.x < kPayloadBytes)
       payload[threadIdx.x] = 0;
     return false;

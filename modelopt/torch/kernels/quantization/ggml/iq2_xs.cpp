@@ -28,10 +28,13 @@ at::Tensor iq2_xs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
                   scales.numel() == num_blocks,
               "scales must be float16 [numel / 256]");
-  // The kernel copies these bits straight into the GGML block scale field, so a non-finite entry
-  // would produce a payload that decodes to garbage. The synchronization this costs is paid once
-  // per packed tensor, on an export path.
-  TORCH_CHECK(scales.isfinite().all().item<bool>(), "scales must be finite");
+  // The kernel copies these bits straight into the GGML block scale field. A non-finite entry
+  // would produce a payload that decodes to garbage, and a negative one inverts the sign of every
+  // decoded element while still packing cleanly -- GGML's own encoders assert a non-negative block
+  // scale. One fused reduction, so the synchronization is paid once per packed tensor, on an
+  // export path.
+  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
+              "scales must be finite and non-negative");
   TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
   return iq2_xs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
 }
@@ -40,7 +43,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pack", &iq2_xs_pack,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [512, 8] holding "
-             "non-negative codebook magnitudes, and scales must be finite float16 [numel / 256]. "
+             "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
+             "[numel / 256]. "
              "Returns uint8 [numel / 256, 74] on the input device. Non-finite input elements are "
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate.");

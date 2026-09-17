@@ -148,14 +148,29 @@ def test_cuda_ext_iq_rejects_row_straddling_input(fmt):
         _pack(fmt, extension, weight, _grid(fmt, zero=True))
 
 
-def test_cuda_ext_iq2_xs_rejects_non_finite_scales():
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
+def test_cuda_ext_iq2_xs_rejects_invalid_scales(bad):
+    """A non-finite scale decodes to garbage; a negative one inverts every decoded element."""
     extension = ext.get_cuda_ext_iq2_xs(raise_if_failed=True)
     fmt = _IQ_EXTENSIONS[1].values[0]
     weight = torch.ones((1, 256), device="cuda", dtype=torch.bfloat16)
-    scales = torch.full((1,), float("nan"), device="cuda", dtype=torch.float16)
+    scales = torch.full((1,), bad, device="cuda", dtype=torch.float16)
 
-    with pytest.raises(RuntimeError, match="scales must be finite"):
+    with pytest.raises(RuntimeError, match="scales must be finite and non-negative"):
         extension.pack(weight, _grid(fmt), scales)
+
+
+def test_cuda_ext_iq2_xs_negative_zero_scale_packs_as_zero():
+    """Negative zero is a zero scale: it must take the zero-payload branch, not search."""
+    extension = ext.get_cuda_ext_iq2_xs(raise_if_failed=True)
+    fmt = _IQ_EXTENSIONS[1].values[0]
+    weight = torch.randn((2, 256), device="cuda", dtype=torch.bfloat16, generator=_generator())
+    grid = _random_grid(fmt)
+    scales = torch.tensor([-0.0, 0.0], device="cuda", dtype=torch.float16)
+
+    packed = extension.pack(weight, grid, scales)
+
+    assert not packed.any()
 
 
 def _random_grid(fmt: _IqFormat) -> torch.Tensor:

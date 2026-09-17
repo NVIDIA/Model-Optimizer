@@ -190,7 +190,6 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
         payload[code_offset] = static_cast<uint8_t>(code);
         payload[code_offset + 1] = static_cast<uint8_t>(code >> 8);
       }
-      __syncthreads();
     }
   }
 

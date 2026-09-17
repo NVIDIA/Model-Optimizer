@@ -183,7 +183,6 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
         selected_entries[vector] = entry;
         payload[kIndexOffset + group * kVectorsPerGroup + vector] = static_cast<uint8_t>(entry);
       }
-      __syncthreads();
     }
 
     if (tid == 0) {
