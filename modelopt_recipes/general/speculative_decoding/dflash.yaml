@@ -16,8 +16,7 @@ data:
   offline_data_path:
   # Jinja chat template with {% generation %} tags for answer_only_loss.
   # Required when answer_only_loss=true. Set in per-model launcher YAML.
-  # Each model keeps its own beside its launcher example, e.g.
-  # tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja
+  # Templates are in modelopt_recipes/general/speculative_decoding/chat_templates/
   chat_template:
 
 # maps to TrainingArguments (main.py)
