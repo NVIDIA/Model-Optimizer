@@ -16,12 +16,12 @@
 import torch
 
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
-from modelopt.torch.quantization.extensions import get_cuda_ext_iq1_s
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml.iq1_s import dequantize_iq1_s, iq1_s_grid, quantize_iq1_s
 
 
 def _extension():
-    extension = get_cuda_ext_iq1_s(raise_if_failed=True)
+    extension = get_cuda_ext_ggml(raise_if_failed=True)
     assert extension is not None
     return extension
 
@@ -30,9 +30,9 @@ def test_iq1_s_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((8, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 
-    packed = _extension().pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
-    packed_again = _extension().pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
-    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
+    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
+    packed_again = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(8, 1, 50)
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
     reference, shape = quantize_iq1_s(weight)
     reconstructed = dequantize_iq1_s(packed, shape)
 
@@ -48,7 +48,7 @@ def test_iq1_s_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
 
 def test_iq1_s_cuda_zero_encoding_matches_ggml_block_layout():
     weight = torch.zeros((1, 256), device="cuda", dtype=torch.bfloat16)
-    packed = _extension().pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
+    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
     shape = torch.tensor(weight.shape, device="cuda")
 
     assert not packed.any()
@@ -59,15 +59,15 @@ def test_iq1_s_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch):
     weight = torch.randn((1, 256), device="cuda", dtype=torch.bfloat16)
     weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf], device="cuda")
 
-    packed = _extension().pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
-    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
+    packed = _extension().iq1_s_pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = quantize_iq1_s(weight)
 
     assert torch.equal(packed, reference)
 
 
 def test_iq1_s_cuda_falls_back_to_pytorch_encoder(monkeypatch):
-    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_ggml", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 

@@ -16,12 +16,12 @@
 import torch
 
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
-from modelopt.torch.quantization.extensions import get_cuda_ext_iq2_xs
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml.iq2_xs import dequantize_iq2_xs, iq2_xs_grid, quantize_iq2_xs
 
 
 def _extension():
-    extension = get_cuda_ext_iq2_xs(raise_if_failed=True)
+    extension = get_cuda_ext_ggml(raise_if_failed=True)
     assert extension is not None
     return extension
 
@@ -29,7 +29,7 @@ def _extension():
 def _pack(weight):
     blocks = weight.contiguous().reshape(-1, 256)
     scales = iq2_xs_module._predict_iq2_xs_scales(blocks)
-    return _extension().pack(weight, iq2_xs_grid("cuda"), scales)
+    return _extension().iq2_xs_pack(weight, iq2_xs_grid("cuda"), scales)
 
 
 def test_iq2_xs_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
@@ -38,7 +38,7 @@ def test_iq2_xs_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
 
     packed = _pack(weight).reshape(8, 2, 74)
     packed_again = _pack(weight).reshape(8, 2, 74)
-    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_ggml", lambda: None)
     reference, shape = quantize_iq2_xs(weight)
     reconstructed = dequantize_iq2_xs(packed, shape)
 
@@ -73,14 +73,14 @@ def test_iq2_xs_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch):
     weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf], device="cuda")
 
     packed = _pack(weight).reshape(1, 1, 74)
-    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = quantize_iq2_xs(weight)
 
     assert torch.equal(packed, reference)
 
 
 def test_iq2_xs_cuda_falls_back_to_pytorch_encoder(monkeypatch):
-    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_ggml", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((2, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
 

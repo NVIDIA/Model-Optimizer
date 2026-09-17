@@ -62,7 +62,7 @@ from functools import cache
 
 import torch
 
-from ..extensions import get_cuda_ext_iq1_s
+from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
@@ -255,9 +255,9 @@ def quantize_iq1_s(
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
     grid = iq1_s_grid(weight.device)
     if weight.is_cuda:
-        extension = get_cuda_ext_iq1_s()
+        extension = get_cuda_ext_ggml()
         if extension is not None:
-            packed = extension.pack(blocks, grid)
+            packed = extension.iq1_s_pack(blocks, grid)
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ1_S_BLOCK_SIZE,

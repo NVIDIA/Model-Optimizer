@@ -60,7 +60,7 @@ from functools import cache
 
 import torch
 
-from ..extensions import get_cuda_ext_iq2_xs
+from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
@@ -262,13 +262,13 @@ def quantize_iq2_xs(
     blocks = weight.contiguous().reshape(-1, IQ2_XS_BLOCK_SIZE)
     grid = iq2_xs_grid(weight.device)
     if weight.is_cuda:
-        extension = get_cuda_ext_iq2_xs()
+        extension = get_cuda_ext_ggml()
         if extension is not None:
             scale_chunks = [
                 _predict_iq2_xs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
                 for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
             ]
-            packed = extension.pack(blocks, grid, torch.cat(scale_chunks))
+            packed = extension.iq2_xs_pack(blocks, grid, torch.cat(scale_chunks))
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
