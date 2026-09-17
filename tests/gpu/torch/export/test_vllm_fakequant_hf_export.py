@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 import torch
@@ -39,6 +40,7 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     """
 
     # Load the model
+    source_config = (Path(model_dir) / "config.json").read_bytes()
     model = AutoModelForCausalLM.from_pretrained(model_dir)
     model = model.cuda()
     model.eval()
@@ -83,6 +85,9 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     export_dir.mkdir(exist_ok=True)
 
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
+
+    # The exporter must preserve the source checkpoint's config bytes for remote-code parity.
+    assert (export_dir / "config.json").read_bytes() == source_config
 
     # Verify the input model is not mutated: all state dict values unchanged
     state_dict_after_export = model.state_dict()

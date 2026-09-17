@@ -807,6 +807,8 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
     for hf_key, expected_quantizer in (
         ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
         ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.0.mlp.experts.up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.down_proj_input_quantizer._amax", "w2_input_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)

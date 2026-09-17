@@ -35,23 +35,50 @@ for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
-Step 1: Configure quantization settings.  
-You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, or set the following environment variables to control quantization behavior:
+Step 1: Configure quantization with the ModelOpt CLI flags below. Each flag falls back to its corresponding environment variable when omitted:
 
-| Variable        | Description                                      | Default             |
-|-----------------|--------------------------------------------------|---------------------|
-| QUANT_DATASET   | Dataset name for calibration                     | cnn_dailymail       |
-| QUANT_CALIB_SIZE| Number of samples used for calibration           | 512                 |
-| QUANT_CFG       | Quantization config                              | None                |
-| KV_QUANT_CFG    | KV-cache quantization config                     | None                |
-| QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
-| MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
-| CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
-| RECIPE_PATH      | Optional path to a ModelOpt PTQ recipe YAML  | None |
+| CLI flag | Environment fallback | Description | Default / auto-detection |
+| --- | --- | --- | --- |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | ModelOpt weight/activation quantization config name | Unset |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config name | Unset |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Megatron-exported quantizer tensor state | `<model_dir>/quantizer_state.pth` when present |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Full HF ModelOpt fakequant state | `<model_dir>/vllm_fq_modelopt_state.pth` when present |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | PTQ recipe YAML or Megatron per-quantizer resolved config | `<model_dir>/vllm_fq_quantizer_state.yaml` when present |
+| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset | `cnn_dailymail` |
+| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Number of calibration samples | `512` |
+| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size | `1` |
 
-Set these variables in your shell or Docker environment as needed to customize calibration.
+CLI values take precedence over their environment fallbacks. `--modelopt-quant-cfg` /
+`--modelopt-kv-quant-cfg` and `--modelopt-recipe-path` are mutually exclusive because a recipe
+already carries its quantization configuration. For a local model directory, HF full state
+auto-detection takes precedence over Megatron quantizer-state/recipe sidecars.
 
-Step 2: Run the following command, with all supported flag as `vllm serve`:
+Install the shim to expose these options through the ordinary `vllm` command:
+
+```bash
+pip install -e examples/vllm_serve
+```
+
+Step 2: Serve with the shim. It accepts every stock vLLM flag plus the ModelOpt flags above:
+
+```bash
+vllm serve <model_path> -tp 8 --host 0.0.0.0 --port 8000 \
+  --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
+  --modelopt-quant-dataset cnn_dailymail \
+  --modelopt-quant-calib-size 512
+```
+
+For an exported HF or Megatron fakequant directory containing the standard sidecars, no
+ModelOpt path flags are required:
+
+```bash
+vllm serve <export_dir> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+When fakequant is requested explicitly or auto-detected, the shim selects
+`fakequant_worker.FakeQuantWorker` unless `--worker-cls` is supplied. With no ModelOpt flags,
+environment settings, or recognized sidecars, it delegates to the stock vLLM CLI unchanged.
+The legacy direct invocation remains available:
 
 ```bash
 python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
