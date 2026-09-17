@@ -15,30 +15,45 @@
  * limitations under the License.
  */
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include <torch/extension.h>
+/*
+ * The IQ1_S packed block layout and format constants implemented here are defined by GGML, pinned
+ * at
+ * https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
+ *
+ * MIT License
+ *
+ * Copyright (c) 2023-2026 The ggml authors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
-#include <cuda_fp16.h>
-
-#include <cfloat>
-#include <cstdint>
-#include <limits>
+#include "common.cuh"
 
 namespace {
 
-// Packed layout and format constants follow the GGML definition at:
-// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
-constexpr int kBlockSize = 256;
-constexpr int kVectorSize = 8;
-constexpr int kEntries = 2048;
+using namespace modelopt::ggml;
+
+constexpr int kEntries = kIq1sEntries;
 constexpr int kGroups = 8;
+constexpr int kVectorsPerGroup = 4;
 constexpr int kChoices = 16;
-constexpr int kScaleOffset = 0;
-constexpr int kIndexOffset = 2;
+constexpr int kIndexOffset = kScaleBytes;
 constexpr int kIndexBytes = kBlockSize / kVectorSize;
 constexpr int kMetadataOffset = kIndexOffset + kIndexBytes;
 constexpr int kPayloadBytes = kMetadataOffset + 2 * kGroups;
@@ -48,10 +63,8 @@ constexpr float kMaxShiftedMagnitude = 1.0f + kDelta;
 constexpr float kNativeMax = kMaxLocalScale * kMaxShiftedMagnitude; // 16.875.
 constexpr float kScaleAnchor = 0.61f;
 
-template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
-  const float value = static_cast<float>(*input);
-  return isfinite(value) ? value : 0.0f;
-}
+static_assert(kEntries % kThreads == 0, "every thread must visit the same number of entries");
+static_assert((kEntries & (kEntries - 1)) == 0, "the codebook index mask assumes a power of two");
 
 __device__ __forceinline__ float quant_error(float xnorm, float xsum, const float *x,
                                              const float *q, float scale, float delta) {
@@ -66,7 +79,7 @@ __device__ __forceinline__ float quant_error(float xnorm, float xsum, const floa
   }
   const float shifted_dot = dot + delta * xsum;
   const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
-  return fmaxf(fmaf(scale * scale, shifted_norm, fmaf(-2.0f * scale, shifted_dot, xnorm)), 0.0f);
+  return clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale);
 }
 
 template <typename scalar_t>
@@ -89,15 +102,13 @@ __global__ void find_scale(const scalar_t *input, int64_t num_blocks, int64_t *s
 template <typename scalar_t>
 __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *grid,
                        const int64_t *scale_bits, uint8_t *output) {
-  __shared__ float warp_best[8 * kChoices];
+  __shared__ float warp_best[kWarps * kChoices];
   __shared__ float group_error[kChoices];
-  __shared__ unsigned long long warp_keys[8];
+  __shared__ unsigned long long warp_keys[kWarps];
   __shared__ int selected_choice;
-  __shared__ uint16_t selected_entries[4];
+  __shared__ uint16_t selected_entries[kVectorsPerGroup];
 
   const int tid = threadIdx.x;
-  const int lane = tid & 31;
-  const int warp = tid >> 5;
   const int64_t block = blockIdx.x;
   if (block >= num_blocks)
     return;
@@ -106,15 +117,8 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
   uint8_t *payload = output + block * kPayloadBytes;
   const uint16_t d_bits = static_cast<uint16_t>(scale_bits[block]);
   const float d = __half2float(__ushort_as_half(d_bits));
-  if (d_bits == 0) {
-    if (tid < kPayloadBytes)
-      payload[tid] = 0;
+  if (!store_block_scale<kPayloadBytes>(payload, d_bits))
     return;
-  }
-  if (tid == 0) {
-    payload[kScaleOffset] = static_cast<uint8_t>(d_bits);
-    payload[kScaleOffset + 1] = static_cast<uint8_t>(d_bits >> 8);
-  }
 
 #pragma unroll 1
   for (int group = 0; group < kGroups; ++group) {
@@ -123,11 +127,11 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     __syncthreads();
 
 #pragma unroll
-    for (int vector = 0; vector < 4; ++vector) {
+    for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
       float xnorm = 0.0f;
       float xsum = 0.0f;
-      const int offset = group * 32 + vector * 8;
+      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
 #pragma unroll
       for (int j = 0; j < kVectorSize; ++j) {
         x[j] = load_float(source + offset + j);
@@ -156,29 +160,11 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
           const float scale = d * (2 * local + 1);
           const float shifted_dot = dot + delta * xsum;
           const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
-          const float error = fmaxf(
-              fmaf(scale * scale, shifted_norm, fmaf(-2.0f * scale, shifted_dot, xnorm)), 0.0f);
-          local_best[choice] = fminf(local_best[choice], error);
+          local_best[choice] = fminf(local_best[choice],
+                                     clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale));
         }
       }
-#pragma unroll
-      for (int choice = 0; choice < kChoices; ++choice) {
-        float value = local_best[choice];
-#pragma unroll
-        for (int delta = 16; delta > 0; delta >>= 1)
-          value = fminf(value, __shfl_down_sync(0xffffffff, value, delta));
-        if (lane == 0)
-          warp_best[warp * kChoices + choice] = value;
-      }
-      __syncthreads();
-      if (tid < kChoices) {
-        float value = warp_best[tid];
-#pragma unroll
-        for (int w = 1; w < 8; ++w)
-          value = fminf(value, warp_best[w * kChoices + tid]);
-        group_error[tid] += value;
-      }
-      __syncthreads();
+      block_min_accumulate<kChoices>(local_best, warp_best, group_error);
     }
 
     if (tid == 0) {
@@ -198,11 +184,11 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     const float selected_scale = d * (2 * selected_local + 1);
 
 #pragma unroll
-    for (int vector = 0; vector < 4; ++vector) {
+    for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
       float xnorm = 0.0f;
       float xsum = 0.0f;
-      const int offset = group * 32 + vector * 8;
+      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
 #pragma unroll
       for (int j = 0; j < kVectorSize; ++j) {
         x[j] = load_float(source + offset + j);
@@ -213,27 +199,14 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
         const float error =
             quant_error(xnorm, xsum, x, grid + entry * kVectorSize, selected_scale, selected_delta);
-        const unsigned long long candidate =
-            (static_cast<unsigned long long>(__float_as_uint(error)) << 32) |
-            static_cast<unsigned long long>(entry);
+        const unsigned long long candidate = error_key(error, entry);
         key = candidate < key ? candidate : key;
       }
-#pragma unroll
-      for (int delta = 16; delta > 0; delta >>= 1) {
-        const auto other = __shfl_down_sync(0xffffffff, key, delta);
-        key = other < key ? other : key;
-      }
-      if (lane == 0)
-        warp_keys[warp] = key;
-      __syncthreads();
+      key = block_min_key(key, warp_keys);
       if (tid == 0) {
-        key = warp_keys[0];
-#pragma unroll
-        for (int w = 1; w < 8; ++w)
-          key = warp_keys[w] < key ? warp_keys[w] : key;
-        const uint16_t entry = static_cast<uint16_t>(key & 0x7ff);
+        const uint16_t entry = static_cast<uint16_t>(key & (kEntries - 1));
         selected_entries[vector] = entry;
-        payload[kIndexOffset + group * 4 + vector] = static_cast<uint8_t>(entry);
+        payload[kIndexOffset + group * kVectorsPerGroup + vector] = static_cast<uint8_t>(entry);
       }
       __syncthreads();
     }
@@ -254,32 +227,20 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
 
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid) {
   TORCH_CHECK(input.is_contiguous() && grid.is_contiguous(), "inputs must be contiguous");
-  const auto input_type = input.scalar_type();
-  TORCH_CHECK(input_type == at::kFloat || input_type == at::kDouble || input_type == at::kHalf ||
-                  input_type == at::kBFloat16,
-              "IQ1_S packing supports float32, float64, float16, and bfloat16 inputs");
-  TORCH_CHECK(input.numel() > 0, "input must be non-empty");
-  TORCH_CHECK(input.dim() > 0 && input.size(-1) % kBlockSize == 0,
-              "input's innermost dimension must be a multiple of 256 so blocks do not straddle "
-              "rows");
-  TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == kEntries &&
-                  grid.size(1) == kVectorSize,
-              "grid must be float32 [2048, 8]");
-  TORCH_CHECK(input.get_device() == grid.get_device(), "input and grid must share a device");
+  check_pack_inputs("IQ1_S", input, grid, kEntries);
   c10::cuda::CUDAGuard guard(input.device());
   const int64_t num_blocks = input.numel() / kBlockSize;
-  TORCH_CHECK(num_blocks <= std::numeric_limits<int>::max(), "IQ1_S CUDA grid is too large");
   auto scales = at::empty({num_blocks}, input.options().dtype(at::kLong));
   auto output = at::empty({num_blocks, kPayloadBytes}, input.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
-  const int scale_grid = static_cast<int>((num_blocks + 255) / 256);
+  const int scale_grid = static_cast<int>((num_blocks + kThreads - 1) / kThreads);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(), "iq1_s_pack", [&] {
-        find_scale<scalar_t><<<scale_grid, 256, 0, stream>>>(input.data_ptr<scalar_t>(), num_blocks,
-                                                             scales.data_ptr<int64_t>());
+        find_scale<scalar_t><<<scale_grid, kThreads, 0, stream>>>(
+            input.data_ptr<scalar_t>(), num_blocks, scales.data_ptr<int64_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        encode<scalar_t><<<static_cast<int>(num_blocks), 256, 0, stream>>>(
+        encode<scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
             input.data_ptr<scalar_t>(), num_blocks, grid.data_ptr<float>(),
             scales.data_ptr<int64_t>(), output.data_ptr<uint8_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();

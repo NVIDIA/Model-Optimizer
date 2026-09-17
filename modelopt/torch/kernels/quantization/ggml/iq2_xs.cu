@@ -15,46 +15,58 @@
  * limitations under the License.
  */
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include <torch/extension.h>
+/*
+ * The IQ2_XS packed block layout and format constants implemented here are defined by GGML, pinned
+ * at
+ * https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
+ *
+ * MIT License
+ *
+ * Copyright (c) 2023-2026 The ggml authors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
-#include <cuda_fp16.h>
-
-#include <cfloat>
-#include <cstdint>
-#include <limits>
+#include "common.cuh"
 
 namespace {
 
-// Packed layout and format constants follow the GGML definition at:
-// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
-constexpr int kBlockSize = 256;
-constexpr int kVectorSize = 8;
-constexpr int kEntries = 512;
+using namespace modelopt::ggml;
+
+constexpr int kEntries = kIq2xsEntries;
 constexpr int kGroups = 16;
+constexpr int kVectorsPerGroup = 2;
 constexpr int kLocalScales = 16;
-constexpr int kScaleOffset = 0;
-constexpr int kCodeOffset = 2;
+constexpr int kCodeOffset = kScaleBytes;
 constexpr int kCodeBytes = 2 * (kBlockSize / kVectorSize);
 constexpr int kLocalScaleOffset = kCodeOffset + kCodeBytes;
 constexpr int kPayloadBytes = kLocalScaleOffset + kGroups / 2;
+constexpr float kLocalScaleStep = 0.125f; // Encoded scale is d * (2 * ls + 1) / 8.
 
-template <typename scalar_t> __device__ __forceinline__ float load_float(const scalar_t *input) {
-  const float value = static_cast<float>(*input);
-  return isfinite(value) ? value : 0.0f;
-}
+static_assert(kEntries % kThreads == 0, "every thread must visit the same number of entries");
+static_assert((kEntries & (kEntries - 1)) == 0, "the codebook index mask assumes a power of two");
 
-__device__ __forceinline__ float quant_error(float xnorm, float dot, float qnorm, float scale) {
-  return fmaxf(fmaf(scale * scale, qnorm, fmaf(-2.0f * scale, dot, xnorm)), 0.0f);
-}
-
+// Dot product of |x| against one codebook vector, under the format's even-parity sign rule. The
+// grid must hold non-negative magnitudes: the signs live in the packed 7-bit field, and the
+// eighth sign is recovered from the parity of the other seven during decoding. For odd parity,
+// flip the coordinate with the smallest |x| * q penalty.
 __device__ __forceinline__ float even_parity_dot(const float *x, const float *q, bool odd_parity) {
-  // The format stores seven sign bits. For odd parity, flip the coordinate with the smallest
-  // |x| * q penalty; the eighth sign is recovered from even parity during decoding.
   float dot = 0.0f;
   float weakest = FLT_MAX;
 #pragma unroll
@@ -71,15 +83,17 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
                        const __half *scales, uint8_t *output) {
   __shared__ float shared_grid[kEntries * kVectorSize];
   __shared__ float grid_norm[kEntries];
-  __shared__ float warp_best[8 * kLocalScales];
+  __shared__ float warp_best[kWarps * kLocalScales];
   __shared__ float group_error[kLocalScales];
-  __shared__ unsigned long long warp_keys[8];
+  __shared__ unsigned long long warp_keys[kWarps];
   __shared__ int selected_local;
   __shared__ uint8_t locals[kGroups];
 
   const int tid = threadIdx.x;
-  const int lane = tid & 31;
-  const int warp = tid >> 5;
+  const int64_t block = blockIdx.x;
+  if (block >= num_blocks)
+    return;
+
   for (int i = tid; i < kEntries * kVectorSize; i += blockDim.x)
     shared_grid[i] = grid[i];
   __syncthreads();
@@ -94,23 +108,13 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
   }
   __syncthreads();
 
-  const int64_t block = blockIdx.x;
-  if (block >= num_blocks)
-    return;
   const scalar_t *source = input + block * kBlockSize;
   uint8_t *payload = output + block * kPayloadBytes;
   const __half d_half = scales[block];
   const uint16_t d_bits = __half_as_ushort(d_half);
   const float d = __half2float(d_half);
-  if (d_bits == 0) {
-    if (tid < kPayloadBytes)
-      payload[tid] = 0;
+  if (!store_block_scale<kPayloadBytes>(payload, d_bits))
     return;
-  }
-  if (tid == 0) {
-    payload[kScaleOffset] = static_cast<uint8_t>(d_bits);
-    payload[kScaleOffset + 1] = static_cast<uint8_t>(d_bits >> 8);
-  }
 
 #pragma unroll 1
   for (int group = 0; group < kGroups; ++group) {
@@ -119,11 +123,11 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     __syncthreads();
 
 #pragma unroll
-    for (int vector = 0; vector < 2; ++vector) {
+    for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
       float xnorm = 0.0f;
       int negative_count = 0;
-      const int offset = group * 16 + vector * 8;
+      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
 #pragma unroll
       for (int j = 0; j < kVectorSize; ++j) {
         x[j] = load_float(source + offset + j);
@@ -140,29 +144,12 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
         const float dot = even_parity_dot(x, q, odd_parity);
 #pragma unroll
         for (int local = 0; local < kLocalScales; ++local) {
-          const float scale = d * (2 * local + 1) * 0.125f;
+          const float scale = d * (2 * local + 1) * kLocalScaleStep;
           local_best[local] =
-              fminf(local_best[local], quant_error(xnorm, dot, grid_norm[entry], scale));
+              fminf(local_best[local], clamped_quant_error(xnorm, dot, grid_norm[entry], scale));
         }
       }
-#pragma unroll
-      for (int local = 0; local < kLocalScales; ++local) {
-        float value = local_best[local];
-#pragma unroll
-        for (int delta = 16; delta > 0; delta >>= 1)
-          value = fminf(value, __shfl_down_sync(0xffffffff, value, delta));
-        if (lane == 0)
-          warp_best[warp * kLocalScales + local] = value;
-      }
-      __syncthreads();
-      if (tid < kLocalScales) {
-        float value = warp_best[tid];
-#pragma unroll
-        for (int w = 1; w < 8; ++w)
-          value = fminf(value, warp_best[w * kLocalScales + tid]);
-        group_error[tid] += value;
-      }
-      __syncthreads();
+      block_min_accumulate<kLocalScales>(local_best, warp_best, group_error);
     }
 
     if (tid == 0) {
@@ -178,14 +165,14 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
       locals[group] = static_cast<uint8_t>(selected_local);
     }
     __syncthreads();
-    const float selected_scale = d * (2 * selected_local + 1) * 0.125f;
+    const float selected_scale = d * (2 * selected_local + 1) * kLocalScaleStep;
 
 #pragma unroll
-    for (int vector = 0; vector < 2; ++vector) {
+    for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
       float xnorm = 0.0f;
       int negative_count = 0;
-      const int offset = group * 16 + vector * 8;
+      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
 #pragma unroll
       for (int j = 0; j < kVectorSize; ++j) {
         x[j] = load_float(source + offset + j);
@@ -195,28 +182,15 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
       const bool odd_parity = (negative_count & 1) != 0;
       unsigned long long key = ~0ULL;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
-        const float error =
-            quant_error(xnorm, even_parity_dot(x, shared_grid + entry * kVectorSize, odd_parity),
-                        grid_norm[entry], selected_scale);
-        const unsigned long long candidate =
-            (static_cast<unsigned long long>(__float_as_uint(error)) << 32) |
-            static_cast<unsigned long long>(entry);
+        const float error = clamped_quant_error(
+            xnorm, even_parity_dot(x, shared_grid + entry * kVectorSize, odd_parity),
+            grid_norm[entry], selected_scale);
+        const unsigned long long candidate = error_key(error, entry);
         key = candidate < key ? candidate : key;
       }
-#pragma unroll
-      for (int delta = 16; delta > 0; delta >>= 1) {
-        const auto other = __shfl_down_sync(0xffffffff, key, delta);
-        key = other < key ? other : key;
-      }
-      if (lane == 0)
-        warp_keys[warp] = key;
-      __syncthreads();
+      key = block_min_key(key, warp_keys);
       if (tid == 0) {
-        key = warp_keys[0];
-#pragma unroll
-        for (int w = 1; w < 8; ++w)
-          key = warp_keys[w] < key ? warp_keys[w] : key;
-        const int entry = static_cast<int>(key & 0x1ff);
+        const int entry = static_cast<int>(key & (kEntries - 1));
         const float *q = shared_grid + entry * kVectorSize;
         int flip_index = 0;
         float weakest = fabsf(x[0]) * q[0];
@@ -237,7 +211,7 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
           sign_mask |= static_cast<int>(is_negative) << j;
         }
         const uint16_t code = static_cast<uint16_t>(entry | ((sign_mask & 0x7f) << 9));
-        const int code_offset = kCodeOffset + 2 * (group * 2 + vector);
+        const int code_offset = kCodeOffset + 2 * (group * kVectorsPerGroup + vector);
         payload[code_offset] = static_cast<uint8_t>(code);
         payload[code_offset + 1] = static_cast<uint8_t>(code >> 8);
       }
@@ -245,7 +219,7 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     }
   }
 
-  if (tid < 8)
+  if (tid < kGroups / 2)
     payload[kLocalScaleOffset + tid] = locals[2 * tid] | (locals[2 * tid + 1] << 4);
 }
 
@@ -254,31 +228,19 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   TORCH_CHECK(input.is_contiguous() && grid.is_contiguous() && scales.is_contiguous(),
               "inputs must be contiguous");
-  const auto input_type = input.scalar_type();
-  TORCH_CHECK(input_type == at::kFloat || input_type == at::kDouble || input_type == at::kHalf ||
-                  input_type == at::kBFloat16,
-              "IQ2_XS packing supports float32, float64, float16, and bfloat16 inputs");
-  TORCH_CHECK(input.numel() > 0, "input must be non-empty");
-  TORCH_CHECK(input.dim() > 0 && input.size(-1) % kBlockSize == 0,
-              "input's innermost dimension must be a multiple of 256 so blocks do not straddle "
-              "rows");
-  TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == kEntries &&
-                  grid.size(1) == kVectorSize,
-              "grid must be float32 [512, 8]");
+  check_pack_inputs("IQ2_XS", input, grid, kEntries);
   const int64_t num_blocks = input.numel() / kBlockSize;
   TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
                   scales.numel() == num_blocks,
               "scales must be float16 [numel / 256]");
-  TORCH_CHECK(input.get_device() == grid.get_device() && input.get_device() == scales.get_device(),
-              "input, grid, and scales must share a device");
+  TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
   c10::cuda::CUDAGuard guard(input.device());
-  TORCH_CHECK(num_blocks <= std::numeric_limits<int>::max(), "IQ2_XS CUDA grid is too large");
   auto output = at::empty({num_blocks, kPayloadBytes}, input.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(), "iq2_xs_pack", [&] {
-        encode<scalar_t><<<static_cast<int>(num_blocks), 256, 0, stream>>>(
+        encode<scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
             input.data_ptr<scalar_t>(), num_blocks, grid.data_ptr<float>(),
             reinterpret_cast<const __half *>(scales.data_ptr<at::Half>()),
             output.data_ptr<uint8_t>());
