@@ -86,7 +86,7 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
-from modelopt.torch.export.unified_export_hf import carryable_source_keys
+from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -936,7 +936,7 @@ def assert_fakequant_export_carries_everything(args, full_model) -> None:
     """
     if not args.vllm_fakequant_export:
         return
-    droppable = [k for k in carryable_source_keys(full_model) if not k.endswith(".inv_freq")]
+    droppable = [k for k in carryable_unplaced_keys(full_model) if not k.endswith(".inv_freq")]
     if droppable:
         raise NotImplementedError(
             f"--vllm_fakequant_export cannot carry the {len(droppable)} checkpoint weight(s) the "

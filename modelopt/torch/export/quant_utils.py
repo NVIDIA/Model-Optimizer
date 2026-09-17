@@ -1626,7 +1626,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
 
     Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
     the export verbatim from the source checkpoint (see
-    :func:`modelopt.torch.export.unified_export_hf._carry_over_unplaced_source_weights`). They
+    :func:`modelopt.torch.export.unified_export_hf.read_unplaced_weights`). They
     have no module in the live model, so the quantizer walk in :func:`get_quant_config` cannot
     see them and would leave them out of ``exclude_modules`` even though their original-precision
     weight is written to the checkpoint. A deployment framework then reads the top-level
@@ -1635,7 +1635,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
     This is the same failure the MoE-router pass above exists to prevent -- only the reason the
     module is invisible differs (no quantizer there, no module at all here).
 
-    Prefers ``_modelopt_carried_source_keys``, which the export records once it knows what it
+    Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
     actually wrote -- carried tensors plus the off-index sidecars copied verbatim. Those sidecars
     are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
     ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
@@ -1644,7 +1644,7 @@ def _get_carried_over_module_names(model: nn.Module) -> list[str]:
     its last component removed. Keys without a dot are top-level tensors with no module and are
     skipped.
     """
-    keys = getattr(model, "_modelopt_carried_source_keys", None)
+    keys = getattr(model, "_modelopt_carried_over_names", None)
     if keys is None:
         # Export has not recorded yet (or this model never went through it). The recorded unplaced
         # list is the best available answer; it is wider than what gets written, so it can name a

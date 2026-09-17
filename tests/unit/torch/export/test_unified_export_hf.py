@@ -37,10 +37,7 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
-from modelopt.torch.export.unified_export_hf import (
-    _carry_over_unplaced_source_weights,
-    _resolve_export_dtype,
-)
+from modelopt.torch.export.unified_export_hf import _resolve_export_dtype, read_unplaced_weights
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -581,7 +578,7 @@ def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
 # --- carrying over weights the loader could not place --------------------------------------------
 
 
-# ``_carry_over_unplaced_source_weights`` imports model_load_utils inside its try block, before it
+# ``read_unplaced_weights`` imports model_load_utils inside its try block, before it
 # looks at the recorded keys, and model_load_utils imports accelerate at module scope. With
 # accelerate absent every call raises ImportError, gets caught, warns and returns {} -- so these
 # tests would still "pass" while exercising none of the logic they name.
@@ -609,20 +606,18 @@ class _ProvenanceModel(torch.nn.Module):
 def test_carry_over_returns_nothing_when_the_loader_placed_everything():
     """A recorded empty list means the question was asked and answered -- do not re-derive."""
     model = _ProvenanceModel(keys=[], ckpt="/anywhere")
-    assert _carry_over_unplaced_source_weights(model) == {}
+    assert read_unplaced_weights(model) == {}
 
 
 @requires_accelerate
 def test_carry_over_returns_nothing_without_provenance():
-    assert _carry_over_unplaced_source_weights(_ProvenanceModel()) == {}
+    assert read_unplaced_weights(_ProvenanceModel()) == {}
 
 
 @requires_accelerate
 def test_carry_over_returns_nothing_for_a_hub_id_rather_than_a_local_path():
     """``_name_or_path`` is often a hub id; there is nothing on disk to re-read."""
-    assert (
-        _carry_over_unplaced_source_weights(_ProvenanceModel(name_or_path="org/Some-Model")) == {}
-    )
+    assert read_unplaced_weights(_ProvenanceModel(name_or_path="org/Some-Model")) == {}
 
 
 @requires_accelerate
@@ -633,7 +628,7 @@ def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
     )
     model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path)
 
-    carried = _carry_over_unplaced_source_weights(model)
+    carried = read_unplaced_weights(model)
 
     assert list(carried) == ["kept.weight"]
     assert torch.equal(carried["kept.weight"], torch.arange(4, dtype=torch.float32))
@@ -644,7 +639,7 @@ def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unre
     """Best-effort: the rest of the weights are already correct, so this must not abort the export."""
     model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path / "does-not-exist")
     with pytest.warns(UserWarning, match="Could not copy"):
-        assert _carry_over_unplaced_source_weights(model) == {}
+        assert read_unplaced_weights(model) == {}
 
 
 @requires_accelerate
@@ -667,7 +662,7 @@ def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path,
     model = _ProvenanceModel(name_or_path=tmp_path)
 
     with pytest.warns(UserWarning, match="Could not copy"):
-        assert _carry_over_unplaced_source_weights(model) == {}
+        assert read_unplaced_weights(model) == {}
 
 
 def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recwarn):
@@ -679,7 +674,7 @@ def test_carry_over_is_quiet_for_a_checkpoint_with_no_safetensors(tmp_path, recw
     (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    assert _carry_over_unplaced_source_weights(model) == {}
+    assert read_unplaced_weights(model) == {}
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
 
 
@@ -701,17 +696,17 @@ def test_carry_over_is_quiet_without_the_loader_dependencies(tmp_path, monkeypat
     (tmp_path / "pytorch_model.bin").write_bytes(b"not safetensors")
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    assert _carry_over_unplaced_source_weights(model) == {}
+    assert read_unplaced_weights(model) == {}
     assert [w for w in recwarn if "Could not copy" in str(w.message)] == []
 
 
-def test_carryable_source_keys_skips_keys_no_shard_backs(tmp_path):
+def test_carryable_unplaced_keys_skips_keys_no_shard_backs(tmp_path):
     """Unplaced != carryable. A stale buffer listed by the model is not a weight to lose.
 
     ``--vllm_fakequant_export`` refuses to run when real weights would be dropped, so this
     distinction decides whether working exports keep working.
     """
-    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+    from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 
     (tmp_path / "model.safetensors.index.json").write_text(
         '{"weight_map": {"model.mtp.eh_proj.weight": "mtp-0001.safetensors"}}'
@@ -722,17 +717,17 @@ def test_carryable_source_keys_skips_keys_no_shard_backs(tmp_path):
         "model.mtp.eh_proj.weight",  # a shard has it -- losing it matters
         "model.layers.0.self_attn.rotary_emb.inv_freq",  # nothing backs it
     ]
-    assert carryable_source_keys(model) == ["model.mtp.eh_proj.weight"]
+    assert carryable_unplaced_keys(model) == ["model.mtp.eh_proj.weight"]
 
 
-def test_carryable_source_keys_is_quiet_when_nothing_was_recorded():
+def test_carryable_unplaced_keys_is_quiet_when_nothing_was_recorded():
     """No provenance, no answer -- and no exception from a diagnostic helper."""
-    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+    from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 
-    assert carryable_source_keys(torch.nn.Module()) == []
+    assert carryable_unplaced_keys(torch.nn.Module()) == []
 
 
-def test_carryable_source_keys_works_without_the_loader_dependencies(tmp_path, monkeypatch):
+def test_carryable_unplaced_keys_works_without_the_loader_dependencies(tmp_path, monkeypatch):
     """The shard-backed question must be answerable where transformers/accelerate are absent.
 
     model_load_utils imports them at module scope, so routing through it would make this return
@@ -741,7 +736,7 @@ def test_carryable_source_keys_works_without_the_loader_dependencies(tmp_path, m
     """
     import sys as _sys
 
-    from modelopt.torch.export.unified_export_hf import carryable_source_keys
+    from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 
     for mod in ("transformers", "accelerate", "huggingface_hub", "safetensors"):
         monkeypatch.setitem(_sys.modules, mod, None)
@@ -756,7 +751,7 @@ def test_carryable_source_keys_works_without_the_loader_dependencies(tmp_path, m
         "model.mtp.eh_proj.weight",
         "model.layers.0.self_attn.rotary_emb.inv_freq",
     ]
-    assert carryable_source_keys(model) == ["model.mtp.eh_proj.weight"]
+    assert carryable_unplaced_keys(model) == ["model.mtp.eh_proj.weight"]
 
 
 def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
@@ -764,7 +759,7 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
 
     LayerwiseExporter.bind() snapshots its quant config during calibration, so finalize() is the
     only point where it can learn what the export carried. If export_hf_checkpoint ever records
-    _modelopt_carried_source_keys after dispatching to the exporter -- or stops recording it on
+    _modelopt_carried_over_names after dispatching to the exporter -- or stops recording it on
     that path -- the sidecar exclusions silently go missing again, with nothing else to catch it.
     """
     from modelopt.torch.export import unified_export_hf as uehf
@@ -774,15 +769,15 @@ def test_layerwise_finalize_sees_the_carried_keys(tmp_path, monkeypatch):
 
     class _Exporter:
         def finalize(self, extra_state_dict=None):
-            seen["keys"] = getattr(model, "_modelopt_carried_source_keys", "<unset>")
+            seen["keys"] = getattr(model, "_modelopt_carried_over_names", "<unset>")
             return {}
 
     model = torch.nn.Module()
     setattr(model, LAYERWISE_EXPORTER_ATTR, _Exporter())
     # Accepts **kwargs because the call site passes keys_only: non-writing ranks resolve
     # names without reading tensors, and a stub that ignores that would hide a signature drift.
-    monkeypatch.setattr(uehf, "_carry_over_unplaced_source_weights", lambda m, **kw: {})
-    monkeypatch.setattr(uehf, "_off_index_source_keys", lambda m: ["model.mtp.eh_proj.weight"])
+    monkeypatch.setattr(uehf, "read_unplaced_weights", lambda m, **kw: {})
+    monkeypatch.setattr(uehf, "off_index_tensor_names", lambda m: ["model.mtp.eh_proj.weight"])
 
     uehf.export_hf_checkpoint(model, export_dir=tmp_path)
 
@@ -805,8 +800,8 @@ def test_carries_a_key_the_index_does_not_list(tmp_path):
     from safetensors.torch import save_file
 
     from modelopt.torch.export.unified_export_hf import (
-        _carry_over_unplaced_source_weights,
-        carryable_source_keys,
+        carryable_unplaced_keys,
+        read_unplaced_weights,
     )
 
     shard, extra = "model-00001-of-00001.safetensors", "model.mtp.eh_proj.weight"
@@ -820,19 +815,19 @@ def test_carries_a_key_the_index_does_not_list(tmp_path):
     model._modelopt_source_checkpoint = str(tmp_path)
     model._modelopt_unplaced_source_keys = [extra]
 
-    carried = _carry_over_unplaced_source_weights(model)
+    carried = read_unplaced_weights(model)
     assert extra in carried, f"un-indexed key dropped from the export: {sorted(carried)}"
     assert torch.equal(carried[extra], torch.full((2,), 7.0))
 
     # The guard must see it too, or it stays silent on the very weights that would be lost.
-    assert carryable_source_keys(model) == [extra]
+    assert carryable_unplaced_keys(model) == [extra]
 
 
 def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
     """A key in neither the index nor any file is reported, not silently ignored."""
     from safetensors.torch import save_file
 
-    from modelopt.torch.export.unified_export_hf import _carry_over_unplaced_source_weights
+    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
 
     shard = "model-00001-of-00001.safetensors"
     save_file({"a.weight": torch.zeros(2)}, str(tmp_path / shard))
@@ -844,7 +839,7 @@ def test_warns_when_a_recorded_key_is_in_no_shard(tmp_path):
     model._modelopt_unplaced_source_keys = ["ghost.weight"]
 
     with pytest.warns(UserWarning, match="in no safetensors file"):
-        assert _carry_over_unplaced_source_weights(model) == {}
+        assert read_unplaced_weights(model) == {}
 
 
 def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch):
@@ -853,13 +848,13 @@ def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch)
     Only the `keys is None` fallback needs model_load_utils. Importing it unconditionally made the
     recorded-keys path -- which needs nothing from it -- fail in the partial-install environments,
     where the handler reported "could not copy" and dropped every carried weight. The sibling test
-    pins this for carryable_source_keys; this pins the carry itself, which is what actually writes.
+    pins this for carryable_unplaced_keys; this pins the carry itself, which is what actually writes.
     """
     import sys as _sys
 
     from safetensors.torch import save_file
 
-    from modelopt.torch.export.unified_export_hf import _carry_over_unplaced_source_weights
+    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
 
     for mod in ("transformers", "accelerate", "huggingface_hub"):
         monkeypatch.setitem(_sys.modules, mod, None)
@@ -875,5 +870,5 @@ def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch)
     model._modelopt_source_checkpoint = str(tmp_path)
     model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
 
-    carried = _carry_over_unplaced_source_weights(model)
+    carried = read_unplaced_weights(model)
     assert "model.mtp.eh_proj.weight" in carried, "recorded keys must not need the loader imports"

@@ -1592,7 +1592,7 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
-def carryable_source_keys(model: nn.Module) -> list[str]:
+def carryable_unplaced_keys(model: nn.Module) -> list[str]:
     """Unplaced checkpoint keys a shard actually provides.
 
     ``_modelopt_unplaced_source_keys`` answers "does the model have a parameter for this key",
@@ -1615,11 +1615,11 @@ def carryable_source_keys(model: nn.Module) -> list[str]:
     return sorted(located)
 
 
-def _off_index_source_keys(model: nn.Module) -> list[str]:
+def off_index_tensor_names(model: nn.Module) -> list[str]:
     """Tensor names in the checkpoint's off-index safetensors sidecars.
 
     Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim rather than
-    loaded, so they are never ``unexpected_keys`` and :func:`carryable_source_keys` cannot see
+    loaded, so they are never ``unexpected_keys`` and :func:`carryable_unplaced_keys` cannot see
     them -- yet their tensors land in the export in original precision exactly like a carried
     weight, and must reach ``exclude_modules`` the same way. Before this mechanism existed
     ``_add_mtp_exclusions`` covered them by globbing for ``mtp*``.
@@ -1628,7 +1628,7 @@ def _off_index_source_keys(model: nn.Module) -> list[str]:
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
-    # Same fallback as _carry_over_unplaced_source_weights: a model that reached the export
+    # Same fallback as read_unplaced_weights: a model that reached the export
     # without going through record_unplaced_source_keys still knows its own provenance, and the
     # two halves of the mechanism must agree about where the source checkpoint is -- otherwise
     # its weights are carried but its sidecar tensors never reach exclude_modules.
@@ -1651,9 +1651,7 @@ def _off_index_source_keys(model: nn.Module) -> list[str]:
 _NO_TENSOR: Any = None
 
 
-def _carry_over_unplaced_source_weights(
-    model: nn.Module, *, keys_only: bool = False
-) -> dict[str, torch.Tensor]:
+def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[str, torch.Tensor]:
     """Read back checkpoint weights the model never loaded, so the export stays complete.
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
@@ -1805,7 +1803,7 @@ def export_hf_checkpoint(
         )
         or torch.distributed.get_rank() == 0
     )
-    _carried = _carry_over_unplaced_source_weights(model, keys_only=not _writes_extra)
+    _carried = read_unplaced_weights(model, keys_only=not _writes_extra)
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
     # Everything the export writes in original precision straight from the source, by either
@@ -1813,7 +1811,7 @@ def export_hf_checkpoint(
     # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
     # that, and because only this point knows what was actually written rather than what was
     # merely unplaced.
-    model._modelopt_carried_source_keys = sorted({*_carried, *_off_index_source_keys(model)})
+    model._modelopt_carried_over_names = sorted({*_carried, *off_index_tensor_names(model)})
 
     from .layerwise_export import LAYERWISE_EXPORTER_ATTR
 

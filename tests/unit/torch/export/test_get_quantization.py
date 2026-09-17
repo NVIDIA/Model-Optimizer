@@ -664,12 +664,12 @@ def test_carried_over_names_prefer_what_the_export_actually_wrote():
     GLM-4.7 ships its MTP head in a standalone ``mtp.safetensors`` that the loader never opens.
     The export copies it verbatim, so its tensors are in the checkpoint in original precision and
     must reach ``exclude_modules`` -- the same requirement as a carried weight, via the other
-    mechanism. The export records both under ``_modelopt_carried_source_keys``.
+    mechanism. The export records both under ``_modelopt_carried_over_names``.
     """
     model = torch.nn.Module()
     model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
     # What the export actually wrote: the carried weight plus the copied sidecar's tensors.
-    model._modelopt_carried_source_keys = [
+    model._modelopt_carried_over_names = [
         "model.mtp.eh_proj.weight",
         "model.mtp.embed_tokens.weight",  # only in the sidecar
     ]
@@ -687,14 +687,14 @@ def test_carried_over_names_fall_back_before_the_export_records():
 
     # An export that wrote nothing is an answer, not a missing one -- do not fall back to the
     # wider list and claim exclusions for weights the checkpoint does not contain.
-    model._modelopt_carried_source_keys = []
+    model._modelopt_carried_over_names = []
     assert _get_carried_over_module_names(model) == []
 
 
 def test_seed_carried_over_exclusions_adds_missing_names():
     """The layerwise exporter snapshots its config before the carried set exists, so it re-seeds."""
     model = torch.nn.Module()
-    model._modelopt_carried_source_keys = [
+    model._modelopt_carried_over_names = [
         "model.mtp.eh_proj.weight",
         "model.mtp.embed_tokens.weight",
     ]
@@ -712,7 +712,7 @@ def test_seed_carried_over_exclusions_adds_missing_names():
 def test_seed_carried_over_exclusions_respects_existing_wildcards():
     """A recipe that already excluded mtp* must not gain redundant per-module entries."""
     model = torch.nn.Module()
-    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["model.mtp*"]}}
 
     assert seed_carried_over_exclusions(model, cfg) == []
@@ -722,7 +722,7 @@ def test_seed_carried_over_exclusions_respects_existing_wildcards():
 def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
     """No single quant_algo means nothing for a deployment framework to misapply."""
     model = torch.nn.Module()
-    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     for algo in (None, "MIXED_PRECISION"):
         cfg = {"quantization": {"quant_algo": algo}}
         assert seed_carried_over_exclusions(model, cfg) == []
@@ -741,7 +741,7 @@ def test_both_export_paths_exclude_carried_weights_identically():
     hidden = 16
     model = _FakeMoEModel(hidden=hidden)
     mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
-    model._modelopt_carried_source_keys = [
+    model._modelopt_carried_over_names = [
         "model.mtp.eh_proj.weight",
         "model.mtp.embed_tokens.weight",
     ]
@@ -764,7 +764,7 @@ def test_both_export_paths_exclude_carried_weights_identically():
 def test_seeded_exclusions_are_literal_module_names():
     """Exact names, not prefix wildcards: a literal cannot over-match a quantized module."""
     model = torch.nn.Module()
-    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
     cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": []}}
 
     assert seed_carried_over_exclusions(model, cfg) == ["model.mtp.eh_proj"]

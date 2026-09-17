@@ -302,6 +302,31 @@ _IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
 _IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetensors")
 
 
+# --- What reaches the export without passing through quantization --------------------------
+# Two disjoint sets, distinguished by what the LOADER did with the file. That difference decides
+# both how we find them and how we move them, so it is worth keeping straight:
+#
+#   1. UNPLACED weights. The loader opened the file and read the tensor, but the model had no
+#      parameter for it, so transformers reports it in ``unexpected_keys`` -- an MTP head the
+#      recipe did not quantize is the common case. Moved as TENSORS: located in whichever shard
+#      holds them and merged into the exporter's ``extra_state_dict``.
+#      Found by: ``read_unplaced_weights`` / ``carryable_unplaced_keys`` / ``locate_source_keys``.
+#
+#   2. OFF-INDEX sidecars. The index never names the file, so the loader never opened it and never
+#      had the chance to call anything unexpected -- GLM-4.7 keeps its MTP head in a standalone
+#      ``mtp.safetensors`` exactly this way. Moved as FILES: copied byte for byte, so no host
+#      memory is spent re-serialising tensors the export does not otherwise touch.
+#      Found by: ``off_index_safetensors_files`` / ``off_index_tensor_names``.
+#
+# The index is what separates them, and it is NOT an inventory of the checkpoint: a tensor missing
+# from ``weight_map`` but sitting in a shard the index names for other tensors is set 1, not set 2.
+# See ``record_unplaced_source_keys`` for the loading behaviour this rests on.
+#
+# Both sets must reach ``quantization_config.ignore``, or a deployment framework reads the
+# top-level ``quant_algo`` and tries to load an original-precision weight as a quantized one
+# (NVBug 5718750). ``_modelopt_carried_over_names`` is their union, recorded by the export once it
+# knows what it actually wrote.
+
 # --- HF checkpoint layout: what counts as a file inside a checkpoint -------------------
 # A hub snapshot stores every entry as a symlink into a sibling ``blobs/`` directory, so
 # "inside the checkpoint" has to mean the snapshot dir OR that blob root. Getting this wrong
@@ -477,7 +502,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     # and accelerate at module scope, and reaching for it here would make this answer "nothing to
     # carry" wherever they are absent -- the partial-install environments -- silencing the
     # --vllm_fakequant_export guard in exactly the case it exists for. Pinned by
-    # test_carryable_source_keys_works_without_the_loader_dependencies, which caught this.
+    # test_carryable_unplaced_keys_works_without_the_loader_dependencies, which caught this.
     if not Path(ckpt).is_dir():
         # A checkpoint that is not there is a different failure from a key that is not in it, and
         # the caller's handler already says the right thing about the first ("could not copy ...
