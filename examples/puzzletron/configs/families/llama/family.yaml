@@ -1,0 +1,46 @@
+# @package _global_
+
+family:
+  name: llama
+  executable_smoke_axes:
+    - ffn_intermediate
+    - hidden_width
+    - kv_groups
+    - q_heads_per_group
+
+model:
+  trust_remote_code: false
+
+pruning:
+  # Keep the passes in campaign order: establish an FFN baseline first, then
+  # score coupled residual width, and finally score grouped attention.
+  activation_passes:
+    - name: ffn_iterative
+      axis_ids: [ffn_intermediate]
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaFFNIntermediateLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+      activation_hooks_kwargs:
+        method: iterative
+        target_layer: mlp.down_proj
+        layer_input_descriptors_path:
+
+    - name: hidden_width
+      axis_ids: [hidden_width]
+      activation_hooks_kwargs:
+        method: minitron_hidden_width
+
+    - name: attention_grouped
+      axis_ids: [kv_groups, q_heads_per_group]
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaKVHeadsLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook}
+      activation_hooks_kwargs:
+        method: grouped_attention_contribution
+        optimize_for: memory
+        target_layer: self_attn.o_proj
+        layer_input_descriptors_path:

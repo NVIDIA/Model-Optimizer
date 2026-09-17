@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - pruneffn_memory_sweep
+  - _self_
+
+# Keep the failed CLI-override attempt and earlier successful runs untouched.
+puzzle_dir: artifacts/llama3p1_8b_pruneffn_memory/runs/joint_block_sweep_2
+
+search_space:
+  no_op:
+    subblocks: [attention, ffn]
+    whole_block: true
+    cartesian: true
+
+replacement_scoring:
+  granularity: block
+
+mip:
+  score_granularity: block
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.block_output_dir}}
+  canonical_solutions_path: ${to_path:${replacement_scoring.block_solutions_path}}
+  runs:
+    pruneffn-memory:
+      constraints:
+        params: {max: 7000000000}

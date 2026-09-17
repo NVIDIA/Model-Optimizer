@@ -1,0 +1,56 @@
+# @package _global_
+
+defaults:
+  - pruneffn_memory
+  - _self_
+
+# Sweep maximum retained memory from 50% through 90% of the full-width
+# teacher. Percentages are resolved against the analytical legacy-batch96
+# workload configured by the inherited campaign. Keep the inherited display
+# identity so compatible upstream artifacts remain reusable.
+
+mip:
+  runs:
+    pruneffn-memory:
+      # Variants override this bound. Keeping the loosest target at run level
+      # makes the inherited constraint explicit in the resolved sweep config.
+      constraints:
+        memory:
+          at:
+            legacy-batch96: {max: 90%}
+      variants:
+        memory-050:
+          constraints:
+            memory:
+              at:
+                legacy-batch96: {max: 50%}
+        memory-060:
+          constraints:
+            memory:
+              at:
+                legacy-batch96: {max: 60%}
+        memory-070:
+          constraints:
+            memory:
+              at:
+                legacy-batch96: {max: 70%}
+        memory-080:
+          constraints:
+            memory:
+              at:
+                legacy-batch96: {max: 80%}
+        memory-090:
+          constraints:
+            memory:
+              at:
+                legacy-batch96: {max: 90%}
+
+post_mip:
+  flows:
+    legacy-pruneffn-memory:
+      nodes:
+        # One solution is requested per MIP variant. Retain all five when they
+        # are structurally unique; candidate deduplication preserves every
+        # contributing variant when adjacent targets choose the same model.
+        best_mip:
+          top_k: 5

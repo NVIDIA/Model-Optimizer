@@ -256,6 +256,21 @@ def _normalized_path(path: Any) -> Path:
     return Path(str(path)).expanduser().resolve()
 
 
+def _campaign_output_path(puzzle_dir: Path, path: Any) -> Path:
+    """Resolve campaign-relative and repository-relative manifest outputs."""
+
+    output = Path(str(path)).expanduser()
+    if output.is_absolute():
+        return output
+    root = puzzle_dir.expanduser().resolve()
+    repository_relative = output.resolve()
+    try:
+        repository_relative.relative_to(root)
+    except ValueError:
+        return root / output
+    return repository_relative
+
+
 def _token_cache_metadata_is_complete(
     config: Mapping[str, Any],
     stage_config: Mapping[str, Any],
@@ -426,9 +441,7 @@ def _width_importance_is_complete(puzzle_dir: Path) -> bool:
     outputs = stage_manifest.get("outputs")
     if not isinstance(outputs, Mapping) or not outputs.get("activations_log_dir"):
         return False
-    output_dir = Path(str(outputs["activations_log_dir"]))
-    if not output_dir.is_absolute():
-        output_dir = puzzle_dir / output_dir
+    output_dir = _campaign_output_path(puzzle_dir, outputs["activations_log_dir"])
     pass_manifest = _read_mapping(output_dir / "activation_passes_manifest.json")
     passes = pass_manifest.get("passes") if pass_manifest is not None else None
     if not isinstance(passes, list) or not passes or len(passes) != len(set(passes)):

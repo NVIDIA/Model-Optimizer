@@ -20,36 +20,24 @@ from typing import List
 
 from transformers import LlamaConfig
 
-from ....block_config import AttentionConfig, BlockConfig, FFNConfig
-from ...converter import Converter, ConverterFactory
+from ....block_config import BlockConfig
+from ...converter import ConverterFactory, GenericDecoderConverter
+from .llama_model_descriptor import LlamaModelDescriptor
 
 __all__ = ["LlamaConverter"]
 
 
 @ConverterFactory.register_decorator("llama")
-class LlamaConverter(Converter):
+class LlamaConverter(GenericDecoderConverter):
     """Converter for Llama models to AnyModel format."""
 
     @staticmethod
     def create_block_configs_from_main_config(config: LlamaConfig) -> List[BlockConfig]:
-        """Create uniform block configs for all Llama layers.
-
-        Llama models have uniform architecture across all layers, so we create
-        the same BlockConfig for each layer.
-        """
-        num_hidden_layers = config.num_hidden_layers
-
-        block_configs = [
-            BlockConfig(
-                subblock_configs=(
-                    AttentionConfig(
-                        no_op=False,
-                        num_kv_heads=config.num_key_value_heads,
-                        num_query_heads=config.num_attention_heads,
-                    ),
-                    FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
-                ),
-            ).to_dict()
-            for _ in range(num_hidden_layers)
+        """Create the descriptor-owned Llama block schema for legacy callers."""
+        return [
+            block.to_dict()
+            for block in GenericDecoderConverter.create_block_configs(
+                LlamaModelDescriptor,
+                config,
+            )
         ]
-        return block_configs

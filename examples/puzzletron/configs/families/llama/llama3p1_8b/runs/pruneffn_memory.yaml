@@ -1,0 +1,310 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/llama/family@_global_
+  - /families/llama/llama3p1_8b/model@_global_
+  - _self_
+
+# Puzzletron v2 port of the legacy
+# configs/llama-3_1-8B_pruneffn_memory campaign. It intentionally keeps a
+# fresh default root so artifacts from a different or cancelled campaign are
+# never reused as compatible state.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,artifacts/llama3p1_8b_pruneffn_memory/runs/production}
+dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH}
+display_name: Llama3p1_8B_PruneFFN_Memory
+
+model:
+  source: ${input_hf_model_path}
+  revision: ${model_info.hf_revision}
+  descriptor_override: llama
+  trust_remote_code: false
+  force_hf: false
+
+capability_validation:
+  require_complete_pipeline: true
+
+data:
+  modality: text
+  layout: fixed
+  max_sample_length: 8192
+  path: ${dataset_path}
+  packing:
+
+# The legacy pipeline read the dataset directly for each stage. Preserve that
+# behavior instead of introducing a token-cache identity into the port.
+train_token_cache_path:
+validation_token_cache_path:
+tokenize_data:
+  enabled: false
+  caches: []
+
+# Named v2 MIP uses the composite scenario driver. The only embedding scenario
+# is the teacher width, so this does not add hidden-width pruning.
+embedding_pruning:
+  enabled: true
+  widths: [4096]
+  alignment: 256
+  cycle_widths: true
+
+# The legacy replacement library added independent attention and FFN no-op
+# candidates in addition to the numeric FFN widths. In v2 these kinds must be
+# named explicitly; build_library.include_noops only controls whether the
+# configured no-op domain is emitted.
+search_space:
+  no_op:
+    subblocks: [attention, ffn]
+    whole_block: false
+    cartesian: false
+
+pruning:
+  experiment_id: 1000samples_diverse_mini
+  eval_samples: 1000
+  micro_batch_size: 4
+  block_size: 8192
+  val_dataset_name: train
+  seed: 42
+  shuffle_seed: 81436
+  bos_rate: 0.5
+  packed_token_cache_path:
+  automodel:
+    parallel: &single_gpu_parallel
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+  # The selected legacy pruning group was FFN-only. Attention is still
+  # eligible for complete no-op removal through build_library.include_noops.
+  activation_passes:
+    - name: ffn_iterative
+      axis_ids: [ffn_intermediate]
+      pruning_mixin:
+        _target_: modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+        layer_descriptor:
+          _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaFFNIntermediateLayerDescriptor
+      hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
+      activation_hooks_kwargs:
+        method: iterative
+        target_layer: mlp.down_proj
+        layer_input_descriptors_path:
+
+sort:
+  deferred_axes: [hidden_width, kv_groups, q_heads_per_group]
+
+# These are v2 readiness gates. They do not expand the MIP domain.
+sort_sanity:
+  enabled: true
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+width_sanity:
+  enabled: true
+  hidden_width_diagnostic: false
+  axes: [ffn_intermediate]
+  single_load_parent_sweep: true
+  one_case_per_axis: false
+  target_count_per_axis: 4
+  layer_count: 2
+  layer_selection: spread
+  methods: [activation, random, reverse]
+  physical_realization: true
+  cleanup_physical_checkpoints: true
+  reuse_sort_equivalence: true
+  require_beats_random: false
+  require_beats_reverse: false
+  require_physical_equivalence: true
+  physical_equivalence_tolerance: 0.001
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+slicing_sanity:
+  enabled: true
+  backend: distributed_parent_sweep
+
+bypass:
+  enabled: false
+
+# The old example did not perform ranked depth pruning. Complete attention or
+# FFN removal is represented by no-op subblocks in the replacement library.
+depth_importance:
+  enabled: false
+  granularity: subblock
+  source_checkpoint_dir: ${teacher_dir}
+  output_dir: ${puzzle_dir}/depth/iterative
+  expected_initial_sublayers: 64
+  max_removals: 0
+  max_subblocks_to_remove: 0
+  metric: lm_loss
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+build_library:
+  enabled: true
+  include_noops: true
+  include_bypass: false
+
+# benchmark_iterations was unset in the legacy config, so its memory objective
+# used analytical BF16 weight, activation, and KV-cache statistics rather than
+# a measured TRT/vLLM runtime gate. Keep the three legacy inventory points.
+vllm_stats:
+  enabled: false
+  batch_sizes: [64, 96, 128]
+  prefill_seq_len: 4096
+  generation_seq_len: 4096
+  merge_with_existing_stats: false
+  runtime_stats:
+    enabled: false
+    backend: vllm
+    granularity: subblock
+    max_num_seqs: 128
+
+replacement_scoring:
+  enabled: true
+  granularity: subblock
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 8192
+  val_dataset_name: valid
+  seed: 42
+  shuffle_seed: 444
+  bos_rate: 0.5
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+# Named MIP is solve-only; the post-MIP materialize/evaluate nodes below own
+# the legacy realization and 128-sample validation behavior.
+realize_model:
+  skip_validation: false
+  save_models: true
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  val_dataset_name: valid
+  seed: 42
+  shuffle_seed: 444
+  bos_rate: 0.5
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+mip:
+  enabled: true
+  score_granularity: subblock
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.subblock_output_dir}}
+  canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
+  # The legacy MIP selected its batch-96 statistics entry. v2 requires this
+  # selector to resolve to exactly one inventory even though build_library
+  # emits all three workload points below.
+  subblock_stats_args:
+    batch_sizes: [96]
+  workloads:
+    legacy-batch64:
+      isl: 4096
+      osl: 4096
+      batch_size: 64
+      concurrency: 64
+    legacy-batch96:
+      isl: 4096
+      osl: 4096
+      batch_size: 96
+      concurrency: 96
+    legacy-batch128:
+      isl: 4096
+      osl: 4096
+      batch_size: 128
+      concurrency: 128
+  runs:
+    pruneffn-memory:
+      constraints:
+        memory:
+          at:
+            legacy-batch96: {max: 78000}
+        params: {max: 7000000000}
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space:
+        depth: [0]
+        embedding: [4096]
+        axes_default: teacher
+        axes:
+          ffn.intermediate_size: all
+      solver:
+        backend: auto
+        num_solutions: 1
+        min_hamming_distance: 1
+        max_seconds_per_solution: 60
+      homogeneous:
+        enabled: false
+        keep: all
+        rank_by: objective
+
+post_mip:
+  flows:
+    legacy-pruneffn-memory:
+      source:
+        run: pruneffn-memory
+        variants: all
+        objectives: all
+      nodes:
+        best_mip:
+          type: filter
+          mode: top_k
+          metric: mip.score
+          direction: minimize
+          top_k: 1
+        materialized:
+          type: materialize
+          input: best_mip
+        final_eval:
+          type: evaluation
+          input: materialized
+          failure_policy: strict
+          config:
+            eval_samples: 128
+            micro_batch_size: 1
+            block_size: 8192
+            dataset_path: ${dataset_path}
+            val_dataset_name: valid
+            seed: 42
+            shuffle_seed: 444
+            bos_rate: 0.5
+            automodel:
+              parallel: *single_gpu_parallel
+        best:
+          type: filter
+          input: final_eval
+          mode: top_k
+          metric: final_eval.lm_loss
+          direction: minimize
+          top_k: 1
+
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+global_distillation:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false
+
+execution:
+  gpus_per_node: 1

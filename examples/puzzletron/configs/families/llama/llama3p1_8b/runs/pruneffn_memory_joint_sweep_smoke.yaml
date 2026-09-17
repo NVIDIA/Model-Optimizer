@@ -1,0 +1,44 @@
+# @package _global_
+
+defaults:
+  - pruneffn_memory_joint_sweep
+  - _self_
+
+# Preserve all five capped targets and joint candidates with bounded samples.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,artifacts/llama3p1_8b_pruneffn_memory/runs/joint_block_sweep_smoke}
+
+data:
+  max_sample_length: 512
+
+pruning:
+  experiment_id: smoke
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 512
+
+sort_sanity:
+  eval_samples: 2
+  block_size: 512
+
+width_sanity:
+  target_count_per_axis: 1
+  layer_count: 2
+  eval_samples: 2
+  block_size: 512
+
+replacement_scoring:
+  eval_samples: 2
+  block_size: 512
+
+realize_model:
+  eval_samples: 2
+  block_size: 512
+
+post_mip:
+  flows:
+    legacy-pruneffn-memory:
+      nodes:
+        final_eval:
+          config:
+            eval_samples: 2
+            block_size: 512

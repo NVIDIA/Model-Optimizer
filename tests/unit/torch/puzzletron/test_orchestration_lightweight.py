@@ -462,13 +462,22 @@ def test_convert_completeness_requires_runtime_subblock_library(
     )
 
 
+@pytest.mark.parametrize("path_style", ["absolute", "repository_relative", "campaign_relative"])
+@pytest.mark.parametrize("relative_root", [False, True])
 def test_width_completeness_requires_success_manifest_and_complete_passes(
-    tmp_path: Path, write_terminal_manifest
+    tmp_path: Path, write_terminal_manifest, monkeypatch, path_style, relative_root
 ) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
-    config = {"puzzle_dir": str(tmp_path)}
-    output = tmp_path / "pruning" / "scores"
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "campaign"
+    config = {"puzzle_dir": "campaign" if relative_root else str(root)}
+    output = root / "pruning" / "scores"
+    recorded_output = {
+        "absolute": output,
+        "repository_relative": output.relative_to(tmp_path),
+        "campaign_relative": output.relative_to(root),
+    }[path_style]
     pass_dir = output / "attention"
     pass_dir.mkdir(parents=True)
     (pass_dir / "args.json").write_text("{}")
@@ -476,10 +485,10 @@ def test_width_completeness_requires_success_manifest_and_complete_passes(
     assert not stage_is_complete(config, "width_importance")
 
     write_terminal_manifest(
-        tmp_path,
+        root,
         "width_importance",
         config=config,
-        outputs={"activations_log_dir": str(output)},
+        outputs={"activations_log_dir": str(recorded_output)},
     )
     assert stage_is_complete(config, "width_importance")
 
