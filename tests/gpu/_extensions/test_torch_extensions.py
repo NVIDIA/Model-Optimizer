@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-from collections.abc import Callable
 from typing import NamedTuple
 
 import pytest
@@ -39,12 +38,8 @@ def test_cuda_ext_mx():
     assert ext.get_cuda_ext_mx() is not None
 
 
-def test_cuda_ext_iq1_s():
-    assert ext.get_cuda_ext_iq1_s() is not None
-
-
-def test_cuda_ext_iq2_xs():
-    assert ext.get_cuda_ext_iq2_xs() is not None
+def test_cuda_ext_ggml():
+    assert ext.get_cuda_ext_ggml() is not None
 
 
 def _generator():
@@ -53,9 +48,10 @@ def _generator():
 
 
 class _IqFormat(NamedTuple):
-    """One GGML IQ packing extension and the format constants its contract is defined by."""
+    """One GGML IQ packer and the format constants its contract is defined by."""
 
-    get_extension: Callable
+    # Name the packer is bound under on the shared GGML extension.
+    packer: str
     entries: int
     payload_bytes: int
     needs_scales: bool
@@ -68,11 +64,9 @@ class _IqFormat(NamedTuple):
 
 
 _IQ_EXTENSIONS = (
+    pytest.param(_IqFormat("iq1_s_pack", 2048, 50, False, (-1.0, 0.0, 1.0), 16.875), id="iq1_s"),
     pytest.param(
-        _IqFormat(ext.get_cuda_ext_iq1_s, 2048, 50, False, (-1.0, 0.0, 1.0), 16.875), id="iq1_s"
-    ),
-    pytest.param(
-        _IqFormat(ext.get_cuda_ext_iq2_xs, 512, 74, True, (8.0, 25.0, 43.0), 166.625),
+        _IqFormat("iq2_xs_pack", 512, 74, True, (8.0, 25.0, 43.0), 166.625),
         id="iq2_xs",
     ),
 )
@@ -90,16 +84,17 @@ def _grid(fmt: _IqFormat, zero: bool = False) -> torch.Tensor:
 
 
 def _pack(fmt: _IqFormat, extension, weight, grid, scales=None):
+    pack = getattr(extension, fmt.packer)
     if not fmt.needs_scales:
-        return extension.pack(weight, grid)
+        return pack(weight, grid)
     if scales is None:
         scales = torch.zeros(weight.numel() // 256, device=weight.device, dtype=torch.float16)
-    return extension.pack(weight, grid, scales)
+    return pack(weight, grid, scales)
 
 
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_zero_block_layout(fmt):
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.zeros((2, 256), device="cuda", dtype=torch.bfloat16)
 
     packed = _pack(fmt, extension, weight, _grid(fmt, zero=True))
@@ -111,7 +106,7 @@ def test_cuda_ext_iq_zero_block_layout(fmt):
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_encodes_non_zero_block(fmt):
     """Exercise the encode loop itself: search, reductions, and the payload writes."""
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.randn((2, 256), device="cuda", dtype=torch.bfloat16, generator=_generator())
     scales = (weight.float().abs().amax(dim=-1) / fmt.native_max).half()
 
@@ -132,7 +127,7 @@ def test_cuda_ext_iq_encodes_non_zero_block(fmt):
 
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_rejects_unsupported_dtype(fmt):
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.ones((1, 256), device="cuda").to(torch.float8_e4m3fn)
 
     with pytest.raises(RuntimeError, match="supports float32, float64, float16, and bfloat16"):
@@ -141,7 +136,7 @@ def test_cuda_ext_iq_rejects_unsupported_dtype(fmt):
 
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_rejects_row_straddling_input(fmt):
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.ones((512, 384), device="cuda", dtype=torch.bfloat16)
 
     with pytest.raises(RuntimeError, match="innermost dimension must be a multiple of 256"):
@@ -151,24 +146,24 @@ def test_cuda_ext_iq_rejects_row_straddling_input(fmt):
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
 def test_cuda_ext_iq2_xs_rejects_invalid_scales(bad):
     """A non-finite scale decodes to garbage; a negative one inverts every decoded element."""
-    extension = ext.get_cuda_ext_iq2_xs(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     fmt = _IQ_EXTENSIONS[1].values[0]
     weight = torch.ones((1, 256), device="cuda", dtype=torch.bfloat16)
     scales = torch.full((1,), bad, device="cuda", dtype=torch.float16)
 
     with pytest.raises(RuntimeError, match="scales must be finite and non-negative"):
-        extension.pack(weight, _grid(fmt), scales)
+        extension.iq2_xs_pack(weight, _grid(fmt), scales)
 
 
 def test_cuda_ext_iq2_xs_negative_zero_scale_packs_as_zero():
     """Negative zero is a zero scale: it must take the zero-payload branch, not search."""
-    extension = ext.get_cuda_ext_iq2_xs(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     fmt = _IQ_EXTENSIONS[1].values[0]
     weight = torch.randn((2, 256), device="cuda", dtype=torch.bfloat16, generator=_generator())
     grid = _random_grid(fmt)
     scales = torch.tensor([-0.0, 0.0], device="cuda", dtype=torch.float16)
 
-    packed = extension.pack(weight, grid, scales)
+    packed = extension.iq2_xs_pack(weight, grid, scales)
 
     assert not packed.any()
 
@@ -260,7 +255,7 @@ def test_cuda_ext_iq_encoding_is_optimal(fmt):
     misplaced index, local scale, delta sign, or sign bit makes the reconstruction worse than
     the brute-force optimum rather than merely different.
     """
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     weight = torch.randn((4, 256), device="cuda", dtype=torch.float32, generator=_generator())
     grid = _random_grid(fmt)
     scales = (weight.abs().amax(dim=-1) / fmt.native_max).half() if fmt.needs_scales else None
@@ -284,7 +279,7 @@ def test_cuda_ext_iq_encoding_is_optimal(fmt):
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_input_dtype_equivalence(fmt):
     """Every accepted input dtype carrying identical values must pack to identical bytes."""
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     # Multiples of 1/16 in [-4, 4) are exact in float16 and bfloat16 as well as the wider types.
     weight = torch.randint(-64, 64, (2, 256), device="cuda", generator=_generator()).float() / 16
     grid = _random_grid(fmt)
@@ -302,7 +297,7 @@ def test_cuda_ext_iq_input_dtype_equivalence(fmt):
 @pytest.mark.parametrize("fmt", _IQ_EXTENSIONS)
 def test_cuda_ext_iq_non_finite_inputs_are_zeroed(fmt):
     """NaN and infinity pack as zeros; finite values too large for float32 saturate instead."""
-    extension = fmt.get_extension(raise_if_failed=True)
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     clean = torch.randn((2, 256), device="cuda", dtype=torch.float32, generator=_generator())
     grid = _random_grid(fmt)
     scales = (clean.abs().amax(dim=-1) / fmt.native_max).half() if fmt.needs_scales else None
