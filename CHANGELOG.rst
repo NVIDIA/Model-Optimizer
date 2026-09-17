@@ -23,6 +23,9 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ``TrtExecBenchmark`` with ``--remoteAutoTuningConfig`` and TensorRT < 10.15 now raises ``ImportError`` at construction time instead of silently falling back. Re-install a TensorRT >= 10.15 build to use remote autotuning.
+- ``TrtExecBenchmark`` with ``--remoteAutoTuningConfig`` will use ``GPU Compute Time`` for latency measurements instead of ``Latency`` since trtexec_safe does not produce a latency output.  This should not break any existing workflows since this workflow is being enabled in this release.
+- ``--plugin_libraries`` combined with ``--remoteAutoTuningConfig`` now raises ``ValueError`` at construction time; the combination was silently broken before (local ``.so`` paths were forwarded to the local build but not to the remote measurement, so plugin-dependent engines always returned ``inf``).
 - Layerwise calibration now uses prior-layer QDQ activations by default
   (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
   preserve full-precision activations for subsequent layers (the default behavior for
@@ -38,6 +41,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX Autotune remote autotuning (``--remoteAutoTuningConfig``) to correctly invoke ``trtexec_safe`` on the remote device when available, falling back to ``trtexec --safe`` otherwise. The remote binary is probed once per run so all candidates use the same binary and latency measurements remain comparable.
 - Fix ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` storing the MoE router at Megatron's ``moe_router_dtype``, which is a routing *compute* dtype, not a storage one. The router now exports at the export ``dtype`` like every other unquantized weight, matching what ``hf_ptq.py`` and the released NVFP4 checkpoints contain; pass ``moe_router_dtype`` to ``export_mcore_gpt_to_hf`` explicitly if you want the old fp32 storage.
 - Fix unified Megatron export writing a second, unreferenced copy of the vocab embedding when a model with MTP layers is exported with pipeline parallelism. The duplicate was never loaded but inflated the checkpoint by the size of the embedding (about 1 GB for Qwen3.6-35B-A3B); re-export to reclaim the space.
 - Fail fast on non-finite AutoQuantize output gradients with an actionable error before accumulating sensitivity scores, without changing attention backend settings.

@@ -250,12 +250,22 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 
 **Requirements:**
 
-* TensorRT 10.15 or later
-* Valid remote autotuning configuration
+* TensorRT 10.15 or later — passing ``--remoteAutoTuningConfig`` on an older build raises ``ImportError`` immediately rather than falling back to local benchmarking.
+* Valid remote autotuning configuration — a malformed or missing ``--remoteAutoTuningConfig`` URL raises ``ValueError`` with a descriptive message.
 * ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
 * ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
+* ssh and scp must be available on the local machine
+* sshkey based authentication must be used for the remote machine.
+* Only one instance of remote auto tuning can be run at a time since the remote timing server and latency measurement processes share the GPU but do not coordinate execution; thus latency measurements would not be accurate if multiple instances are run concurrently.
+* ``--useCudaGraph``, ``--avgRuns``, and ``--duration=0`` are forwarded to the remote ``trtexec_safe`` (or ``trtexec --safe``) call so measurement settings match those used during local engine builds.
 
-Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
+.. note::
+
+   ``--plugin_libraries`` is not compatible with ``--remoteAutoTuningConfig``: local ``.so``
+   paths cannot be transferred to the remote device automatically. Remote plugin support will be 
+   added in the future.
+
+Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``) are also available; run ``--help`` for details.
 
 Low-Level API Usage
 ===================
