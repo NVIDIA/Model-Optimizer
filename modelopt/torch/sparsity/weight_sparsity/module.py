@@ -87,11 +87,9 @@ class SparseModule(DynamicModule):
 
     def set_mask(self, value: torch.BoolTensor | None):
         """Set the active sparse mask of the module weights."""
-        # invalidate the cached DTensor mask since the underlying mask is changing
-        self._weight_mask_dtensor = None
-
         if value is None:
             self._weight_mask = None
+            self._weight_mask_dtensor = None
             return
 
         # sanity checks on the mask
@@ -108,3 +106,7 @@ class SparseModule(DynamicModule):
                 self._weight_mask = value.detach().clone().to(self.weight.device)
             else:
                 self._weight_mask.copy_(value.to(self._weight_mask.device))
+
+        # Reading self.weight above can populate the cache with the old mask.
+        # Invalidate it only after the underlying mask has been updated.
+        self._weight_mask_dtensor = None
