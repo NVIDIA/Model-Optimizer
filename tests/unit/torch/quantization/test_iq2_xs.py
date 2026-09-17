@@ -71,11 +71,13 @@ def test_iq2_xs_round_trip_and_payload_fields():
     weight = torch.randn((2, 512), generator=generator, dtype=torch.bfloat16)
 
     packed, shape = quantize_iq2_xs(weight, block_chunk_size=2)
-    reconstructed = dequantize_iq2_xs(packed, shape)
+    reconstructed = dequantize_iq2_xs(packed, shape, block_chunk_size=1)
+    default_reconstructed = dequantize_iq2_xs(packed, shape)
 
     assert packed.shape == (2, 2, 74)
     assert reconstructed.shape == weight.shape
     assert reconstructed.dtype == torch.bfloat16
+    assert torch.equal(reconstructed, default_reconstructed)
     normalized_mse = (
         reconstructed.float() - weight.float()
     ).square().mean() / weight.float().square().mean()

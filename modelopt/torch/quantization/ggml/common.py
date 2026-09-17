@@ -86,7 +86,12 @@ def fake_quantize_with_cache(
         else:
             quantizer._quantizer_cache = None
 
-    reconstructed = dequantize(packed_weights, weight_shape, dtype=inputs.dtype)
+    reconstructed = dequantize(
+        packed_weights,
+        weight_shape,
+        dtype=inputs.dtype,
+        block_chunk_size=block_chunk_size,
+    )
     return inputs + (reconstructed - inputs).detach()
 
 
@@ -101,6 +106,14 @@ def validate_weight(weight: torch.Tensor, format_name: str) -> None:
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
+
+
+def validate_block_chunk_size(block_chunk_size: int) -> None:
+    """Validate the common encoder and decoder block-chunk limit."""
+    if isinstance(block_chunk_size, bool) or not isinstance(block_chunk_size, int):
+        raise TypeError("block_chunk_size must be an integer")
+    if block_chunk_size <= 0:
+        raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
 
 def validate_packed_weights(

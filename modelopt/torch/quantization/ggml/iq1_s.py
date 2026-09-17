@@ -66,6 +66,7 @@ from ..extensions import get_cuda_ext_iq1_s
 from .common import (
     GGML_BLOCK_SIZE,
     fake_quantize_with_cache,
+    validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
 )
@@ -248,10 +249,7 @@ def quantize_iq1_s(
     treated as zero during packing.
     """
     validate_weight(weight, "IQ1_S")
-    if isinstance(block_chunk_size, bool) or not isinstance(block_chunk_size, int):
-        raise TypeError("block_chunk_size must be an integer")
-    if block_chunk_size <= 0:
-        raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
+    validate_block_chunk_size(block_chunk_size)
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
     blocks = weight.contiguous().reshape(-1, IQ1_S_BLOCK_SIZE)
@@ -285,26 +283,35 @@ def dequantize_iq1_s(
     weight_shape: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
 ) -> torch.Tensor:
     """Decode GGML-compatible IQ1_S payload bytes."""
     shape = validate_packed_weights(
         packed_weights, weight_shape, block_bytes=IQ1_S_BLOCK_BYTES, format_name="IQ1_S"
     )
+    validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ1_S_BLOCK_BYTES)
-    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-    low = blocks[:, 2:34].to(torch.int64).reshape(-1, 8, 4)
-    qh = blocks[:, 34:50:2].to(torch.int64) | (blocks[:, 35:50:2].to(torch.int64) << 8)
     shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
-    high = (qh.unsqueeze(-1) >> shifts) & 0x7
-    entries = low | (high << 8)
-
-    local = (qh >> 12) & 0x7
-    delta = torch.where((qh & 0x8000).bool(), -_IQ1_S_DELTA, _IQ1_S_DELTA)
-    values = iq1_s_grid(blocks.device)[entries] + delta.unsqueeze(-1).unsqueeze(-1)
-    scales = d.unsqueeze(-1) * (2 * local + 1).float()
-    decoded = values * scales.unsqueeze(-1).unsqueeze(-1)
-    return decoded.reshape(shape).to(dtype)
+    grid = iq1_s_grid(blocks.device)
+    decoded = torch.empty((blocks.shape[0], IQ1_S_BLOCK_SIZE), dtype=dtype, device=blocks.device)
+    for start in range(0, blocks.shape[0], block_chunk_size):
+        stop = min(start + block_chunk_size, blocks.shape[0])
+        block_chunk = blocks[start:stop]
+        d = block_chunk[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+        low = block_chunk[:, 2:34].to(torch.int64).reshape(-1, 8, 4)
+        qh = block_chunk[:, 34:50:2].to(torch.int64) | (
+            block_chunk[:, 35:50:2].to(torch.int64) << 8
+        )
+        high = (qh.unsqueeze(-1) >> shifts) & 0x7
+        entries = low | (high << 8)
+        local = (qh >> 12) & 0x7
+        delta = torch.where((qh & 0x8000).bool(), -_IQ1_S_DELTA, _IQ1_S_DELTA)
+        values = grid[entries] + delta.unsqueeze(-1).unsqueeze(-1)
+        scales = d.unsqueeze(-1) * (2 * local + 1).float()
+        chunk_decoded = values * scales.unsqueeze(-1).unsqueeze(-1)
+        decoded[start:stop] = chunk_decoded.reshape(-1, IQ1_S_BLOCK_SIZE)
+    return decoded.reshape(shape)
 
 
 def iq1_s_fake_quant(

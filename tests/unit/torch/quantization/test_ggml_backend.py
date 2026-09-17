@@ -30,6 +30,7 @@ def test_ggml_backend_via_quantize(num_bits):
     torch.manual_seed(1234)
     model = torch.nn.Linear(256, 2, bias=False)
     inputs = torch.randn(2, 256)
+    unquantized_output = model(inputs).detach()
     config = {
         "quant_cfg": [
             {"quantizer_name": "*", "enable": False},
@@ -49,6 +50,7 @@ def test_ggml_backend_via_quantize(num_bits):
     assert model.weight_quantizer.num_bits == num_bits
     assert output.shape == (2, 2)
     assert torch.isfinite(output).all()
+    assert not torch.equal(output, unquantized_output)
 
 
 def test_ggml_backend_rejects_unknown_format():
