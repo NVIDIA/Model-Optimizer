@@ -1604,6 +1604,16 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
 
     def _accumulate_scores(self, module, invocation_diffs, grad_output) -> None:
         """Accumulate scores for the invocation that produced ``grad_output``."""
+        if not torch.isfinite(grad_output).all():
+            module_name = next(
+                name for name, child in self.model.named_modules() if child is module
+            )
+            raise RuntimeError(
+                f"AutoQuantize: Non-finite output gradients in module '{module_name or '<root>'}'. "
+                "Cannot compute reliable sensitivity scores. Check the model, data, and loss. "
+                "cuDNN SDPA backward on fully masked attention rows is one possible cause; "
+                "try torch.backends.cuda.enable_cudnn_sdp(False) before rerunning auto_quantize."
+            )
         for hparam, output_diffs in invocation_diffs.items():
             for recipe, output_diff in output_diffs.items():
                 importance = hparam._importance_dict[recipe][module]
