@@ -79,6 +79,7 @@ Changelog
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
 - Fix ``--kv_cache_free_gpu_memory_fraction`` having no effect on the ``lm_eval`` task of ``examples/hf_ptq/scripts/huggingface_example.sh``, where the KV cache always took TensorRT-LLM's default 90% of free GPU memory and evaluation could run out of memory. ``examples/llm_eval/lm_eval_trtllm.py`` now takes ``kv_cache_free_gpu_memory_fraction`` in ``--model_args``, defaulting to 0.8.
+- Fix ``--aux-layers eagle`` failing in the vLLM offline hidden-state dump (``examples/speculative_decoding/collect_hidden_states/compute_hidden_states_vllm.py``). ``eagle`` is the flag's default, but the dump's standalone resolver -- a copy kept so the script runs in a stock vLLM container without ModelOpt -- only handled ``dflash`` and explicit id lists, so the documented invocation aborted with ``invalid literal for int(): 'eagle'`` before any state was written. An unrecognised preset now reports which values are accepted instead of surfacing the raw ``int()`` error.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
