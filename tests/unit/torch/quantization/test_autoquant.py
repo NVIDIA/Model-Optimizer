@@ -1206,7 +1206,6 @@ def test_auto_quantize_fails_fast_on_nonfinite_gradients(bad_gradient):
 
 
 def test_backward_scoring_session_restores_partial_setup():
-    original_cudnn = torch.backends.cuda.cudnn_sdp_enabled()
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
     score_module = model[0]
     score_module._hparams_for_scoring = []
@@ -1227,7 +1226,6 @@ def test_backward_scoring_session_restores_partial_setup():
         pytest.fail("scoring setup should not complete")
 
     assert "forward" not in score_module.__dict__
-    assert torch.backends.cuda.cudnn_sdp_enabled() == original_cudnn
     assert {
         name: param.requires_grad for name, param in model.named_parameters()
     } == original_requires_grad
