@@ -42,7 +42,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
-3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
@@ -65,18 +65,22 @@ tasks). If the user asks for GDPVal:
    (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
    `GDPVAL_SIF_DIR` in `.env` and build with `"$SKILL_DIR/scripts/gdpval-sif.sh"`
    (build-if-absent, no cross-cluster copy). Either way the mounted dir must contain
-   the file `GDPVAL_CONTAINER_PATH` names (template: `python-3.13.gdpval.sif`) — a
+   the file `GDPVAL_CONTAINER_PATH` names (canonical:
+   `python-3.13.gdpval.gym-80e4fc.sif`, the GDPval-AA v2 sandbox) — a
    name mismatch passes NEL's `test -d` check and the agent then silently runs
-   unsandboxed. Verify with `gdpval-sif.sh --check`. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
+   unsandboxed. Verify with `gdpval-sif.sh --check`. The SIF, the Gym pin and the eval
+   image's Python move as **one unit** (reference: "Three things that move together").
+   `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
    `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
    config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
 4. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gdpval.sh"`; it
    enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
    and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
-   **`limit_samples` is inert on the gym path** (the gym runs all 220 tasks
-   regardless), so there is no cheap canary: watch the real run's first
-   ~20–30 min for the SIF-sandbox line and judge auth, and cancel if wrong. See the
-   recipe's Canary section.
+   **`limit_samples` is inert on the GDPVal gym path** (the gym runs all 220 tasks
+   regardless; the config says so via `allow_limit_samples: false`), so there is no
+   cheap canary: watch the real run's first ~20–30 min for the SIF-sandbox line and
+   judge auth, and cancel if wrong. See the recipe's Canary section. (MRCR is the
+   exception — there `limit_samples` *does* reach the gym.)
 
 ---
 
@@ -92,6 +96,8 @@ for an "AA" request. If the user asks for MRCR:
 2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
    sets the context cap, dataset *and* metric prefix; the three are not
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+   Upstream now carries 1M and 128K as two separate benchmarks with their own
+   manifests and metric keys — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
    `transformers`; prepare fails without it) and

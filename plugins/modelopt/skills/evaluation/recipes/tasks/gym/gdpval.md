@@ -1,16 +1,26 @@
-# GDPVal (NeMo Gym "Stirrup" agent)
+# GDPVal-AA v2 (NeMo Gym "Stirrup" agent)
 
 ## Task Details
 
 - Reference: `references/gym-gdpval.md` (SIF build, gym machinery, deploy sizing,
-  scoring modes, failure modes) — **read it before editing a GDPVal config.**
+  scoring modes, reference ladder, multistage, failure modes) — **read it before
+  editing a GDPVal config.**
+- Upstream config: `configs/benchmarks/gdpval-aa-v2/` → `configs/benchmarks/gym/gdpval/`
+  (`bench.yaml` + `refs.yaml`) in nvidia-eval-factory-benchmarking
+  (`dl/JoC/competitive_evaluation/…`) — the source of truth; re-read it before a scored run.
 - Upstream README:
   <https://github.com/NVIDIA-NeMo/Evaluator/blob/main/examples/nemotron/nemotron-3-ultra/v0.2/README.md>
 
 GDPVal is an **agentic** benchmark: the Stirrup agent produces office/PDF
-deliverables inside a per-task Apptainer code-exec sandbox, then a pairwise/rubric
-judge (**Gemini 3.1 Pro**) scores them. It is the most resource-intensive benchmark
-in the suite — **220 tasks**, `num_repeats=1`, 4 judge trials per rollout.
+deliverables inside a per-task Apptainer code-exec sandbox, then a judge scores
+them — one rubric judge, or in comparison mode a **3-member panel** (gpt-5.5 /
+gemini-3.1-pro / claude-opus-4.8) sampled per trial. It is the most
+resource-intensive benchmark in the suite — **220 tasks**, `num_repeats=1`, 4
+comparison trials per rollout.
+
+**Upstream is now GDPVal-AA v2** — a rebuilt sandbox matching the published AA
+environment, a refreshed 12-reference ELO ladder, and a two-stage anchored fit. A v2
+score is not comparable to a v1 one.
 
 It is currently validated with the **0.2.6 `nel` launcher** as a `nemo_gym` task
 (NOT nel-next), so Steps 1–9 apply — but with the branch differences below.
@@ -33,14 +43,19 @@ suite membership, so read that per-task, not from the path.
 - **Apptainer SIF sandbox** — prefer a site-provided SIF; otherwise
   `$SKILL_DIR/scripts/gdpval-sif.sh` builds one into `$GDPVAL_SIF_DIR` (build-if-absent,
   never copied between clusters). Missing/misnamed → **silent** unsandboxed exec.
+  Canonical is `python-3.13.gdpval.gym-80e4fc.sif`, and it is versioned **with** the Gym
+  pin and the eval image's Python — see the reference's "Three things that move together".
 - **Thinking mode is mandatory** — non-thinking loses ~86% of pairwise judgements.
   Serve with the model's `--reasoning-parser` and force it on via the adapter's
   `chat_template_kwargs`.
 - **Scoring:** `rubric` (template default, no references, no ELO) vs `comparison`
-  (the AA-comparable `normalized_elo`; a conversion, not a flag flip).
+  (the AA-comparable `normalized_elo`; a conversion, not a flag flip). Comparison adds
+  the 12-reference ladder and a **two-stage** fit: stage 1 samples 45 tasks against all
+  references, stage 2 judges all 220 against the 4 nearest the stage-1 estimate.
 - Needs `INFERENCE_API_KEY`, `TAVILY_API_KEY`, `INFERENCE_JUDGE_URL`,
   `GDPVAL_SIF_DIR` in `.env`, plus `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
-  `pre_cmd`).
+  `pre_cmd`). Comparison mode additionally wants `JUDGE_API_KEY` and the auxiliary
+  endpoint keys — see the reference's "Env vars".
 
 All of the above — SIF handling, the SIF↔Gym-commit coupling, scoring modes, judge
 panel, preflight and failure modes — is detailed in **`references/gym-gdpval.md`**.
@@ -64,7 +79,12 @@ current goldens use it. A full 220-task run of a large MoE typically needs multi
 **`++…params.limit_samples=N` is inert on the gym path.** The gym does its own data
 prep and rollout collection, so the launcher-level limiter is ignored: you get the
 full 220-task run. Do not use it believing you launched a two-task smoke test — this
-is the heaviest benchmark in the suite.
+is the heaviest benchmark in the suite. The canonical config states this in the config
+itself (`extra.nemo_gym.allow_limit_samples: false`), and the template carries it too.
+
+**`++limit` is worse than useless in comparison mode**: it truncates the loaded dataset
+while the stages sample from the full distribution, so you get **0 rollouts**. (MRCR is
+the opposite — there `limit_samples` *does* reach the gym. Don't carry the habit across.)
 
 There is no cheap sample-limited canary. Instead, **launch the real run and treat its
 first ~20–30 minutes as the canary**, cancelling if any of these is wrong:
@@ -77,8 +97,12 @@ grep -ciE " 401 | 403 |Internal Server Error" $RD/artifacts/nemo_gym_logs/gdpval
 wc -l $RD/artifacts/evaluator_rollouts.jsonl                        # rollouts flowing
 ```
 
-In comparison mode stage 1 (45 tasks) is a natural early checkpoint — an ELO estimate
-appears before the full 220-task stage 2 starts.
+In comparison mode stage 1 (45 tasks, all references) is a natural early checkpoint — an
+ELO estimate appears before the full 220-task stage 2 starts. Stage 1 runs with
+`partial_completion` gates (≥0.9 overall success, ≥0.5 per reference, ≥1 judged row per
+reference; `timeout_exceeded` and `transient` waivable) so one reaped rollout or one judge
+400 no longer forfeits stage 2 — if you see stage 2 refuse to start, check those gates
+before blaming the model.
 
 ## Score Extraction
 
@@ -88,29 +112,37 @@ appears before the full 220-task stage 2 starts.
 
 **The reported GDPVal score is `normalized_elo`** — the AA 0–1 scale, comparable
 across models and to the published AA index. `eval_elo` is the same fit on the raw
-Elo axis (`normalized_elo = (eval_elo - 500) / 2000`); quote it as supporting
-detail, not as the score.
+Elo axis (`normalized_elo = (eval_elo - 500) / 2000`, fitted across all models); quote it
+as supporting detail, not as the score.
+
+**Read it from the FINAL STAGE key, not the flat one.** The upstream manifest certifies
+on `comparison/stage_1/normalized_elo` (stage index 1 = the 220-task stage), because the
+flat `comparison/normalized_elo` is emitted **only when that stage is exactly complete** —
+a few lost rollouts blank it out while the stage-scoped key still carries the fit. A
+missing flat key is therefore not evidence the run failed to score.
 
 The final numbers live in **`artifacts/results.yml`** (authoritative, local) and are
 mirrored to MLflow. Read them by metric name:
 
 | Mode | Metric (results.yml → `groups.nemo_gym.metrics.<name>.scores.<name>.value`) |
 | --- | --- |
-| comparison | `gdpval_stirrup_agent/comparison/normalized_elo` ← **REPORT THIS** (AA 0–1 scale) |
-| comparison | `gdpval_stirrup_agent/comparison/eval_elo` (raw Elo; supporting detail) |
+| comparison | `gdpval_stirrup_agent/comparison/stage_1/normalized_elo` ← **REPORT THIS** (AA 0–1 scale, final stage) |
+| comparison | `gdpval_stirrup_agent/comparison/stage_1/eval_elo` (raw Elo; supporting detail) |
+| comparison | `gdpval_stirrup_agent/comparison/stage_0/eval_elo` — the stage-1 (45-task) estimate; an early checkpoint, **not** the score |
+| comparison | flat `gdpval_stirrup_agent/comparison/{normalized_elo,eval_elo}` — same quantity, but present only on an exactly-complete final stage |
 | comparison | `gdpval_stirrup_agent/comparison/win_rate`, `/judged`, `/wins`, `/losses`, `/ties` |
 | comparison | per-reference: `gdpval_stirrup_agent/comparison/ref/<ref_key>/{win_rate,wins,losses,ties,judged}` |
-| comparison | per-stage estimate: `gdpval_stirrup_agent/comparison/stage_0/eval_elo` (stage 1, all refs) — the **final** value is the top-level one, from the last stage |
 | rubric | mean of `reward` across `artifacts/evaluator_rollouts.jsonl` (per-rollout 0–1) |
 
 ```bash
-# COMPARISON mode — final score from the local results file (no MLflow needed)
+# COMPARISON mode — final score from the local results file (no MLflow needed).
+# stage_1 first (what upstream certifies on); the flat key is the fallback.
 python3 -c "
 import yaml
 m=yaml.safe_load(open('<output_dir>/<run>/nemo_gym.0/artifacts/results.yml'))['groups']['nemo_gym']['metrics']
-for k in ('normalized_elo','eval_elo','win_rate'):
+for k in ('stage_1/normalized_elo','stage_1/eval_elo','normalized_elo','eval_elo','win_rate'):
     n=f'gdpval_stirrup_agent/comparison/{k}'
-    print(k, '=', m[n]['scores'][n]['value'])"
+    if n in m: print(k, '=', m[n]['scores'][n]['value'])"
 
 # RUBRIC mode (the template default) — there is no ELO; average the per-rollout reward
 python3 -c "
@@ -126,8 +158,9 @@ comparison run logs **~200 metrics and most of them are per-reference**, so the
 headline is easy to miss:
 
 ```text
-nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/normalized_elo   <- report this
-nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/eval_elo
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/stage_1/normalized_elo   <- report this
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/stage_1/eval_elo
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/normalized_elo           <- flat fallback
 nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/win_rate
 ```
 

@@ -25,8 +25,9 @@
 #   "$SKILL_DIR/scripts/gdpval-sif.sh" [<sif-dir-or-file>] [--commit <sha>] [--force|--check]
 #     <sif-dir-or-file>  Persistent path on the target cluster's shared FS.
 #                        DEFAULTS to $GDPVAL_SIF_DIR (from .env) when omitted. A
-#                        directory -> <dir>/$GDPVAL_SIF_NAME (default python-3.13.gdpval.sif,
-#                        matching the example config); a *.sif path
+#                        directory -> <dir>/$GDPVAL_SIF_NAME (default
+#                        python-3.13.gdpval.gym-80e4fc.sif, matching the example config
+#                        and the canonical GDPVAL_CONTAINER_PATH); a *.sif path
 #                        is used verbatim. Bind-mount this SAME dir into the eval
 #                        container at /gdpval/sif (see recipes/examples/gym/).
 #     --commit <sha>     NeMo Gym commit whose gdpval.def to build. Keep in sync
@@ -51,8 +52,12 @@
 set -euo pipefail
 
 # Keep GDPVAL_GYM_COMMIT in sync with install_on_the_fly.commit in the config.
-GDPVAL_GYM_COMMIT="${GDPVAL_GYM_COMMIT:-dd41196f620f2af99947d776cbe5da9439d2a08d}"  # pragma: allowlist secret
-GDPVAL_SIF_NAME="${GDPVAL_SIF_NAME:-python-3.13.gdpval.sif}"
+# df3e201d is the GDPval-AA v2 pin: its gdpval.def is the one the canonical
+# gym-80e4fc image was built from (Debian trixie, python3.13=3.13.5 asserted at build
+# time, the 419 published AA package pins, Office metric-substitute fonts, and no
+# torch/keras/jax). Bump this and GDPVAL_SIF_NAME together.
+GDPVAL_GYM_COMMIT="${GDPVAL_GYM_COMMIT:-df3e201d942f6397def1ec8c10037d29115fcbbd}"  # pragma: allowlist secret
+GDPVAL_SIF_NAME="${GDPVAL_SIF_NAME:-python-3.13.gdpval.gym-80e4fc.sif}"
 APPTAINER_BIN="${APPTAINER_BIN:-}"
 
 _log() { printf '\033[2m  %s\033[0m\n' "$*" >&2; }
@@ -128,10 +133,18 @@ fi
 [[ -n "$APPTAINER_BIN" ]] || _die "apptainer/singularity not found on PATH. Run on a node that has it \
 (e.g. 'module load apptainer', or inside the eval image). This script does NOT copy a SIF from another cluster."
 
-def_url="https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/${GDPVAL_GYM_COMMIT}/responses_api_agents/stirrup_agent/containers/gdpval.def"
+def_base="https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/${GDPVAL_GYM_COMMIT}/responses_api_agents/stirrup_agent/containers"
+# apptainer resolves %files SOURCES relative to the build's CWD, so the def cannot be
+# built alone: stage it with its siblings and build from inside that dir.
+build_dir="${sif_dir}/.gdpval-build.$$"
 tmp="${sif_dir}/.build.$$.${GDPVAL_SIF_NAME}"
-def_local="${sif_dir}/.gdpval.$$.def"
 lock="${sif_dir}/.gdpval-sif.lock"
+
+# _fetch <url> <dest> — curl if available, else wget.
+_fetch() {
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  else wget -qO "$2" "$1"; fi
+}
 
 # --- build under a flock (double-checked) so concurrent runs don't double-build ---
 exec 9>"$lock" || _die "cannot open lock file: $lock"
@@ -145,32 +158,53 @@ fi
 
 _log "building GDPVal SIF (this can take ~20-40 min)"
 _log "  gym commit: ${GDPVAL_GYM_COMMIT}"
-_log "  def:        ${def_url}"
+_log "  def:        ${def_base}/gdpval.def"
 _log "  dest:       ${sif}"
 # Leave no temp artefacts if we are killed or exit early. $tmp is renamed on success,
 # so this only ever removes leftovers.
-trap 'rm -f "$tmp" "$def_local"' EXIT
-rm -f "$tmp" "$def_local"
-# apptainer build cannot take a remote def URL as its source — fetch the def to a
-# local file first, then build from it.
-if command -v curl >/dev/null 2>&1; then curl -fsSL "$def_url" -o "$def_local"
-else wget -qO "$def_local" "$def_url"; fi
-[ -s "$def_local" ] || { rm -f "$def_local"; _die "failed to download def from $def_url"; }
+trap 'rm -rf "$tmp" "$build_dir"' EXIT
+rm -rf "$tmp" "$build_dir"
+mkdir -p "$build_dir" || _die "cannot create build staging dir: $build_dir"
+
+# apptainer build cannot take a remote def URL as its source — fetch the def first.
+_fetch "${def_base}/gdpval.def" "${build_dir}/gdpval.def" || true
+[ -s "${build_dir}/gdpval.def" ] || _die "failed to download def from ${def_base}/gdpval.def"
+
+# The GDPval-AA v2 def declares %files (the published 419-package pin list, the apt
+# closure, the arm64 exclusions, the sandbox verifier). Those sources resolve against
+# the build CWD, so fetch every one named in the def — parsed rather than hardcoded, so
+# a def that adds a file keeps working.
+_files=$(awk '
+  /^[[:space:]]*%files([[:space:]]|$)/ { inblk=1; next }
+  /^[[:space:]]*%/ { inblk=0 }
+  inblk && $1 !~ /^#/ && NF { print $1 }
+' "${build_dir}/gdpval.def")
+for _f in $_files; do
+  case "$_f" in
+    /*|*..*) _die "refusing to stage %files source outside the containers dir: $_f" ;;
+  esac
+  _log "  staging %files source: $_f"
+  _fetch "${def_base}/${_f}" "${build_dir}/${_f}" || true
+  [ -s "${build_dir}/${_f}" ] || _die "def declares %files source '$_f' but it could not be fetched from ${def_base}/${_f}"
+done
+
+# Absolute, because the build runs with CWD inside $build_dir.
+_abs_tmp="$(cd "$(dirname "$tmp")" && pwd)/$(basename "$tmp")"
 # Prefer --fakeroot (needs an /etc/subuid entry for the build user); fall back to an
 # unprivileged build where fakeroot is unavailable.
-if "$APPTAINER_BIN" build --fakeroot "$tmp" "$def_local"; then
+if (cd "$build_dir" && "$APPTAINER_BIN" build --fakeroot "$_abs_tmp" gdpval.def); then
   :
 # A failed --fakeroot attempt can leave a partial $tmp behind, and apptainer refuses an
 # existing destination — clear it or the unprivileged fallback can never succeed.
-elif rm -f "$tmp" && "$APPTAINER_BIN" build "$tmp" "$def_local"; then
+elif rm -f "$_abs_tmp" && (cd "$build_dir" && "$APPTAINER_BIN" build "$_abs_tmp" gdpval.def); then
   _log "built without --fakeroot (unprivileged mode)"
 else
-  rm -f "$tmp" "$def_local"
+  rm -rf "$_abs_tmp" "$build_dir"
   _die "apptainer build failed (see output above)."
 fi
-rm -f "$def_local"
+rm -rf "$build_dir"
 
 # Atomic publish: a partial build never looks complete.
-mv -f "$tmp" "$sif" || { rm -f "$tmp"; _die "failed to move built SIF into place: $sif"; }
+mv -f "$_abs_tmp" "$sif" || { rm -f "$_abs_tmp"; _die "failed to move built SIF into place: $sif"; }
 _log "done: $sif"
 echo "$sif"

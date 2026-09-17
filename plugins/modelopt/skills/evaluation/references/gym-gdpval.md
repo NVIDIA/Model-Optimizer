@@ -3,13 +3,22 @@
 GDPVal is currently validated with the **0.2.6 `nel` launcher** as a `nemo_gym`
 task, but it is mechanically unlike the `aa/` nemo-skills tasks: the Stirrup agent
 produces office/PDF **deliverables** in a per-task **Apptainer** code-exec sandbox,
-a pairwise/rubric **judge** (Gemini 3.1 Pro) scores them, and NeMo Gym is pulled
-and run **inline in the eval container** (`install_on_the_fly`) via
+a rubric judge or a **3-member pairwise judge panel** scores them, and NeMo Gym is
+pulled and run **inline in the eval container** (`install_on_the_fly`) via
 `ng_prepare_benchmark` + `ng_e2e_collect_rollouts`. This file is the shared
 machinery; the config template is `recipes/examples/gym/example_gdpval.yaml` and
 the per-task pointer is `recipes/tasks/gym/gdpval.md`. The gym bootstrap machinery
 described here is shared with MRCR (`recipes/tasks/gym/mrcr.md`) — fixes here apply
 to both examples.
+
+**Upstream this benchmark is `GDPVal-AA-V2`** (`configs/benchmarks/gdpval-aa-v2/` →
+`configs/benchmarks/gym/gdpval/{bench,refs}.yaml` in nvidia-eval-factory-benchmarking,
+`dl/JoC/competitive_evaluation/…`). v2 is a different measurement from the v1 configs
+this skill previously tracked: a rebuilt sandbox aligned to the **published AA GDPval-AA
+v2 environment**, a refreshed 12-model reference ladder, an anchored multi-stage ELO fit,
+and stage-scoped metric keys. Do not compare a v2 number to a v1 one. Re-read the
+upstream `bench.yaml` + `refs.yaml` before any scored run — the reference ELO anchors
+move with the AA board.
 
 Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PATH:
 
@@ -59,15 +68,50 @@ versions within a baseline-versus-candidate comparison.
 | Policy model (under test) | your self-deployed vLLM endpoint (SLURM GPU node) — or an external endpoint |
 | NeMo Gym + Stirrup agent orchestration | inside the **eval** container (`nemo_gym` task), pulled via `install_on_the_fly` |
 | Per-task code-exec | **Apptainer SIF** launched by the agent inside the eval container |
-| Judge (pairwise/rubric) | external OpenAI-compatible endpoint (`gdpval_judge`, e.g. Gemini 3.1 Pro) |
+| Judge (pairwise/rubric) | external OpenAI-compatible endpoint (`gdpval_judge`); one model in rubric mode, a sampled 3-member panel in comparison mode |
 | Agent web search | Tavily (`TAVILY_API_KEY`) |
+
+The canonical comparison-mode config also reaches two **auxiliary** endpoints through the
+same proxy pattern — an `allenai/wildguard` safety server and a `Qwen3-235B` helper — each
+with its own key (`COMP_EVAL_NVCF_SERVICE_KEY`, `INTEGRATE_NVAPI_KEY`). They are part of the
+eval-config Step 3c conversion, not of the rubric template.
+
+## Three things that move together
+
+The Gym pin, the eval image's Python, and the SIF are **one unit**. The canonical pin
+`df3e201d942f6397def1ec8c10037d29115fcbbd` declares `requires-python >= 3.13.14`, so it
+must run on a py3.13 gym runtime image with
+`extra.nemo_gym.runtime_python: /usr/local/bin/python3.13`, and it must mount the SIF
+built from *its own* `gdpval.def` (`python-3.13.gdpval.gym-80e4fc.sif`). Move one and you
+must move all three:
+
+| | Canonical (GDPval-AA v2) |
+|---|---|
+| Gym `install_on_the_fly.commit` | `df3e201d942f6397def1ec8c10037d29115fcbbd` |
+| eval container | a py3.13 gym runtime image (internal `gym_runtime_py313`, CPython 3.13.14) |
+| `runtime_python` | `/usr/local/bin/python3.13` — overrides the model common's py3.12 default |
+| SIF | `python-3.13.gdpval.gym-80e4fc.sif` |
+
+A py3.12 image with this pin fails at sub-venv creation (loud). An old SIF with this pin
+degrades deliverables inside the sandbox (silent). Those are the two failure shapes.
 
 ## Apptainer SIF sandbox
 
 The Stirrup agent runs each task's generated code in an Apptainer SIF, bind-mounted
 at **exactly** the path `GDPVAL_CONTAINER_PATH` names (template:
-`/gdpval/sif/python-3.13.gdpval.sif`). Missing or misnamed → the agent **silently**
-runs code-exec unsandboxed; the run "succeeds" but the numbers aren't comparable.
+`/gdpval/sif/python-3.13.gdpval.gym-80e4fc.sif`). Missing or misnamed → the agent
+**silently** runs code-exec unsandboxed; the run "succeeds" but the numbers aren't
+comparable.
+
+**What gym-80e4fc is.** The first sandbox aligned to the environment AA publishes for
+GDPval-AA v2: Debian trixie (not the `python:3.13` docker image, whose 3.13.15 differs
+from the closure's pinned 3.13.5 — the def *asserts* 3.13.5 at build time and fails
+otherwise), the 419 published Python pins installed verbatim from the vendored freeze,
+the 762-package apt closure, and the Calibri/Cambria **metric-substitute fonts** earlier
+images lacked — whose absence had been reflowing every deliverable written in those
+fonts. It deliberately ships **no** torch/keras/jax; the agent prompt used to advertise
+them and no longer does. The name carries no architecture: build natively per cluster and
+read the `BUILD_INFO` file beside a site-provided image before copying one anywhere.
 
 **If your site provides a prebuilt SIF, use it** — a self-built one resolves its pip
 stack at *your* build time and can drift from the sandbox a published reference set
@@ -81,17 +125,22 @@ srun -p cpu -t 01:00:00 --pty "$SKILL_DIR/scripts/gdpval-sif.sh"   # uses $GDPVA
 ```
 
 `gdpval-sif.sh` is idempotent (flock-guarded, atomic): it builds from `gdpval.def` at
-the pinned commit if absent and is a no-op once present. It needs
+the pinned commit if absent and is a no-op once present. The v2 def declares a
+**`%files` section** (the pin list, the apt closure, the arm64 exclusions, the sandbox
+verifier), and apptainer resolves those sources against the *build's CWD* — so the def
+can no longer be built on its own. The script stages the def plus every source named in
+its `%files` block into a temp dir and builds from inside it; a def that adds a file
+keeps working because the list is parsed, not hardcoded. It needs
 apptainer/singularity with unprivileged-build support and network egress — run it on a
 login or CPU node, **not** inside the eval job. The eval image doesn't ship apptainer,
 so the config's `pre_cmd` installs the **runtime** (arch-aware: use the Ubuntu PPA, not
 an amd64 `.deb` — most Blackwell/Grace clusters are aarch64), which needs
 `NEMO_EVALUATOR_TRUST_PRE_CMD=1`.
 
-**The SIF is versioned with the Gym repo.** `gdpval.def` changes across commits (e.g.
-`2502893977` → `049b1fd0` moved python 3.12 → 3.13 and added TeX Live, playwright,
-polars, geospatial), and the newer agent's prompt advertises that richer runtime. So
-when you bump `install_on_the_fly.commit`, **diff the def at the two commits**
+**The SIF is versioned with the Gym repo.** `gdpval.def` changes across commits (the
+v1→v2 move rebuilt it wholesale onto the published AA closure; an earlier one moved
+python 3.12 → 3.13), and the agent's prompt describes whatever runtime the def
+installs. So when you bump `install_on_the_fly.commit`, **diff the def at the two commits**
 (`raw.githubusercontent.com/NVIDIA-NeMo/Gym/<sha>/responses_api_agents/stirrup_agent/containers/gdpval.def`);
 if it changed, rebuild to a **new version-tagged filename** (`GDPVAL_SIF_NAME=… gdpval-sif.sh --commit <sha>`)
 and repoint `GDPVAL_CONTAINER_PATH`. Running a new gym on an old SIF makes the
@@ -158,21 +207,85 @@ self-deploys single-node vLLM, which is fine for a canary or a small policy. For
 + **`rubric`** (template default) — judge scores each deliverable against its rubric.
   0–1 reward, **no ELO** (undefined without an opponent). Runs on the public gym image.
 + **`comparison`** — pairwise vs anchored reference deliverables; the **only** mode
-  yielding the AA-comparable `normalized_elo`. It is a conversion, not a flag flip:
-  it needs a reference set, a gym image whose Gym has the `reference_models` map, ref
-  mounts on **both** deployment and evaluation, and multistage overrides. Setting
+  yielding the AA-comparable `normalized_elo`, and the mode GDPVal-AA-V2 is defined in
+  upstream. It is a conversion, not a flag flip: it needs the reference set, a py3.13
+  gym image whose Gym has the `reference_models` map, ref mounts on **both** deployment
+  and evaluation, the judge panel, and the multistage block. Setting
   `reward_mode=comparison` alone exits at startup with
   `reward_mode=comparison requires reference_deliverables_dir to be set`, surfaced
   only as `Process gdpval_resources_server finished unexpectedly!`.
   NVIDIA-internal: `modelopttools:eval-config` Step 3c is the conversion checklist.
 
+### Comparison mode: the reference ladder
+
+`refs.yaml` is the single source of truth — each reference is one stanza (ELO anchor +
+deliverables dir), and both the mounts and the `++…reference_models.*` overrides are
+derived from it, so a path or anchor is edited in exactly one place.
+
+**12 active references**, spanning ELO 274 → 1468 (deepseek_v4_flash_0731 1468,
+deepseek_v4_pro 1223, inkling_small 1191, glm51_fp8 1181, kimi_k26 1115,
+nemotron3_ultra 1091, qwen36_35b 992, qwen35_122b 925, qwen35_397b 905, gptoss_120b 745,
+gemma4_26b 713, qwen3_30b_thinking 274). Two are **deliberately disabled** and must not be
+re-enabled casually:
+
++ `human_gold` — 35/220 tasks ship no gold deliverable upstream, which the judge scores
+  as free candidate wins, and the panel rates gold ~782 against a 1000 anchor.
++ `gptoss_20b` — 23% empty deliverables, same free-win problem.
+
+**Anchors are held FIXED by the Bradley-Terry fit, so a stale anchor shifts every
+candidate score by roughly the anchor error.** The current set was read off the AA live
+board on 2026-09-09 (2026-09-11 for the three additions); the previous set sat 30–76
+points high. Match the model **variant and collection date**, not just the family — AA
+scores e.g. "DeepSeek V4 Pro (Reasoning, Max Effort)" separately from "DeepSeek V4 Pro
+0813". Adding a reference means staging its deliverables under the refs root *first*:
+the mount fails the run if the source path is missing.
+
+### Comparison mode: multistage
+
+`_gdpval_stages.cli_params` is the one place the stage shape is defined:
+
+```text
+++multistage.enabled=true
+++multistage.retry_inprocess=true
+++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9,
+  min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1,
+  waivable_failure_classes: [timeout_exceeded, transient], tolerate_unresolved: true}},
+  {num_tasks: 220, num_models: 4}]'
+++num_repeats=1
+```
+
+Stage 1 samples **45 tasks against all references**; stage 2 judges the full **220** against
+the **4 references nearest the stage-1 estimate**. Things to know before touching it:
+
++ **`partial_completion` is not optional hardening.** Without it the orchestrator requires
+  *every* planned non-final rollout to carry usable battle evidence, so a single unresolved
+  rollout — one reaped job, one judge 400 — kills stage 2 after stage 1 has already been
+  paid for. That happened to real runs. `legitimate` failures stay non-waivable.
++ **The resume journal is fingerprinted on the stage shape**, so changing stages invalidates
+  in-flight runs. `num_repeats` is *not* fingerprinted — never flip it mid-campaign.
++ **There is no per-stage repeats key.** One inside a stage dict is silently ignored;
+  `++num_repeats` is rollout-collection level and applies to every stage.
++ **Never combine `++limit` with multistage.** It truncates the loaded dataset while stages
+  sample from the full distribution → 0 rollouts. The canonical config sets
+  `allow_limit_samples: false` so the launcher-level limiter cannot be believed either.
++ `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=3` bounds the in-process retry (`retry_inprocess`) at two
+  passes. The cap alone resolves nothing — `retry_inprocess` is what re-dispatches.
+
 ## Judge
 
-Rubric mode uses a single judge. **Comparison mode uses a 3-member panel** —
-`openai/gpt-5.5`, `gcp/google/gemini-3.1-pro-preview`,
-`aws/anthropic/bedrock-claude-opus-4-8` — one **sampled per trial**, all routed
-through the single `gdpval_judge_model` proxy (`<INFERENCE_JUDGE_URL>` from `.env`).
-`++...judge_sampling_seed=42` makes that sampling reproducible.
+Rubric mode uses a single judge. **Comparison mode uses a 3-member panel**, one
+**sampled per trial**, all routed through the single `gdpval_judge_model` proxy
+(`<INFERENCE_JUDGE_URL>` from `.env`). `++...judge_sampling_seed=42` makes that sampling
+reproducible, and `++...num_comparison_trials=4` sets the trials per rollout.
+
+**Each member carries its own generation overrides — copy them verbatim, they are part
+of the methodology:**
+
+| Member | `model` | `create_params_overrides` |
+|---|---|---|
+| gpt-5.5 | `openai/openai/gpt-5.5` | `{reasoning_effort: medium}` |
+| gemini-3.1-pro | `gcp/google/gemini-3.1-pro-preview` | `{extra_body: {reasoning_effort: high}}`, `handles_audio_video: true` |
+| claude-opus-4.8 | `aws/anthropic/bedrock-claude-opus-4-8` | `{extra_body: {thinking: {type: enabled}}}` |
 
 + **Inject the key's VALUE, not its name:** `openai_api_key=$INFERENCE_API_KEY`.
   Passing an env-var *name* (e.g. via a `${...api_key}` interpolation that resolves to
@@ -181,9 +294,10 @@ through the single `gdpval_judge_model` proxy (`<INFERENCE_JUDGE_URL>` from `.en
   not a config error. One key covers all three panel members.
 + **Do not set `judge_responses_create_params_overrides.model`.** Pinning a model
   collapses the panel to a single judge, silently changing the scoring methodology.
-+ **Throttles:** judge `max_concurrent_requests=10` and Stirrup `concurrency=220` are
-  the golden values — the judge rate-limits long before the served model does, so raise
-  these only after the judge logs are clean of 429s.
++ **Throttles:** judge `max_concurrent_requests=10`, Stirrup `concurrency=220` and
+  `preconvert_max_concurrent=30` are the canonical values — the judge rate-limits long
+  before the served model does, so raise these only after the judge logs are clean of
+  429s.
 
 ## Preflight — what NEL validates, and what it does NOT
 
@@ -226,7 +340,10 @@ mount source, and `raise ValueError` listing the missing ones **before** any
 | `GDPVAL_CONTAINER_PATH` | lit | SIF path — must equal the SIF bind-mount target |
 | `GDPVAL_REF_FILES_DIR` | lit:/gdpval_ref_files | shared-FS ref-file staging (node-local /tmp breaks multi-node Ray) |
 | `PERSIST_DELIVERABLES_DIR` | lit | where deliverables persist (see MLflow note) |
-| `GDPVAL_MAX_TURNS` | lit (optional) | Stirrup turn cap (default 100; golden uses 250) |
+| `GDPVAL_MAX_TURNS` | lit (optional) | Stirrup turn cap (default 100; canonical uses 250) |
+| `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` | lit:3 | bounds Gym's in-process rollout retry at two passes |
+| `JUDGE_API_KEY` | host (comparison) | upstream splits judge auth from `INFERENCE_API_KEY`; this template reuses the latter for both |
+| `INTEGRATE_NVAPI_KEY` / `COMP_EVAL_NVCF_SERVICE_KEY` | host (comparison) | auxiliary Qwen3-235B / wildguard endpoints in the canonical config |
 | `NEL_INVOCATION_ID` | runtime | stable run id assigned by the validated launcher; do not use `SLURM_JOB_ID` |
 
 `INFERENCE_JUDGE_URL` is the judge host — config (from `.env`), substituted as the
@@ -256,9 +373,10 @@ nemo_gym.gdpval`).
 
 ## num_repeats
 
-**Use 1.** Both current goldens do, set with a top-level `++num_repeats=1` — it
-works, and recent Gym pins already ship `num_repeats: 1` in
-`benchmarks/gdpval/config.yaml`, so no `sed` patching is needed.
+**Use 1.** The canonical config sets it with a top-level `++num_repeats=1` inside the
+multistage block, and recent Gym pins already ship `num_repeats: 1` in
+`benchmarks/gdpval/config.yaml`, so no `sed` patching is needed. It applies to every
+stage — there is no per-stage repeats key (see "Comparison mode: multistage").
 
 Historical only: pre-multistage single-reference configs used 2 (220 × 2 = 440
 rollouts) and patched it with `sed` because the per-dataset key could not be set

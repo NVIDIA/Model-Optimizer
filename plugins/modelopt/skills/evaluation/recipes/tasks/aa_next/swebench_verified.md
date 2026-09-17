@@ -8,6 +8,11 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 > **Source of truth:** `configs/benchmarks/swe-bench-verified/bench.yaml` in
 > nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the eval-image
 > pin in `configs/shared/nel_next_containers.yaml` — match its values for a reference run.
+>
+> That dir also ships `bench_direct.yaml`, a **different backend**: the Gym/opencode
+> route (`++num_samples_in_parallel=1024`, its own Gym commit pin, opensandbox) used by
+> the P/D recipes. `benchmark_backend: evaluator` — the harbor path described here — is
+> what this skill runs. Don't mix values between the two.
 
 ## Task-specific values (canonical `bench.yaml`)
 
@@ -16,12 +21,15 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 | `playbook` | `swebench_verified` (`harbor://swebench-verified@1.0`) |
 | agent | `openhands-sdk` (playbook; `agent_kwargs: {max_iterations: 200, version: "1.17.0"}`) |
 | scope | 500 Python tasks × `repeats: 5` |
-| `max_concurrent` / `sandbox.concurrency` | `15` in `bench.yaml`; per-model configs override it (MiniMax-M2.7 uses `20`) |
+| `max_concurrent` / `sandbox.concurrency` | `15` (canonical `bench.yaml`); the reviewed per-model leaves keep it. A separate customer-launch track (`reviewed_configs/clu/…`) runs `repeats: 3` / `concurrency: 10` — **not** AA-comparable, don't borrow its numbers |
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
-| `sandbox.region` | `us-east-2` |
-| `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (dedicated `harbor-swebench` repo, **us-west-2**, regardless of sandbox region) |
+| `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-2}` (differs from TB2.1's `us-east-1` default) |
+| `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` → `463701203462.dkr.ecr.us-west-2.amazonaws.com/harbor-swebench`. **Hardcoded us-west-2 upstream** — unlike TB2.1 the repo does *not* track `HARBOR_ECS_REGION`; moving the sandbox region leaves the ECR alone |
 | `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1: `configs/shared/nel_next_containers.yaml`) *(shared — see `references/nel-next.md`)* |
-| `cluster.container_env.AWS_DEFAULT_REGION` | `us-east-2` (match `sandbox.region`) |
+| `cluster.container_env.AWS_DEFAULT_REGION` | `${HARBOR_ECS_REGION:-us-east-2}` (match `sandbox.region`) |
+| `sandbox.log_stream_prefix` | canonical stem `swebench-<model>-<cluster>-<framework>` |
+| `output.export_config.mlflow.tags` | canonical adds `task_name: swebench-verified` and `nemo-evaluator-next-version: 0.5.0.1` |
+| `proxy.model_traffic.capture_request_body` | `true`, set **per service** (`services.<alias>.proxy.model_traffic`) — never in a shared block |
 | `instruction_template` | `/configs/prompts/swebench_instruction.md`, **must be MOUNTED**; content is scoring-relevant (gotcha below) |
 | `proxy.request_timeout` | `3600` (FEP-1104 paired HTTP timeout; leaves mirror it on the service proxy) *(shared — see `references/nel-next.md`)* |
 | `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
@@ -32,7 +40,7 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 benchmarks:
   - playbook: swebench_verified
     repeats: 5
-    max_concurrent: 15            # keep == sandbox.concurrency; per-model configs may raise both
+    max_concurrent: 15            # canonical; keep == sandbox.concurrency
     instruction_template: /configs/prompts/swebench_instruction.md   # mounted (see gotcha)
     solver:
       service: <svc-name>
@@ -40,7 +48,7 @@ benchmarks:
       run_timeout: 10800
       agent_kwargs: {llm_kwargs: {timeout: 3600}}
     sandbox:
-      region: us-east-2
+      region: ${HARBOR_ECS_REGION:-us-east-2}   # canonical; the ECR below stays us-west-2
       ecr_repository: ${HARBOR_SWEBENCH_ECR_REPOSITORY}
       concurrency: 15
       log_stream_prefix: swebench-verified-<model>-<cluster>
@@ -88,10 +96,16 @@ OpenHands runs ~200 turns/task. The canonical config adds a `system_message`
 interceptor (a large OpenHands system prompt — copy it verbatim from `bench.yaml`)
 plus `turn_counter`.
 
-**Order differs from TB2.1**: `http_pairs_dump` is **first** (not last) and `drop_params`
-comes **before** `consolidate_system`. `http_pairs_dump` is canary/diagnostic-only — it
-retains every error pair in memory for the whole run (`references/nel-next.md`); drop it
-from the scored config.
+**Order.** `http_pairs_dump` is **first**, then `system_message` → `turn_counter` →
+`drop_params` → `consolidate_system` → `reasoning` → `reasoning_replay`. (TB2.1 now puts
+`http_pairs_dump` first too; the SWE-bench-only part is the `system_message` +
+`turn_counter` pair.) `http_pairs_dump` is canary/diagnostic-only — it retains every error
+pair in memory for the whole run (`references/nel-next.md`); drop it from the scored config.
+
+**Interceptor lists replace wholesale on merge.** The reviewed leaf restates the model
+fragment's whole chain to add two entries — it does not append. Adding `system_message`
+without re-listing `drop_params`/`consolidate_system`/`reasoning`/`reasoning_replay`
+silently drops them.
 
 ```yaml
 proxy:
@@ -127,11 +141,21 @@ Fargate quota and `N × gpus_per_node` against your allocation.
 
 ## Score Extraction
 
-Report **`pass@1`** only — benchmark `swebench-verified@1.0`, scorer `pass@1` (0–1):
+Report **`pass@1`** — benchmark `swebench-verified@1.0`, scorer `pass@1` (0–1):
 the resolved rate over the 500 tasks, **already averaged over repeats** (nel-next
 reports a single `pass@1`; there is **no `avg-of-N` key** like the 0.2.6 nemo-skills
-metrics). MLflow logs it as `pass_at_1`. Read from `report.md` (Benchmark / Scorer
-table) in the run dir or `nel eval report -r <run_id>`, then push to MLflow with
+metrics). MLflow logs it as `pass_at_1`.
+
+> The upstream `manifest.yaml` lists its metric key as **`mean/reward`**, not `pass@1` —
+> that is the key the Gym/direct (`bench_direct.yaml`) recipes emit, and it is shared by
+> the whole SWE-bench family (Verified / Multilingual / Pro). On the harbor path the
+> certificates in `reviewed_configs/…/swebench_verified/certificates/` record `pass@1`
+> (e.g. `0.516`), so `pass@1` is still what you report for a nel-next run. Quote the key
+> name alongside the number so a `mean/reward` from the direct path is never compared
+> against it.
+
+Read from `report.md` (Benchmark / Scorer table) in the run dir or
+`nel eval report -r <run_id>`, then push to MLflow with
 `nel-next.sh mlflow-push -r <run_id> -c <cfg>` (SLURM doesn't auto-export). Keep
 `timeout_strategy` + the instruction/system prompt fixed across baseline vs quantized
 for a valid delta.

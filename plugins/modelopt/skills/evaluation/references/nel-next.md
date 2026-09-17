@@ -52,6 +52,14 @@ prints the resolved spec, so check there if a run behaves unexpectedly.
   (SWE-bench), and `${MLFLOW_TRACKING_URI}` from `.env`. Run **`modelopttools:eval-config`**
   (Step 3b) to write them — it holds the canonical values, arch/region rules, and
   points to the per-benchmark `bench.yaml` source of truth.
+- **`HARBOR_ECS_REGION` selects the sandbox region** (`sandbox.region` +
+  `cluster.container_env.AWS_DEFAULT_REGION`); upstream defaults it to `us-east-1` for
+  TB2.1 and `us-east-2` for SWE-bench. The two then treat the ECR differently: TB2.1's
+  repo **name tracks the region**
+  (`463701203462.dkr.ecr.<region>.amazonaws.com/harbor-<region>`), while SWE-bench's is
+  pinned to `463701203462.dkr.ecr.us-west-2.amazonaws.com/harbor-swebench` whatever the
+  sandbox region is. So changing the region changes the TB2.1 ECR and not the SWE-bench
+  one — keep `${HARBOR_*_ECR_REPOSITORY}` in `.env` consistent with it.
 - `set -a && source .env && set +a` before running so `${VAR}` resolves.
 
 ## Architecture — where each piece runs
@@ -154,9 +162,13 @@ with its own `run_id`, copying the shared `services:` block.
   catch. This pair is safe because it is what the TB2.1 + SWE-bench parity runs executed, not
   by construction. **Re-canary whenever either side moves**, and treat a post-allocation
   `ValidationError` mentioning an unknown/missing config field as skew, not a config bug.
-- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
-  against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
-  pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
+- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch;
+  `gitlab-master.nvidia.com/dl/joc/competitive_evaluation/nemo-evaluator-next:0.5.0.1-harbor`).
+  Re-check against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which
+  is the single pin for TB2.1 + SWE-bench Verified + SWE-bench Multilingual and does move.
+  It also carries `nemo_evaluator_next_version`, which the canonical configs echo into the
+  MLflow tag of the same name — tag your runs with it too, so a score traces back to the
+  image that produced it. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
   Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
 - **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600). A
   smaller proxy timeout silently truncates long agent turns.
@@ -178,7 +190,16 @@ with its own `run_id`, copying the shared `services:` block.
   for the life of the run, full request + response bodies, and the whole list is re-serialized
   on each write. A long agentic run that is 400ing or rate-limiting (the failure this dumps
   diagnose) grows the proxy without bound — exactly the run you can least afford to lose.
-  Chain position is per benchmark (last for TB2.1, first for SWE-bench).
+  It is **first** in the chain for both TB2.1 and SWE-bench (it used to be last for TB2.1).
+- **Interceptor lists replace wholesale on merge, they do not append.** A leaf that adds
+  one interceptor must restate the whole chain from the model fragment
+  (`http_pairs_dump` → `drop_params` → `consolidate_system` → `reasoning` →
+  `reasoning_replay`, plus SWE-bench's `system_message` + `turn_counter`). Half a chain is
+  a silent scoring change, not an error.
+- **`proxy.model_traffic.capture_request_body: true` belongs on the service leaf**
+  (`services.<alias>.proxy.model_traffic`), never in a shared/benchmark-level block: a
+  shared `services:` entry is alias-only with no `type`, which fails the service
+  discriminator in every other model's composed config.
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.
@@ -188,7 +209,9 @@ with its own `run_id`, copying the shared `services:` block.
 - **MLflow export — config + a post-run push.** Add `output.export: [mlflow]` +
   `export_config.mlflow` (hardcode `experiment_name: <user>/<model>` — `${USER}=root`
   in-container; tags `framework`/`model`/`temperature`/`top_p` + `checkpoint_path`/`benchmark`
-  for dashboard attribution). `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
+  for dashboard attribution; canonical also sets `task_name: <benchmark-slug>`,
+  `nemo-evaluator-next-version`, and `log_config_params: true`).
+  `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
   Step 3b — canonical `mlflow.frontier-evals.nvidia.com`; **not** the `mlflow-nemo-evaluator`
   alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
   the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back
