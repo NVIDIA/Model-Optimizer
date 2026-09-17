@@ -32,8 +32,6 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
-from modelopt.torch.export.shard_cast_utils import resolve_checkpoint_file
-
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
 
 
@@ -302,6 +300,54 @@ _IS_MAIN_WEIGHT_SHARD = re.compile(r"model(-\d{5}-of-\d{5})?\.safetensors")
 # weights). ``adapter_model.safetensors`` is a PEFT adapter, whose tensor names do not overlap
 # the index, so only a name rule catches it.
 _IS_WEIGHT_DUPLICATE = re.compile(r"(consolidated[^/]*|adapter_model)\.safetensors")
+
+
+# --- HF checkpoint layout: what counts as a file inside a checkpoint -------------------
+# A hub snapshot stores every entry as a symlink into a sibling ``blobs/`` directory, so
+# "inside the checkpoint" has to mean the snapshot dir OR that blob root. Getting this wrong
+# in either direction is costly: reject links and no hub checkpoint works, follow them blindly
+# and a checkpoint can name any file on the host.
+_MAX_CHECKPOINT_METADATA_BYTES = 128 * 1024 * 1024
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _snapshot_blob_root(source_root: Path) -> Path | None:
+    if source_root.parent.name != "snapshots":
+        return None
+    blob_root = source_root.parent.parent / "blobs"
+    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
+
+
+def _allowed_source_roots(src_dir: Path) -> list[Path]:
+    source_root = src_dir.resolve(strict=True)
+    allowed_roots = [source_root]
+    if blob_root := _snapshot_blob_root(source_root):
+        allowed_roots.append(blob_root)
+    return allowed_roots
+
+
+def resolve_checkpoint_file(
+    src_dir: Path,
+    relative_path: str | Path,
+    *,
+    max_bytes: int | None = _MAX_CHECKPOINT_METADATA_BYTES,
+) -> Path:
+    """Resolve a contained regular checkpoint file and optionally bound its size."""
+    src = src_dir / relative_path
+    try:
+        resolved_src = src.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
+    if not resolved_src.is_file():
+        raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
+    if not any(_is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)):
+        raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
+    if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
+        raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
+    return resolved_src
 
 
 def off_index_safetensors_files(src: "str | os.PathLike") -> list[str]:
