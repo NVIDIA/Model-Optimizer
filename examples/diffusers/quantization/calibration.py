@@ -99,6 +99,7 @@ class Calibrator:
                     common_args = {
                         "prompt": prompt_batch,
                         "num_inference_steps": self.config.n_steps,
+                        "output_type": "latent",
                     }
                     self.pipe(**common_args, **extra_args).images
                 pbar.update(1)
