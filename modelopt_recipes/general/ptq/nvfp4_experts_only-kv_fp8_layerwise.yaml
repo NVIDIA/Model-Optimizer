@@ -28,6 +28,7 @@ quantize:
     # Max calibration is fast and does not typically need checkpointing.
     layerwise:
       enable: true
+      get_qdq_activations_from_prev_layer: false
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*.experts.*weight_quantizer'

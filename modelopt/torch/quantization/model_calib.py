@@ -1031,6 +1031,9 @@ def local_hessian_calibrate(
     experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
     unsupported and left at their max-calibrated scale.
 
+    We recommend using Local-Hessian with layerwise calibration enabled
+    (``"layerwise": {"enable": True}``) and a calibration batch size of 1.
+
     Args:
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
@@ -2064,13 +2067,14 @@ def layerwise_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
 
-    Every knob arrives through ``calib_kwargs`` from :class:`LayerwiseConfig`, which
+    Every knob arrives through ``calib_kwargs`` from
+    :class:`LayerwiseConfig <modelopt.torch.quantization.config.LayerwiseConfig>`, which
     documents them; ``export_dir`` additionally leaves the model in export form, so it
     must not be used for inference afterwards.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     export_dir = calib_kwargs.pop("export_dir", None)
-    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", True)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
@@ -2264,6 +2268,9 @@ def gptq(
       more accurate Hessian estimates.
     * **Non-layerwise** (``layerwise.enable=False``): called once on the full
       model. All layers are quantized in parallel from the original activations.
+
+    We recommend enabling layerwise calibration
+    (``"layerwise": {"enable": True}``) and using a calibration batch size of 1.
 
     Per-module steps:
 

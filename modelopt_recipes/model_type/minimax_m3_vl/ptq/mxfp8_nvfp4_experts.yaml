@@ -34,6 +34,7 @@ quantize:
     fp8_scale_sweep: false
     layerwise:
       enable: true
+      get_qdq_activations_from_prev_layer: false
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: "*weight_quantizer"

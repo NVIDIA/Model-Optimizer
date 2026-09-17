@@ -30,6 +30,7 @@ quantize:
     method: max
     layerwise:
       enable: true
+      get_qdq_activations_from_prev_layer: false
       calib_mutates_weights: false
   quant_cfg:
     - $import: base_disable_all

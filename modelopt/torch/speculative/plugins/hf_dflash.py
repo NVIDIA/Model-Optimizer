@@ -1290,18 +1290,23 @@ class HFDFlashModel(DFlashModel):
         # Extract target hidden states (raw, before FC projection)
         hid_offset = 1
         selected = [base_outputs.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
-        target_hidden = torch.cat(selected, dim=-1)
+        # target_layer_ids spans early and late layers, so under device_map="auto" these come
+        # off different GPUs and the cat below fails. Everything the draft consumes is gathered
+        # onto the draft's own device -- the last base layer's, per _place_draft() -- which is
+        # also not input_ids.device once the base model is sharded. All no-ops single-device.
+        device = self._base_device()
+        target_hidden = torch.cat([h.to(device) for h in selected], dim=-1)
 
         block_size = self.dflash_block_size
         bsz = input_ids.shape[0]
-        device = input_ids.device
 
         # Block: first token is base_token (anchor), rest are mask
         block_ids = torch.full(
             (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
         )
-        block_ids[:, 0] = base_token.squeeze(-1)
-        noise_embedding = self._base_model_embeddings(block_ids)
+        block_ids[:, 0] = base_token.squeeze(-1).to(device)
+        # The embedding table is on the first shard; its output follows it, not block_ids.
+        noise_embedding = self._base_model_embeddings(block_ids).to(device)
 
         # Position IDs: training uses [0..L-1, 0..L-1] where noise positions
         # mirror context positions. At inference, block predicts tokens at
@@ -1326,6 +1331,7 @@ class HFDFlashModel(DFlashModel):
         draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
         draft_tokens = draft_logits.argmax(dim=-1)  # [B, block_size-1]
 
-        # Return up to `steps` tokens
+        # Return up to `steps` tokens. base_token already follows input_ids; draft_tokens is
+        # produced on the draft's device, and callers cat both onto the running sequence.
         num_tokens = min(steps, block_size - 1)
-        return base_token, draft_tokens[:, :num_tokens]
+        return base_token, draft_tokens[:, :num_tokens].to(input_ids.device)
