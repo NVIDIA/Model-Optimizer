@@ -248,6 +248,7 @@ extend-ignore = [
 "tests/*" = ["B017", "D", "E402", "PT012"]
 "plugins/modelopt/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
+"modelopt/torch/kernels/quantization/linear_attention/fla_*.py" = ["D", "E501"] # Vendored flash-linear-attention kernels
 "*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
 "modelopt/torch/puzzletron/*" = [
@@ -320,6 +321,15 @@ disable_error_code = ["attr-defined"]
 # than annotated to modelopt's strict mypy (e.g. worker-global ``X | None`` initialized lazily).
 [[tool.mypy.overrides]]
 module = ["examples.diffusers.fastgen.preprocess.*"]
+ignore_errors = true
+
+# Vendored from fla-org/flash-linear-attention (MIT); kept faithful to upstream rather than
+# annotated to modelopt's strict mypy (Triton loop indices, ``*tensor.shape`` unpacking).
+[[tool.mypy.overrides]]
+module = [
+    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_delta_h",
+    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_gated_delta_rule",
+]
 ignore_errors = true
 
 [tool.bandit]

@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# FP8 E4M3 fake quantization of ``w``, the WY-transformed keys that multiply the GatedDeltaNet
+# recurrent state inside the chunked kernel, with a dynamic scale per token and head
+# (``w`` is ``[B, T, H, K]``; ``axis: [0, 1, 2]`` reduces over K). Pairs with
+# ``gdn_state_fp8_dynamic`` to emulate an FP8 x FP8 state matmul. Unlike the state quantizer this
+# one runs on the tensor itself, so any ModelOpt quantizer configuration works here, calibrated
+# ones included. Needs flash-linear-attention >= 0.5.1 and Triton.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_w_quantizer'
+    cfg:
+      num_bits: e4m3
+      axis: [0, 1, 2]
+      type: dynamic

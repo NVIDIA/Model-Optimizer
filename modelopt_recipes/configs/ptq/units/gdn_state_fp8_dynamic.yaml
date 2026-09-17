@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# FP8 E4M3 fake quantization of the GatedDeltaNet (linear attention) recurrent state with a
+# dynamic scale computed inside the kernel from the state itself (no calibration). The state is
+# ``[N, H, K, V]`` for ``N`` sequences; ``axis: [0, 1]`` scales each sequence's head state on its
+# own, in tiles of ``gdn_state_qdq_block_v`` value columns (default: the kernel's 64-column tile,
+# two scales per head for V = 128; set 128 on the quantized module for one scale per head). This
+# is the only configuration the kernel implements. Applied at every kernel chunk boundary
+# (64 tokens) during calibration, QAT and QAD; needs flash-linear-attention >= 0.5.1 and Triton.
+# See ``modelopt.torch.quantization.plugins.gated_delta_net``.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_state_quantizer'
+    cfg:
+      num_bits: e4m3
+      axis: [0, 1]
+      type: dynamic
