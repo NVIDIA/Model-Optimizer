@@ -184,9 +184,11 @@ def fit_from_counts(
         if not records:
             continue
         for record in records:
-            if len(record["total_tiles"]) != len(threshold_trials):
+            total_width = len(record["total_tiles"])
+            skipped_width = len(record["skipped_tiles"])
+            if total_width != len(threshold_trials) or skipped_width != len(threshold_trials):
                 raise ValueError(
-                    f"{phase} record has {len(record['total_tiles'])} counters but "
+                    f"{phase} record has {total_width}/{skipped_width} total/skipped counters but "
                     f"{len(threshold_trials)} threshold trials are configured"
                 )
         calibrator = DynamicThresholdCalibrator(

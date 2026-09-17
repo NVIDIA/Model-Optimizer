@@ -335,10 +335,11 @@ def attention_calibrate(
             ``k``/``v`` tensors. ``k``/``v`` are then dummies whose only
             meaningful dimension is ``shape[1] == num_kv_heads`` (used to
             compute the GQA ratio).
-        v_cache: Paged V cache ``[num_blocks, page_size, num_kv_heads, head_dim]``.
+        v_cache: Paged V cache with the same logical 4D shape as ``k_cache``.
+            Both caches must be supplied together.
         block_table: Page table ``[batch, max_blocks_per_seq]`` mapping each
             sequence's block indices to global page IDs.
-        page_size: Number of tokens per page in the KV cache.
+        page_size: Positive number of tokens per page, matching the caches' page dimension.
 
     Returns:
         Tuple of ``(output, sparsity_counters)``:
@@ -350,9 +351,19 @@ def attention_calibrate(
     """
     threshold_trials = _validate_threshold_trials(threshold_trials)
 
+    if (k_cache is None) != (v_cache is None):
+        raise ValueError("k_cache and v_cache must be provided together")
     is_paged = k_cache is not None
-    if is_paged and block_table is None:
-        raise ValueError("block_table is required when k_cache/v_cache are provided.")
+    if is_paged:
+        assert k_cache is not None and v_cache is not None
+        if block_table is None or block_table.ndim != 2:
+            raise ValueError("a rank-2 block_table is required for paged K/V")
+        if k_cache.ndim != 4 or v_cache.ndim != 4 or k_cache.shape != v_cache.shape:
+            raise ValueError("k_cache and v_cache must have the same logical 4D shape")
+        if page_size <= 0 or k_cache.shape[1] != page_size:
+            raise ValueError(
+                "page_size must be positive and match the paged K/V cache page dimension"
+            )
 
     # Calibration has only been validated with uniform-length batches (current
     # diffusion + RULER paths). Varlen inputs would exercise code paths in the

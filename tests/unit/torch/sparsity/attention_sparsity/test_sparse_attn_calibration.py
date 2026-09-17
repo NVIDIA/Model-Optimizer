@@ -127,11 +127,17 @@ class TestFitFromCounts:
     def test_empty_phase_produces_no_fit(self):
         assert fit_from_counts({"decode": []}, DEFAULT_THRESHOLD_TRIALS) == {}
 
-    def test_fit_rejects_counter_width_vs_trials_mismatch(self):
-        """Consistent-but-wrong widths must not silently zip against the trials."""
-        short = len(DEFAULT_THRESHOLD_TRIALS) - 1
+    @pytest.mark.parametrize(
+        ("total_delta", "skipped_delta"), [(-1, -1), (-1, 0), (1, 0), (0, -1), (0, 1)]
+    )
+    def test_fit_rejects_counter_width_vs_trials_mismatch(self, total_delta, skipped_delta):
+        width = len(DEFAULT_THRESHOLD_TRIALS)
         records = [
-            {"sample_length": 4096, "total_tiles": [100] * short, "skipped_tiles": [50] * short}
+            {
+                "sample_length": 4096,
+                "total_tiles": [100] * (width + total_delta),
+                "skipped_tiles": [50] * (width + skipped_delta),
+            }
         ]
         with pytest.raises(ValueError, match="threshold trials are configured"):
             fit_from_counts({"prefill": records}, DEFAULT_THRESHOLD_TRIALS)

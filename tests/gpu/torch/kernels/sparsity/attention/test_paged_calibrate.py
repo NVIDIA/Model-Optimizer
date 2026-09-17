@@ -51,6 +51,45 @@ def _pack_paged(k, v, page_size, *, layout="NHD", shuffle=True, num_spare_blocks
 
 
 class TestPagedCalibrate:
+    @pytest.mark.parametrize(
+        ("key_shape", "value_shape", "table_shape", "page_size", "error"),
+        [
+            (None, (1, 16, 2, 64), (1, 1), 16, "provided together"),
+            ((1, 16, 2, 64), None, (1, 1), 16, "provided together"),
+            ((16, 2, 64), (16, 2, 64), (1, 1), 16, "same logical 4D shape"),
+            ((1, 16, 2, 64), (1, 16, 1, 64), (1, 1), 16, "same logical 4D shape"),
+            ((1, 16, 2, 64), (1, 16, 2, 64), None, 16, "rank-2 block_table"),
+            ((1, 16, 2, 64), (1, 16, 2, 64), (1,), 16, "rank-2 block_table"),
+            ((1, 16, 2, 64), (1, 16, 2, 64), (1, 1), 0, "page_size"),
+            ((1, 16, 2, 64), (1, 16, 2, 64), (1, 1), -1, "page_size"),
+            ((1, 16, 2, 64), (1, 16, 2, 64), (1, 1), 32, "page_size"),
+        ],
+    )
+    def test_rejects_invalid_paged_cache(
+        self, key_shape, value_shape, table_shape, page_size, error
+    ):
+        # CPU tensors ensure malformed metadata is rejected before any CUDA launch.
+        q = torch.empty(1, 4, 64)
+        k = torch.empty(0, 2, 64)
+        locs = torch.zeros(1, dtype=torch.int32)
+        lens = torch.ones(1, dtype=torch.int32)
+        with pytest.raises(ValueError, match=error):
+            attention_calibrate(
+                q,
+                k,
+                k,
+                locs,
+                lens,
+                1,
+                threshold_trials=TRIALS,
+                k_cache=torch.empty(key_shape) if key_shape is not None else None,
+                v_cache=torch.empty(value_shape) if value_shape is not None else None,
+                block_table=torch.zeros(table_shape, dtype=torch.int32)
+                if table_shape is not None
+                else None,
+                page_size=page_size,
+            )
+
     @pytest.mark.parametrize("layout", ["NHD", "HND"])
     @pytest.mark.parametrize("seq_len", [256, 300, 512])  # 300: non-128-aligned padding
     def test_paged_matches_contiguous_prefill(self, seq_len, layout):
