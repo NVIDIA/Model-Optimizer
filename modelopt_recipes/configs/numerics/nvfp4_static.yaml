@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Static NVFP4 E2M1 block quantizer attributes with FP8 E4M3 scales.
+# Static NVFP4 E2M1 weight quantizer with FP8 E4M3 scales, WITHOUT Four-Over-Six.
+#
+# `type: static` means the per-block scales are calibrated and stored ahead of export, so the
+# quantizer carries one amax per 16-element block. Under `type: dynamic` the per-block scales are
+# derived from the data inside the kernel and the quantizer holds only a single global scalar --
+# which means a scale-search algorithm (mse, local_hessian) can only search that one scalar.
+# Use this for weights whenever the calibration pipeline is meant to search per-block scales.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e2m1
@@ -21,3 +27,5 @@ block_sizes:
   -1: 16
   type: static
   scale_bits: e4m3
+# Autoquant LP cost: 4 value bits + an FP8 (8-bit) scale per 16-element block = 4.5 bits/element.
+effective_bits: 4.5

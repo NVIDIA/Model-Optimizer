@@ -1799,6 +1799,19 @@ def awq_lite(
             else:
                 with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module, name)
+                    # awq_lite declares it produces WEIGHT_AMAX, and for a *static*-block weight
+                    # quantizer it otherwise does not: the search pass quantizes against a grid
+                    # derived on the fly, and smoothing then changes the weight again. Without
+                    # this the stage leaves an uncalibrated, unpromoted quantizer behind, and a
+                    # following stage running with `skip_max_init=True` (which trusts that
+                    # declaration) would inherit nothing to refine. Calibrating here also
+                    # promotes it to StaticBlockScaleQuantizer. Dynamic-block quantizers are
+                    # left untouched -- they need no stored amax, and writing one would change
+                    # the grid they already use.
+                    if module.weight_quantizer.is_static_block_quant:
+                        max_calibrate(
+                            module, lambda module: module.weight_quantizer(module.weight)
+                        )
 
             module.awq_lite.cleanup()
             if not debug:

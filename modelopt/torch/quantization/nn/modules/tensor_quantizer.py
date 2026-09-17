@@ -899,7 +899,21 @@ class TensorQuantizer(nn.Module):
         if not self.is_mx_format:
             amax = self._get_amax(inputs)
 
-        if self.block_sizes is not None and self.block_sizes.get("type", "static") == "dynamic":
+        # An NVFP4 *static*-block quantizer whose per-block amax has not been calibrated yet has
+        # no grid to quantize against, and would fall through to the E4M3-only branch below and
+        # raise "Only support E=4 & M=3". Route it through the dynamic block kernel instead: the
+        # static grid before any search refines it *is* the per-block max grid, which is exactly
+        # what that kernel derives from the data, so this is the same answer a max-calibrated
+        # static quantizer would give -- at no extra cost. This is what lets forward-pass-based
+        # algorithms (awq_lite's alpha search) run against a static config at all; they quantize
+        # weights before anything has calibrated them.
+        uncalibrated_static_nvfp4 = (
+            self.is_nvfp4_static and not hasattr(self, "_amax") and not self._use_constant_amax
+        )
+
+        if (
+            self.block_sizes is not None and self.block_sizes.get("type", "static") == "dynamic"
+        ) or uncalibrated_static_nvfp4:
             # Dynamic block quantization
             block_size = self.block_sizes.get(-1, None) or self.block_sizes.get(
                 inputs.dim() - 1, None
