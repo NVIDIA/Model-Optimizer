@@ -727,3 +727,46 @@ def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
         cfg = {"quantization": {"quant_algo": algo}}
         assert seed_carried_over_exclusions(model, cfg) == []
         assert "exclude_modules" not in cfg["quantization"]
+
+
+def test_both_export_paths_exclude_carried_weights_identically():
+    """The unified and layerwise exporters must emit the same exclusions for the same model.
+
+    They reach exclude_modules at different times -- get_quant_config after its per-layer pass,
+    the layerwise exporter from finalize() because bind() snapshotted its config during
+    calibration -- so it is easy for them to drift into different formats (wildcards one side,
+    literals the other) for identical inputs. Both go through seed_carried_over_exclusions now;
+    this pins that they agree.
+    """
+    hidden = 16
+    model = _FakeMoEModel(hidden=hidden)
+    mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
+    model._modelopt_carried_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",
+    ]
+
+    # Unified: seeded inside get_quant_config.
+    unified = get_quant_config(model)["quantization"]["exclude_modules"]
+
+    # Layerwise: the same config minus the carried names, re-seeded at finalize() time.
+    layerwise_cfg = {
+        "quantization": {
+            "quant_algo": "NVFP4",
+            "exclude_modules": [e for e in unified if not e.startswith("model.mtp")],
+        }
+    }
+    seed_carried_over_exclusions(model, layerwise_cfg)
+
+    assert sorted(layerwise_cfg["quantization"]["exclude_modules"]) == sorted(unified)
+
+
+def test_seeded_exclusions_are_literal_module_names():
+    """Exact names, not prefix wildcards: a literal cannot over-match a quantized module."""
+    model = torch.nn.Module()
+    model._modelopt_carried_source_keys = ["model.mtp.eh_proj.weight"]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": []}}
+
+    assert seed_carried_over_exclusions(model, cfg) == ["model.mtp.eh_proj"]
+    assert cfg["quantization"]["exclude_modules"] == ["model.mtp.eh_proj"]
+    assert not any("*" in e for e in cfg["quantization"]["exclude_modules"])

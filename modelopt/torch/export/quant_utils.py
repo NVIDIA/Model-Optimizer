@@ -1588,11 +1588,18 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
 def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
     """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
 
-    :func:`get_quant_config` seeds these itself, but the layerwise exporter snapshots its config
-    during ``bind()`` -- while calibration is still running, long before ``export_hf_checkpoint``
-    records what it carried. A layerwise export would otherwise copy GLM-4.7's
+    The single place carried weights reach ``exclude_modules``, for both exporters.
+    :func:`get_quant_config` calls it once the per-layer pass is done, and the layerwise exporter
+    calls it again from ``finalize()`` -- it snapshots its config during ``bind()``, while
+    calibration is still running and long before ``export_hf_checkpoint`` records what it carried,
+    so it has no chance to see them any earlier. Without it a layerwise export copies GLM-4.7's
     ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
     NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+
+    Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
+    emitting the same thing, and a literal can never over-match a module the export did in fact
+    quantize -- the risk :func:`_prefix_wildcard_summarize_exclude_modules` has to guard against by
+    consulting ``quantized_layers``, which is unavailable by the time the layerwise path runs.
 
     Returns the names it added. No-op when the export is not uniformly quantized -- there is no
     single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
@@ -1817,14 +1824,17 @@ def get_quant_config(
     for router_name in _get_unquantized_moe_router_names(model):
         layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
 
-    # Weights carried over from the source checkpoint have no module in the live model, so the
-    # walk above cannot see them. Record them as unquantized too, or a never-quantized MTP head
-    # would be written in original precision yet be absent from exclude_modules.
-    for carried_name in _get_carried_over_module_names(model):
-        layer_config_dict.setdefault(carried_name + ".quantization", QUANTIZATION_NONE)
-
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
+
+    # Carried weights are seeded AFTER the per-layer pass, through the same helper the layerwise
+    # exporter calls. Seeding them into layer_config_dict instead would route them through
+    # _prefix_wildcard_summarize_exclude_modules and emit wildcards here, while the layerwise path
+    # -- which can only act once its config is already built -- emits literals: one model, two
+    # exporters, two different-looking quantization_config.ignore. The summarizer cannot serve both,
+    # because it needs `quantized_layers` to avoid a wildcard swallowing a quantized module and
+    # process_layer_quant_config pops that key before returning.
+    seed_carried_over_exclusions(model, quant_config)
 
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
     needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (
