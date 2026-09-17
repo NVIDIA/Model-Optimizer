@@ -16,6 +16,7 @@
 import pytest
 import torch
 
+import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 from modelopt.torch.quantization.ggml.iq2_xs import (
     IQ2_XS_BLOCK_BYTES,
     dequantize_iq2_xs,
@@ -33,6 +34,15 @@ def test_iq2_xs_canonical_grid():
     assert set(grid.unique().tolist()) == {8.0, 25.0, 43.0}
     assert grid[0].tolist() == [8.0] * 8
     assert grid[-1].tolist() == [43.0] * 8
+
+
+def test_iq2_xs_grid_normalizes_unindexed_cuda_device(monkeypatch):
+    cached = torch.empty(0)
+    indexed_device = torch.device("cuda", 7)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
+    monkeypatch.setitem(iq2_xs_module._GRID_CACHE, indexed_device, cached)
+
+    assert iq2_xs_grid("cuda") is cached
 
 
 def test_iq2_xs_zero_block_has_canonical_zero_encoding():
@@ -93,6 +103,37 @@ def test_iq2_xs_dequantizes_pinned_scale_factor():
 def test_iq2_xs_requires_complete_last_dimension_blocks():
     with pytest.raises(ValueError, match="last weight dimension"):
         quantize_iq2_xs(torch.ones(2, 257))
+
+
+def test_iq2_xs_treats_nonfinite_values_as_zero():
+    weight = torch.randn(1, 256)
+    weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf])
+
+    packed, _ = quantize_iq2_xs(weight)
+    expected, _ = quantize_iq2_xs(torch.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0))
+
+    assert torch.equal(packed, expected)
+
+
+@pytest.mark.parametrize(
+    "weight_shape",
+    [
+        torch.tensor(256),
+        torch.tensor([[1, 256]]),
+        torch.tensor([1.0, 256.0]),
+        torch.tensor([0, 256]),
+    ],
+)
+def test_iq2_xs_rejects_invalid_shape_metadata(weight_shape):
+    packed = torch.zeros((1, 1, 74), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match=r"weight_shape|logical weight shape"):
+        dequantize_iq2_xs(packed, weight_shape)
+
+
+def test_iq2_xs_rejects_scalar_packed_payload():
+    with pytest.raises(ValueError, match="packed_weights"):
+        dequantize_iq2_xs(torch.tensor(0, dtype=torch.uint8), torch.tensor([1, 256]))
 
 
 def test_iq2_xs_fake_quant_has_pass_through_gradient():

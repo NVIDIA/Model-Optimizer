@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TensorQuantizer backend dispatch for GGML-compatible IQ formats."""
+"""TensorQuantizer backend dispatch for GGML-compatible weight-only IQ formats."""
 
 import torch
 
@@ -25,10 +25,14 @@ from .iq2_xs import iq2_xs_fake_quant
 def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     """Dispatch an IQ quantizer to its format-specific implementation."""
     num_bits = getattr(quantizer, "num_bits", None)
+    extra_args = getattr(quantizer, "backend_extra_args", None) or {}
+    unknown_args = set(extra_args) - {"block_chunk_size"}
+    if unknown_args:
+        raise ValueError(f"Unsupported ggml backend_extra_args: {sorted(unknown_args)}")
     if num_bits == "iq1_s":
-        return iq1_s_fake_quant(inputs, quantizer)
+        return iq1_s_fake_quant(inputs, quantizer, **extra_args)
     if num_bits == "iq2_xs":
-        return iq2_xs_fake_quant(inputs, quantizer)
+        return iq2_xs_fake_quant(inputs, quantizer, **extra_args)
     raise ValueError("The ggml backend requires num_bits='iq1_s' or 'iq2_xs'")
 
 

@@ -63,7 +63,12 @@ from functools import cache
 import torch
 
 from ..extensions import get_cuda_ext_iq1_s
-from .common import GGML_BLOCK_SIZE, validate_packed_weights, validate_weight
+from .common import (
+    GGML_BLOCK_SIZE,
+    fake_quantize_with_cache,
+    validate_packed_weights,
+    validate_weight,
+)
 
 __all__ = [
     "IQ1_S_BLOCK_BYTES",
@@ -150,6 +155,8 @@ def _grid_bytes() -> bytes:
 def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
     """Return the canonical IQ1_S ternary grid as float32."""
     resolved_device = torch.device(device or "cpu")
+    if resolved_device.type == "cuda" and resolved_device.index is None:
+        resolved_device = torch.device("cuda", torch.cuda.current_device())
     if resolved_device not in _GRID_CACHE:
         raw = torch.tensor(list(_grid_bytes()), dtype=torch.uint8).view(torch.int8)
         _GRID_CACHE[resolved_device] = raw.reshape(2048, 8).to(
@@ -160,7 +167,7 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
 
 def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
-    x = blocks.float()
+    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
     block_count = x.shape[0]
     vectors = x.reshape(block_count, 32, 8)
     xnorm = vectors.square().sum(dim=-1)
@@ -237,9 +244,12 @@ def quantize_iq1_s(
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 50]``
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
-    the logical-shape metadata is kept on CPU.
+    the logical-shape metadata is kept on CPU. Non-finite input elements are
+    treated as zero during packing.
     """
     validate_weight(weight, "IQ1_S")
+    if isinstance(block_chunk_size, bool) or not isinstance(block_chunk_size, int):
+        raise TypeError("block_chunk_size must be an integer")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
@@ -297,10 +307,20 @@ def dequantize_iq1_s(
     return decoded.reshape(shape).to(dtype)
 
 
-def iq1_s_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
-    """IQ1_S backend for TensorQuantizer, with pass-through backward."""
+def iq1_s_fake_quant(
+    inputs: torch.Tensor,
+    quantizer,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+) -> torch.Tensor:
+    """IQ1_S weight backend for TensorQuantizer, with pass-through backward."""
     if getattr(quantizer, "num_bits", None) != "iq1_s":
         raise ValueError("The ggml IQ1_S backend requires num_bits='iq1_s'")
-    packed, shape = quantize_iq1_s(inputs)
-    reconstructed = dequantize_iq1_s(packed, shape, dtype=inputs.dtype)
-    return inputs + (reconstructed - inputs).detach()
+    return fake_quantize_with_cache(
+        inputs,
+        quantizer,
+        format_name="iq1_s",
+        block_chunk_size=block_chunk_size,
+        quantize=quantize_iq1_s,
+        dequantize=dequantize_iq1_s,
+    )

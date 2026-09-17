@@ -55,6 +55,17 @@ def test_iq1_s_cuda_zero_encoding_matches_ggml_block_layout():
     assert torch.equal(dequantize_iq1_s(packed, shape), weight)
 
 
+def test_iq1_s_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch):
+    weight = torch.randn((1, 256), device="cuda", dtype=torch.bfloat16)
+    weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf], device="cuda")
+
+    packed = _extension().pack(weight, iq1_s_grid("cuda")).reshape(1, 1, 50)
+    monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
+    reference, _ = quantize_iq1_s(weight)
+
+    assert torch.equal(packed, reference)
+
+
 def test_iq1_s_cuda_falls_back_to_pytorch_encoder(monkeypatch):
     monkeypatch.setattr(iq1_s_module, "get_cuda_ext_iq1_s", lambda: None)
     generator = torch.Generator(device="cuda").manual_seed(1234)

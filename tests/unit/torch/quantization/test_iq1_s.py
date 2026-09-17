@@ -16,6 +16,7 @@
 import pytest
 import torch
 
+import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 from modelopt.torch.quantization.ggml.iq1_s import (
     IQ1_S_BLOCK_BYTES,
     dequantize_iq1_s,
@@ -32,6 +33,15 @@ def test_iq1_s_canonical_grid():
     assert grid.dtype == torch.float32
     assert set(grid.unique().tolist()) == {-1.0, 0.0, 1.0}
     assert grid[0].tolist() == [-1.0] * 8
+
+
+def test_iq1_s_grid_normalizes_unindexed_cuda_device(monkeypatch):
+    cached = torch.empty(0)
+    indexed_device = torch.device("cuda", 7)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
+    monkeypatch.setitem(iq1_s_module._GRID_CACHE, indexed_device, cached)
+
+    assert iq1_s_grid("cuda") is cached
 
 
 def test_iq1_s_zero_block_has_canonical_zero_encoding():
@@ -108,6 +118,37 @@ def test_iq1_s_search_is_independent_of_default_dtype():
 def test_iq1_s_requires_complete_last_dimension_blocks():
     with pytest.raises(ValueError, match="last weight dimension"):
         quantize_iq1_s(torch.ones(2, 257))
+
+
+def test_iq1_s_treats_nonfinite_values_as_zero():
+    weight = torch.randn(1, 256)
+    weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf])
+
+    packed, _ = quantize_iq1_s(weight)
+    expected, _ = quantize_iq1_s(torch.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0))
+
+    assert torch.equal(packed, expected)
+
+
+@pytest.mark.parametrize(
+    "weight_shape",
+    [
+        torch.tensor(256),
+        torch.tensor([[1, 256]]),
+        torch.tensor([1.0, 256.0]),
+        torch.tensor([0, 256]),
+    ],
+)
+def test_iq1_s_rejects_invalid_shape_metadata(weight_shape):
+    packed = torch.zeros((1, 1, 50), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match=r"weight_shape|logical weight shape"):
+        dequantize_iq1_s(packed, weight_shape)
+
+
+def test_iq1_s_rejects_scalar_packed_payload():
+    with pytest.raises(ValueError, match="packed_weights"):
+        dequantize_iq1_s(torch.tensor(0, dtype=torch.uint8), torch.tensor([1, 256]))
 
 
 def test_iq1_s_fake_quant_has_pass_through_gradient():

@@ -26,12 +26,18 @@ def _extension():
     return extension
 
 
+def _pack(weight):
+    blocks = weight.contiguous().reshape(-1, 256)
+    scales = iq2_xs_module._predict_iq2_xs_scales(blocks)
+    return _extension().pack(weight, iq2_xs_grid("cuda"), scales)
+
+
 def test_iq2_xs_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
     generator = torch.Generator(device="cuda").manual_seed(1234)
     weight = torch.randn((8, 512), generator=generator, device="cuda", dtype=torch.bfloat16)
 
-    packed = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(8, 2, 74)
-    packed_again = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(8, 2, 74)
+    packed = _pack(weight).reshape(8, 2, 74)
+    packed_again = _pack(weight).reshape(8, 2, 74)
     monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
     reference, shape = quantize_iq2_xs(weight)
     reconstructed = dequantize_iq2_xs(packed, shape)
@@ -48,7 +54,7 @@ def test_iq2_xs_cuda_pack_matches_pytorch_encoder_and_is_decodable(monkeypatch):
 
 def test_iq2_xs_cuda_zero_encoding_matches_ggml_block_layout():
     weight = torch.zeros((1, 256), device="cuda", dtype=torch.bfloat16)
-    packed = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(1, 1, 74)
+    packed = _pack(weight).reshape(1, 1, 74)
     shape = torch.tensor(weight.shape, device="cuda")
 
     assert not packed.any()
@@ -57,9 +63,20 @@ def test_iq2_xs_cuda_zero_encoding_matches_ggml_block_layout():
 
 def test_iq2_xs_cuda_underflowed_scale_has_canonical_zero_encoding():
     weight = torch.full((1, 256), -1e-6, device="cuda", dtype=torch.bfloat16)
-    packed = _extension().pack(weight, iq2_xs_grid("cuda")).reshape(1, 1, 74)
+    packed = _pack(weight).reshape(1, 1, 74)
 
     assert not packed.any()
+
+
+def test_iq2_xs_cuda_nonfinite_policy_matches_pytorch_encoder(monkeypatch):
+    weight = torch.randn((1, 256), device="cuda", dtype=torch.bfloat16)
+    weight[0, :3] = torch.tensor([torch.nan, torch.inf, -torch.inf], device="cuda")
+
+    packed = _pack(weight).reshape(1, 1, 74)
+    monkeypatch.setattr(iq2_xs_module, "get_cuda_ext_iq2_xs", lambda: None)
+    reference, _ = quantize_iq2_xs(weight)
+
+    assert torch.equal(packed, reference)
 
 
 def test_iq2_xs_cuda_falls_back_to_pytorch_encoder(monkeypatch):

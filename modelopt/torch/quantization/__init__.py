@@ -31,4 +31,5 @@ from .utils import update_quant_cfg_with_kv_cache_quant
 # Imported last to register the backend without cycling through quantization.qtensor.
 # A dynamic import prevents isort from hoisting it into the import block above.
 ggml = _import_module(".ggml", __name__)
+globals().update({name: getattr(ggml, name) for name in ggml.__all__})
 del _import_module

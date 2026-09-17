@@ -61,7 +61,12 @@ from functools import cache
 import torch
 
 from ..extensions import get_cuda_ext_iq2_xs
-from .common import GGML_BLOCK_SIZE, validate_packed_weights, validate_weight
+from .common import (
+    GGML_BLOCK_SIZE,
+    fake_quantize_with_cache,
+    validate_packed_weights,
+    validate_weight,
+)
 
 __all__ = [
     "IQ2_XS_BLOCK_BYTES",
@@ -80,8 +85,9 @@ _IQ2_XS_NATIVE_MAX = 43 * 31 / 8
 _IQ2_XS_SCALE_ANCHOR_MIN = 0.65
 _IQ2_XS_SCALE_ANCHOR_MAX = 0.92
 _IQ2_XS_PEAK_TO_RMS_TAPER = 0.035
-# At 256 blocks, the largest IQ2_XS search temporary is about 64 MiB in FP32.
+# At 256 blocks, the largest IQ2_XS search temporary is about 16 MiB in FP32.
 _DEFAULT_BLOCK_CHUNK_SIZE = 256
+_SCALE_BLOCK_CHUNK_SIZE = 4096
 
 # Compact byte representation of the canonical [512, 8] grid. Values are only
 # 8, 25, and 43. Keeping this as checkpoint-independent package data avoids
@@ -155,21 +161,17 @@ def _grid_bytes() -> bytes:
 def iq2_xs_grid(device: torch.device | str | None = None) -> torch.Tensor:
     """Return the canonical IQ2_XS magnitude grid as float32."""
     resolved_device = torch.device(device or "cpu")
+    if resolved_device.type == "cuda" and resolved_device.index is None:
+        resolved_device = torch.device("cuda", torch.cuda.current_device())
     if resolved_device not in _GRID_CACHE:
         values = torch.tensor(list(_grid_bytes()), dtype=torch.float32)
         _GRID_CACHE[resolved_device] = values.reshape(512, 8).to(device=resolved_device)
     return _GRID_CACHE[resolved_device]
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
-    x = blocks.float()
-    block_count = x.shape[0]
-    vectors = x.reshape(block_count, 32, 8)
-    magnitudes = vectors.abs()
-    negative = vectors < 0
-    odd_parity = negative.sum(dim=-1).remainder(2).bool()
-
+def _predict_iq2_xs_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """Predict one FP16 super-block scale for each flattened block."""
+    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
     amax = x.abs().amax(dim=1)
     rms = x.square().mean(dim=1).sqrt()
     peak_to_rms = torch.where(rms > 0, amax / rms, torch.zeros_like(rms))
@@ -178,7 +180,21 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     anchor_ratio = (1.0 - _IQ2_XS_PEAK_TO_RMS_TAPER * peak_to_rms).clamp(
         _IQ2_XS_SCALE_ANCHOR_MIN, _IQ2_XS_SCALE_ANCHOR_MAX
     )
-    d = ((amax / _IQ2_XS_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
+    return ((amax / _IQ2_XS_NATIVE_MAX) * anchor_ratio).clamp(max=65504.0).to(torch.float16)
+
+
+def _encode_blocks(
+    blocks: torch.Tensor, grid: torch.Tensor, scales: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Encode a moderate-size batch of flattened 256-value blocks."""
+    x = torch.nan_to_num(blocks.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    block_count = x.shape[0]
+    vectors = x.reshape(block_count, 32, 8)
+    magnitudes = vectors.abs()
+    negative = vectors < 0
+    odd_parity = negative.sum(dim=-1).remainder(2).bool()
+
+    d = _predict_iq2_xs_scales(x) if scales is None else scales
     d_float = d.float()
 
     xnorm = vectors.square().sum(dim=-1)
@@ -235,9 +251,12 @@ def quantize_iq2_xs(
 
     Returned shapes are ``[*weight.shape[:-1], weight.shape[-1] // 256, 74]``
     and ``[weight.ndim]``. The packed payload remains on the weight's device;
-    the logical-shape metadata is kept on CPU.
+    the logical-shape metadata is kept on CPU. Non-finite input elements are
+    treated as zero during packing.
     """
     validate_weight(weight, "IQ2_XS")
+    if isinstance(block_chunk_size, bool) or not isinstance(block_chunk_size, int):
+        raise TypeError("block_chunk_size must be an integer")
     if block_chunk_size <= 0:
         raise ValueError(f"block_chunk_size must be positive, got {block_chunk_size}")
 
@@ -247,7 +266,11 @@ def quantize_iq2_xs(
     if weight.is_cuda:
         extension = get_cuda_ext_iq2_xs()
         if extension is not None:
-            packed = extension.pack(blocks, grid)
+            scale_chunks = [
+                _predict_iq2_xs_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
+                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
+            ]
+            packed = extension.pack(blocks, grid, torch.cat(scale_chunks))
             packed_shape = (
                 *weight.shape[:-1],
                 weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -255,10 +278,11 @@ def quantize_iq2_xs(
             )
             return packed.reshape(packed_shape), logical_shape
 
-    chunks = [
-        _encode_blocks(blocks[start : start + block_chunk_size], grid)
-        for start in range(0, blocks.shape[0], block_chunk_size)
-    ]
+    chunks = []
+    for start in range(0, blocks.shape[0], block_chunk_size):
+        block_chunk = blocks[start : start + block_chunk_size]
+        scales = _predict_iq2_xs_scales(block_chunk)
+        chunks.append(_encode_blocks(block_chunk, grid, scales))
     packed_shape = (
         *weight.shape[:-1],
         weight.shape[-1] // IQ2_XS_BLOCK_SIZE,
@@ -303,10 +327,20 @@ def dequantize_iq2_xs(
     return decoded.reshape(shape).to(dtype)
 
 
-def iq2_xs_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
-    """IQ2_XS backend for TensorQuantizer, with pass-through backward."""
+def iq2_xs_fake_quant(
+    inputs: torch.Tensor,
+    quantizer,
+    *,
+    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+) -> torch.Tensor:
+    """IQ2_XS weight backend for TensorQuantizer, with pass-through backward."""
     if getattr(quantizer, "num_bits", None) != "iq2_xs":
         raise ValueError("The ggml IQ2_XS backend requires num_bits='iq2_xs'")
-    packed, shape = quantize_iq2_xs(inputs)
-    reconstructed = dequantize_iq2_xs(packed, shape, dtype=inputs.dtype)
-    return inputs + (reconstructed - inputs).detach()
+    return fake_quantize_with_cache(
+        inputs,
+        quantizer,
+        format_name="iq2_xs",
+        block_chunk_size=block_chunk_size,
+        quantize=quantize_iq2_xs,
+        dequantize=dequantize_iq2_xs,
+    )
