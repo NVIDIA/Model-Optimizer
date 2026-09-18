@@ -942,6 +942,17 @@ def export_quantized(
                         )
                     # Calibration already wrote every shard, the index and the configs.
                     print(f"Layerwise export already wrote the checkpoint to {export_path}")
+                elif args.fakequant_export:
+                    # Simulated-quantization checkpoint: keep the original dtype weights and
+                    # record the modelopt state beside them, rather than compressing to the
+                    # deployment format. `save_pretrained` under `enable_huggingface_checkpointing`
+                    # writes `modelopt_state.pth`, which `from_pretrained` restores automatically,
+                    # so the result is loadable by any plain HF consumer (e.g. lm_eval) with the
+                    # quantizers reinstated. The compressed export has no such state file and
+                    # needs a runtime that understands `quant_method: "modelopt"`.
+                    mto.enable_huggingface_checkpointing()
+                    full_model.save_pretrained(export_path)
+                    print(f"Fake-quantized checkpoint (with modelopt_state) saved to {export_path}")
                 else:
                     export_hf_checkpoint(
                         full_model,
@@ -1583,6 +1594,19 @@ def parse_args() -> argparse.Namespace:
             "Skip pre/post-quantization preview calls that invoke model.generate(). "
             "Note: this does not skip calibration or batch-size probing. "
             "For very large models, pair with --batch_size 1 to avoid max-batch probing."
+        ),
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--fakequant_export",
+        help=(
+            "Export a simulated-quantization checkpoint instead of a compressed one: the "
+            "weights keep their original dtype and the modelopt state is saved alongside them "
+            "as modelopt_state.pth, so from_pretrained reinstates the quantizers. Use this to "
+            "evaluate calibration quality with plain HF tooling (e.g. examples/llm_eval), "
+            "which cannot read the compressed export's quant_method='modelopt'. The resulting "
+            "checkpoint is not a deployment artifact and is the size of the unquantized model."
         ),
         default=False,
         action="store_true",
