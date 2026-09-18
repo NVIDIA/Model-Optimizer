@@ -2722,8 +2722,8 @@ def _recipes_where_the_mtp_disable_is_load_bearing():
 def test_mtp_disable_recipes_are_discovered():
     """Guard the discovery above: an empty list would make the tests below silently skip."""
     assert _recipes_where_the_mtp_disable_is_load_bearing(), (
-        "No shipped recipe ends with an 'mtp.*' disable -- discovery is broken, or the "
-        "entry was removed from every recipe that had one."
+        "No shipped recipe has a load-bearing 'mtp.*' disable -- discovery is broken, or "
+        "the entry was removed from every recipe whose patterns reach into the MTP block."
     )
 
 
