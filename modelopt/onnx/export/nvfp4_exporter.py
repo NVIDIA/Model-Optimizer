@@ -430,4 +430,10 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
         utils.topologically_sort_graph_nodes(graph)
 
+        if fp4_qdq_nodes:
+            default_opset = next(
+                opset for opset in onnx_model.opset_import if opset.domain in {"", "ai.onnx"}
+            )
+            default_opset.version = max(default_opset.version, 23)
+
         return onnx_model
