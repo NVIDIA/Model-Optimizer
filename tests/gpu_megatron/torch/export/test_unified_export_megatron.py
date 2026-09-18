@@ -324,6 +324,35 @@ def test_megatron_iq_export_rejects_tensor_parallelism():
         exporter.save_pretrained("unused", "unused")
 
 
+def test_megatron_iq_export_rejects_pipeline_parallelism():
+    """IQ packing requires PP=1 so the fused-MoE rejection reaches every rank.
+
+    The rejection raises from inside the per-expert loops, so a stage owning no expert would
+    skip it and block in save_pretrained's collectives while its peers exit. PP=1 removes the
+    divergence rather than trying to detect it.
+    """
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
+    linear.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits="iq2_xs",
+            block_sizes={-1: 256},
+            backend="ggml",
+        )
+    )
+    exporter = object.__new__(GPTModelExporter)
+    exporter.model = torch.nn.Sequential(linear)
+
+    with (
+        patch.object(exporter, "_is_sidecar_writer_rank", return_value=False),
+        patch.object(uem, "get_pipeline_model_parallel_rank", return_value=0),
+        patch.object(uem, "get_pipeline_model_parallel_world_size", return_value=2),
+        patch.object(uem, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(uem, "get_tensor_model_parallel_world_size", return_value=1),
+        pytest.raises(NotImplementedError, match="pipeline model parallel size 1"),
+    ):
+        exporter.save_pretrained("unused", "unused")
+
+
 def _test_unified_export_megatron(
     tmp_path,
     model_type,
