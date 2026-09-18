@@ -27,8 +27,9 @@ Load out-of-tree:
      "kv_role":"kv_producer",
      "kv_connector_extra_config":{"sidecar_port":"18999","pool_slots":"64","max_tokens":"512"}}'
 
-Scope: TP>=1 (hidden states are replicated across TP ranks; only rank 0 owns the
-pool + sidecar and serves them), host(pinned) memory (container UCX has no CUDA),
+Scope: TP>=1 using vLLM's LBHNC cache layout (the connector receives each layer
+as a BHNC view). Hidden states are replicated across TP ranks; only rank 0 owns the
+pool + sidecar and serves them. Uses host-pinned memory (container UCX has no CUDA),
 ring-slot reuse (fine when in-flight requests < pool_slots; no credit protocol yet).
 PP>1 is not supported (the capture layer lives on one PP rank; owner election only
 covers TP). The sidecar is unauthenticated and binds all interfaces, so it assumes a
@@ -54,19 +55,39 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     SupportsHMA,
 )
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from .hf_streaming_dataset import nixl_backends_from_env
+from modelopt.torch.speculative.plugins.hf_streaming_dataset import nixl_backends_from_env
 
 logger = init_logger(__name__)
 
 
 def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens):
-    """Gather the first ``num_tokens`` rows of ``kv_cache`` addressed by ``slot_mapping``."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    """Gather hidden states from vLLM's per-layer ``[B, H, N, C]`` cache view.
+
+    ``H`` is the number of requested capture planes and ``N`` is the KV-cache
+    block size. Keeping those axes distinct is essential: treating ``N`` as the
+    feature axis turns a six-plane capture into sixteen planes at block size 16.
+    """
+    if kv_cache.ndim != 4:
+        raise ValueError(
+            "RdmaHiddenStatesConnector expected a [blocks, heads, block_size, head_size] "
+            f"cache tensor, got shape {tuple(kv_cache.shape)}."
+        )
+    block_size = kv_cache.shape[2]
+    block_ids = slot_mapping[:num_tokens] // block_size
+    block_offsets = slot_mapping[:num_tokens] % block_size
+    return kv_cache[block_ids, :, block_offsets, :]
+
+
+def build_request_slot_mapping(block_ids, num_tokens, block_size, device):
+    """Map one request's logical token positions to its allocated cache blocks."""
+    if len(block_ids) * block_size < num_tokens:
+        raise ValueError("Hidden-state cache blocks do not cover the prompt")
+    blocks = torch.as_tensor(block_ids, device=device, dtype=torch.long)
+    positions = torch.arange(num_tokens, device=device)
+    return blocks[positions // block_size] * block_size + positions % block_size
 
 
 @dataclass
@@ -76,11 +97,17 @@ class ReqMeta:
     req_id: str
     token_ids: torch.Tensor
     slot: int
+    block_ids: list[int]
 
     @staticmethod
-    def make(req_id, token_ids, slot):
+    def make(req_id, token_ids, slot, block_ids):
         """Build a :class:`ReqMeta`, tensorizing ``token_ids``."""
-        return ReqMeta(req_id=req_id, token_ids=torch.tensor(token_ids), slot=slot)
+        return ReqMeta(
+            req_id=req_id,
+            token_ids=torch.tensor(token_ids),
+            slot=slot,
+            block_ids=list(block_ids),
+        )
 
 
 @dataclass
@@ -89,9 +116,9 @@ class RdmaConnMeta(KVConnectorMetadata):
 
     requests: list = field(default_factory=list)
 
-    def add(self, req_id, token_ids, slot):
+    def add(self, req_id, token_ids, slot, block_ids):
         """Append one request's capture metadata."""
-        self.requests.append(ReqMeta.make(req_id, token_ids, slot))
+        self.requests.append(ReqMeta.make(req_id, token_ids, slot, block_ids))
 
 
 class _Sidecar(BaseHTTPRequestHandler):
@@ -162,6 +189,20 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """Read pool/sidecar config from ``kv_connector_extra_config`` and init state."""
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self._role = role
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+        groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else []
+        capture_groups = [
+            index
+            for index, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+        ]
+        if len(capture_groups) == 1:
+            self._capture_group_id = capture_groups[0]
+        elif kv_cache_config is None or (len(groups) == 1 and not capture_groups):
+            self._capture_group_id = 0
+        else:
+            raise ValueError("RDMA capture requires exactly one hidden-state cache group")
         ex = self._kv_transfer_config.get_from_extra_config
         self._sidecar_port = int(ex("sidecar_port", "18999"))
         self._pool_slots = int(ex("pool_slots", "64"))
@@ -229,9 +270,22 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
         kv = kv_caches[self.cache_layers[0]]
-        # per-token feature = everything past [num_blocks, block_size]
-        self._per_token_elems = int(prod(kv.shape[2:]))
-        self._feat_shape = tuple(kv.shape[2:])
+        if kv.ndim != 4:
+            raise ValueError(
+                "RdmaHiddenStatesConnector expected vLLM's per-layer [B, H, N, C] "
+                f"cache view, got shape {tuple(kv.shape)}."
+            )
+        hf_config = self._vllm_config.speculative_config.draft_model_config.hf_config
+        capture_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", ())
+        if kv.shape[1] != len(capture_ids):
+            raise ValueError(
+                f"RdmaHiddenStatesConnector cache exposes {kv.shape[1]} hidden-state planes "
+                f"but EAGLE requested {len(capture_ids)} ids: {list(capture_ids)}."
+            )
+        # Per-token feature is [capture_planes, hidden_size]. The cache's third
+        # dimension is its block size and must not leak into the transferred shape.
+        self._per_token_elems = int(kv.shape[1] * prod(kv.shape[3:]))
+        self._feat_shape = (kv.shape[1], *kv.shape[3:])
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
 
@@ -309,15 +363,6 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready = torch.cuda.Event()
         ready.record()
         cs.wait_event(ready)
-        slot_mapping = get_forward_context().slot_mapping[layer_name]
-        # Assumes new-request tokens sit contiguously at the front of slot_mapping; bound
-        # the offset walk so an unexpected layout fails loud instead of short-slicing.
-        n_capture = sum(req.token_ids.shape[0] for req in md.requests)
-        assert n_capture <= slot_mapping.shape[0], (
-            f"RdmaHiddenStatesConnector: capturing {n_capture} tokens but slot_mapping has "
-            f"only {slot_mapping.shape[0]}; unexpected batch layout (chunked prefill?)."
-        )
-        offset = 0
         for req in md.requests:
             n = req.token_ids.shape[0]
             nelems = n * self._per_token_elems
@@ -337,11 +382,13 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                         self._max_tokens,
                     )
                     self._oversize_warned = True
-                offset += n
                 continue
             with torch.cuda.stream(cs):
-                rsm = slot_mapping[offset : offset + n]
-                offset += n
+                # The runner can reorder requests independently of scheduler metadata.
+                # Address this request's allocated cache blocks, not batch offsets.
+                rsm = build_request_slot_mapping(
+                    req.block_ids, n, kv_layer.shape[2], kv_layer.device
+                )
                 hs_gpu = extract_from_kv_cache(kv_layer, rsm, n)  # [n, *feat]
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
@@ -375,9 +422,8 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Assign each newly scheduled request a ring-pool slot for this step.
 
-        ``save_kv_layer`` walks ``slot_mapping`` with a running offset, so it needs each
-        prompt computed whole in one step; assert that here (chunked prefill would split
-        it and silently misalign the capture).
+        Each request carries its own hidden-state cache blocks, independent of the
+        runner's batch order. Only complete, uncached prompts are supported.
         """
         meta = RdmaConnMeta()
         for nr in scheduler_output.scheduled_new_reqs:
@@ -388,9 +434,16 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 f"(disable chunked prefill): req {nr.req_id} scheduled {n_sched} of "
                 f"{len(prompt)} prompt tokens."
             )
+            if nr.num_computed_tokens != 0:
+                raise ValueError("RDMA capture requires an uncached complete prompt")
             slot = self._slot_ctr % self._pool_slots
             self._slot_ctr += 1
-            meta.add(nr.req_id, token_ids=prompt, slot=slot)
+            meta.add(
+                nr.req_id,
+                token_ids=prompt,
+                slot=slot,
+                block_ids=nr.block_ids[self._capture_group_id],
+            )
         return meta
 
     def request_finished(self, request, block_ids):
@@ -435,7 +488,7 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config):
-        """Require NHD layout so each token's hidden state stays contiguous."""
+        """Use vLLM's layer/block/head/token/channel cache layout."""
         if cls is KVConnectorBase_V1:
             raise TypeError("not on base class")
-        return "NHD"
+        return "LBHNC"
