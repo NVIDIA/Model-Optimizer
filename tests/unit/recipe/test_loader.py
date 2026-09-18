@@ -2661,9 +2661,15 @@ def test_load_recipe_round_trips_non_ascii_description(tmp_path):
     assert "—" in load_recipe(recipe).metadata.description
 
 
-_NEMOTRON_3_SUPER_RECIPES = [
-    "models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse",
-    "models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-max-calib",
+_MTP_DISABLE_PATTERN = "mtp.*"
+
+# Representative Megatron-Core quantizer names inside the MTP block. The ``backbone.``
+# counterparts of these are what the entry must NOT touch.
+_MTP_QUANTIZER_NAMES = [
+    "mtp.layers.0.mixer.in_proj.weight_quantizer",
+    "mtp.layers.0.mixer.in_proj.input_quantizer",
+    "mtp.layers.0.mixer.out_proj.weight_quantizer",
+    "mtp.layers.0.mixer.experts.0.up_proj.weight_quantizer",
 ]
 
 
@@ -2683,8 +2689,46 @@ def _effective_enable(quant_cfg: list[dict], quantizer_name: str) -> bool | None
     return state
 
 
-@pytest.mark.parametrize("recipe_path", _NEMOTRON_3_SUPER_RECIPES)
-def test_nemotron_3_super_leaves_the_mtp_block_in_bf16(recipe_path):
+def _recipes_where_the_mtp_disable_is_load_bearing():
+    """Shipped PTQ recipes where the ``mtp.*`` entry actually changes the outcome.
+
+    Discovered rather than listed, because the entry is copied into each recipe that needs
+    it and the failure mode is a new recipe gaining one that nobody adds here -- which has
+    already happened once, and was caught in review rather than by a test.
+
+    Scoped by behaviour, not by position or presence, and both alternatives are traps:
+
+    * **Presence** sweeps in every recipe that imports ``configs/ptq/units/default_disabled_quantizers``,
+      since ``load_recipe`` resolves ``$import`` before this sees it. For those the entry is
+      inert -- nothing else in the recipe matches an ``mtp.`` name -- so the assertions below
+      are vacuous there.
+    * **Position** ("ends with ``mtp.*``") would mean a recipe whose entry was moved off the
+      end quietly leaves the parameter set and stops being tested, rather than failing. That
+      is the silent-skip trap ``test_ptq_recipes_are_discovered`` exists to catch, and it is
+      the reason this filter asks what the recipe would do *without* the entry: a misplaced
+      entry still qualifies, and then fails.
+    """
+    found = []
+    for recipe_path in _BUILTIN_PTQ_RECIPES:
+        quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+        if not any(e["quantizer_name"] == _MTP_DISABLE_PATTERN for e in quant_cfg):
+            continue
+        without_mtp = [e for e in quant_cfg if e["quantizer_name"] != _MTP_DISABLE_PATTERN]
+        if any(_effective_enable(without_mtp, n) is True for n in _MTP_QUANTIZER_NAMES):
+            found.append(recipe_path)
+    return found
+
+
+def test_mtp_disable_recipes_are_discovered():
+    """Guard the discovery above: an empty list would make the tests below silently skip."""
+    assert _recipes_where_the_mtp_disable_is_load_bearing(), (
+        "No shipped recipe ends with an 'mtp.*' disable -- discovery is broken, or the "
+        "entry was removed from every recipe that had one."
+    )
+
+
+@pytest.mark.parametrize("recipe_path", _recipes_where_the_mtp_disable_is_load_bearing())
+def test_mtp_disable_leaves_the_mtp_block_in_bf16(recipe_path):
     """The ``mtp.*`` entry must actually disable the MTP block, and only it.
 
     Two things this pins, neither of which the smoke-load tests touch:
@@ -2697,32 +2741,32 @@ def test_nemotron_3_super_leaves_the_mtp_block_in_bf16(recipe_path):
       this entry is inert there and only the Megatron path exercises it.
     """
     quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+    without_mtp = [e for e in quant_cfg if e["quantizer_name"] != _MTP_DISABLE_PATTERN]
 
-    # Inside the MTP block: matched by the broad patterns, then undone by the last entry.
-    for quantizer_name in (
-        "mtp.layers.0.mixer.in_proj.weight_quantizer",
-        "mtp.layers.0.mixer.in_proj.input_quantizer",
-        "mtp.layers.0.mixer.out_proj.weight_quantizer",
-        "mtp.layers.0.mixer.experts.0.up_proj.weight_quantizer",
-    ):
+    for quantizer_name in _MTP_QUANTIZER_NAMES:
         assert _effective_enable(quant_cfg, quantizer_name) is False, (
             f"{quantizer_name} should be BF16 -- 'mtp.*' must come last and must match it"
         )
 
-    # The same modules outside the MTP block keep the quantization the recipe is for.
-    for quantizer_name in (
-        "backbone.layers.0.mixer.in_proj.weight_quantizer",
-        "backbone.layers.0.mixer.in_proj.input_quantizer",
-        "backbone.layers.0.mixer.out_proj.weight_quantizer",
-        "backbone.layers.0.mixer.experts.0.up_proj.weight_quantizer",
-    ):
-        assert _effective_enable(quant_cfg, quantizer_name) is True, (
-            f"{quantizer_name} is outside the MTP block and must stay quantized"
+        # ...and only because of this entry. Without it the recipe would quantize the MTP
+        # block, which is what makes the entry load-bearing rather than redundant.
+        assert _effective_enable(without_mtp, quantizer_name) is True, (
+            f"{quantizer_name} is already disabled without the 'mtp.*' entry, so this "
+            "recipe does not actually exercise it -- the assertion above proves nothing"
+        )
+
+        # The same module outside the MTP block must be untouched by the entry. Compared
+        # against the recipe's own behaviour rather than a fixed True/False, so this holds
+        # for a weight-only recipe (w4a16) as well as a full W/A one.
+        outside = quantizer_name.replace("mtp.", "backbone.", 1)
+        assert _effective_enable(quant_cfg, outside) == _effective_enable(without_mtp, outside), (
+            f"'mtp.*' changed {outside}, which is outside the MTP block -- the pattern is "
+            "matching more than it should"
         )
 
 
-@pytest.mark.parametrize("recipe_path", _NEMOTRON_3_SUPER_RECIPES)
-def test_nemotron_3_super_mtp_entry_is_order_dependent(recipe_path):
+@pytest.mark.parametrize("recipe_path", _recipes_where_the_mtp_disable_is_load_bearing())
+def test_mtp_disable_entry_is_order_dependent(recipe_path):
     """Moving the ``mtp.*`` entry off the end silently re-enables the MTP block.
 
     The guard for the comment the recipe carries ("Must stay last, after the patterns it
@@ -2730,13 +2774,13 @@ def test_nemotron_3_super_mtp_entry_is_order_dependent(recipe_path):
     would leave every other assertion in this file passing.
     """
     quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
-    mtp_entries = [e for e in quant_cfg if e["quantizer_name"] == "mtp.*"]
+    mtp_entries = [e for e in quant_cfg if e["quantizer_name"] == _MTP_DISABLE_PATTERN]
     assert len(mtp_entries) == 1, "expected exactly one 'mtp.*' entry"
-    assert quant_cfg[-1]["quantizer_name"] == "mtp.*", (
+    assert quant_cfg[-1]["quantizer_name"] == _MTP_DISABLE_PATTERN, (
         "'mtp.*' must be the last entry; it is last-match-wins that makes it work"
     )
 
     # And prove the dependency rather than asserting position alone: with the entry moved
     # to the front, the MTP quantizer it is meant to disable comes back on.
     reordered = [quant_cfg[-1], *quant_cfg[:-1]]
-    assert _effective_enable(reordered, "mtp.layers.0.mixer.in_proj.weight_quantizer") is True
+    assert _effective_enable(reordered, _MTP_QUANTIZER_NAMES[0]) is True
