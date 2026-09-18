@@ -124,6 +124,23 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 > [!NOTE]
 > HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** and **Qwen3.5-VL**. Other VLMs such as Gemma3-VL are saved in Megatron checkpoint format only.
 
+### Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a `quantize.py` run on an MLflow server:
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --mlflow https://<your-mlflow-server>/
+```
+
+The run opens *before* the model loads, so a bad URI fails in seconds rather than after a full calibration. Only the master rank uploads: the invocation, every argument as a searchable param, the resolved recipe, that rank's log and the quantizer summary — plus `.experiment.json` written into `--export_megatron_path` once the checkpoint is saved, so a checkpoint on disk names the run that produced it. A failed run is still recorded, with its traceback.
+
+`--mlflow_experiment` defaults to `$USER/megatron_bridge_quantize/<model basename>-<recipe name, or --quant_cfg>`, and `--mlflow_run_name` to the UTC start time. Authentication uses MLflow's own environment variables. See the [`hf_ptq` README](../hf_ptq/README.md#tracking-runs-with-mlflow) for the full artifact list and the `$MLFLOW_TRACKING_URI` semantics.
+
 ## Distillation
 
 This section shows how to distill a student model from a teacher model in the Megatron-Bridge framework.

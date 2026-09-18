@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import getpass
 import io
+import json
 import logging
 import sys
 from pathlib import Path
@@ -25,11 +27,15 @@ import pytest
 import modelopt
 from modelopt.torch.utils.logging import TeeStream
 from modelopt.torch.utils.mlflow import (
+    EXPERIMENT_JSON,
     MlflowRunLogger,
     _git_sha,
     _redact_argv,
+    add_mlflow_args,
     command_text,
     default_experiment_name,
+    drop_experiment_json,
+    resolve_mlflow_args,
     validate_tracking_uri,
 )
 
@@ -750,3 +756,136 @@ def test_required_tracking_still_raises(monkeypatch):
 
     with pytest.raises(ConnectionError, match="no route to host"):
         _logger(required=True).start()
+
+
+# --- the CLI surface the example scripts share -----------------------------------------
+
+
+def _parser():
+    parser = argparse.ArgumentParser()
+    add_mlflow_args(parser, "hf_ptq", variant_help="recipe name")
+    return parser
+
+
+def _resolved(argv, parser=None):
+    parser = parser or _parser()
+    args = parser.parse_args(argv)
+    resolve_mlflow_args(args, parser, tool="hf_ptq", model="/models/Qwen3-0.6B", variant="nvfp4")
+    return args
+
+
+def test_flags_are_off_by_default():
+    args = _resolved([])
+
+    assert (args.mlflow, args.mlflow_experiment, args.mlflow_run_name) == (None, None, None)
+    assert args.mlflow_required is False
+
+
+def test_the_flag_names_the_experiment_and_normalizes_the_uri():
+    args = _resolved(["--mlflow", f"{URI}/"])
+
+    assert args.mlflow == URI
+    assert args.mlflow_required is True
+    assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-nvfp4"
+
+
+def test_an_explicit_experiment_is_left_alone():
+    args = _resolved(["--mlflow", URI, "--mlflow_experiment", "team/sweep"])
+
+    assert args.mlflow_experiment == "team/sweep"
+
+
+@pytest.mark.parametrize("sep", ["-", "_"])
+def test_multiword_flags_accept_both_spellings(sep):
+    """vLLM's FlexibleArgumentParser rewrites --foo_bar to --foo-bar before matching, so a
+    flag registered only under the underscored spelling is unreachable from its CLI."""
+    args = _resolved([f"--mlflow{sep}experiment", "team/sweep", f"--mlflow{sep}run{sep}name", "r"])
+
+    assert (args.mlflow_experiment, args.mlflow_run_name) == ("team/sweep", "r")
+
+
+def test_the_environment_alone_enables_tracking(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"{URI}/")
+
+    args = _resolved([])
+
+    assert args.mlflow == URI
+    assert args.mlflow_required is False  # ... but it was not an explicit request
+    assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-nvfp4"
+
+
+def test_the_flag_overrides_the_environment(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://other.example.com")
+
+    assert _resolved(["--mlflow", URI]).mlflow == URI
+
+
+def test_a_bad_uri_is_fatal_only_when_it_was_asked_for(monkeypatch):
+    """The variable is commonly exported for unrelated tooling, so it must not fail a job
+    that never asked to be tracked -- unlike an explicit --mlflow."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///local/mlruns")
+
+    with pytest.warns(UserWarning, match="continuing untracked"):
+        assert _resolved([]).mlflow is None
+
+    with pytest.raises(SystemExit):
+        _resolved(["--mlflow", "file:///local/mlruns"])
+
+
+# --- the provenance pointer a checkpoint carries ---------------------------------------
+
+
+def test_experiment_json_is_uploaded_and_written_beside_the_checkpoint(fake_mlflow, tmp_path):
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(tmp_path)
+    logger.finish("FINISHED")
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "deadbeef"
+    assert written["experiment_name"] == "tester/hf_ptq/model-nvfp4"
+    # Uploaded without the leading dot, which is awkward to browse in the MLflow UI.
+    assert json.loads(fake_mlflow.texts["experiment.json"]) == written
+
+
+def test_experiment_json_uploads_without_claiming_a_checkpoint(fake_mlflow, tmp_path):
+    """A run whose export never completed stays traceable from the server, but nothing on
+    disk may name it as the author of whatever checkpoint is sitting there."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(None)
+    logger.finish("FAILED")
+
+    assert "experiment.json" in fake_mlflow.texts
+    assert not (tmp_path / EXPERIMENT_JSON).exists()
+
+
+def test_experiment_json_is_inert_when_the_run_never_opened(tmp_path):
+    MlflowRunLogger(URI, "e", enabled=False).log_experiment_json(tmp_path)
+
+    assert not (tmp_path / EXPERIMENT_JSON).exists()
+
+
+def test_an_unwritable_checkpoint_dir_warns_instead_of_failing_the_run(
+    fake_mlflow, tmp_path, capsys
+):
+    """The weights are already on disk; losing the pointer must not fail the job."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(tmp_path / "does-not-exist")
+    logger.finish("FINISHED")
+
+    assert "could not write" in capsys.readouterr().out
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_dropping_the_pointer_is_idempotent(tmp_path):
+    (tmp_path / EXPERIMENT_JSON).write_text('{"run_id": "stale"}')
+
+    drop_experiment_json(tmp_path)
+    drop_experiment_json(tmp_path)  # nothing left to remove, and no error
+
+    assert not (tmp_path / EXPERIMENT_JSON).exists()

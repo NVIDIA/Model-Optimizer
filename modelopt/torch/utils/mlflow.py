@@ -20,8 +20,10 @@ be reproduced from its MLflow entry alone. ``mlflow`` is an optional dependency,
 only once tracking is actually enabled.
 """
 
+import argparse
 import contextlib
 import getpass
+import json
 import logging
 import os
 import re
@@ -32,6 +34,7 @@ import sys
 import tempfile
 import time
 import traceback
+import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -43,10 +46,15 @@ import modelopt
 from modelopt.torch.utils.logging import TeeStream
 
 __all__ = [
+    "EXPERIMENT_JSON",
     "MlflowRunLogger",
+    "add_mlflow_args",
     "command_text",
     "current_user",
     "default_experiment_name",
+    "drop_experiment_json",
+    "resolve_mlflow_args",
+    "resolve_tracking_uri",
     "validate_tracking_uri",
 ]
 
@@ -62,6 +70,14 @@ _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _SECRET_NAME = re.compile(r"token|api[-_]?key|password|passwd|secret|credential", re.IGNORECASE)
 _URI_USERINFO = re.compile(r"(?<=://)[^/\s@]+(?=@)")
 _MASK = "***"
+
+# Provenance pointer a checkpoint carries, dotted like the other sidecars a quantization
+# drops next to the weights so a checkpoint loader ignores it and it does not look like part
+# of the model.
+EXPERIMENT_JSON = ".experiment.json"
+
+# MLflow's own variable, so a shell that already exports it opts in without a flag.
+_TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
 
 
 def _stat_key(path: Path) -> tuple[int, int] | None:
@@ -389,6 +405,34 @@ class MlflowRunLogger:
         except Exception as e:
             print(f"[mlflow] WARNING: could not upload {artifact_path}: {e}")
 
+    def log_experiment_json(self, checkpoint_dir: Path | str | None = None) -> None:
+        """Record which MLflow run produced a checkpoint, on the server and in the checkpoint.
+
+        Tags point from a run to the checkpoint it wrote; this is the reverse, so a checkpoint
+        found on disk can be traced back to the run that produced it without searching the
+        server. The artifact goes up for any run that opened, so a failure is traceable from
+        the server side too.
+
+        *checkpoint_dir* also writes the JSON there as :data:`EXPERIMENT_JSON`. Pass it only
+        once the checkpoint is really on disk, since the file claims authorship of the weights
+        sitting next to it: an output directory existing proves nothing, as it may hold a
+        checkpoint from an earlier attempt whose weights this run never touched. Nothing is
+        recorded at all when the run never opened, which a URI taken from the environment
+        reaches by design.
+        """
+        info = self.run_info
+        if not info:
+            return
+        text = json.dumps(info, indent=2) + "\n"
+        self.log_text(EXPERIMENT_JSON.removeprefix("."), text)
+        if checkpoint_dir is None:
+            return
+        target = Path(checkpoint_dir) / EXPERIMENT_JSON
+        try:
+            target.write_text(text)
+        except OSError as e:
+            print(f"[mlflow] WARNING: could not write {target}: {e}")
+
     def _abort_run(self) -> None:
         """End a run that failed before :meth:`start` returned, so it is not left RUNNING."""
         if self._run is None:
@@ -569,3 +613,111 @@ class MlflowRunLogger:
         if self._log_path is not None:
             shutil.rmtree(self._log_path.parent, ignore_errors=True)
             self._log_path = None
+
+
+# The CLI surface below is shared by the example scripts that offer tracking, so a run is
+# configured the same way and named by the same convention whichever script opened it.
+
+_ENV_HELP = (
+    f"MLflow's own ${_TRACKING_URI_ENV} enables tracking without this flag, which overrides "
+    "it. A URI taken from the environment is best-effort: if it is unusable the run warns and "
+    "continues untracked."
+)
+
+_TRACKS_HELP = (
+    "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), uploading the "
+    "command, the resolved configuration, the run log and the run's summaries."
+)
+
+
+def add_mlflow_args(
+    parser: argparse.ArgumentParser,
+    tool: str,
+    tracks: str = _TRACKS_HELP,
+    variant_help: str = "recipe name, or the quantization format",
+) -> None:
+    """Add ``--mlflow``, ``--mlflow_experiment`` and ``--mlflow_run_name`` to *parser*.
+
+    *tool* names the script in the default experiment ``<user>/<tool>/<model>-<variant>`` (see
+    :func:`default_experiment_name`), *tracks* is the leading description of ``--mlflow`` --
+    what this particular script uploads -- and *variant_help* says what the script derives the
+    variant from. Pair with :func:`resolve_mlflow_args`.
+
+    The multi-word flags are registered under both the underscored and the dashed spelling:
+    vLLM's ``FlexibleArgumentParser`` rewrites every ``--foo_bar`` on the command line to
+    ``--foo-bar`` before matching, so the dashed spelling has to exist for the flag to be
+    reachable there at all, and a user moving between the example scripts should not have to
+    remember which spelling each one took.
+    """
+    parser.add_argument("--mlflow", default=None, help=f"{tracks} {_ENV_HELP}")
+    parser.add_argument(
+        "--mlflow_experiment",
+        "--mlflow-experiment",
+        default=None,
+        help=f"MLflow experiment name. Default: $USER/{tool}/<model basename>-<{variant_help}>.",
+    )
+    parser.add_argument(
+        "--mlflow_run_name",
+        "--mlflow-run-name",
+        default=None,
+        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
+    )
+
+
+def resolve_tracking_uri(
+    uri: str | None, parser: argparse.ArgumentParser
+) -> tuple[str | None, bool]:
+    """Settle the tracking URI from ``--mlflow`` and the environment.
+
+    Returns ``(uri or None, required)``, where *required* records that the flag was passed.
+    Only the flag is a deliberate request, so only the flag is fatal when the URI is unusable:
+    the environment variable is commonly exported for unrelated tooling and must not fail a
+    job that would otherwise have worked.
+    """
+    required = uri is not None
+    uri = uri or os.environ.get(_TRACKING_URI_ENV) or None
+    if not uri:
+        return None, required
+    try:
+        return validate_tracking_uri(uri), required
+    except ValueError as e:
+        if required:
+            parser.error(f"--mlflow: {e}")  # exits
+        warnings.warn(f"Ignoring {_TRACKING_URI_ENV}, continuing untracked: {e}")
+        return None, required
+
+
+def resolve_mlflow_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    tool: str,
+    model: str,
+    variant: str,
+) -> None:
+    """Settle where tracking is configured from, and name the experiment, in place.
+
+    Sets ``args.mlflow`` to the validated URI or ``None``, ``args.mlflow_required`` to whether
+    the flag asked for it, and defaults ``args.mlflow_experiment`` from *tool*, *model* and
+    *variant*. Pair with :func:`add_mlflow_args`.
+    """
+    args.mlflow, args.mlflow_required = resolve_tracking_uri(args.mlflow, parser)
+    if args.mlflow:
+        args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
+            tool, model, variant
+        )
+
+
+def drop_experiment_json(checkpoint_dir: Path | str) -> None:
+    """Remove a provenance pointer an untracked export would otherwise inherit.
+
+    A fresh checkpoint written into a reused output directory would keep the previous run's
+    pointer, and one produced from a tracked source checkpoint could be handed that source's
+    pointer. Either way the file would name a run that did not produce these weights. Call it
+    only for a completed export; a failed run leaves whatever checkpoint was already there,
+    pointer included.
+    """
+    stale = Path(checkpoint_dir) / EXPERIMENT_JSON
+    try:
+        stale.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"Warning: could not remove stale {stale}: {e}")

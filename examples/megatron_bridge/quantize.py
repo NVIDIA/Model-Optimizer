@@ -63,6 +63,7 @@ import gc
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+from mlflow_utils import add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
@@ -222,9 +223,17 @@ def get_args() -> argparse.Namespace:
         help="Skip the post-quantization generation sanity check.",
     )
 
+    add_mlflow_args(parser)
+
     args = parser.parse_args()
+    resolve_mlflow_args(args, parser)
 
     print_args(args)
+
+    # Flipped by main() once the Megatron checkpoint is on disk. The MLflow provenance
+    # pointer is gated on it rather than on --export_megatron_path existing, which proves
+    # nothing: print_quant_summary creates that directory before the save.
+    args.checkpoint_exported = False
 
     return args
 
@@ -423,6 +432,7 @@ def main(args: argparse.Namespace):
         hf_tokenizer_path=args.hf_model_name_or_path,
         hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
+    args.checkpoint_exported = True
     if is_vlm:
         print_rank_0(
             f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
@@ -462,7 +472,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args):
+            main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
