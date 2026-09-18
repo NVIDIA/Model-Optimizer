@@ -240,7 +240,11 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value in ("IQ1_S", "IQ2_XS"):
-        iq_metadata = _quant_algo_to_group_config(quant_algo_value)
+        # Forward the caller's group size so a mismatched one is rejected rather than rewritten
+        # to the format's block size.
+        iq_metadata = _quant_algo_to_group_config(
+            quant_algo_value, original_quantization_details.get("group_size")
+        )
         new_config.update(iq_metadata)
     elif quant_algo_value == "NVFP4_SVD":
         # NVFP4 + SVDQuant: NVFP4 weights/activations plus an AWQ-style

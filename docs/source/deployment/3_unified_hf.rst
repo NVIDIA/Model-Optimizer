@@ -50,8 +50,8 @@ The unified HF export API supports the following quantization formats:
 4. NVFP4_AWQ - NVIDIA 4-bit floating point with AWQ optimization
 5. INT4_AWQ - 4-bit integer with AWQ optimization
 6. W4A8_AWQ - 4-bit weights and 8-bit activations with AWQ optimization
-7. IQ1_S - 1-bit importance-aware quantization using the GGML block layout
-8. IQ2_XS - 2-bit importance-aware quantization using the GGML block layout
+7. IQ1_S - 1-bit codebook quantization using the GGML block layout
+8. IQ2_XS - 2-bit codebook quantization using the GGML block layout
 
 .. note::
    GGML has no equivalent for ModelOpt's per-tensor FP8 weight-and-activation format. In particular,

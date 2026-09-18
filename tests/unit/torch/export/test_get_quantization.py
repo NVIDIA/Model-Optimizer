@@ -45,6 +45,7 @@ from modelopt.torch.export.quant_utils import (
     get_quantization_format,
     postprocess_state_dict,
     process_layer_quant_config,
+    uses_iq_quantization,
 )
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
 
@@ -94,6 +95,78 @@ def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, ef
     assert hf_config["effective_bits"] == effective_bits
     assert hf_config["packing"] == "ggml"
     assert hf_config["block_payload_bytes"] == payload_bytes
+
+
+def _quantize_sequential(layer_cfgs):
+    """Quantize a two-Linear model, one quantizer config per layer."""
+    model = torch.nn.Sequential(
+        torch.nn.Linear(256, 256, bias=False), torch.nn.Linear(256, 256, bias=False)
+    )
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}, *layer_cfgs],
+            "algorithm": None,
+        },
+    )
+    return model
+
+
+_IQ_WEIGHT_CFG = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
+
+
+def test_uses_iq_quantization_sees_iq_behind_another_format():
+    """get_quantization_format stops at the first format, so the TP guard cannot rely on it."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "0.weight_quantizer", "cfg": {"num_bits": (4, 3)}},
+            {"quantizer_name": "1.weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+        ]
+    )
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+    assert uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_false_without_iq_layers():
+    model = _quantize_sequential(
+        [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    )
+
+    assert not uses_iq_quantization(model)
+
+
+def test_iq_export_rejects_enabled_input_quantizer():
+    """IQ payloads carry no activation scale, so W-IQ + A-FP8 must not export as weight-only."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "*weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="weight-only"):
+        get_quantization_format(model)
+
+
+def test_iq_hf_config_rejects_mismatched_group_size():
+    """A uniformly-IQ config must validate group_size, not silently rewrite it to the block size.
+
+    The MIXED_PRECISION branch already forwards the per-layer group size; this covers the
+    top-level branch, which did not.
+    """
+    with pytest.raises(ValueError, match="IQ2_XS requires group size 256, got 128"):
+        convert_hf_quant_config_format(
+            {
+                "quantization": {
+                    "quant_algo": "IQ2_XS",
+                    "group_size": 128,
+                    "effective_bits": 2.3125,
+                    "packing": "ggml",
+                    "block_payload_bytes": 74,
+                }
+            }
+        )
 
 
 def test_mixed_iq_config_group_does_not_claim_integer_weight_schema():

@@ -78,6 +78,7 @@ from .quant_utils import (
     get_weight_scaling_factor_2,
     process_layer_quant_config,
     to_quantized_weight,
+    uses_iq_quantization,
 )
 
 with import_plugin("transformers", verbose=False):
@@ -317,10 +318,10 @@ class GPTModelExporter:
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         quantization_format = self._get_quantization_format(self.model)
-        if (
-            quantization_format in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
-            and get_tensor_model_parallel_world_size() != 1
-        ):
+        # Scan every layer rather than trusting quantization_format, which is only the first
+        # non-NONE format in the tree: a mixed-format model whose IQ layers follow, say, an FP8
+        # one would otherwise slip past this guard and pack TP-sharded weights as whole ones.
+        if uses_iq_quantization(self.model) and get_tensor_model_parallel_world_size() != 1:
             raise NotImplementedError(
                 "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
                 "parallel size 1"
