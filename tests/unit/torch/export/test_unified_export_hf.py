@@ -16,6 +16,7 @@
 """Tests for tied-weight helpers in unified_export_hf."""
 
 import importlib.util
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -661,7 +662,11 @@ def test_carry_over_handler_survives_failing_before_the_keys_are_known(tmp_path,
     (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
     model = _ProvenanceModel(name_or_path=tmp_path)
 
-    with pytest.warns(UserWarning, match="Could not copy"):
+    # The message changed with the union derivation, deliberately: the structural pass failing
+    # is not the same as "could not copy N weights" -- with nothing recorded we do not know that
+    # anything is missing, only that we could not check. What must still hold is that the handler
+    # does not throw from inside itself.
+    with pytest.warns(UserWarning, match="Could not derive unplaced source keys"):
         assert read_unplaced_weights(model) == {}
 
 
@@ -872,3 +877,98 @@ def test_carry_over_works_without_the_loader_dependencies(tmp_path, monkeypatch)
 
     carried = read_unplaced_weights(model)
     assert "model.mtp.eh_proj.weight" in carried, "recorded keys must not need the loader imports"
+
+
+def test_union_survives_an_architecture_that_ignores_its_mtp_keys(tmp_path, monkeypatch):
+    """An empty loader report must not mean "nothing to carry".
+
+    Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
+    Qwen3-Next ignores ^mtp.*, DeepSeek-V3 and GLM their own MTP prefixes. So for exactly the
+    heads this mechanism exists to carry, the report comes back EMPTY -- and an earlier revision
+    treated [] as authoritative and shipped the export without them. The structural pass has no
+    such blind spot, because it asks whether the model has a parameter rather than what the
+    loader chose to mention.
+    """
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
+
+    shard, mtp = "model-00001-of-00001.safetensors", "mtp.fc.weight"
+    save_file({"a.weight": torch.zeros(2), mtp: torch.full((2,), 5.0)}, str(tmp_path / shard))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a.weight": shard, mtp: shard}})
+    )
+
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    # What an architecture with an ^mtp.* ignore rule leaves behind.
+    model._modelopt_unplaced_source_keys = []
+
+    monkeypatch.setattr(
+        "modelopt.torch.utils.plugins.model_load_utils.unplaced_source_keys",
+        lambda m, c: [mtp],
+    )
+    carried = read_unplaced_weights(model)
+    assert mtp in carried, f"an ignored MTP key was dropped from the export: {sorted(carried)}"
+    assert torch.equal(carried[mtp], torch.full((2,), 5.0))
+
+
+def test_union_prefers_source_keys_over_converted_names(tmp_path, monkeypatch):
+    """A fused target name is not a checkpoint key and cannot be located.
+
+    The loader can report a post-conversion name (``...experts.gate_up_proj``) that exists in no
+    shard, standing for several source tensors. The structural pass resolves in the other
+    direction -- source key through the converters to a target -- so it names the tensors that are
+    actually on disk, and the union carries them.
+    """
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
+
+    shard = "model-00001-of-00001.safetensors"
+    g = "model.layers.1.mlp.experts.0.gate_proj.weight"
+    u = "model.layers.1.mlp.experts.0.up_proj.weight"
+    save_file({g: torch.ones(2), u: torch.full((2,), 2.0)}, str(tmp_path / shard))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {g: shard, u: shard}})
+    )
+
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    # The loader reports the FUSED name, which is in neither the index nor any shard.
+    model._modelopt_unplaced_source_keys = ["model.layers.1.mlp.experts.gate_up_proj"]
+
+    monkeypatch.setattr(
+        "modelopt.torch.utils.plugins.model_load_utils.unplaced_source_keys",
+        lambda m, c: [g, u],
+    )
+    with pytest.warns(UserWarning, match="in no safetensors file"):
+        carried = read_unplaced_weights(model)
+    assert {g, u} <= set(carried), f"fused name stranded its sources: {sorted(carried)}"
+    assert torch.equal(carried[g], torch.ones(2))
+    assert torch.equal(carried[u], torch.full((2,), 2.0))
+
+
+def test_union_degrades_to_the_recorded_set_without_the_loader(tmp_path, monkeypatch):
+    """Where transformers/accelerate are absent the structural pass cannot run.
+
+    The recorded set then stands alone -- worse than the union, but the export must still carry
+    what it can rather than refuse outright.
+    """
+    import sys as _sys
+
+    from safetensors.torch import save_file
+
+    from modelopt.torch.export.unified_export_hf import read_unplaced_weights
+
+    shard, key = "model-00001-of-00001.safetensors", "model.mtp.eh_proj.weight"
+    save_file({key: torch.full((2,), 3.0)}, str(tmp_path / shard))
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {key: shard}}))
+
+    monkeypatch.setitem(_sys.modules, "modelopt.torch.utils.plugins.model_load_utils", None)
+    model = _ProvenanceModel(name_or_path=tmp_path)
+    model._modelopt_source_checkpoint = str(tmp_path)
+    model._modelopt_unplaced_source_keys = [key]
+
+    carried = read_unplaced_weights(model)
+    assert key in carried, "recorded keys must still carry when the structural pass is unavailable"

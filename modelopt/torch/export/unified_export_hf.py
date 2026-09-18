@@ -1604,12 +1604,16 @@ def carryable_unplaced_keys(model: nn.Module) -> list[str]:
     Best-effort by design: it is used to decide how loudly to complain, so an unreadable index
     answers "nothing to carry" rather than raising from inside a diagnostic.
     """
-    keys = getattr(model, "_modelopt_unplaced_source_keys", None)
-    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
-    if not keys or not ckpt:
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None) or getattr(
+        getattr(model, "config", None), "_name_or_path", None
+    )
+    if not ckpt or not Path(ckpt).is_dir():
+        return []
+    keys = unplaced_keys_for(model, ckpt)
+    if not keys:
         return []
     try:
-        located = locate_source_keys(ckpt, list(keys))
+        located = locate_source_keys(ckpt, keys)
     except Exception:
         return []
     return sorted(located)
@@ -1647,6 +1651,48 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
         return []
 
 
+def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
+    """Every source key the model has no parameter for, from both accountings.
+
+    Neither source is sufficient alone, and each covers the other's blind spot:
+
+    * The **structural** pass (``unplaced_source_keys``) walks the checkpoint index and asks, for
+      each source key, whether the built model has a parameter for it -- resolving the key through
+      Transformers' renames and converters first. Being structural it is unaffected by
+      ``_keys_to_ignore_on_load_unexpected``, and being source-keyed it names tensors that exist on
+      disk. It cannot see a key the index omits.
+    * The **recorded** set is the loader's own ``unexpected_keys``. It sees tensors the index omits,
+      because the loader enumerates the contents of every shard it opens. But Transformers filters
+      it through the architecture's ignore rules -- Qwen3-Next drops ``^mtp.*``, DeepSeek-V3 and GLM
+      drop their MTP prefixes -- so for exactly the MTP heads this mechanism exists to carry it can
+      come back EMPTY. It can also report post-conversion target names (a fused
+      ``...experts.gate_up_proj``) that exist in no shard, and one such name can stand for several
+      source tensors.
+
+    Taking the union means an architecture's ignore rules cannot hide a weight, a fused name cannot
+    strand the tensors behind it, and a key missing from the index is still carried. Recorded names
+    that no shard backs are dropped by :func:`locate_source_keys`, which is the right outcome: the
+    structural pass has already named the real source keys for any converted target.
+
+    The structural pass needs ``model_load_utils``, which imports transformers and accelerate at
+    module scope. Where those are absent the recorded set stands alone -- degraded, but no worse
+    than before this function existed.
+    """
+    recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    structural: list[str] = []
+    try:
+        from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
+
+        structural = unplaced_source_keys(model, str(ckpt))
+    except Exception as exc:
+        if not recorded:
+            warnings.warn(
+                f"Could not derive unplaced source keys structurally ({exc}); relying on the "
+                "loader's report, which its architecture may have filtered."
+            )
+    return sorted({*structural, *recorded})
+
+
 # Placeholder for keys_only resolution: the name is real, the tensor is never read.
 _NO_TENSOR: Any = None
 
@@ -1672,49 +1718,41 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
-    keys = getattr(model, "_modelopt_unplaced_source_keys", None)
     ckpt = getattr(model, "_modelopt_source_checkpoint", None)
 
-    if keys is None:
-        # Not loaded by the sharded loader (plain from_pretrained, or a caller-built model), so
-        # nothing was recorded. Fall back to the model's own provenance and ask the same question
-        # directly. `keys is None` rather than `not keys`: a loader that recorded an EMPTY list has
-        # already answered, and re-deriving would be wasted work.
-        #
-        # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
-        # there is nothing to carry must not depend on an optional import succeeding. The import
-        # below reaches model_load_utils, which pulls in transformers and accelerate at module
-        # scope; those are absent in the partial-install environments, and letting that ImportError
-        # fall into the handler would emit the very "will be missing them" warning this guard
-        # exists to avoid. (safetensors itself is a module-scope dependency here, so it is always
-        # present by the time this runs.)
-        ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
-        if not ckpt or not Path(ckpt).is_dir():
-            # A hub id rather than a local path, or no provenance at all -- nothing to read.
-            return {}
-        # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can
-        # read. Returning quietly is right: there is nothing to carry, so warning about weights
-        # "missing" from the export would be alarming and wrong.
-        if (
-            not (Path(ckpt) / "model.safetensors.index.json").exists()
-            and not (Path(ckpt) / "model.safetensors").exists()
-        ):
-            return {}
+    # The recorded list is never treated as final, empty or not. An earlier revision returned
+    # early when the loader recorded [], reasoning that it "had already answered" -- but
+    # Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
+    # Qwen3-Next ignores ^mtp.*, so for exactly the MTP heads this exists to carry the report comes
+    # back empty and the export silently shipped without them. See unplaced_keys_for.
+    #
+    # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
+    # there is nothing to carry must not depend on an optional import succeeding.
+    ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
+    if not ckpt or not Path(ckpt).is_dir():
+        # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
+        # when nothing was recorded, because there is no reason to think anything is missing. But
+        # if the loader DID report unplaced keys, they are about to be dropped, and dropping them
+        # silently is the failure this whole path exists to prevent.
+        recorded = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+        if recorded:
+            warnings.warn(
+                f"Could not copy {len(recorded)} unplaced source weight(s) into the export: "
+                f"the source checkpoint is not a readable directory ({ckpt}); "
+                "the checkpoint will be missing them."
+            )
+        return {}
+    # A checkpoint with no safetensors at all (pytorch_model.bin) has nothing this path can read.
+    # Returning quietly is right: there is nothing to carry, so warning about weights "missing"
+    # from the export would be alarming and wrong.
+    if (
+        not (Path(ckpt) / "model.safetensors.index.json").exists()
+        and not (Path(ckpt) / "model.safetensors").exists()
+    ):
+        return {}
 
     try:
-        # Narrowed here rather than below so the call site can see that `ckpt` is a real path;
-        # the guards above only narrow it inside the `keys is None` branch.
-        if not ckpt:
-            return {}
-        if keys is None:
-            # Imported in the branch that needs it, not above: model_load_utils pulls in
-            # transformers and accelerate at module scope, and importing it unconditionally made
-            # the RECORDED-keys path -- the common one, which needs nothing from it -- fail wherever
-            # those are absent. The handler below then reported "could not copy" and dropped every
-            # carried weight in the partial-install environments.
-            from modelopt.torch.utils.plugins.model_load_utils import unplaced_source_keys
-
-            keys = unplaced_source_keys(model, ckpt)
+        keys = unplaced_keys_for(model, ckpt)
         if not keys:
             return {}
 
