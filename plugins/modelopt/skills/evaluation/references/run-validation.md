@@ -24,16 +24,55 @@ For each completed invocation/run directory, whether baseline, quantized, or a
 single-model run:
 
 1. Inspect client, server/deployment, SLURM, judge, and task-specific/code-execution logs as applicable. Search for `Traceback`, `Exception`, `ERROR`, `FAILED`, `OOM`, `Killed`, `timeout`, `rate limit`, `unauthorized`, `connection refused/reset`, `health check`, `sandbox`, `container`, `judge`, `parse`, `scoring`, and task-specific failure strings.
-2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, max-context truncation, quantization load error, or repeated 4xx/5xx responses.
+2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, input/context clipping, quantization load error, or repeated 4xx/5xx responses.
 3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
 4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
 5. Confirm sample accounting: expected samples/repeats match completed, scored samples; no unexpected dropped/skipped/failed samples, `unknown_agent_error`, `failed_samples_policy` aborts, empty outputs, or partial result files.
-6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess output truncation separately using the policy below. Check for parser errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 
 Report the run-validation summary before any score: log scan status, sample
 accounting, reasoning/answer parsing status, and any errors or warnings found.
-If any validation item fails, either rerun/fix it or label the result as
-incomplete or invalid.
+If a validation item fails, label the result as incomplete or invalid and return
+findings and a recommendation to the parent (or user); do not automatically
+resubmit a completed run.
+
+### Response Truncation Policy (Parent and Evaluator)
+
+This policy supersedes the vendored `launching-evals` advice to uncap reasoning
+output (`max_tokens=null` or payload field removal), use fixed token/context
+limits, or treat any unfinished reasoning as invalid. Apply it when analyzing
+results through either skill.
+
+For each benchmark/run, report `truncated count / total responses (rate%)`,
+where `rate = 100 × truncated / total`. Count unique evaluated-model responses
+in the evaluated sample/repeat/turn trajectories, including length-capped and
+empty responses. Count cached responses once; exclude duplicate log records,
+transport retry attempts, judge calls, and unrelated runs. The numerator counts
+responses with `finish_reason=length` or an equivalent output-limit termination.
+Do not use dataset size alone for repeated or multi-turn tasks, or pool tasks
+to dilute a task's rate. Missing termination metadata or an unknown/zero
+denominator means truncation is unverified, not 0%.
+
+- **0 < rate ≤ 1.0% (inclusive, before rounding):** visible warning, not automatic
+  invalidation or grounds for retry. Accept only if expected sample/repeat and
+  scoring coverage are complete and the other validation checks pass. A small
+  truncation rate does **not** guarantee negligible score impact; retain affected
+  responses in scoring under the benchmark protocol and report any observed impact.
+- **rate > 1.0%:** flag for review and return counts, findings, and a recommendation
+  to the parent (or user); do not automatically resubmit or declare success.
+- Independently assess request failures (including exhausted retries), empty
+  outputs, parsing/scoring failures, and benchmark configuration: version, sample
+  count/repeats, prompts, reasoning mode, and sampling. The tolerance does not waive
+  these checks, input/context clipping, or benchmark-specific validity rules. A
+  score above a reference does not establish run validity.
+- Check configured and effective output limits against the reference evaluation
+  protocol and deployed context capacity, including prompt/history plus output
+  space. Report mismatches or unavailable reference settings. Do not remove limits
+  or increase them until a target score passes; propose protocol-justified changes
+  for parent/user approval instead.
+
+The parent must preserve these warnings and apply the same policy to evaluator
+handoffs, rather than interpreting any nonzero truncation as failure.
 
 ## External Baseline Sanity Check
 

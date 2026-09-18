@@ -326,7 +326,7 @@ overridden task is reported under sampling params it did not use.
 
 #### `max_new_tokens` — mandatory model-card lookup
 
-1. **Fetch the HF model card before writing the value.** Not optional.
+1. **Fetch the HF model card before writing the value.** Not optional. For reference-score comparisons, match the reference protocol's token budget rather than automatically taking a higher card value below. Verify prompt/history plus output fits deployed context capacity; surface conflicts instead of silently changing limits.
 2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
    **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
 3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
@@ -560,7 +560,7 @@ Remove `limit_samples` overrides; keep canary-validated parallelism. If the cana
 
 ### Step 9 — Verify completed run
 
-Before pulling/reporting scores, validate the run. Read `references/run-validation.md` for NEL timeout/resume behavior, completed-run validation, diagnostics, and score harvesting. For a baseline that will be compared with a candidate, also perform its **External Baseline Sanity Check** before a success verdict, then hand the validated runs to `compare-results` for baseline-vs-candidate deltas.
+Before pulling/reporting scores, validate the run. Read `references/run-validation.md` for NEL timeout/resume behavior, completed-run validation, diagnostics, and score harvesting. Parents and evaluators must apply its **Response Truncation Policy**: report truncated/total responses and rate; ≤1.0% is a warning if all other checks pass, not an automatic retry. Above tolerance, return findings and a recommendation without automatically resubmitting. For a baseline that will be compared with a candidate, also perform its **External Baseline Sanity Check** before a success verdict, then hand the validated runs to `compare-results` for baseline-vs-candidate deltas.
 
 ---
 
