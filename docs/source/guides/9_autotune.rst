@@ -251,11 +251,17 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 **Requirements:**
 
 * TensorRT 10.15 or later
-* Valid remote autotuning configuration
+* Valid ``ssh://`` remote autotuning configuration without a password
+* Non-interactive SSH key authentication from the host to the target
+* ``trtexec_safe`` on the target, alongside the configured ``remote_exec_path``
 * ``--use_trtexec`` must be set (benchmarking uses ``trtexec`` instead of the TensorRT Python API)
 * ``--safe --skipInference`` must be enabled via ``--trtexec_benchmark_args``
 
-Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
+Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs ``trtexec_safe`` there to measure GPU compute time. The temporary engine is removed after each benchmark.
+
+Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
+
+``--plugin_libraries`` applies to the host-side engine build only. ModelOpt does not transfer or load custom plugin libraries on the remote target, so this workflow does not support plugin-dependent remote safety engines.
 
 Low-Level API Usage
 ===================
