@@ -318,10 +318,7 @@ class GPTModelExporter:
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         quantization_format = self._get_quantization_format(self.model)
-        # Scan every layer rather than trusting quantization_format, which is only the first
-        # non-NONE format in the tree: a mixed-format model whose IQ layers follow, say, an FP8
-        # one would otherwise slip past this guard and pack TP-sharded weights as whole ones.
-        if uses_iq_quantization(self.model) and get_tensor_model_parallel_world_size() != 1:
+        if self._any_rank_uses_iq_quantization() and get_tensor_model_parallel_world_size() != 1:
             raise NotImplementedError(
                 "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
                 "parallel size 1"
@@ -1139,6 +1136,23 @@ class GPTModelExporter:
                 raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
 
         return name_to_value, qformat, block_size
+
+    def _any_rank_uses_iq_quantization(self) -> bool:
+        """Whether any rank's local stage holds an IQ layer.
+
+        Two reasons this is not ``self._get_quantization_format(self.model) in (...)``. That
+        returns only the first non-NONE format in the tree, so a mixed-format model whose IQ
+        layers follow, say, an FP8 one would slip past the caller's guard and pack TP-sharded
+        weights as whole ones. And the scan is rank-local: under pipeline parallelism a stage
+        holding no IQ layer would skip the raise and then block in the next collective while its
+        peers exit. Agree across ranks first, mirroring ``_gather_exclude_modules``.
+        """
+        local_uses_iq = uses_iq_quantization(self.model)
+        if not torch.distributed.is_initialized():
+            return local_uses_iq
+        per_rank = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(per_rank, local_uses_iq)
+        return any(per_rank)
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return get_quantization_format(module)

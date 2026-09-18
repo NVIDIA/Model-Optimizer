@@ -462,10 +462,13 @@ def uses_iq_quantization(module) -> bool:
     """
     for weight_name in weight_attr_names(module):
         weight_quantizer = representative_weight_quantizer(module, weight_name)
+        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never IQ --
+        # IQ is a single quantizer with backend="ggml".
         if (
             weight_quantizer is not None
             and weight_quantizer.is_enabled
-            and weight_quantizer.num_bits in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
+            and getattr(weight_quantizer, "num_bits", None)
+            in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
         ):
             return True
     return any(uses_iq_quantization(child) for _, child in module.named_children())

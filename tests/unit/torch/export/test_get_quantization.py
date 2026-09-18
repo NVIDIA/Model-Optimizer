@@ -47,7 +47,11 @@ from modelopt.torch.export.quant_utils import (
     process_layer_quant_config,
     uses_iq_quantization,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 
 
 class _FakeAttention(torch.nn.Module):
@@ -134,6 +138,19 @@ def test_uses_iq_quantization_false_without_iq_layers():
     )
 
     assert not uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_tolerates_sequential_quantizer():
+    """A SequentialQuantizer has is_enabled but no num_bits, and is never IQ.
+
+    save_pretrained calls this on every Megatron export, so reading num_bits directly would
+    raise AttributeError on a W4A8_AWQ model before any format dispatch.
+    """
+    layer = torch.nn.Linear(256, 256, bias=False)
+    layer.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    assert not hasattr(layer.weight_quantizer, "num_bits")
+
+    assert not uses_iq_quantization(torch.nn.Sequential(layer))
 
 
 def test_iq_export_rejects_enabled_input_quantizer():
