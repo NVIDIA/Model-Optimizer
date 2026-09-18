@@ -38,11 +38,6 @@ resubmit a completed run.
 
 ### Response Truncation Policy (Parent and Evaluator)
 
-This policy supersedes the vendored `launching-evals` advice to uncap reasoning
-output (`max_tokens=null` or payload field removal), use fixed token/context
-limits, or treat any unfinished reasoning as invalid. Apply it when analyzing
-results through either skill.
-
 For each benchmark/run, report `truncated count / total responses (rate%)`,
 where `rate = 100 × truncated / total`. Count unique evaluated-model responses
 in the evaluated sample/repeat/turn trajectories, including length-capped and

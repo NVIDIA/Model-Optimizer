@@ -1,12 +1,13 @@
 [
   {
-    "name": "qwen-gpqa-small-truncation",
-    "skills": ["evaluation", "launching-evals"],
-    "query": "As the evaluator, hand off this completed Qwen GPQA run to the parent: all 3168 expected responses scored, score 90.5619 versus reference 89.2, 13 finish_reason=length at max_new_tokens=131072. All other validity checks pass; the output budget matches the reference and prompt plus output fits deployed context. Should the parent launch another run?",
+    "name": "standalone-launching-evals-small-truncation",
+    "skills": ["launching-evals"],
+    "query": "Analyze this completed Qwen GPQA invocation in a fresh repository session, without an evaluator role or prior evaluation skill context: all 3168 expected responses scored, score 90.5619 versus reference 89.2, 13 finish_reason=length at max_new_tokens=131072. All other validity checks pass; the output budget matches the reference and prompt plus output fits deployed context=262144. Is the run valid, or should I uncap reasoning output and rerun? Do not launch jobs.",
     "files": [],
     "expected_behavior": [
+      "Follows AGENTS.md (also exposed via CLAUDE.md) to read evaluation/references/run-validation.md before reporting scores, without preloading the evaluation skill",
       "Reports 13/3168 = approximately 0.4104% as a visible warning, retaining the score and affected responses",
-      "Neither evaluator nor parent invalidates or retries solely for this truncation",
+      "Does not invalidate or retry solely for this truncation, uncap reasoning output, or replace the protocol-matched token/context limits with vendored fixed limits",
       "Does not infer negligible score impact from the low rate or validity from beating the reference",
       "Reports complete sample/scoring coverage and the independent validity and token-budget checks"
     ]
