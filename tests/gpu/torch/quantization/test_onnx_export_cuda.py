@@ -17,7 +17,6 @@
 
 import pytest
 import torch
-import torch.nn as nn
 from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
 
 
@@ -40,7 +39,4 @@ def test_onnx_export_cuda(model_cls, num_bits, per_channel_quantization, constan
     torch.manual_seed(0)
 
     model = model_cls()
-    for _, module in model.named_modules():
-        if isinstance(module, nn.Conv2d) and num_bits == (4, 3):
-            pytest.skip("Conv2d with FP8 quantization is not supported yet")
     onnx_export_tester(model, "cuda", num_bits, per_channel_quantization, constant_folding, dtype)
