@@ -13,7 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hugging Face checkpoint utility."""
+"""Hugging Face checkpoint utility.
+
+General-purpose logic about the on-disk shape of an HF checkpoint (index, shards, sidecars) --
+not export-specific, so it lives under ``modelopt.torch.utils.plugins`` alongside
+``model_load_utils`` rather than under ``modelopt.torch.export``. Deliberately independent of
+that module's ``transformers``/``accelerate`` module-scope imports; only needs
+``huggingface_hub`` + ``safetensors``.
+"""
 
 import contextlib
 import fnmatch
@@ -22,7 +29,7 @@ import os
 import re
 import shutil
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -472,13 +479,14 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
     and should be preferred by anything asking "where does this key actually live". Only the
     single-file case is exhaustive, because there is no index for it to disagree with.
 
-    Independent of the loader's dependencies, deliberately.
+    Independent of the loader's dependencies, deliberately -- only stdlib + safetensors, not
+    transformers/accelerate, so it stays answerable in the partial-install environments where
+    those are absent.
 
-    :func:`modelopt.torch.utils.plugins.model_load_utils.weight_map_for` answers the same
-    question, but that module imports transformers, accelerate and huggingface_hub at module
-    scope. Reaching for it here would make "does a shard back this key" unanswerable wherever
-    those are absent -- the partial-install environments -- and the caller would then conclude
-    there is nothing to carry and skip a guard that should have fired.
+    Returns ``{}``, not an exception, when neither an index nor a single-file checkpoint exists:
+    right for callers that treat "nothing recorded" as legitimate (e.g. :func:`locate_source_keys`
+    below). Callers that need a genuinely missing checkpoint to fail loudly want
+    :func:`weight_map_for` instead.
 
     The indexed case, which is every sharded checkpoint, is a stdlib JSON read and needs nothing.
     Only a single-file ``model.safetensors`` needs safetensors, and only to list its keys.
@@ -492,6 +500,53 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
         with safe_open(str(single), framework="pt") as f:
             return dict.fromkeys(f.keys(), "model.safetensors")
     return {}
+
+
+def weight_map_for(ckpt_path: "str | Path") -> dict[str, str]:
+    """Return the ``param_name -> safetensors_file`` map for a local checkpoint directory, or raise.
+
+    Same answer as :func:`indexed_weight_map`, but raises ``RuntimeError`` instead of returning
+    ``{}`` when the directory has no safetensors checkpoint at all -- for callers (FSDP2 parallel
+    loading, the structural unplaced-keys fallback, DFlash draft-precision reload) where that is
+    a genuine error, not a "nothing to report" case.
+    """
+    weight_map = indexed_weight_map(ckpt_path)
+    if not weight_map:
+        raise RuntimeError(
+            f"No safetensors checkpoint at {ckpt_path} "
+            "(expected model.safetensors or model.safetensors.index.json)."
+        )
+    return weight_map
+
+
+def read_safetensors_subset(
+    ckpt_path: "str | Path",
+    weight_map: dict,
+    select: Callable[[str], bool],
+) -> dict:
+    """Read tensors whose name satisfies ``select`` from safetensors files.
+
+    Groups param names by file to avoid re-opening. Returns CPU tensors.
+    Uses ``safe_open`` so only the requested tensors' bytes are read.
+
+    ``get_tensor`` returns a zero-copy view into the mmap'd file; the bytes are
+    not actually read from disk until first touched. We ``clone()`` here to force
+    the read eagerly, while this function runs (each rank reading its own layers
+    in parallel, for FSDP2 callers). Without it the read is deferred to a later
+    per-source broadcast, which is serialized across ranks and silently destroys
+    the read parallelism such callers exist to provide.
+    """
+    by_file: dict[str, list[str]] = {}
+    for name, file in weight_map.items():
+        if select(name):
+            by_file.setdefault(file, []).append(name)
+
+    state: dict[str, torch.Tensor] = {}
+    for file, names in by_file.items():
+        with safe_open(os.path.join(str(ckpt_path), file), framework="pt", device="cpu") as f:
+            for name in names:
+                state[name] = f.get_tensor(name).clone()
+    return state
 
 
 def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:

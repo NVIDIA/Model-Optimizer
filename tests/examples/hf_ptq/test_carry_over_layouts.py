@@ -41,7 +41,7 @@ from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, LlamaConfig
 
-from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_off_index_safetensors
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
 
 NUM_HIDDEN_LAYERS = 2
 

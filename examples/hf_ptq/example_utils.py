@@ -47,7 +47,7 @@ from transformers import (
 
 from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
 )

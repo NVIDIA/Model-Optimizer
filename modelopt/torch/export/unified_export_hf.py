@@ -35,9 +35,10 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     locate_source_keys,
     off_index_safetensors_files,
+    sanitize_hf_config_for_deployment,
 )
 from modelopt.torch.models import hf_model_type, is_moe
 
@@ -91,7 +92,7 @@ from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import get_experts_list, is_layernorm, is_quantlinear, sync_moe_gate_up_amax
 from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
-from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
+from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
     revert_quant_config_names,

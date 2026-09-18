@@ -15,18 +15,16 @@
 
 """HuggingFace-coupled FSDP2 model loading helpers."""
 
-import json
 import logging
 import os
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import chain
 from typing import Any
 
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
-from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -43,54 +41,12 @@ from modelopt.torch.utils.distributed import (
     fsdp2_wrap,
     is_initialized,
 )
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    read_safetensors_subset,
+    weight_map_for,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def read_safetensors_subset(
-    ckpt_path: str,
-    weight_map: dict,
-    select: Callable[[str], bool],
-) -> dict:
-    """Read tensors whose name satisfies ``select`` from safetensors files.
-
-    Groups param names by file to avoid re-opening. Returns CPU tensors.
-    Uses ``safe_open`` so only the requested tensors' bytes are read.
-
-    ``get_tensor`` returns a zero-copy view into the mmap'd file; the bytes are
-    not actually read from disk until first touched. We ``clone()`` here to force
-    the read eagerly, while this function runs (each rank reading its own layers
-    in parallel). Without it the read is deferred to the later per-source
-    broadcast (``.to(device)``), which is serialized across ranks and silently
-    destroys the read parallelism this loader exists to provide.
-    """
-    by_file: dict[str, list[str]] = {}
-    for name, file in weight_map.items():
-        if select(name):
-            by_file.setdefault(file, []).append(name)
-
-    state: dict[str, torch.Tensor] = {}
-    for file, names in by_file.items():
-        with safe_open(os.path.join(ckpt_path, file), framework="pt", device="cpu") as f:
-            for name in names:
-                state[name] = f.get_tensor(name).clone()
-    return state
-
-
-def weight_map_for(ckpt_path: str) -> dict[str, str]:
-    """Return the ``param_name → safetensors_file`` map for a local checkpoint directory."""
-    index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
-    single_file = os.path.join(ckpt_path, "model.safetensors")
-    if os.path.exists(index_path):
-        with open(index_path) as f:
-            return json.load(f)["weight_map"]
-    if os.path.exists(single_file):
-        with safe_open(single_file, framework="pt", device="cpu") as f:
-            return dict.fromkeys(f.keys(), "model.safetensors")
-    raise RuntimeError(
-        f"No safetensors checkpoint at {ckpt_path} "
-        "(expected model.safetensors or model.safetensors.index.json)."
-    )
 
 
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
@@ -352,7 +308,7 @@ def record_unplaced_source_keys(
       alone used to drop these tensors from the export silently.
     * A tensor in a file the index never names is NOT reported -- the loader never opened it, so
       it had no opportunity to call anything unexpected. Those are handled by
-      :func:`~modelopt.torch.export.plugins.hf_checkpoint_utils.copy_off_index_safetensors`, which
+      :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors`, which
       copies the file whole rather than paying host memory to re-serialise it.
 
     This is observed behaviour, established by experiment against transformers 5.3.0 (a shard

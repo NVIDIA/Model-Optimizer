@@ -637,9 +637,9 @@ class HFDFlashModel(DFlashModel):
 
     def _reload_draft_weights_at_stored_precision(self, checkpoint_dir):
         """Copy the draft's tensors back out of the checkpoint at the dtype they were saved in."""
-        # Imported here rather than at module scope: that module pulls in accelerate,
-        # huggingface_hub and torch.distributed.tensor.
-        from modelopt.torch.utils.plugins.model_load_utils import (
+        # Imported here rather than at module scope to keep this file's own import-time
+        # footprint minimal; hf_checkpoint_utils itself only needs huggingface_hub + safetensors.
+        from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
             read_safetensors_subset,
             weight_map_for,
         )

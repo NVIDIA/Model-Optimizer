@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for modelopt/torch/export/plugins/hf_checkpoint_utils.py"""
+"""Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,21 +24,23 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from modelopt.torch.export.plugins.hf_checkpoint_utils import (
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_off_index_safetensors,
     off_index_safetensors_files,
+    read_safetensors_subset,
+    weight_map_for,
 )
 
 pytest.importorskip("huggingface_hub")
 hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
 LocalEntryNotFoundError = hf_hub_errors.LocalEntryNotFoundError
 
-from modelopt.torch.export import (
+from modelopt.torch.utils.plugins import hf_checkpoint_utils
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
     sanitize_hf_config_for_deployment,
 )
-from modelopt.torch.export.plugins import hf_checkpoint_utils
 
 
 def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_path):
@@ -132,7 +135,7 @@ def test_copy_hf_ckpt_remote_code_hub_id(tmp_path, monkeypatch):
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     with patch(
-        "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+        "modelopt.torch.utils.plugins.hf_checkpoint_utils.snapshot_download",
         return_value=str(snapshot_dir),
     ) as mock_sd:
         copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-Nano-12B-v2", dst_dir)
@@ -155,7 +158,7 @@ def test_copy_hf_ckpt_remote_code_hub_id_offline_uses_cache(tmp_path, monkeypatc
 
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     with patch(
-        "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+        "modelopt.torch.utils.plugins.hf_checkpoint_utils.snapshot_download",
         return_value=str(snapshot_dir),
     ) as mock_sd:
         copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", dst_dir)
@@ -173,7 +176,7 @@ def test_copy_hf_ckpt_remote_code_hub_id_offline_missing_cache_raises(tmp_path, 
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     with (
         patch(
-            "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+            "modelopt.torch.utils.plugins.hf_checkpoint_utils.snapshot_download",
             side_effect=LocalEntryNotFoundError("missing"),
         ),
         pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"),
@@ -543,3 +546,66 @@ def test_skips_a_sidecar_pointing_outside_the_checkpoint(tmp_path):
     with pytest.warns(UserWarning, match="outside the checkpoint directory"):
         assert copy_off_index_safetensors(src, dst) == []
     assert not (dst / "mtp.safetensors").exists()
+
+
+# --- weight_map_for / read_safetensors_subset (moved from model_load_utils.py, which used to
+# duplicate indexed_weight_map's logic; see weight_map_for's own docstring) --------------------
+
+
+def test_weight_map_for_sharded(tmp_path):
+    save_file({"a.weight": torch.zeros(2)}, str(tmp_path / "shard1.safetensors"))
+    save_file({"b.weight": torch.zeros(2)}, str(tmp_path / "shard2.safetensors"))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"a.weight": "shard1.safetensors", "b.weight": "shard2.safetensors"}}
+        )
+    )
+
+    assert weight_map_for(str(tmp_path)) == {
+        "a.weight": "shard1.safetensors",
+        "b.weight": "shard2.safetensors",
+    }
+
+
+def test_weight_map_for_single_file(tmp_path):
+    save_file(
+        {"a.weight": torch.zeros(2), "b.weight": torch.zeros(2)},
+        str(tmp_path / "model.safetensors"),
+    )
+
+    assert weight_map_for(str(tmp_path)) == {
+        "a.weight": "model.safetensors",
+        "b.weight": "model.safetensors",
+    }
+
+
+def test_weight_map_for_missing(tmp_path):
+    """weight_map_for still raises even though indexed_weight_map (which it delegates to) does not.
+
+    indexed_weight_map returns {} for a missing checkpoint -- the right answer for its own
+    callers, which treat "nothing recorded" as legitimate. weight_map_for's callers
+    (unplaced_source_keys, parallel_load_and_prepare_fsdp2, hf_dflash's precision reload) all
+    expect a genuinely absent checkpoint to fail loudly, so it turns that empty result back into
+    a RuntimeError.
+    """
+    with pytest.raises(RuntimeError, match="No safetensors checkpoint"):
+        weight_map_for(str(tmp_path))
+
+
+def test_read_safetensors_subset(tmp_path):
+    save_file(
+        {"a.weight": torch.tensor([1.0, 2.0]), "a.bias": torch.tensor([3.0])},
+        str(tmp_path / "shard1.safetensors"),
+    )
+    save_file({"b.weight": torch.tensor([4.0])}, str(tmp_path / "shard2.safetensors"))
+    weight_map = {
+        "a.weight": "shard1.safetensors",
+        "a.bias": "shard1.safetensors",
+        "b.weight": "shard2.safetensors",
+    }
+
+    result = read_safetensors_subset(str(tmp_path), weight_map, lambda n: n.startswith("a."))
+
+    assert set(result.keys()) == {"a.weight", "a.bias"}
+    assert torch.equal(result["a.weight"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(result["a.bias"], torch.tensor([3.0]))
