@@ -595,6 +595,12 @@ class _ProvenanceModel(torch.nn.Module):
     def __init__(self, keys=None, ckpt=None, name_or_path=None):
         super().__init__()
         self.lin = torch.nn.Linear(2, 2)
+        # Sentinel already-placed weights this file's checkpoints use to stand in for "the
+        # model loaded this one fine": real parameters, so the union's structural pass does
+        # not also flag them as unplaced (it only knows a checkpoint key by whether the model
+        # has a matching parameter, not by which test wrote it).
+        self.a = torch.nn.Linear(1, 1)
+        self.other = torch.nn.Linear(1, 1)
         if keys is not None:
             self._modelopt_unplaced_source_keys = keys
         if ckpt is not None:

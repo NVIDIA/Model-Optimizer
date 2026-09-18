@@ -25,7 +25,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from accelerate import init_empty_weights
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
@@ -150,7 +149,7 @@ def _conversion_plan(model: nn.Module) -> dict | None:
         "legacy_renames": legacy_renames,
         "renamings": renamings,
         "converters": converters,
-        "prefix": model.base_model_prefix,
+        "prefix": getattr(model, "base_model_prefix", ""),
         "meta_state_dict": model.state_dict(),
     }
 
@@ -216,6 +215,8 @@ def build_meta_causal_lm(
         # Honor the override even when the caller passed in a pre-fetched config.
         hf_config._attn_implementation = attn_implementation
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
+    from accelerate import init_empty_weights  # only real callers of this function need it
+
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
             hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
