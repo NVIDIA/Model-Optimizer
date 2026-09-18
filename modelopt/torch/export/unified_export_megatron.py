@@ -318,11 +318,23 @@ class GPTModelExporter:
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         quantization_format = self._get_quantization_format(self.model)
-        if self._any_rank_uses_iq_quantization() and get_tensor_model_parallel_world_size() != 1:
-            raise NotImplementedError(
-                "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
-                "parallel size 1"
-            )
+        if self._any_rank_uses_iq_quantization():
+            # Both sizes below are identical on every rank, and the IQ flag is agreed across
+            # ranks, so these raise everywhere or nowhere. Raising on only a subset would strand
+            # the rest in the collectives further down.
+            if get_tensor_model_parallel_world_size() != 1:
+                raise NotImplementedError(
+                    "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
+                    "parallel size 1"
+                )
+            # Requiring PP=1 is also what makes the per-expert fused-MoE rejection safe: with
+            # every rank holding the same layers, that check runs on all of them rather than
+            # only the stages that happen to own an MoE block.
+            if pp_size != 1:
+                raise NotImplementedError(
+                    "Megatron IQ1_S/IQ2_XS unified export currently requires pipeline model "
+                    "parallel size 1"
+                )
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -1188,12 +1200,15 @@ class GPTModelExporter:
     def _reject_unsupported_fused_iq_export(qformat: str) -> None:
         """Reject fused-expert IQ payloads until a deployment loader owns their layout.
 
-        Raised from inside the per-expert loops, so it is rank-local: a stage owning no fused
-        expert skips it and blocks in ``save_pretrained``'s collectives while its peers exit.
-        Hoisting it beside the TP guard needs a rank-uniform way to know the *experts* are IQ;
-        keying off the architecture's rule table is not it, since that cannot distinguish an
-        architecture that has fused experts from one whose experts are actually IQ, and would
-        reject IQ dense-layer exports on GPT-OSS and Llama4.
+        Raised from inside the per-expert loops, so it only runs on ranks that own an expert.
+        The guards in ``save_pretrained`` are what make that safe: IQ export requires PP=1 and
+        TP=1, so every rank holds the same layers and reaches the same loops, and expert
+        parallelism shards a set of experts quantized alike -- so every rank arrives here with
+        the same ``qformat`` and they raise together rather than stranding each other in a
+        collective.
+
+        The one gap left is a rank holding no local expert at all, which needs expert-parallel
+        size to exceed the expert count. Worth revisiting if that becomes a supported topology.
         """
         if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
             raise NotImplementedError(

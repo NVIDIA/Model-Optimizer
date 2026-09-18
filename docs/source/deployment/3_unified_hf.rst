@@ -69,6 +69,12 @@ for IQ1_S and 74 for IQ2_XS. No separate shape tensor is stored: a loader recove
 shape as ``[*weight.shape[:-2], weight.shape[-2] * 256]``. This is unambiguous because IQ export
 requires the logical last dimension to be divisible by 256.
 
+.. note::
+   Megatron IQ export currently requires tensor and pipeline model parallel sizes of 1. Packing
+   happens during export, so a tensor-parallel shard would be packed as if it were a whole
+   weight, and a pipeline stage holding no IQ layer would not reach the same rejection as its
+   peers. Expert parallelism is supported, assuming every expert uses the same format.
+
 .. warning::
    Megatron fused-MoE IQ export is not currently supported. Its packed tensor would require the
    deployment consumer to understand
