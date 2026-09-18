@@ -107,7 +107,12 @@ def test_documented_recipe_paths_resolve():
     for label, path in docs.items():
         if not path.is_file():
             continue
-        for name in sorted(set(re.findall(r"general/ptq/([A-Za-z0-9._-]+)", path.read_text()))):
+        # encoding= is required, not decorative: these docs contain non-ASCII (em dashes
+        # among others) and a bare read_text() decodes with the locale codepage, which is
+        # cp1252 on the Windows runners -- UnicodeDecodeError on the first such byte.
+        for name in sorted(
+            set(re.findall(r"general/ptq/([A-Za-z0-9._-]+)", path.read_text(encoding="utf-8")))
+        ):
             stem = name.removesuffix(".yaml").removesuffix(".yml")
             if (GENERAL_PTQ_DIR / f"{stem}.yaml").is_file():
                 continue
