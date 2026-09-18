@@ -28,6 +28,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
 )
 from safetensors.torch import load_file
+from torch import nn
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layerwise_export import (
@@ -411,8 +412,12 @@ def test_vlm_export_follows_the_documented_flow(tmp_path):
     # sliding_window past the calibration length: the tiny default (16) masks against a
     # shorter window than the batch and the text forward fails before export is reached.
     vlm = get_tiny_gemma3vl(tie_word_embeddings=False, sliding_window=1024).cuda().eval()
-    # The plain attribute is what TiedWeightMap reads; the config kwarg only reaches text_config.
+    # The kwarg only reaches text_config: the outer config still ties lm_head to the
+    # embedding, by name and by storage.
+    vlm.config.tie_word_embeddings = False
+    vlm._tied_weights_keys = {}
     vlm.all_tied_weights_keys = {}
+    vlm.lm_head.weight = nn.Parameter(vlm.lm_head.weight.detach().clone())
     language_model = get_language_model_from_vl(vlm)[-1]
 
     export_dir = tmp_path / "fused"
@@ -606,7 +611,7 @@ def test_tied_embeddings_are_refused(tmp_path, make_cfg):
     model.config.architectures = ["LlamaForCausalLM"]
 
     cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=make_cfg())
-    with pytest.raises(NotImplementedError, match="weight-tied quantized modules"):
+    with pytest.raises(NotImplementedError, match="weight-tied modules"):
         mtq.quantize(model, cfg, _calib)
 
 
