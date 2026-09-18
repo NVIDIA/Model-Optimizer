@@ -15,9 +15,11 @@
 
 """API for sparsification algorithms.
 
-This module provides access to both weight sparsity and attention sparsity algorithms.
+This module provides access to weight, attention, and recurrent-state sparsity algorithms.
 For backward compatibility, weight sparsity APIs are re-exported at the module level.
 """
+
+from . import state_sparsity
 
 # Import weight sparsity for backward compatibility
 from .weight_sparsity import mode, module, plugins
