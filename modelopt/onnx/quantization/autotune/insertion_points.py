@@ -42,7 +42,7 @@ from modelopt.onnx.op_types import (
     is_fusible_reduction_op,
     is_linear_op,
 )
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 
 class InsertionPoint(ABC):

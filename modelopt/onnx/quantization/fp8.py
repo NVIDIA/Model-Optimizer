@@ -29,14 +29,14 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.logging_config import configure_logging, logger
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_indexing import (
     expand_node_names_from_patterns,
+    get_tensor_producer_nodes,
+)
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
-    get_concat_eliminated_tensors,
-    get_tensor_producer_nodes,
-    remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.int8 import _find_nodes_to_quantize
 from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
@@ -44,6 +44,10 @@ from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.precision_utils import (
     _convert_to_runtime_precision,
     _upgrade_opset_21,
+)
+from modelopt.onnx.quantization.qdq_graph import (
+    get_concat_eliminated_tensors,
+    remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 

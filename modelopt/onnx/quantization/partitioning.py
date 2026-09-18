@@ -25,7 +25,7 @@ from modelopt.onnx.op_types import (
     is_pointwise_or_elementwise_op,
     is_pooling_or_window_op,
 )
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_indexing import (
     get_fusible_backbone,
     has_const_input,
     has_path_type,

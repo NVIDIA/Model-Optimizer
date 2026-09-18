@@ -312,13 +312,16 @@ def test_future_python_api_removes_calibration_cache_input():
     assert "calibration_cache_path" not in inspect.signature(moq.quantize).parameters
 
 
+def test_legacy_graph_utils_module_is_removed():
+    assert importlib.util.find_spec("modelopt.onnx.quantization.graph_utils") is None
+
+
 @pytest.mark.parametrize(
     ("module_name", "removed_symbol"),
     [
         pytest.param("modelopt.onnx.quantization.int8", "quantize", id="int8-mode-function"),
         pytest.param("modelopt.onnx.quantization.fp8", "quantize", id="fp8-mode-function"),
         pytest.param("modelopt.onnx.quantization.ort_patching", None, id="ort-patching-module"),
-        pytest.param("modelopt.onnx.quantization.graph_utils", None, id="graph-utils-module"),
         pytest.param("modelopt.onnx.quantization.qdq_utils", None, id="qdq-utils-module"),
         pytest.param(
             "modelopt.onnx.quantization.qdq_utils",

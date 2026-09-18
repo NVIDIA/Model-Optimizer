@@ -29,7 +29,7 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
     merge_resolved_insertion_points,
 )
 from modelopt.onnx.quantization.fp8 import int8_to_fp8
-from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
+from modelopt.onnx.quantization.graph_indexing import get_tensor_consumer_node_indices
 
 __all__ = [
     "build_tensor_map",
