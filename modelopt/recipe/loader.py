@@ -209,10 +209,14 @@ _RECIPE_SCHEMA_PATHS: dict[str, RecipeType] = {
 }
 
 
+_UNPARSED = object()  # "caller supplied no pre-parsed body", distinct from a body of ``None``
+
+
 def _peek_recipe_type(
     recipe_file: Path | Traversable,
     _seen: frozenset[str] | None = None,
     _cycle: list[tuple[str, str]] | None = None,
+    _raw: object = _UNPARSED,
 ) -> RecipeType | None:
     """Determine a recipe's kind without resolving its ``$import`` references.
 
@@ -251,10 +255,15 @@ def _peek_recipe_type(
     if declared in _RECIPE_SCHEMA_PATHS:
         return _RECIPE_SCHEMA_PATHS[declared]
 
-    try:
-        raw = yaml.safe_load(recipe_file.read_text())
-    except yaml.YAMLError:
-        return None
+    if _raw is not _UNPARSED:
+        # Supplied by _load_recipe_from_file, which has already parsed this file; only the
+        # top-level call can reuse it, the recursion below still reads each import itself.
+        raw = _raw
+    else:
+        try:
+            raw = yaml.safe_load(recipe_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            return None
     if not isinstance(raw, dict):
         return None
 
@@ -312,8 +321,21 @@ def _load_recipe_from_file(
     ``eagle`` / ``dflash`` / ``medusa``), either directly or through a top-level
     ``$import`` of a recipe that has one.
     """
+    # Parsed once and threaded into the peek below, which would otherwise read and parse
+    # the same file a second time. A YAMLError is held rather than raised here so the
+    # kind-resolution errors below still come first, as they did when the peek owned the
+    # only parse -- a malformed file that nonetheless declares its schema in a comment
+    # keeps resolving, and one that does not still reports the parse error.
+    import yaml
+
+    yaml_error: Exception | None = None
+    try:
+        raw_top: object = yaml.safe_load(recipe_file.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raw_top, yaml_error = None, exc
+
     cycle: list[tuple[str, str]] = []
-    rtype = _peek_recipe_type(recipe_file, _cycle=cycle)
+    rtype = _peek_recipe_type(recipe_file, _cycle=cycle, _raw=raw_top)
     if rtype is None:
         if cycle:
             # The delegation remedy below is the one thing the author cannot do here --
@@ -335,10 +357,9 @@ def _load_recipe_from_file(
     if schema_class is None:
         raise ValueError(f"Unsupported recipe type: {rtype!r}")
 
-    import yaml
-
-    raw = yaml.safe_load(recipe_file.read_text()) or {}
-    raw = raw if isinstance(raw, dict) else {}
+    if yaml_error is not None:
+        raise yaml_error
+    raw = raw_top if isinstance(raw_top, dict) else {}
 
     # A recipe that delegates inherits the imported recipe's body wholesale, so the two
     # have to be the same kind. Checked here, and against the *declared* kind on both

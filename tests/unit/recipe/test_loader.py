@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+import modelopt.recipe.loader
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
     RECIPE_TYPE_TO_CLASS,
@@ -2604,3 +2605,138 @@ def test_shipped_ptq_recipe_algorithm_config_constructs(recipe_path):
     algorithm = load_recipe(recipe_path).quantize.algorithm
     for mode_name, mode_cfg in get_modelike_from_algo_cfg(algorithm):
         CalibrateModeRegistry[mode_name].config_class(**mode_cfg)
+
+
+def test_recipe_loader_never_reads_a_file_with_the_locale_encoding():
+    """Every text read in the recipe loader must pin ``encoding=``.
+
+    Shipped recipes contain non-ASCII -- em dashes in several descriptions -- and a bare
+    ``read_text()`` decodes with the locale codepage. On a cp1252 machine that does not
+    raise; it silently yields mojibake, and for two of the Nemotron-3-Super recipes the
+    corruption lands in parsed *values* rather than in a comment the YAML parser drops. A
+    behavioural test cannot catch this on our UTF-8 CI, because there the locale encoding
+    IS utf-8 and a bare read behaves identically -- so this asserts the source-level
+    invariant instead, which holds on every platform.
+    """
+    import ast
+
+    source = Path(modelopt.recipe.loader.__file__)
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    unpinned = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name not in {"read_text", "write_text", "open"}:
+            continue
+        # A binary open needs no encoding; anything textual does.
+        if any(
+            isinstance(a, ast.Constant) and isinstance(a.value, str) and "b" in a.value
+            for a in node.args
+        ):
+            continue
+        if not any(kw.arg == "encoding" for kw in node.keywords):
+            unpinned.append(f"{name}() at {source.name}:{node.lineno}")
+    assert not unpinned, "these reads use the locale encoding instead of utf-8: " + ", ".join(
+        unpinned
+    )
+
+
+def test_load_recipe_round_trips_non_ascii_description(tmp_path):
+    """A recipe's non-ASCII text survives loading byte-for-byte.
+
+    The companion to the source-level check above: that one pins how we read, this one
+    pins what comes out, so a future rewrite that keeps ``encoding=`` but mangles the text
+    some other way still fails.
+    """
+    recipe = tmp_path / "em_dash.yaml"
+    recipe.write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "metadata:\n"
+        "  description: NVFP4 for Qwen3.5-VL — vision tower left in BF16\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n",
+        encoding="utf-8",
+    )
+    assert "—" in load_recipe(recipe).metadata.description
+
+
+_NEMOTRON_3_SUPER_RECIPES = [
+    "models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse",
+    "models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-max-calib",
+]
+
+
+def _effective_enable(quant_cfg: list[dict], quantizer_name: str) -> bool | None:
+    """Resolve a quantizer's enable state the way ``mtq.quantize`` does.
+
+    Entries apply in list order and later entries override earlier ones, so the *last*
+    matching pattern wins. Order matters here rather than being an implementation detail:
+    the MTP entry works only because it sits after the broad patterns it undoes, so a test
+    using ``any(fnmatch(...))`` over the enabled patterns -- which ignores order -- would
+    pass even if the entry were moved to the top and stopped working.
+    """
+    state = None
+    for entry in quant_cfg:
+        if fnmatch(quantizer_name, entry["quantizer_name"]):
+            state = entry["enable"]
+    return state
+
+
+@pytest.mark.parametrize("recipe_path", _NEMOTRON_3_SUPER_RECIPES)
+def test_nemotron_3_super_leaves_the_mtp_block_in_bf16(recipe_path):
+    """The ``mtp.*`` entry must actually disable the MTP block, and only it.
+
+    Two things this pins, neither of which the smoke-load tests touch:
+
+    * **Order.** ``mtp.*`` is last, after ``*mixer.in_proj*weight_quantizer`` and friends
+      that match into the MTP block. Move it up and the MTP quantizers come back on.
+    * **Pattern shape.** ``mtp.*`` is an unanchored prefix, unlike the ``*mtp*`` form the
+      AutoQuantize recipes use. It has to match the Megatron-Core quantizer names, which
+      begin with ``mtp.``; the HF ``nemotron_h`` class drops those tensors on load, so
+      this entry is inert there and only the Megatron path exercises it.
+    """
+    quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+
+    # Inside the MTP block: matched by the broad patterns, then undone by the last entry.
+    for quantizer_name in (
+        "mtp.layers.0.mixer.in_proj.weight_quantizer",
+        "mtp.layers.0.mixer.in_proj.input_quantizer",
+        "mtp.layers.0.mixer.out_proj.weight_quantizer",
+        "mtp.layers.0.mixer.experts.0.up_proj.weight_quantizer",
+    ):
+        assert _effective_enable(quant_cfg, quantizer_name) is False, (
+            f"{quantizer_name} should be BF16 -- 'mtp.*' must come last and must match it"
+        )
+
+    # The same modules outside the MTP block keep the quantization the recipe is for.
+    for quantizer_name in (
+        "backbone.layers.0.mixer.in_proj.weight_quantizer",
+        "backbone.layers.0.mixer.in_proj.input_quantizer",
+        "backbone.layers.0.mixer.out_proj.weight_quantizer",
+        "backbone.layers.0.mixer.experts.0.up_proj.weight_quantizer",
+    ):
+        assert _effective_enable(quant_cfg, quantizer_name) is True, (
+            f"{quantizer_name} is outside the MTP block and must stay quantized"
+        )
+
+
+@pytest.mark.parametrize("recipe_path", _NEMOTRON_3_SUPER_RECIPES)
+def test_nemotron_3_super_mtp_entry_is_order_dependent(recipe_path):
+    """Moving the ``mtp.*`` entry off the end silently re-enables the MTP block.
+
+    The guard for the comment the recipe carries ("Must stay last, after the patterns it
+    undoes"). Without this, a reordering -- an alphabetical sort, a merge resolution --
+    would leave every other assertion in this file passing.
+    """
+    quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+    mtp_entries = [e for e in quant_cfg if e["quantizer_name"] == "mtp.*"]
+    assert len(mtp_entries) == 1, "expected exactly one 'mtp.*' entry"
+    assert quant_cfg[-1]["quantizer_name"] == "mtp.*", (
+        "'mtp.*' must be the last entry; it is last-match-wins that makes it work"
+    )
+
+    # And prove the dependency rather than asserting position alone: with the entry moved
+    # to the front, the MTP quantizer it is meant to disable comes back on.
+    reordered = [quant_cfg[-1], *quant_cfg[:-1]]
+    assert _effective_enable(reordered, "mtp.layers.0.mixer.in_proj.weight_quantizer") is True

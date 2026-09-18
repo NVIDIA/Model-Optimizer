@@ -60,6 +60,15 @@ _SCHEMA_COMMENT_RE = re.compile(
     re.MULTILINE,
 )
 
+# Any ``# modelopt-schema:`` declaration, recipe or not. The reusable snippets under
+# ``modelopt_recipes/configs/`` declare non-recipe schemas -- QuantizerAttributeConfig,
+# LayerPatternList and friends -- and a snippet is allowed a top-level ``$import`` of its
+# own, which would otherwise make it indistinguishable here from a delegating alias.
+_ANY_SCHEMA_COMMENT_RE = re.compile(
+    r"^\s*#\s*modelopt-schema:\s*\S+\s*$",
+    re.MULTILINE,
+)
+
 
 def _declares_recipe_schema(path: Path) -> bool:
     """Whether *path* names one of the recipe schema classes in a ``# modelopt-schema:`` comment.
@@ -76,6 +85,19 @@ def _declares_recipe_schema(path: Path) -> bool:
         return bool(_SCHEMA_COMMENT_RE.search(path.read_text(encoding="utf-8")))
     except OSError:
         return False
+
+
+def _declares_non_recipe_schema(path: Path) -> bool:
+    """Whether *path* declares a ``# modelopt-schema:`` that is not a recipe schema.
+
+    That is the signature of a reusable snippet (a quantizer attribute, a layer-pattern
+    list), which ``load_recipe`` cannot load and should never be handed.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(_ANY_SCHEMA_COMMENT_RE.search(text)) and not bool(_SCHEMA_COMMENT_RE.search(text))
 
 
 def _check_quant_cfg(quant_cfg, label: str) -> list[str]:
@@ -217,6 +239,13 @@ def _is_recipe_file(path: Path) -> bool:
         return False  # not a recipe file at all
     if _declares_recipe_schema(path):
         return True
+    if _declares_non_recipe_schema(path):
+        # A snippet, not a recipe -- and snippets may carry a top-level ``$import`` of
+        # their own (see ``test_import_cross_file_same_name_no_conflict``). Without this
+        # the next branch would claim it and ``load_recipe`` would reject it with "does
+        # not say what kind of recipe it is", which is a confusing way to learn that a
+        # fragment was never meant to be loaded as a recipe.
+        return False
     if "$import" in data:
         # A delegating alias declares neither a schema comment nor a recipe_type: its
         # kind comes from the recipe it imports. Validate it so a typo in ``imports:``
