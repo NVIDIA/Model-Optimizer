@@ -1162,11 +1162,18 @@ def post_quantize(
         pass
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
-        generated_ids_after_ptq = full_model.generate(
-            preview_input_ids,
-            attention_mask=preview_attention_mask,
-            max_new_tokens=100,
-        )
+        # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
+        # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a
+        # quantized layer run on CPU, which some kernels (e.g. NVFP4 dynamic block
+        # quantization) don't support. Don't let that discard the completed calibration.
+        try:
+            generated_ids_after_ptq = full_model.generate(
+                preview_input_ids,
+                attention_mask=preview_attention_mask,
+                max_new_tokens=100,
+            )
+        except Exception as e:
+            warnings.warn(f"Post-quantization generation sanity check failed, skipping it: {e}")
     elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_after_ptq = run_nemotron_vl_preview(
             full_model,
