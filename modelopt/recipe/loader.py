@@ -210,7 +210,9 @@ _RECIPE_SCHEMA_PATHS: dict[str, RecipeType] = {
 
 
 def _peek_recipe_type(
-    recipe_file: Path | Traversable, _seen: frozenset[str] | None = None
+    recipe_file: Path | Traversable,
+    _seen: frozenset[str] | None = None,
+    _cycle: list[tuple[str, str]] | None = None,
 ) -> RecipeType | None:
     """Determine a recipe's kind without resolving its ``$import`` references.
 
@@ -263,8 +265,15 @@ def _peek_recipe_type(
 
     for base in _delegated_recipe_paths(raw):
         if str(base) in _seen:
+            # Skipping is what stops the recursion, but a caller that ends up with no kind
+            # at all needs to know a cycle is *why* -- otherwise it reports "nothing
+            # declared anywhere" and sends the author to fix something that is not wrong.
+            # Recorded rather than raised: another `$import` may still resolve the kind,
+            # and a cycle that does not prevent resolution is not worth mentioning.
+            if _cycle is not None:
+                _cycle.append((key, str(base)))
             continue
-        rtype = _peek_recipe_type(base, _seen)
+        rtype = _peek_recipe_type(base, _seen, _cycle)
         if rtype is not None:
             return rtype
     return None
@@ -303,8 +312,19 @@ def _load_recipe_from_file(
     ``eagle`` / ``dflash`` / ``medusa``), either directly or through a top-level
     ``$import`` of a recipe that has one.
     """
-    rtype = _peek_recipe_type(recipe_file)
+    cycle: list[tuple[str, str]] = []
+    rtype = _peek_recipe_type(recipe_file, _cycle=cycle)
     if rtype is None:
+        if cycle:
+            # The delegation remedy below is the one thing the author cannot do here --
+            # they already delegated, and that is the problem. Name the cycle instead.
+            edges = ", ".join(f"{src} -> {dst}" for src, dst in cycle)
+            raise ValueError(
+                f"Recipe file {recipe_file} delegates to a recipe that delegates back to "
+                f"it, so its kind cannot be resolved (cycle: {edges}). Break the cycle, or "
+                "declare the kind directly with a '# modelopt-schema: "
+                "modelopt.recipe.config.ModelOpt<Kind>Recipe' comment."
+            )
         raise ValueError(
             f"Recipe file {recipe_file} does not say what kind of recipe it is. Set "
             "'metadata.recipe_type', or declare a '# modelopt-schema: "

@@ -141,6 +141,15 @@ its exported scale tensors) against what the candidate recipe's `quant_cfg` woul
 produce. A body duplicated from a general recipe is a maintenance liability: it stops
 tracking edits to the recipe it was copied from.
 
+### When a release gets no entry at all
+
+A release is backfilled here only when its model card describes a **post-training**
+quantization recipe. A card documenting quantization-aware distillation after PTQ is
+deliberately left out: no PTQ recipe reproduces that checkpoint, so an entry claiming to
+would be wrong. If you came looking for a published NVIDIA checkpoint and did not find
+it, this is the usual reason — check whether its card mentions QAD before assuming the
+entry is merely missing.
+
 ## Sharing content across recipes
 
 When several recipes reuse the same body, extract it into a sibling **snippet**

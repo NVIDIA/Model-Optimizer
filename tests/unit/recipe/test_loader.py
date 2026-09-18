@@ -717,12 +717,20 @@ def test_load_recipe_delegation_cycle_is_reported_not_hung(tmp_path):
     Neither states a kind, so resolution has to walk the import to find one and would
     loop without the cycle guard. A ``ValueError`` rather than a ``RecursionError`` is
     the assertion that the guard is doing its job.
+
+    The message has to name the cycle, not fall back to the generic "does not say what
+    kind" text: that text's third remedy is "delegate to a recipe that does", which is
+    exactly what the author already did, so it sends them in a circle.
     """
     a, b = tmp_path / "a.yaml", tmp_path / "b.yaml"
     a.write_text(f"imports:\n  other: {b}\n\n$import: other\n")
     b.write_text(f"imports:\n  other: {a}\n\n$import: other\n")
-    with pytest.raises(ValueError, match="does not say what kind of recipe it is"):
+    with pytest.raises(ValueError, match="delegates back to it") as excinfo:
         load_recipe(a)
+    assert "cycle:" in str(excinfo.value)
+    assert str(b) in str(excinfo.value)
+    # The generic advice must not be what the author is left holding.
+    assert "does not say what kind of recipe it is" not in str(excinfo.value)
 
 
 def test_load_recipe_delegates_via_a_list_of_imports(tmp_path):
