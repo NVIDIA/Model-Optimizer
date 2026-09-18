@@ -178,7 +178,7 @@ def test_explicit_calibrated_quantization_graph_contract(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 10 changes omitted FP8 calibration from entropy to max",
+    reason="Omitted FP8 calibration is expected to default to max",
 )
 def test_future_fp8_omitted_method_defaults_to_max(tmp_path, monkeypatch):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
@@ -207,7 +207,7 @@ def test_future_fp8_omitted_method_defaults_to_max(tmp_path, monkeypatch):
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 5 makes an explicit calibration source mandatory",
+    reason="Calibrated quantization is expected to require an explicit source",
 )
 def test_future_calibrated_quantization_requires_an_explicit_source(tmp_path, monkeypatch):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
@@ -237,7 +237,7 @@ def test_future_calibrated_quantization_requires_an_explicit_source(tmp_path, mo
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 5 rejects requests with two calibration sources",
+    reason="Calibrated quantization is expected to reject multiple sources",
 )
 def test_future_calibrated_quantization_rejects_two_sources(tmp_path, monkeypatch):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
@@ -275,7 +275,7 @@ def test_future_calibrated_quantization_rejects_two_sources(tmp_path, monkeypatc
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 5 accepts only exact top-level quantization mode tokens",
+    reason="Top-level quantization is expected to accept only exact mode tokens",
 )
 def test_future_top_level_mode_tokens_are_exact(tmp_path, monkeypatch):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
@@ -306,7 +306,7 @@ def test_future_top_level_mode_tokens_are_exact(tmp_path, monkeypatch):
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 5 removes calibration-cache input from the Python API",
+    reason="Calibration-cache input is expected to be absent from the Python API",
 )
 def test_future_python_api_removes_calibration_cache_input():
     assert "calibration_cache_path" not in inspect.signature(moq.quantize).parameters
@@ -340,7 +340,7 @@ def test_future_python_api_removes_calibration_cache_input():
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Tickets 2-4 and 12 remove legacy calibrated implementation imports",
+    reason="Legacy calibrated implementation imports are expected to be unavailable",
 )
 def test_future_legacy_calibrated_imports_are_removed(module_name, removed_symbol):
     module_spec = importlib.util.find_spec(module_name)
@@ -354,7 +354,7 @@ def test_future_legacy_calibrated_imports_are_removed(module_name, removed_symbo
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="Ticket 4 publishes get_quantized_tensors from the AutoTune namespace",
+    reason="AutoTune is expected to export get_quantized_tensors",
 )
 def test_future_autotune_exports_get_quantized_tensors():
     autotune = importlib.import_module("modelopt.onnx.quantization.autotune")
