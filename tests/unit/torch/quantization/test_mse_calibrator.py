@@ -18,6 +18,10 @@
 import torch
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_calib as model_calib_module
+from modelopt.torch.kernels.quantization.gemm._fp8_scale_candidates import (
+    fp8_scale_offset_candidates,
+)
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
@@ -543,6 +547,45 @@ class TestMseCalibrator:
         assert torch.all(a_best > 0)
 
 
+def test_nvfp4_bounded_candidates_clip_codes_and_break_ties_by_ascending_offset():
+    global_amax = torch.tensor(448.0)
+    initial_amax = torch.tensor([0.0, 1.0, 448.0])
+    offset_range = (-2, 2)
+    candidates = fp8_scale_offset_candidates(initial_amax, global_amax, offset_range)
+
+    candidate_codes = (candidates * 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
+    base_codes = candidate_codes[2]
+    expected_codes = (
+        base_codes.to(torch.int16).unsqueeze(0)
+        + torch.arange(-2, 3, dtype=torch.int16).unsqueeze(1)
+    ).clamp(1, 126)
+    assert torch.equal(candidate_codes, expected_codes.to(torch.uint8))
+
+    cal = calib.NVFP4MSECalibrator(
+        amax=initial_amax,
+        axis=0,
+        global_amax=global_amax,
+        quant_func=lambda x, _amax: torch.zeros_like(x),
+        fp8_scale_sweep=offset_range,
+    )
+    cal.collect(torch.zeros(3, 1))
+    assert torch.equal(cal.compute_amax(), candidates[0] * global_amax)
+
+
+def test_mse_calibrate_normalizes_direct_list_input(monkeypatch):
+    calls = []
+    monkeypatch.setattr(model_calib_module, "max_calibrate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        model_calib_module,
+        "_mse_calibrate_weights",
+        lambda *args, **kwargs: calls.append(kwargs),
+    )
+
+    mse_calibrate(torch.nn.Linear(2, 2), fp8_scale_sweep=[-2, 6])
+
+    assert calls[0]["fp8_scale_sweep"] == (-2, 6)
+
+
 class TestRegisterFP8SweepCalibrator:
     """Tests for _register_fp8_sweep_calibrator and its dispatch in mse_calibrate."""
 
@@ -627,6 +670,18 @@ class TestRegisterFP8SweepCalibrator:
 
         assert len(factory_calls) == 0
 
+    def test_bounded_sweep_does_not_change_custom_backend_dispatch(self):
+        factory_calls: list = []
+
+        def my_factory(amax, axis, quant_func):
+            factory_calls.append(amax)
+            return calib.MseCalibrator(amax=amax, axis=axis, quant_func=quant_func)
+
+        _register_fp8_sweep_calibrator("_test_bounded", my_factory)
+        self._quantize_and_calibrate("_test_bounded", fp8_scale_sweep=(-2, 6))
+
+        assert factory_calls == []
+
     def test_unregistered_backend_skipped_when_fp8_sweep_enabled(self):
         """An unregistered backend is skipped under fp8_scale_sweep, leaving the max calibrator."""
         model = self._quantize_and_calibrate("_test_unregistered", fp8_scale_sweep=True)
@@ -658,6 +713,39 @@ class TestRegisterFP8SweepCalibrator:
         )
 
         assert isinstance(cal, calib.NVFP4MSECalibrator)
+
+        bounded_cal = _make_weight_mse_calibrator(
+            q,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=(-2, 6),
+        )
+        assert bounded_cal._fp8_max_for_normalization == 448.0
+
+        q_4_over_6 = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={
+                    -1: 16,
+                    "type": "static",
+                    "scale_bits": (4, 3),
+                    "four_over_six": True,
+                },
+                axis=None,
+            ),
+            amax=torch.tensor([1.0, 2.0]),
+        )
+        model.weight_quantizer = q_4_over_6
+        promote_nvfp4_static_quantizers(model)
+        bounded_cal = _make_weight_mse_calibrator(
+            q_4_over_6,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=(-2, 6),
+        )
+        assert bounded_cal._fp8_max_for_normalization == 256.0
 
     def test_internal_int8_skipped_when_fp8_sweep_enabled(self):
         """INT8 is skipped under fp8_scale_sweep but uses the multiplier search otherwise."""
