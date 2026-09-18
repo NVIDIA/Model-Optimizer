@@ -253,7 +253,7 @@ python3 -m modelopt.onnx.quantization.autotune \
 - `--use_trtexec` must be set (benchmarking uses `trtexec` instead of the TensorRT Python API)
 - `--safe --skipInference` must be enabled via `--trtexec_benchmark_args`
 
-Replace `<remote autotuning config>` with an actual remote autotuning configuration string (see `trtexec --help` for more details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs `trtexec_safe` there to measure GPU compute time. The temporary engine is removed after each benchmark.
+Replace `<remote autotuning config>` with an actual remote autotuning configuration string (see `trtexec --help` for more details). ModelOpt uses the configuration to build the engine with remote autotuning, copies the generated engine to an internal temporary path on the target, and runs `trtexec_safe` there to measure GPU compute time. ModelOpt attempts to remove the temporary engine after each benchmark.
 
 Other TensorRT benchmark options (e.g. `--timing_cache`, `--warmup_runs`, `--timing_runs`, `--plugin_libraries`) are also available; run `--help` for details.
 
