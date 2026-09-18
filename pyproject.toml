@@ -382,3 +382,11 @@ exclude_lines = [
     # Don't complain about abstract methods, they aren't run
     "@(abc\\.)?abstractmethod",
 ]
+
+[tool.pyrefly]
+# Walk up from each importing file's directory to the config root to resolve imports,
+# matching how Python puts a script's own directory on sys.path at runtime. This lets
+# example scripts that import sibling helper modules next to them (e.g.
+# examples/hf_ptq/example_utils, cast_mxfp4_to_nvfp4) type-check without listing each
+# example directory in search-path.
+enable-fallback-search-path = true
