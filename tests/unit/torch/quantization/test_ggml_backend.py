@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.ggml.backend as backend_module
+import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
+import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
+from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
+from modelopt.torch.quantization.ggml.common import narrow_to_float32
+
+
+@pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
+def test_ggml_backend_via_quantize(num_bits):
+    torch.manual_seed(1234)
+    model = torch.nn.Linear(256, 2, bias=False)
+    inputs = torch.randn(2, 256)
+    unquantized_output = model(inputs).detach()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "backend": "ggml"},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+
+    mtq.quantize(model, config, forward_loop=lambda module: module(inputs))
+    output = model(inputs)
+
+    assert model.weight_quantizer.backend == "ggml"
+    assert model.weight_quantizer.num_bits == num_bits
+    assert output.shape == (2, 2)
+    assert torch.isfinite(output).all()
+    assert not torch.equal(output, unquantized_output)
+
+
+def test_ggml_backend_rejects_unknown_format():
+    with pytest.raises(ValueError, match="requires num_bits"):
+        ggml_fake_quant(torch.ones(1, 256), SimpleNamespace(num_bits="unknown"))
+
+
+def test_ggml_codecs_are_exported_from_quantization_package():
+    assert mtq.quantize_iq1_s is iq1_s_module.quantize_iq1_s
+    assert mtq.quantize_iq2_xs is iq2_xs_module.quantize_iq2_xs
+
+
+def test_ggml_backend_forwards_block_chunk_size(monkeypatch):
+    received = {}
+
+    def fake_quant(inputs, _quantizer, *, block_chunk_size):
+        received["block_chunk_size"] = block_chunk_size
+        return inputs
+
+    monkeypatch.setattr(backend_module, "iq1_s_fake_quant", fake_quant)
+    inputs = torch.ones(1, 256)
+    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args={"block_chunk_size": 17})
+
+    assert ggml_fake_quant(inputs, quantizer) is inputs
+    assert received == {"block_chunk_size": 17}
+
+
+def test_ggml_backend_rejects_unknown_extra_arg():
+    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args={"unknown": 1})
+
+    with pytest.raises(ValueError, match="Unsupported ggml backend_extra_args"):
+        ggml_fake_quant(torch.ones(1, 256), quantizer)
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module", "fake_quant_name", "quantize_name"),
+    [
+        ("iq1_s", iq1_s_module, "iq1_s_fake_quant", "quantize_iq1_s"),
+        ("iq2_xs", iq2_xs_module, "iq2_xs_fake_quant", "quantize_iq2_xs"),
+    ],
+)
+def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(
+    monkeypatch, num_bits, module, fake_quant_name, quantize_name
+):
+    weight = torch.randn(1, 256)
+    quantizer = SimpleNamespace(num_bits=num_bits, _quantizer_cache=None)
+    original_quantize = getattr(module, quantize_name)
+    call_count = 0
+
+    def counted_quantize(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_quantize(*args, **kwargs)
+
+    monkeypatch.setattr(module, quantize_name, counted_quantize)
+    fake_quant = getattr(module, fake_quant_name)
+
+    fake_quant(weight, quantizer, block_chunk_size=1)
+    fake_quant(weight, quantizer, block_chunk_size=1)
+    assert call_count == 1
+
+    fake_quant(weight, quantizer, block_chunk_size=2)
+    assert call_count == 2
+
+    with torch.no_grad():
+        weight.add_(0.01)
+    fake_quant(weight, quantizer, block_chunk_size=2)
+    assert call_count == 3
+
+
+def test_narrow_to_float32_matches_the_cuda_load_float_policy():
+    """Non-finite elements become zero; finite out-of-range elements saturate."""
+    largest = torch.finfo(torch.float32).max
+    values = torch.tensor(
+        [torch.nan, torch.inf, -torch.inf, 1e100, -1e100, 1.5], dtype=torch.float64
+    )
+
+    narrowed = narrow_to_float32(values)
+
+    assert narrowed.dtype is torch.float32
+    assert torch.equal(
+        narrowed, torch.tensor([0.0, 0.0, 0.0, largest, -largest, 1.5], dtype=torch.float32)
+    )

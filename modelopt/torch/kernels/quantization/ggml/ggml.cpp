@@ -15,9 +15,23 @@
  * limitations under the License.
  */
 
+// Every GGML IQ format shares common.cuh, the same CUDA version gate, and the same build flags,
+// so they compile into one extension and bind here. Each format keeps its kernels in its own
+// translation unit and exposes a single host entry point.
+
 #include "common.cuh"
 
+at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+
+namespace {
+
+at::Tensor iq1_s_pack(at::Tensor input, at::Tensor grid) {
+  TORCH_CHECK(input.is_cuda(), "IQ1_S packing requires a CUDA input");
+  TORCH_CHECK(grid.is_cuda(), "IQ1_S packing requires a CUDA grid");
+  modelopt::ggml::check_pack_inputs("IQ1_S", input, grid, modelopt::ggml::kIq1sEntries);
+  return iq1_s_pack_cuda(input.contiguous(), grid.contiguous());
+}
 
 at::Tensor iq2_xs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   TORCH_CHECK(input.is_cuda(), "IQ2_XS packing requires a CUDA input");
@@ -39,8 +53,15 @@ at::Tensor iq2_xs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   return iq2_xs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
 }
 
+} // namespace
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
-  module.def("pack", &iq2_xs_pack,
+  module.def("iq1_s_pack", &iq1_s_pack,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [2048, 8]. Returns uint8 "
+             "[numel / 256, 50] on the input device. Non-finite input elements are treated as "
+             "zero during packing, and finite elements outside the float32 range saturate.");
+  module.def("iq2_xs_pack", &iq2_xs_pack,
              "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
              "dimension is a multiple of 256. The grid must be float32 [512, 8] holding "
              "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
