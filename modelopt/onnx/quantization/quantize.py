@@ -56,18 +56,17 @@ from modelopt.onnx.quantization.calib_utils import (
     RandomDataProvider,
 )
 from modelopt.onnx.quantization.fp8 import quantize as quantize_fp8
-from modelopt.onnx.quantization.graph_utils import (
-    cast_custom_ops,
+from modelopt.onnx.quantization.graph_rewrites import cast_custom_ops, remove_redundant_cast_nodes
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_mha_to_exclude,
     get_input_shapes,
-    print_stat,
-    remove_redundant_cast_nodes,
     validate_op_types_spelling,
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
 from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
+from modelopt.onnx.quantization.qdq_graph import print_stat
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
