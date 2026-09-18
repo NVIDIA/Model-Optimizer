@@ -12,6 +12,36 @@ These instructions apply to AI-assisted work in this repository.
   those skills through relative symlinks. Shared agent config and scripts
   remain under `.agents/`. See `.agents/README.md` for the convention.
 
+## Delegated evaluations
+
+Use the existing evaluator handoff/reply mechanism; if a subagent cannot wait
+for replies, let it return and re-delegate only after deciding the next action.
+Before delegation, agree on the task's numeric-score and output-health acceptance
+policy and submission/compute budget. Apply `plugins/modelopt/skills/evaluation/SKILL.md`
+and its `references/run-validation.md`: a passing score does not override failed health
+or coverage validation. Accept with warnings only when validation passes and the
+agreed policy permits those warnings; otherwise stop as incomplete/invalid or
+consider a corrected run.
+
+After each terminal invocation report, the parent checks that policy and remaining
+budget, records the decision in the workspace invocation ledger, and explicitly
+says **STOP** or authorizes **one next submission**, naming task, canary/full scope,
+configuration changes, and budget. Canary completion is not full-run permission.
+A retry recommendation, prior workflow plan, or no reply is not authorization.
+No speculative retries or submission loops independent of the parent. Manual
+resumes also require authorization; already-submitted NEL timeout/resume chains
+remain part of the authorized invocation, within its budget.
+
+Keep every submitted invocation in the ledger, including failed/canceled attempts,
+with its configuration, status, and job IDs; link resume jobs to their original
+invocation rather than counting them as new attempts. On authorized cancellation
+or budget exhaustion, identify and stop the actual local/remote submission process
+and any submit-capable descendants, not just the shell/tool wrapper. Discover and
+cancel affected queued/running jobs, including resume dependencies and jobs
+created during cancellation; verify the submitter exited and those jobs are
+terminal. Record evidence or unresolved cleanup, never claim cancellation from
+wrapper exit alone. Do not cancel merely to free GPUs (see the evaluation skill).
+
 ## Coding guidelines
 
 - **Coding guide:** Code development and review require reading and following
