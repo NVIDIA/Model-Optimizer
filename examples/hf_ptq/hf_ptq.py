@@ -86,7 +86,6 @@ from modelopt.torch.export import (
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
-from modelopt.torch.export.unified_export_hf import carryable_unplaced_keys
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -919,32 +918,6 @@ def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
             )
 
 
-def assert_fakequant_export_carries_everything(args, full_model) -> None:
-    """Refuse --vllm_fakequant_export up front when real weights would be dropped.
-
-    export_hf_vllm_fq_checkpoint writes model-backed state only, so weights the loader could not
-    place are lost -- and a fake-quant checkpoint is evaluated, where an absent MTP head moves the
-    score instead of failing. Checked here rather than at export time: everything needed is set by
-    the loader, and raising after quantization would throw away the whole PTQ run, hours of it on
-    a large MoE.
-
-    Buffers a checkpoint merely happens to ship are not weights to lose. ``rotary_emb.inv_freq``
-    is the common one: older Llama/Mistral-lineage conversions list it in the index, so it IS
-    shard-backed, and whether it reaches ``unexpected_keys`` depends on the architecture declaring
-    it in ``_keys_to_ignore_on_load_unexpected``. Transformers recomputes it, so refusing an
-    export over it would reject checkpoints that export correctly today.
-    """
-    if not args.vllm_fakequant_export:
-        return
-    droppable = [k for k in carryable_unplaced_keys(full_model) if not k.endswith(".inv_freq")]
-    if droppable:
-        raise NotImplementedError(
-            f"--vllm_fakequant_export cannot carry the {len(droppable)} checkpoint weight(s) the "
-            f"model has no parameter for (e.g. {droppable[0]}); the exported model would be "
-            "incomplete. Use the unified HF export instead."
-        )
-
-
 def export_quantized(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
@@ -1029,10 +1002,9 @@ def export_quantized(
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
-                # The fake-quant exporter saves the model-backed state only, so weights the loader
-                # could not place would be dropped. Refuse the combination when there ARE such
-                # weights rather than write a checkpoint that is quietly missing them -- a
-                # fake-quant export is evaluated, and an absent MTP head changes the answer.
+                # save_pretrained inside the exporter writes model-backed state only; weights
+                # the loader could not place (an MTP head, an auxiliary tower) are carried over
+                # as an extra shard afterward -- see _carry_over_unplaced_weights.
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
@@ -1872,8 +1844,6 @@ def main(args: argparse.Namespace):
                 default_pad_token,
                 device,
             ) = load_model(args)
-
-            assert_fakequant_export_carries_everything(args, full_model)
 
             if args.sparsity_fmt != "dense":
                 # Sparse
