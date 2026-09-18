@@ -485,8 +485,8 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
 
     Returns ``{}``, not an exception, when neither an index nor a single-file checkpoint exists:
     right for callers that treat "nothing recorded" as legitimate (e.g. :func:`locate_source_keys`
-    below). Callers that need a genuinely missing checkpoint to fail loudly want
-    :func:`weight_map_for` instead.
+    below). Callers for whom that is a genuine error (a missing checkpoint, not merely nothing
+    recorded) should check for the empty result and raise themselves.
 
     The indexed case, which is every sharded checkpoint, is a stdlib JSON read and needs nothing.
     Only a single-file ``model.safetensors`` needs safetensors, and only to list its keys.
@@ -500,23 +500,6 @@ def indexed_weight_map(ckpt: "str | Path") -> dict[str, str]:
         with safe_open(str(single), framework="pt") as f:
             return dict.fromkeys(f.keys(), "model.safetensors")
     return {}
-
-
-def weight_map_for(ckpt_path: "str | Path") -> dict[str, str]:
-    """Return the ``param_name -> safetensors_file`` map for a local checkpoint directory, or raise.
-
-    Same answer as :func:`indexed_weight_map`, but raises ``RuntimeError`` instead of returning
-    ``{}`` when the directory has no safetensors checkpoint at all -- for callers (FSDP2 parallel
-    loading, the structural unplaced-keys fallback, DFlash draft-precision reload) where that is
-    a genuine error, not a "nothing to report" case.
-    """
-    weight_map = indexed_weight_map(ckpt_path)
-    if not weight_map:
-        raise RuntimeError(
-            f"No safetensors checkpoint at {ckpt_path} "
-            "(expected model.safetensors or model.safetensors.index.json)."
-        )
-    return weight_map
 
 
 def read_safetensors_subset(
@@ -562,7 +545,7 @@ def locate_source_keys(ckpt: "str | Path", keys: list[str]) -> dict[str, str]:
     The index answers for everything it lists, at no cost. Only the leftovers trigger a header
     scan -- names, never tensor data -- and only when there are any, which is the rare case.
     """
-    # indexed_weight_map, not model_load_utils.weight_map_for: that module imports transformers
+    # indexed_weight_map, not anything from model_load_utils: that module imports transformers
     # and accelerate at module scope, and reaching for it here would make this answer "nothing to
     # carry" wherever they are absent -- the partial-install environments -- silencing the
     # --vllm_fakequant_export guard in exactly the case it exists for. Pinned by

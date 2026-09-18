@@ -640,14 +640,18 @@ class HFDFlashModel(DFlashModel):
         # Imported here rather than at module scope to keep this file's own import-time
         # footprint minimal; hf_checkpoint_utils itself only needs huggingface_hub + safetensors.
         from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+            indexed_weight_map,
             read_safetensors_subset,
-            weight_map_for,
         )
 
+        weight_map = indexed_weight_map(checkpoint_dir)
+        if not weight_map:
+            raise RuntimeError(
+                f"No safetensors checkpoint at {checkpoint_dir} "
+                "(expected model.safetensors or model.safetensors.index.json)."
+            )
         prefix = "dflash_module."
-        stored = read_safetensors_subset(
-            checkpoint_dir, weight_map_for(checkpoint_dir), lambda k: k.startswith(prefix)
-        )
+        stored = read_safetensors_subset(checkpoint_dir, weight_map, lambda k: k.startswith(prefix))
         own = dict(self.dflash_module.named_parameters())
         with torch.no_grad():
             for key, saved in stored.items():

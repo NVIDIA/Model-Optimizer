@@ -42,8 +42,8 @@ from modelopt.torch.utils.distributed import (
     is_initialized,
 )
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    indexed_weight_map,
     read_safetensors_subset,
-    weight_map_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -335,7 +335,12 @@ def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
     Architecture-agnostic by construction -- it asks whether a target parameter exists, not whether
     the key looks like an MTP head or an auxiliary tower.
     """
-    weight_map = weight_map_for(ckpt_path)
+    weight_map = indexed_weight_map(ckpt_path)
+    if not weight_map:
+        raise RuntimeError(
+            f"No safetensors checkpoint at {ckpt_path} "
+            "(expected model.safetensors or model.safetensors.index.json)."
+        )
     plan = _conversion_plan(model)
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
     return [
@@ -374,7 +379,12 @@ def parallel_load_and_prepare_fsdp2(
     pass ``None`` to broadcast all of a source's layers at once).
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
-    weight_map = weight_map_for(resolved_path)
+    weight_map = indexed_weight_map(resolved_path)
+    if not weight_map:
+        raise RuntimeError(
+            f"No safetensors checkpoint at {resolved_path} "
+            "(expected model.safetensors or model.safetensors.index.json)."
+        )
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 

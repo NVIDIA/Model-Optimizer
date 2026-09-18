@@ -26,9 +26,9 @@ from safetensors.torch import save_file
 
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_off_index_safetensors,
+    indexed_weight_map,
     off_index_safetensors_files,
     read_safetensors_subset,
-    weight_map_for,
 )
 
 pytest.importorskip("huggingface_hub")
@@ -548,11 +548,11 @@ def test_skips_a_sidecar_pointing_outside_the_checkpoint(tmp_path):
     assert not (dst / "mtp.safetensors").exists()
 
 
-# --- weight_map_for / read_safetensors_subset (moved from model_load_utils.py, which used to
-# duplicate indexed_weight_map's logic; see weight_map_for's own docstring) --------------------
+# --- indexed_weight_map / read_safetensors_subset (moved from model_load_utils.py, which used
+# to duplicate indexed_weight_map's own index/single-file logic) --------------------------------
 
 
-def test_weight_map_for_sharded(tmp_path):
+def test_indexed_weight_map_sharded(tmp_path):
     save_file({"a.weight": torch.zeros(2)}, str(tmp_path / "shard1.safetensors"))
     save_file({"b.weight": torch.zeros(2)}, str(tmp_path / "shard2.safetensors"))
     (tmp_path / "model.safetensors.index.json").write_text(
@@ -561,35 +561,33 @@ def test_weight_map_for_sharded(tmp_path):
         )
     )
 
-    assert weight_map_for(str(tmp_path)) == {
+    assert indexed_weight_map(str(tmp_path)) == {
         "a.weight": "shard1.safetensors",
         "b.weight": "shard2.safetensors",
     }
 
 
-def test_weight_map_for_single_file(tmp_path):
+def test_indexed_weight_map_single_file(tmp_path):
     save_file(
         {"a.weight": torch.zeros(2), "b.weight": torch.zeros(2)},
         str(tmp_path / "model.safetensors"),
     )
 
-    assert weight_map_for(str(tmp_path)) == {
+    assert indexed_weight_map(str(tmp_path)) == {
         "a.weight": "model.safetensors",
         "b.weight": "model.safetensors",
     }
 
 
-def test_weight_map_for_missing(tmp_path):
-    """weight_map_for still raises even though indexed_weight_map (which it delegates to) does not.
+def test_indexed_weight_map_missing_returns_empty(tmp_path):
+    """Neither an index nor a single-file checkpoint: {}, not an exception.
 
-    indexed_weight_map returns {} for a missing checkpoint -- the right answer for its own
-    callers, which treat "nothing recorded" as legitimate. weight_map_for's callers
-    (unplaced_source_keys, parallel_load_and_prepare_fsdp2, hf_dflash's precision reload) all
-    expect a genuinely absent checkpoint to fail loudly, so it turns that empty result back into
-    a RuntimeError.
+    Right for indexed_weight_map's own callers (e.g. locate_source_keys), which treat "nothing
+    recorded" as legitimate. Callers for whom a missing checkpoint is a genuine error (FSDP2
+    parallel loading, the structural unplaced-keys fallback, DFlash's precision reload) check for
+    the empty result and raise themselves.
     """
-    with pytest.raises(RuntimeError, match="No safetensors checkpoint"):
-        weight_map_for(str(tmp_path))
+    assert indexed_weight_map(str(tmp_path)) == {}
 
 
 def test_read_safetensors_subset(tmp_path):
