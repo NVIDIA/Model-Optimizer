@@ -28,6 +28,7 @@ TinyDeepseekV3 (+ MLAAttention).
 
 from __future__ import annotations
 
+import builtins
 import gc
 import importlib.util
 from pathlib import Path
@@ -67,6 +68,245 @@ def _load_example_module(name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _calibration_worker(
+    num_blocks: int,
+    *,
+    cache_specs=("attention", "mamba"),
+    needs_kv_cache_zeroing=True,
+):
+    cache_groups = [SimpleNamespace(kv_cache_spec=spec) for spec in cache_specs]
+    return SimpleNamespace(
+        model_runner=SimpleNamespace(
+            kv_cache_config=SimpleNamespace(
+                kv_cache_groups=cache_groups,
+                num_blocks=num_blocks,
+                needs_kv_cache_zeroing=needs_kv_cache_zeroing,
+            )
+        )
+    )
+
+
+def _patch_vllm_imports(monkeypatch, modules):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in modules:
+            imported = modules[name]
+            if isinstance(imported, BaseException):
+                raise imported
+            return imported
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
+    """The current vLLM adapter must forward every warmup reservation argument."""
+    module = _load_example_module("vllm_ptq_utils")
+    reserved_block_count = Mock(return_value=4)
+    _patch_vllm_imports(
+        monkeypatch,
+        {"vllm.v1.worker.gpu.warmup": SimpleNamespace(_reserved_block_count=reserved_block_count)},
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=3),
+        max_model_len=2048,
+    )
+    kv_cache_spec = object()
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, kv_cache_spec) == 4
+    reserved_block_count.assert_called_once_with(
+        128,
+        kv_cache_spec,
+        num_lookahead_tokens=3,
+        max_model_len=2048,
+        max_encoder_len=0,
+    )
+
+
+def test_get_calibration_block_count_uses_vllm_026_reservation_policy(monkeypatch):
+    """The vLLM 0.26 adapter must preserve its cross-attention and Mamba rules."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class CrossAttentionSpec:
+        block_size = 16
+
+    class MambaSpec:
+        block_size = 16
+        mamba_cache_mode = "align"
+        num_speculative_blocks = 2
+
+    cdiv = Mock(
+        side_effect=lambda numerator, denominator: (numerator + denominator - 1) // denominator
+    )
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": ImportError("0.28 helper unavailable"),
+            "vllm.utils.math_utils": SimpleNamespace(cdiv=cdiv),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                CrossAttentionSpec=CrossAttentionSpec,
+                MambaSpec=MambaSpec,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        max_model_len=2048,
+    )
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(33, SimpleNamespace(block_size=16)) == 3
+    assert block_count(33, CrossAttentionSpec()) == 0
+    assert block_count(33, MambaSpec()) == 5
+    assert cdiv.call_args_list == [
+        ((33, 16),),
+        ((0, 16),),
+        ((33, 16),),
+    ]
+
+
+def test_allocate_calibration_blocks_assigns_non_null_blocks(monkeypatch):
+    """Scratch block tables must use unique non-null blocks for every request and group."""
+    module = _load_example_module("vllm_ptq_utils")
+    block_count = Mock(side_effect=[1, 2, 2, 1])
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=block_count),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(num_blocks=7),
+        sequence_lengths=[8, 16],
+    )
+
+    assert block_tables == [
+        ([1], [2, 3]),
+        ([4, 5], [6]),
+    ]
+    assert block_count.call_args_list == [
+        ((8, "attention"),),
+        ((8, "mamba"),),
+        ((16, "attention"),),
+        ((16, "mamba"),),
+    ]
+
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = (
+        [1, 2, 3, 4, 5, 6] if "new_block_ids_to_zero" in scheduler_fields else None
+    )
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_skips_zeroing_for_attention_only_cache(monkeypatch):
+    """Attention-only caches have no block zeroer and must receive an empty zeroing list."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(return_value=1)),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(
+            num_blocks=4,
+            cache_specs=("attention",),
+            needs_kv_cache_zeroing=False,
+        ),
+        sequence_lengths=[8],
+    )
+
+    assert block_tables == [([1],)]
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = [] if "new_block_ids_to_zero" in scheduler_fields else None
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_rejects_insufficient_capacity(monkeypatch):
+    """Scratch block allocation must account for block 0 being unavailable."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(side_effect=[1, 2, 2, 1])),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Calibration batch requires 6 KV cache blocks, "
+            r"but only 5 non-null blocks are available\."
+        ),
+    ):
+        module._allocate_calibration_blocks(
+            _calibration_worker(num_blocks=6),
+            sequence_lengths=[8, 16],
+        )
+
+
+@pytest.mark.parametrize("has_calibration_error", [False, True])
+def test_cleanup_failure_preserves_calibration_error(has_calibration_error):
+    """Cleanup must fail closed without replacing an active calibration error."""
+    module = _load_example_module("vllm_ptq_utils")
+    execute_error = RuntimeError("scheduler cleanup failed")
+    finish_error = RuntimeError("legacy cleanup failed")
+    calibration_error = ValueError("calibration failed") if has_calibration_error else None
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=execute_error),
+        model_runner=SimpleNamespace(finish_requests=Mock(side_effect=finish_error)),
+    )
+
+    expected_error = calibration_error or finish_error
+    with pytest.raises(type(expected_error)) as raised:
+        module._cleanup_calibration_requests(worker, object(), calibration_error)
+
+    assert raised.value is expected_error
+    if calibration_error is not None:
+        assert calibration_error.__cause__ is finish_error
+    assert finish_error.__cause__ is execute_error
+
+
+@pytest.mark.parametrize("has_calibration_error", [False, True])
+def test_cleanup_without_legacy_fallback_preserves_primary_error(has_calibration_error):
+    """Missing legacy cleanup must preserve the most useful primary error."""
+    module = _load_example_module("vllm_ptq_utils")
+    execute_error = RuntimeError("scheduler cleanup failed")
+    calibration_error = ValueError("calibration failed") if has_calibration_error else None
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=execute_error),
+        model_runner=SimpleNamespace(),
+    )
+
+    expected_error = calibration_error or execute_error
+    with pytest.raises(type(expected_error)) as raised:
+        module._cleanup_calibration_requests(worker, object(), calibration_error)
+
+    assert raised.value is expected_error
+    if calibration_error is not None:
+        assert calibration_error.__cause__ is execute_error
+
+
+def test_cleanup_uses_legacy_fallback():
+    """A successful legacy cleanup may recover from an unsupported scheduler step."""
+    module = _load_example_module("vllm_ptq_utils")
+    cleanup_output = object()
+    finish_requests = Mock()
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=RuntimeError("unsupported scheduler cleanup")),
+        model_runner=SimpleNamespace(finish_requests=finish_requests),
+    )
+
+    module._cleanup_calibration_requests(worker, cleanup_output, calibration_error=None)
+
+    finish_requests.assert_called_once_with(cleanup_output)
 
 
 class _NativeAttention(torch.nn.Module):

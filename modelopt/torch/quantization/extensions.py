@@ -19,10 +19,17 @@ from pathlib import Path
 
 from modelopt.torch.utils import load_cpp_extension
 
-__all__ = ["get_cuda_ext", "get_cuda_ext_fp8", "get_cuda_ext_mx", "precompile"]
+__all__ = [
+    "get_cuda_ext",
+    "get_cuda_ext_fp8",
+    "get_cuda_ext_ggml",
+    "get_cuda_ext_mx",
+    "precompile",
+]
 
 path = Path(__file__).parent
 kernels_gemm = path.parent / "kernels" / "quantization" / "gemm"
+kernels_ggml = path.parent / "kernels" / "quantization" / "ggml"
 
 
 def get_cuda_ext(raise_if_failed: bool = False):
@@ -72,6 +79,31 @@ def get_cuda_ext_mx(raise_if_failed: bool = False):
     return get_cuda_ext_mx.extension  # type:ignore[attr-defined]
 
 
+def get_cuda_ext_ggml(raise_if_failed: bool = False):
+    """Return the GGML-compatible IQ packing extension, exposing one packer per IQ format.
+
+    The formats share their packing helpers, CUDA version requirement, and build flags, so they
+    build as a single extension: ``iq1_s_pack(input, grid)`` and
+    ``iq2_xs_pack(input, grid, scales)``.
+    """
+    if not hasattr(get_cuda_ext_ggml, "extension") or (
+        raise_if_failed and get_cuda_ext_ggml.extension is None
+    ):
+        get_cuda_ext_ggml.extension = load_cpp_extension(  # type:ignore[attr-defined]
+            name="modelopt_cuda_ext_ggml",
+            sources=[
+                kernels_ggml / "ggml.cpp",
+                kernels_ggml / "iq1_s.cu",
+                kernels_ggml / "iq2_xs.cu",
+            ],
+            cuda_version_specifiers=">=11.8",
+            fail_msg="GGML IQ CUDA packing extension is unavailable.",
+            extra_cuda_cflags=["-O3"],
+            raise_if_failed=raise_if_failed,
+        )
+    return get_cuda_ext_ggml.extension  # type:ignore[attr-defined]
+
+
 def __getattr__(name):
     if name == "cuda_ext":
         return get_cuda_ext()
@@ -79,6 +111,8 @@ def __getattr__(name):
         return get_cuda_ext_fp8()
     elif name == "cuda_ext_mx":
         return get_cuda_ext_mx()
+    elif name == "cuda_ext_ggml":
+        return get_cuda_ext_ggml()
     else:
         raise AttributeError(f"module {__name__} has no attribute {name}")
 
@@ -88,3 +122,4 @@ def precompile():
     print(get_cuda_ext())
     print(get_cuda_ext_fp8())
     print(get_cuda_ext_mx())
+    print(get_cuda_ext_ggml())

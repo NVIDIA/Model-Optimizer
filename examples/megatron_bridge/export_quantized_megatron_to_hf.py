@@ -166,7 +166,6 @@ def main(args: argparse.Namespace):
         export_extra_modules=export_extra_modules,
         dtype=torch.bfloat16,
         export_dir=args.export_unified_hf_path,
-        moe_router_dtype=getattr(unwrapped_model.config, "moe_router_dtype", None),
         trust_remote_code=trust_remote_code,
     )
     print_rank_0(f"Exported HuggingFace checkpoint to {args.export_unified_hf_path}")

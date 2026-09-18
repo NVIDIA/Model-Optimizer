@@ -149,7 +149,7 @@ Homepage = "https://github.com/NVIDIA/Model-Optimizer"
 include = ["modelopt*"]
 
 [tool.setuptools.package-data]
-modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
+modelopt = ["**/*.cpp", "**/*.cu", "**/*.cuh", "**/*.h"]
 modelopt_recipes = ["**/*.yml", "**/*.yaml"]
 
 [tool.setuptools.exclude-package-data]
