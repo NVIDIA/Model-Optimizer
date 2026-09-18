@@ -23,6 +23,29 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The ``modelopt.onnx.quantization.graph_utils`` module has been removed with no
+  compatibility shim; update direct imports using this migration map:
+
+  - ``modelopt.onnx.quantization.graph_indexing``: ``expand_node_names_from_patterns``,
+    ``find_mha_partitions``, ``get_fusible_backbone``,
+    ``get_tensor_consumer_node_indices``, ``get_tensor_consumer_nodes``,
+    ``get_tensor_from_name``, ``get_tensor_producer_nodes``, ``has_const_input``,
+    ``has_path_type``, ``is_const_input``, and ``match_fp8_mha_pattern``.
+  - ``modelopt.onnx.quantization.graph_selection``: ``find_nodes_from_convs_to_exclude``,
+    ``find_nodes_from_matmul_to_exclude``, ``find_nodes_from_mha_to_exclude``,
+    ``find_nodes_to_exclude``, ``get_extended_model_outputs``, ``get_input_shapes``,
+    and ``validate_op_types_spelling``.
+  - ``modelopt.onnx.quantization.graph_rewrites``: ``cast_custom_ops``,
+    ``convert_fp16_io``, ``insert_fp8_mha_casts``, ``insert_matmul_casts``,
+    ``remove_output_initializers``, and ``remove_redundant_cast_nodes``.
+  - ``modelopt.onnx.quantization.qdq_graph``: ``build_non_residual_input_map``,
+    ``classify_partially_quantized_weighted_ops``, ``classify_partition_nodes``,
+    ``filter_quantizable_kgen_heads``, ``find_conv_to_layernorm_nodes``,
+    ``get_concat_eliminated_tensors``, ``get_layer_info``,
+    ``get_layer_precision_mapping``, ``get_resize_scales``, ``print_stat``,
+    ``remove_partial_input_qdq``, ``should_quantize_to_8bit``, and
+    ``validate_8bit_layers``.
+
 - Layerwise calibration now uses prior-layer QDQ activations by default
   (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
   preserve full-precision activations for subsequent layers (the default behavior for

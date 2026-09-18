@@ -31,6 +31,7 @@ __all__ = [
     "cast_custom_ops",
     "convert_fp16_io",
     "insert_fp8_mha_casts",
+    "insert_matmul_casts",
     "remove_output_initializers",
     "remove_redundant_cast_nodes",
 ]
