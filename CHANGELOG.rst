@@ -56,6 +56,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
 - Fix ONNX AutoCast failing on models with external initializers larger than 2 GiB.
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
