@@ -895,6 +895,10 @@ def test_union_survives_an_architecture_that_ignores_its_mtp_keys(tmp_path, monk
     such blind spot, because it asks whether the model has a parameter rather than what the
     loader chose to mention.
     """
+    # monkeypatch.setattr on a dotted path imports the module for real to resolve it, and
+    # model_load_utils genuinely needs transformers (this test pins behaviour of ITS loader,
+    # ignore rules included) -- so there is nothing meaningful to assert without it.
+    pytest.importorskip("transformers")
     from safetensors.torch import save_file
 
     from modelopt.torch.export.unified_export_hf import read_unplaced_weights
@@ -927,6 +931,9 @@ def test_union_prefers_source_keys_over_converted_names(tmp_path, monkeypatch):
     direction -- source key through the converters to a target -- so it names the tensors that are
     actually on disk, and the union carries them.
     """
+    # Same reasoning as test_union_survives_an_architecture_that_ignores_its_mtp_keys above:
+    # the converter resolution this test pins is transformers', not ours.
+    pytest.importorskip("transformers")
     from safetensors.torch import save_file
 
     from modelopt.torch.export.unified_export_hf import read_unplaced_weights
