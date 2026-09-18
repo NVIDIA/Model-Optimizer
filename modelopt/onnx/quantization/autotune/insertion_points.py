@@ -369,6 +369,41 @@ def skip_invalid_insertion_points(
                         producer = node.inputs[0].inputs[0]
                         if producer.op in ["Conv", "ConvTranspose"]:
                             return True
+                # Conv -> [BN ->] Add -> Relu: skip quantizing the main-path Conv
+                # output feeding Add to preserve TRT Conv+Add+Relu INT8 fusion.
+                # Guards:
+                #   1. The Add output has a single consumer and that consumer is Relu
+                #      (otherwise TRT cannot fuse, and skipping removes a legitimate
+                #      quantization point).
+                #   2. The Conv feeding Add is a "main-path" Conv (its activation input
+                #      has a single consumer), not a downsample/projection Conv (whose
+                #      activation input fans out to multiple consumers).
+                if node.op == "Add":
+                    # Guard 1: Add must feed exactly one Relu
+                    add_out = node.outputs[0] if node.outputs else None
+                    if add_out is None or len(add_out.outputs) != 1:
+                        pass  # Add fans out or has no consumer — skip not applicable
+                    elif add_out.outputs[0].op != "Relu":
+                        pass  # Add does not feed Relu — fusion impossible
+                    elif inp.inputs:
+                        producer = inp.inputs[0]
+                        # Unwrap optional BN
+                        conv_node = None
+                        if producer.op in ["Conv", "ConvTranspose"]:
+                            conv_node = producer
+                        elif producer.op == "BatchNormalization":
+                            bn_act = producer.inputs[0] if producer.inputs else None
+                            if (
+                                bn_act
+                                and bn_act.inputs
+                                and bn_act.inputs[0].op in ["Conv", "ConvTranspose"]
+                            ):
+                                conv_node = bn_act.inputs[0]
+                        # Guard 2: main-path Conv (single consumer on activation input)
+                        if conv_node is not None and conv_node.inputs:
+                            conv_act_input = conv_node.inputs[0]
+                            if len(conv_act_input.outputs) == 1:
+                                return True
                 # Filter 1: out boolean operations
                 if node.op in (
                     get_bool_ops()
@@ -472,6 +507,11 @@ def merge_resolved_insertion_points(
     to insert Q/DQ once at the tensor level rather than at each individual node input.
     This reduces the number of Q/DQ nodes in the graph and simplifies the quantization scheme.
 
+    Additionally, when a tensor has Q/DQ at some consumers and the remaining uncovered
+    consumers are all Concat nodes, the insertion is promoted to tensor-level. Concat is
+    a byte-level copy in TRT — quantizing its input has no accuracy cost and enables
+    INT8 Concat fusion when all Concat inputs are INT8.
+
     Args:
         graph: The ONNX graph containing the nodes
         resolved_insertion_points: Set of resolved insertion points to optimize
@@ -486,10 +526,29 @@ def merge_resolved_insertion_points(
     for tensor_name in {ip.tensor_name for ip in node_ips}:
         all_users = set(tensor_users_map.get(tensor_name, []))
         qdq_users = {ip for ip in node_ips if ip.tensor_name == tensor_name}
-        if all_users == {ip.node_index for ip in qdq_users}:
+        covered_nodes = {ip.node_index for ip in qdq_users}
+
+        if all_users == covered_nodes:
+            # All consumers have Q/DQ — merge to tensor-level
             results.add(
                 ResolvedInsertionPoint(tensor_name=tensor_name, node_index=None, input_index=None)
             )
+        elif covered_nodes and all_users - covered_nodes:
+            # Some consumers lack Q/DQ — check if all uncovered ones are Concat
+            uncovered = all_users - covered_nodes
+            uncovered_all_concat = all(
+                node_idx < len(graph.nodes) and graph.nodes[node_idx].op == "Concat"
+                for node_idx in uncovered
+            )
+            if uncovered_all_concat:
+                # Promote to tensor-level: Concat is byte-copy, safe to quantize
+                results.add(
+                    ResolvedInsertionPoint(
+                        tensor_name=tensor_name, node_index=None, input_index=None
+                    )
+                )
+            else:
+                results.update(qdq_users)
         else:
             results.update(qdq_users)
     return results
@@ -497,7 +556,10 @@ def merge_resolved_insertion_points(
 
 def get_autotuner_skip_ops():
     """Returns set of shape/structural operations that are not quantizable."""
-    return set(get_copy_ops()) | {
+    # Concat is excluded: it can pass INT8 data through in TRT (byte-level copy).
+    # Blocking Concat prevents tensor-level Q/DQ when a quantizable op's output
+    # fans out to both a compute op (e.g. Conv) and a Concat, breaking INT8 fusion.
+    return (set(get_copy_ops()) - {"Concat"}) | {
         # Additional indexing/scatter/reshape ops
         "Compress",
         "Scatter",
