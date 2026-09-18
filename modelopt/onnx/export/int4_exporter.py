@@ -19,7 +19,7 @@ import onnx
 from onnx import numpy_helper
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import get_tensor_producer_nodes
+from modelopt.onnx.quantization.graph_indexing import get_tensor_producer_nodes
 from modelopt.onnx.quantization.qdq_utils import cast_initializer_to_dtype
 from modelopt.onnx.quantization.quant_utils import pack_weights_to_int4
 

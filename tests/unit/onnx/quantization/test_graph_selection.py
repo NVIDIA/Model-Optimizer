@@ -20,7 +20,7 @@ import onnx_graphsurgeon as gs
 import pytest
 from onnx import TensorProto, helper
 
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_selection import (
     _exclude_matmuls_by_inference,
     _exclude_matmuls_by_shape_inference,
     _get_inp_b_k_dim,
@@ -303,7 +303,7 @@ def test_exclude_matmuls_by_inference_runtime_path(k, n, expected_excluded):
         "B": np.zeros((k, n), dtype=np.float32),
     }
     with mock.patch(
-        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        "modelopt.onnx.quantization.graph_selection.get_extended_model_outputs",
         return_value=fake_output_map,
     ):
         excluded = _exclude_matmuls_by_inference(
@@ -331,7 +331,7 @@ def test_exclude_matmuls_by_inference_gemv_variable_b():
         "B": np.zeros((k, n), dtype=np.float32),
     }
     with mock.patch(
-        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        "modelopt.onnx.quantization.graph_selection.get_extended_model_outputs",
         return_value=fake_output_map,
     ):
         excluded = _exclude_matmuls_by_inference(
@@ -354,7 +354,7 @@ def test_exclude_matmuls_by_inference_gemv_constant_b():
     # B is a Constant (initializer) so only the matmul output is added to graph outputs.
     fake_output_map = {"Y": np.zeros((m, n), dtype=np.float32)}
     with mock.patch(
-        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        "modelopt.onnx.quantization.graph_selection.get_extended_model_outputs",
         return_value=fake_output_map,
     ):
         excluded = _exclude_matmuls_by_inference(
@@ -390,7 +390,7 @@ def test_exclude_matmuls_by_inference_dedupes_added_outputs():
         "B": np.zeros((k, n), dtype=np.float32),
     }
     with mock.patch(
-        "modelopt.onnx.quantization.graph_utils.get_extended_model_outputs",
+        "modelopt.onnx.quantization.graph_selection.get_extended_model_outputs",
         return_value=fake_output_map,
     ):
         excluded = _exclude_matmuls_by_inference(
