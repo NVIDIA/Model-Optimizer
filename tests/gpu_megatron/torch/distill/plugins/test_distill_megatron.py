@@ -14,9 +14,12 @@
 # limitations under the License.
 
 from functools import partial
+from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference_with_dummy_input
 from _test_utils.torch.misc import set_seed
@@ -24,6 +27,9 @@ from _test_utils.torch.misc import set_seed
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.plugins.megatron import (
     DistillationConfig,
+    LogitsAndIntermediatesLossBalancer,
+    LogitsKLLoss,
+    TopKLogitsKLLoss,
     _mtp_excluded_from_quantization,
     adjust_distillation_model_for_mcore,
     setup_distillation_config,
@@ -124,7 +130,7 @@ def _test_logits_kl_loss(rank, size):
     loss["kd_loss"].backward()
 
 
-def _test_topk_logits_kl_loss(top_k, rank, size):
+def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
     """Test TopKLogitsKLLoss with simple forward/backward pass."""
     set_seed(SEED)
 
@@ -169,7 +175,7 @@ def _test_topk_logits_kl_loss(top_k, rank, size):
 
     # Setup distillation config with TopKLogitsKLLoss via logit_kl_topk argument
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(logit_kl_topk=top_k),
+        config_or_path=DistillationConfig(**kd_kwargs),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -210,6 +216,12 @@ def _test_topk_logits_kl_loss(top_k, rank, size):
     )
     assert isinstance(loss, dict), "Loss should be a dictionary"
     assert "kd_loss" in loss, "Should contain kd_loss key"
+
+    # All TP ranks operate on the same global Top-K, so the loss must be identical across ranks.
+    gathered = [torch.empty_like(loss["kd_loss"]) for _ in range(size)]
+    torch.distributed.all_gather(gathered, loss["kd_loss"].detach())
+    for other in gathered[1:]:
+        assert torch.allclose(gathered[0], other), "Top-K KD loss differs across TP ranks"
 
     # Backward pass
     loss["kd_loss"].backward()
@@ -260,7 +272,7 @@ def _test_skip_lm_loss_with_mtp(rank, size):
     ).cuda()
 
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(skip_lm_loss=True),
+        config_or_path=DistillationConfig(kd_loss_alpha=1.0),  # skips LM loss
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -313,9 +325,136 @@ def test_logits_kl_loss(dist_workers):
     dist_workers.run(_test_logits_kl_loss)
 
 
-def test_topk_logits_kl_loss(dist_workers, top_k: int = 5):
+@pytest.mark.parametrize(
+    ("top_p", "top_p_min_k", "ghost_token"),
+    [(None, 1, True), (None, 1, False), (0.9, 1, True), (0.9, 3, False)],
+)
+def test_topk_logits_kl_loss(dist_workers, top_p, top_p_min_k, ghost_token, top_k: int = 5):
     """Test TopKLogitsKLLoss with TP parallelism."""
-    dist_workers.run(partial(_test_topk_logits_kl_loss, top_k))
+    kd_kwargs = {
+        "logit_kl_topk": top_k,
+        "logit_kl_top_p": top_p,
+        "logit_kl_top_p_min_k": top_p_min_k,
+        "logit_kl_ghost_token": ghost_token,
+    }
+    dist_workers.run(partial(_test_topk_logits_kl_loss, kd_kwargs))
+
+
+def _make_loss_inputs(seq=4, batch=3, vocab=16):
+    torch.manual_seed(SEED)
+    student = torch.randn(seq, batch, vocab, requires_grad=True)
+    teacher = torch.randn(seq, batch, vocab) * 3  # peaky teacher so top-P actually truncates
+    return student, teacher
+
+
+def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
+    """With K = vocab and ghost token, Top-K KL equals the dense full-vocab KL (residual ~0)."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student, teacher = _make_loss_inputs()
+    dense = LogitsKLLoss(cfg)(student, teacher)[0]
+    topk = TopKLogitsKLLoss(cfg, top_k=student.size(-1), add_ghost_token=True)(student, teacher)[0]
+    assert torch.allclose(dense, topk, atol=1e-6)
+    # Without ghost token, the unnormalized Top-K KL over the full vocab is also the dense KL.
+    topk_no_ghost = TopKLogitsKLLoss(cfg, top_k=student.size(-1), add_ghost_token=False)(
+        student, teacher
+    )[0]
+    assert torch.allclose(dense, topk_no_ghost, atol=1e-5)
+
+
+def test_topk_logits_kl_loss_numerics_ghost_token_reference():
+    """Top-K + ghost token matches a hand-written reference on the K+1 bucketed distributions."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student, teacher = _make_loss_inputs()
+    k = 4
+    loss = TopKLogitsKLLoss(cfg, top_k=k, add_ghost_token=True)(student, teacher)[0]
+
+    q_full = F.log_softmax(teacher, dim=-1)
+    p_full = F.log_softmax(student, dim=-1)
+    _, idx = torch.topk(teacher, k, dim=-1)
+    q_k, p_k = q_full.gather(-1, idx), p_full.gather(-1, idx)
+    q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
+    p_rest = torch.log1p(-p_k.exp().sum(-1, keepdim=True))
+    q = torch.cat([q_k, q_rest], -1)
+    p = torch.cat([p_k, p_rest], -1)
+    ref = (q.exp() * (q - p)).sum(-1).transpose(0, 1)
+    assert torch.allclose(loss, ref, atol=1e-6)
+    # Sanity: total mass within the K+1 buckets is 1 for both distributions.
+    assert torch.allclose(q.exp().sum(-1), torch.ones_like(q[..., 0]), atol=1e-5)
+    assert torch.allclose(p.exp().sum(-1), torch.ones_like(p[..., 0]), atol=1e-5)
+
+
+@pytest.mark.parametrize("temperature", [0.5, 2.0, 3.7])
+def test_logits_kl_losses_temperature_scaling(temperature):
+    """Dense and Top-K losses match a plain ``log_softmax(x / T)`` reference at T != 1."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student, teacher = _make_loss_inputs()
+    q = F.log_softmax(teacher / temperature, dim=-1)
+    p = F.log_softmax(student / temperature, dim=-1)
+
+    dense = LogitsKLLoss(cfg, temperature=temperature)(student, teacher)[0]
+    ref_dense = (q.exp() * (q - p)).sum(-1).transpose(0, 1)
+    assert torch.allclose(dense, ref_dense, atol=1e-5)
+
+    k = 4
+    topk = TopKLogitsKLLoss(cfg, temperature=temperature, top_k=k, add_ghost_token=True)(
+        student, teacher
+    )[0]
+    _, idx = torch.topk(teacher, k, dim=-1)
+    q_k, p_k = q.gather(-1, idx), p.gather(-1, idx)
+    q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
+    p_rest = torch.log1p(-p_k.exp().sum(-1, keepdim=True))
+    qq = torch.cat([q_k, q_rest], -1)
+    pp = torch.cat([p_k, p_rest], -1)
+    ref_topk = (qq.exp() * (qq - pp)).sum(-1).transpose(0, 1)
+    assert torch.allclose(topk, ref_topk, atol=1e-6)
+
+
+def test_topk_logits_kl_loss_top_p_masks_tail():
+    """Top-P zeroes out-of-nucleus entries and honors the min_k floor."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    student, teacher = _make_loss_inputs()
+    k = 8
+    q_full = F.log_softmax(teacher, dim=-1)
+    q_k, idx = torch.topk(q_full, k, dim=-1)
+    p_k = F.log_softmax(student, dim=-1).gather(-1, idx)
+    probs = q_k.exp()
+    keep = (probs.cumsum(-1) - probs) < 0.5
+
+    # No ghost token: loss is exactly the masked partial KL sum.
+    loss = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5, add_ghost_token=False)(student, teacher)[0]
+    ref = (keep * probs * (q_k - p_k)).sum(-1).transpose(0, 1)
+    assert torch.allclose(loss, ref, atol=1e-5)
+    assert not keep.all(), "test inputs should produce some truncation"
+
+    # min_k floor forces at least min_k entries even when nucleus is tiny.
+    min_k = 3
+    loss_min = TopKLogitsKLLoss(cfg, top_k=k, top_p=1e-6, top_p_min_k=min_k, add_ghost_token=False)(
+        student, teacher
+    )[0]
+    ref_min = ((torch.arange(k) < min_k) * probs * (q_k - p_k)).sum(-1).transpose(0, 1)
+    assert torch.allclose(loss_min, ref_min, atol=1e-5)
+
+    # Ghost token with top-P: residual is mass outside the kept nucleus, distributions sum to 1.
+    loss_ghost = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5, add_ghost_token=True)(student, teacher)[
+        0
+    ]
+    q_rest = torch.log1p(-(probs * keep).sum(-1, keepdim=True))
+    p_rest = torch.log1p(-(p_k.exp() * keep).sum(-1, keepdim=True))
+    ref_ghost = ref + (q_rest.exp() * (q_rest - p_rest)).sum(-1).transpose(0, 1)
+    assert torch.allclose(loss_ghost, ref_ghost, atol=1e-6)
+    assert loss_ghost.shape == (student.size(1), student.size(0))
+    loss_ghost.sum().backward()
+    assert student.grad is not None and torch.isfinite(student.grad).all()
+
+
+def test_distillation_config_top_p_validation():
+    with pytest.raises(AssertionError):
+        DistillationConfig(logit_kl_top_p=0.9)  # requires logit_kl_topk
+    with pytest.raises(AssertionError):
+        DistillationConfig(logit_kl_topk=8, logit_kl_top_p=1.5)
+    with pytest.raises(AssertionError):
+        DistillationConfig(logit_kl_topk=8, logit_kl_top_p=0.9, logit_kl_top_p_min_k=0)
+    DistillationConfig(logit_kl_topk=8, logit_kl_top_p=1.0, logit_kl_top_p_min_k=2)
 
 
 def test_skip_lm_loss_with_mtp(dist_workers):
@@ -356,3 +495,62 @@ def test_mtp_excluded_from_quantization():
     assert not _mtp_excluded_from_quantization(
         _model(with_mtp=False, body_quant=True, mtp_quant=False)
     )
+
+
+def test_loss_balancer_convex_combination():
+    """Total loss is (1 - alpha) * lm + alpha * (logits + rescaled intermediate)."""
+    lm = torch.tensor(2.0)
+    logits = torch.tensor(0.5)
+    inter = torch.tensor(4.0)  # rescaled to logits magnitude -> contributes 0.5
+    key = mtd.loss_balancers.STUDENT_LOSS_KEY
+
+    out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=0.25)(
+        {key: lm, "LogitsKLLoss_0": logits, "HiddenStateCosineLoss_0": inter}
+    )
+    assert torch.allclose(out["kd_loss"], torch.tensor(0.75 * 2.0 + 0.25 * (0.5 + 0.5)))
+    assert torch.allclose(out["logits_loss"], logits)
+
+    # A negative logits loss (possible for Top-K KL without ghost token) must not flip the sign of
+    # the intermediate-loss contribution.
+    out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=1.0)(
+        {key: lm, "LogitsKLLoss_0": -logits, "HiddenStateCosineLoss_0": inter}
+    )
+    assert torch.allclose(out["kd_loss"], -logits + logits)  # -0.5 + abs(-0.5) * (4.0 / 4.0) = 0
+
+    # alpha=1 ignores the LM loss entirely; skip_original_loss does the same regardless of alpha.
+    out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=1.0)({key: lm, "LogitsKLLoss_0": logits})
+    assert torch.allclose(out["kd_loss"], logits)
+    out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=0.0, skip_original_loss=True)(
+        {key: lm, "LogitsKLLoss_0": logits}
+    )
+    assert torch.allclose(out["kd_loss"], logits)
+
+    with pytest.raises(AssertionError):
+        LogitsAndIntermediatesLossBalancer(kd_loss_alpha=1.5)
+    with pytest.raises(AssertionError):
+        DistillationConfig(kd_loss_alpha=-0.1)
+
+
+def test_distillation_config_deprecations():
+    """skip_lm_loss is derived from kd_loss_alpha; legacy fields warn with FutureWarning."""
+    assert DistillationConfig(kd_loss_alpha=1.0).skip_lm_loss is True
+    assert DistillationConfig(kd_loss_alpha=0.9).skip_lm_loss is False
+
+    # Explicit skip_lm_loss=True is translated to kd_loss_alpha=1.0 rather than overridden.
+    with pytest.warns(FutureWarning, match="translating skip_lm_loss=True"):
+        cfg = DistillationConfig(kd_loss_alpha=0.9, skip_lm_loss=True)
+    assert cfg.kd_loss_alpha == 1.0 and cfg.skip_lm_loss is True
+
+    # skip_lm_loss=False with alpha=1.0 is a conflict; alpha wins.
+    with pytest.warns(FutureWarning, match="conflicts with kd_loss_alpha=1.0"):
+        cfg = DistillationConfig(kd_loss_alpha=1.0, skip_lm_loss=False)
+    assert cfg.skip_lm_loss is True
+
+    # Consistent but deprecated usage still warns.
+    with pytest.warns(FutureWarning, match="skip_lm_loss is deprecated"):
+        cfg = DistillationConfig(kd_loss_alpha=0.9, skip_lm_loss=False)
+    assert cfg.skip_lm_loss is False
+
+    with pytest.warns(FutureWarning, match="kd_loss_scale is deprecated"):
+        cfg = DistillationConfig(kd_loss_scale=2.0)
+    assert cfg.kd_loss_alpha == 0.9
