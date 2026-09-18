@@ -6,6 +6,11 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. Skip-softmax serving keeps the calibrated 128-token KV-tile granularity (and 128-row prefill Q tiles), autotunes only its execution schedule, and uses a smaller Q tile for one-token decode.
+- Sparse-only vLLM installs now reject unsupported DCP, DBO/ubatching, speculative decoding, and FULL mixed-batch CUDA graphs; calibrated decode also rejects FULL decode graphs.
+
 *Quantization*
 
 - A recipe can now **delegate its whole body to another recipe** with a top-level ``$import``; any top-level key given alongside it overrides the imported one. ``metadata.recipe_type`` became optional along with it: a recipe states its kind with a ``# modelopt-schema:`` comment, with ``metadata.recipe_type``, or by delegating to a recipe that does, and only a recipe that another file imports has to carry the schema comment. Whatever a recipe does state must be true: a schema comment and a ``recipe_type`` must agree, and so must a recipe and the recipe it delegates to. ``modelopt_recipes/models/`` uses this for checkpoint entries that a portable recipe already reproduces: the entry aliases that recipe instead of copying it.
@@ -25,6 +30,29 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The ``modelopt.onnx.quantization.graph_utils`` module has been removed with no
+  compatibility shim; update direct imports using this migration map:
+
+  - ``modelopt.onnx.quantization.graph_indexing``: ``expand_node_names_from_patterns``,
+    ``find_mha_partitions``, ``get_fusible_backbone``,
+    ``get_tensor_consumer_node_indices``, ``get_tensor_consumer_nodes``,
+    ``get_tensor_from_name``, ``get_tensor_producer_nodes``, ``has_const_input``,
+    ``has_path_type``, ``is_const_input``, and ``match_fp8_mha_pattern``.
+  - ``modelopt.onnx.quantization.graph_selection``: ``find_nodes_from_convs_to_exclude``,
+    ``find_nodes_from_matmul_to_exclude``, ``find_nodes_from_mha_to_exclude``,
+    ``find_nodes_to_exclude``, ``get_extended_model_outputs``, ``get_input_shapes``,
+    and ``validate_op_types_spelling``.
+  - ``modelopt.onnx.quantization.graph_rewrites``: ``cast_custom_ops``,
+    ``convert_fp16_io``, ``insert_fp8_mha_casts``, ``insert_matmul_casts``,
+    ``remove_output_initializers``, and ``remove_redundant_cast_nodes``.
+  - ``modelopt.onnx.quantization.qdq_graph``: ``build_non_residual_input_map``,
+    ``classify_partially_quantized_weighted_ops``, ``classify_partition_nodes``,
+    ``filter_quantizable_kgen_heads``, ``find_conv_to_layernorm_nodes``,
+    ``get_concat_eliminated_tensors``, ``get_layer_info``,
+    ``get_layer_precision_mapping``, ``get_resize_scales``, ``print_stat``,
+    ``remove_partial_input_qdq``, ``should_quantize_to_8bit``, and
+    ``validate_8bit_layers``.
+
 - Layerwise calibration now uses prior-layer QDQ activations by default
   (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
   preserve full-precision activations for subsequent layers (the default behavior for
@@ -41,6 +69,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix shared ONNX export metadata and Diffusers attention policy: every ``NVFP4QuantExporter`` post-process now upgrades the default-domain opset to at least 23, all FP8 custom-op exports re-run ONNX shape/type inference after setting output metadata, and quantized SDPA derives FP8 MHA enablement from the live Q/K/V quantizers instead of honoring a caller-set ``_disable_fp8_mha`` attribute.
+- Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
 - Fix ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` storing the MoE router at Megatron's ``moe_router_dtype``, which is a routing *compute* dtype, not a storage one. The router now exports at the export ``dtype`` like every other unquantized weight, matching what ``hf_ptq.py`` and the released NVFP4 checkpoints contain; pass ``moe_router_dtype`` to ``export_mcore_gpt_to_hf`` explicitly if you want the old fp32 storage.
 - Fix unified Megatron export writing a second, unreferenced copy of the vocab embedding when a model with MTP layers is exported with pipeline parallelism. The duplicate was never loaded but inflated the checkpoint by the size of the embedding (about 1 GB for Qwen3.6-35B-A3B); re-export to reclaim the space.
 - Fail fast on non-finite AutoQuantize output gradients with an actionable error before accumulating sensitivity scores, without changing attention backend settings.

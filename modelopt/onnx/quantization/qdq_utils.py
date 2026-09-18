@@ -26,12 +26,12 @@ import torch
 from onnx import numpy_helper
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_indexing import (
     get_tensor_consumer_nodes,
     get_tensor_from_name,
     get_tensor_producer_nodes,
-    remove_redundant_cast_nodes,
 )
+from modelopt.onnx.quantization.graph_rewrites import remove_redundant_cast_nodes
 from modelopt.onnx.quantization.quant_utils import (
     compute_e8m0,
     get_amax,

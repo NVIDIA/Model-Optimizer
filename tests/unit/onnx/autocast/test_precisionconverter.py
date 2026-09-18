@@ -2220,6 +2220,33 @@ def test_convert_to_f16_restores_public_io_metadata_from_entry_boundary():
     onnx.checker.check_model(converted, full_check=True)
 
 
+def test_convert_to_f16_preserves_declared_output_type_after_inference_changes_it():
+    graph_input = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [2, 3])
+    graph_output = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3])
+    node = helper.make_node("Identity", ["X"], ["Y"], name="Identity_0")
+    graph = helper.make_graph([node], "inferred_output_type", [graph_input], [graph_output])
+    model = helper.make_model(
+        graph,
+        producer_name="inferred_output_type",
+        opset_imports=[helper.make_opsetid("", 19)],
+        ir_version=10,
+    )
+
+    converted = convert_to_f16(
+        model, keep_io_types=True, op_block_list=[], trt_plugins=[], opset=19
+    )
+
+    output = next(vi for vi in converted.graph.output if vi.name == "Y")
+    assert output.type.tensor_type.elem_type == TensorProto.FLOAT
+    output_producers = [node for node in converted.graph.node if "Y" in node.output]
+    assert len(output_producers) == 1
+    assert output_producers[0].op_type == "Cast"
+    assert next(attr.i for attr in output_producers[0].attribute if attr.name == "to") == (
+        TensorProto.FLOAT
+    )
+    onnx.checker.check_model(converted, full_check=True)
+
+
 def test_convert_to_f16_combines_op_and_node_exclusions(simple_model):
     model, *_ = simple_model
     converted = convert_to_f16(
