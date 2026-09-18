@@ -233,6 +233,34 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     return apply_reverse_rules(state_dict, split_rules, rename_rules)
 
 
+def _strip_sentinel_or_raise(mapped: str, sentinel: str, original: str) -> str:
+    """Strip ``sentinel`` from the end of ``mapped``, or raise if a rename rule mangled it.
+
+    ``mapped`` is the result of running the reverse rename rules against
+    ``base + sentinel`` (see :func:`build_reverse_name_mapper`). Rename patterns use
+    ``.`` as "any path-separator char", so a rule whose match extends further than
+    intended -- most commonly a greedy ``.`` -- can consume or rewrite part of the
+    sentinel instead of leaving it as an untouched trailing segment. When that happens
+    ``str.removesuffix`` is a silent no-op (it only strips an *exact* suffix match), and
+    the mangled remnant would otherwise leak into the exported ``exclude_modules``
+    name, which no real checkpoint tensor can ever match.
+
+    Raises:
+        QuantConversionUnsupportedError: the sentinel did not survive as a clean
+            suffix, so this name mapping cannot be trusted. The caller
+            (:func:`build_reverse_name_mapper`'s callers) already treats this
+            exception as "reverse conversion failed, fall back to in-memory names for
+            both weights and config" -- so raising here converts a silent, downstream
+            (deployment-time) failure into a loud, immediate one at export time.
+    """
+    if not mapped.endswith(sentinel):
+        raise QuantConversionUnsupportedError(
+            f"reverse rename mangled the internal sentinel while mapping {original!r} "
+            f"(got {mapped!r}); a rename rule likely matched past its intended boundary"
+        )
+    return mapped.removesuffix(sentinel)
+
+
 def build_reverse_name_mapper(model):
     """Build a ``str -> str`` mapper that applies the quant-aware reverse *rename* rules.
 
@@ -271,7 +299,7 @@ def build_reverse_name_mapper(model):
         elif name.endswith("*"):
             base, suffix = name[:-1], "*"
         mapped = _apply(base + _sentinel)
-        mapped = mapped.removesuffix(_sentinel)
+        mapped = _strip_sentinel_or_raise(mapped, _sentinel, name)
         return mapped + suffix
 
     return _map

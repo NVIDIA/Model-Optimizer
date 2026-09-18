@@ -1158,6 +1158,8 @@ def _forward_loop(
     model: torch.nn.Module,
     dataloader: DataLoader,
     allowed_non_tensor_keys: set | None = None,
+    checkpoint_every: int = 0,
+    checkpoint_fn: Callable[[], None] | None = None,
 ) -> None:
     """Runs forward passes through the model using data from the dataloader.
 
@@ -1165,6 +1167,12 @@ def _forward_loop(
         model: The PyTorch model to run inference on
         dataloader: DataLoader containing the batched input data
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
+        checkpoint_every: If > 0, call `checkpoint_fn` after every this-many batches.
+            0 (the default) disables checkpointing entirely -- `checkpoint_fn` is never
+            called, matching prior behavior for existing callers.
+        checkpoint_fn: No-arg callback invoked periodically per `checkpoint_every`. Ignored
+            if `checkpoint_every` is 0. Runs on every process that executes the loop; must be
+            rank-safe or collective if it persists shared state.
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
@@ -1173,11 +1181,13 @@ def _forward_loop(
         infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
-        for _, data in enumerate(tqdm(dataloader)):
+        for step, data in enumerate(tqdm(dataloader)):
             # Process batch and update max working batch size
             max_working_batch_size = _process_batch(
                 data, infer_method, max_working_batch_size, allowed_non_tensor_keys
             )
+            if checkpoint_every and (step + 1) % checkpoint_every == 0:
+                checkpoint_fn()
 
 
 def create_forward_loop(
@@ -1191,6 +1201,8 @@ def create_forward_loop(
     include_labels: bool = False,
     dataloader: DataLoader | None = None,
     allowed_non_tensor_keys: set | None = None,
+    checkpoint_every: int = 0,
+    checkpoint_fn: Callable[[], None] | None = None,
 ) -> Callable:
     """Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.
 
@@ -1212,6 +1224,13 @@ def create_forward_loop(
         allowed_non_tensor_keys: Set of key names whose batch values may be non-tensor types.
             Useful when the dataloader yields batches with non-standard fields (e.g., nested
             model outputs).
+        checkpoint_every: If > 0, checkpoint_fn is called after every this-many batches. 0
+            (the default) disables checkpointing.
+        checkpoint_fn: No-arg callback invoked periodically per checkpoint_every. Runs on every
+            process that executes the forward loop; under a multi-process/distributed run,
+            the callback itself must be rank-safe (e.g. guard writes with a rank check) or
+            collective (e.g. an all-reduce/barrier) if it persists shared state such as a
+            checkpoint file.
 
     Example usage for quantization:
 
@@ -1235,6 +1254,11 @@ def create_forward_loop(
         A forward loop function that can be called with no arguments. When called, this function iterates over
             the dataset specified by `dataset_name`.
     """
+    if checkpoint_every < 0:
+        raise ValueError(f"checkpoint_every must be non-negative, got {checkpoint_every}")
+    if checkpoint_every > 0 and not callable(checkpoint_fn):
+        raise ValueError("checkpoint_fn must be callable when checkpoint_every > 0")
+
     if dataloader is None:
         if batch_size == 0:
             # We let the system to determine the max data batch for each forward.
@@ -1251,7 +1275,9 @@ def create_forward_loop(
             include_labels=include_labels,
         )
 
-    return lambda model: _forward_loop(model, dataloader, allowed_non_tensor_keys)
+    return lambda model: _forward_loop(
+        model, dataloader, allowed_non_tensor_keys, checkpoint_every, checkpoint_fn
+    )
 
 
 def model_type_is_enc_dec(model):
