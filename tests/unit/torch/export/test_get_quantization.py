@@ -28,6 +28,7 @@ from _test_utils.torch.export.utils import (
 import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
+from modelopt.torch.export.plugins.mcore_custom import CustomModuleMapping
 from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_FP8_K_NVFP4_V,
@@ -773,3 +774,31 @@ def test_moe_router_names_handle_root_module():
     block = _FakeMoEBlock(hidden=16)
     # name == "" for the root module; the router must be "gate", not ".gate".
     assert _get_unquantized_moe_router_names(block) == ["gate"]
+
+
+@pytest.mark.parametrize(
+    ("func_name", "expected"),
+    [
+        ("pack_name_remapping", True),
+        ("pack_name_remapping_gpt_oss", True),
+        ("name_remapping", False),
+        ("gated_mlp_slicing", False),
+    ],
+)
+def test_mappings_pack_fused_experts(func_name, expected):
+    """The fused-expert decision must come from the architecture's rule table.
+
+    That table is identical on every rank, unlike the per-expert loops that apply it, so it is
+    what lets the IQ rejection be raised where all ranks agree instead of only on the ranks
+    that own an expert.
+    """
+    mappings = {
+        "word_embeddings": CustomModuleMapping("name_remapping", "model.embed_tokens."),
+        "experts": CustomModuleMapping(func_name, "model.layers.{}.mlp.experts."),
+    }
+
+    assert unified_export_megatron._mappings_pack_fused_experts(mappings) is expected
+
+
+def test_mappings_pack_fused_experts_ignores_non_mapping_entries():
+    assert not unified_export_megatron._mappings_pack_fused_experts({"skip_output_scale": True})

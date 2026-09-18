@@ -113,6 +113,23 @@ __all__ = [
 ]
 
 
+_FUSED_EXPERT_MAPPING_FUNCS = ("pack_name_remapping", "pack_name_remapping_gpt_oss")
+
+
+def _mappings_pack_fused_experts(mappings: dict) -> bool:
+    """Whether an architecture's export mapping packs experts into one fused tensor.
+
+    This is a property of the architecture's rule table, which is identical on every rank --
+    unlike the per-expert loops that apply it, which only the ranks owning those experts run.
+    That makes it safe to reject a fused IQ export up front, where every rank agrees.
+    """
+    return any(
+        isinstance(mapping, CustomModuleMapping)
+        and mapping.func_name in _FUSED_EXPERT_MAPPING_FUNCS
+        for mapping in mappings.values()
+    )
+
+
 class GPTModelExporter:
     """Megatron Core GPTModel Exporter.
 
@@ -318,11 +335,20 @@ class GPTModelExporter:
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         quantization_format = self._get_quantization_format(self.model)
-        if self._any_rank_uses_iq_quantization() and get_tensor_model_parallel_world_size() != 1:
-            raise NotImplementedError(
-                "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
-                "parallel size 1"
-            )
+        if self._any_rank_uses_iq_quantization():
+            if get_tensor_model_parallel_world_size() != 1:
+                raise NotImplementedError(
+                    "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
+                    "parallel size 1"
+                )
+            # _reject_unsupported_fused_iq_export raises from inside the per-expert loops, so a
+            # stage owning no fused expert would skip it and block in the collectives below while
+            # its peers exit. The architecture's rule table is the same everywhere, so decide here.
+            if _mappings_pack_fused_experts(all_mcore_hf_export_mapping.get(self.arch, {})):
+                raise NotImplementedError(
+                    "Fused-MoE IQ export requires a deployment loader that supports "
+                    "[num_experts, out_features, in_features // 256, payload_bytes]"
+                )
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
