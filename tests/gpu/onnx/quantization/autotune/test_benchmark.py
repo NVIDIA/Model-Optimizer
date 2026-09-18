@@ -273,16 +273,22 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     assert "--avgRuns=4" in remote_command[-1]
 
 
-def test_trtexec_remote_config_falls_back_when_version_is_unsupported(tmp_path):
+@pytest.mark.parametrize("config_form", ["inline", "split"])
+def test_trtexec_remote_config_falls_back_when_version_is_unsupported(tmp_path, config_form):
     """An unsupported TensorRT version preserves the existing local fallback."""
     remote_url = (
         "ssh://alice@10.0.0.5:2222?remote_exec_path=/opt/trt/bin&remote_lib_path=/opt/trt/lib"
+    )
+    remote_config_args = (
+        [f"--remoteAutoTuningConfig={remote_url}"]
+        if config_form == "inline"
+        else ["--remoteAutoTuningConfig", remote_url]
     )
     with patch.object(bm, "_check_for_trtexec", side_effect=ImportError):
         benchmark = TrtExecBenchmark(
             timing_cache_file=str(tmp_path / "cache.bin"),
             trtexec_args=[
-                f"--remoteAutoTuningConfig={remote_url}",
+                *remote_config_args,
                 "--safe",
                 "--skipInference",
             ],
@@ -299,11 +305,17 @@ def test_trtexec_remote_config_falls_back_when_version_is_unsupported(tmp_path):
         assert benchmark.run(str(model_path)) == pytest.approx(2.5)
 
     assert run_mock.call_count == 1
+    local_command = run_mock.call_args.args[0]
+    assert remote_url not in local_command
+    assert not any(
+        arg == "--remoteAutoTuningConfig" or arg.startswith("--remoteAutoTuningConfig=")
+        for arg in local_command
+    )
 
 
 @pytest.mark.parametrize("failure_kind", ["nonzero", "timeout"])
-def test_trtexec_remote_failure_returns_inf_and_cleans_up(tmp_path, failure_kind):
-    """A target failure is logged, keeps the sentinel, and removes its engine."""
+def test_trtexec_remote_failure_returns_inf_and_attempts_cleanup(tmp_path, failure_kind):
+    """A target failure is logged, keeps the sentinel, and attempts engine cleanup."""
     remote_url = "ssh://alice@10.0.0.5?remote_exec_path=/opt/trt/bin&remote_lib_path=/opt/trt/lib"
     with patch.object(bm, "_check_for_trtexec"):
         benchmark = TrtExecBenchmark(

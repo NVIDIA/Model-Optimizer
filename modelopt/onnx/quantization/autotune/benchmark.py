@@ -144,6 +144,23 @@ def _parse_remote_benchmark_config(
     )
 
 
+def _remove_remote_autotuning_config(trtexec_args: list[str]) -> list[str]:
+    """Remove inline or split-form remote-autotuning arguments."""
+    filtered_args = []
+    index = 0
+    while index < len(trtexec_args):
+        arg = trtexec_args[index]
+        if arg == "--remoteAutoTuningConfig":
+            index += 2
+            continue
+        if arg.startswith("--remoteAutoTuningConfig="):
+            index += 1
+            continue
+        filtered_args.append(arg)
+        index += 1
+    return filtered_args
+
+
 def _run_network_command(command: list[str]) -> Any:
     """Run an SSH or SCP command using the system's key-based configuration."""
     # System SSH/SCP is required because TensorRT's remote build does not report target latency.
@@ -301,9 +318,7 @@ class TrtExecBenchmark(Benchmark):
                     "Remote autotuning is not supported with TensorRT version < 10.15. "
                     "Removing --remoteAutoTuningConfig from trtexec arguments"
                 )
-                trtexec_args = [
-                    arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
-                ]
+                trtexec_args = _remove_remote_autotuning_config(trtexec_args)
             else:
                 self.logger.debug("TensorRT Python API version >= 10.15 detected")
                 try:
@@ -343,6 +358,99 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.debug(f"Cleaned up temporary directory: {self.temp_dir}")
             except Exception as e:
                 self.logger.warning(f"Failed to cleanup temporary directory: {e}")
+
+    def _benchmark_remote_engine(
+        self,
+        config: _RemoteBenchmarkConfig,
+        log_file: str | None,
+        local_log_content: str,
+    ) -> Any | None:
+        """Upload, benchmark, and clean up a generated engine on the remote target."""
+        remote_engine_path = f".modelopt_{Path(self.temp_dir).name}.engine.trt"
+        remote_log = []
+        try:
+            upload_command = [
+                "scp",
+                "-oBatchMode=yes",
+                "-P",
+                str(config.port),
+                self.engine_path,
+                f"{config.destination}:{remote_engine_path}",
+            ]
+            upload_result = _run_network_command(upload_command)
+            remote_log.append(
+                f"Upload command: {shlex.join(upload_command)}\n"
+                f"Return code: {upload_result.returncode}\n"
+                f"STDOUT:\n{upload_result.stdout}\nSTDERR:\n{upload_result.stderr}"
+            )
+            if upload_result.returncode != 0:
+                self.logger.error(
+                    f"Failed to upload engine to remote target: {upload_result.stderr}"
+                )
+                return None
+
+            remote_program = [
+                config.trtexec_safe_path,
+                "--useCudaGraph",
+                f"--warmUp={self.warmup_runs}",
+                f"--iterations={self.timing_runs}",
+                f"--avgRuns={self.timing_runs}",
+                "--duration=0",
+                f"--loadEngine={remote_engine_path}",
+            ]
+            remote_command = (
+                f"LD_LIBRARY_PATH={shlex.quote(config.library_path)}:$LD_LIBRARY_PATH "
+                f"{shlex.join(remote_program)}"
+            )
+            benchmark_command = [
+                "ssh",
+                "-oBatchMode=yes",
+                "-p",
+                str(config.port),
+                config.destination,
+                remote_command,
+            ]
+            result = _run_network_command(benchmark_command)
+            remote_log.append(
+                f"Benchmark command: {shlex.join(benchmark_command)}\n"
+                f"Return code: {result.returncode}\n"
+                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+        except Exception as error:
+            remote_log.append(f"Remote benchmark failed: {error}")
+            raise
+        finally:
+            cleanup_command = [
+                "ssh",
+                "-oBatchMode=yes",
+                "-p",
+                str(config.port),
+                config.destination,
+                f"rm -f -- {shlex.quote(remote_engine_path)}",
+            ]
+            try:
+                cleanup_result = _run_network_command(cleanup_command)
+                remote_log.append(
+                    f"Cleanup command: {shlex.join(cleanup_command)}\n"
+                    f"Return code: {cleanup_result.returncode}\n"
+                    f"STDOUT:\n{cleanup_result.stdout}\nSTDERR:\n{cleanup_result.stderr}"
+                )
+                if cleanup_result.returncode != 0:
+                    self.logger.warning(
+                        "Remote engine cleanup failed with return code "
+                        f"{cleanup_result.returncode}: {cleanup_result.stderr}"
+                    )
+            except Exception as error:
+                remote_log.append(f"Cleanup failed: {error}")
+                self.logger.warning(f"Remote engine cleanup failed: {error}")
+            self._write_log_file(log_file, "\n\n".join([local_log_content, *remote_log]))
+
+        if result.returncode != 0:
+            self.logger.error(
+                f"Remote trtexec_safe failed with return code {result.returncode}: {result.stderr}"
+            )
+            return None
+        return result
 
     def run(
         self,
@@ -402,91 +510,10 @@ class TrtExecBenchmark(Benchmark):
                 return float("inf")
 
             if self._remote_benchmark_config is not None:
-                config = self._remote_benchmark_config
-                remote_engine_path = f".modelopt_{Path(self.temp_dir).name}.engine.trt"
-                remote_log = []
-                try:
-                    upload_command = [
-                        "scp",
-                        "-oBatchMode=yes",
-                        "-P",
-                        str(config.port),
-                        self.engine_path,
-                        f"{config.destination}:{remote_engine_path}",
-                    ]
-                    upload_result = _run_network_command(upload_command)
-                    remote_log.append(
-                        f"Upload command: {shlex.join(upload_command)}\n"
-                        f"Return code: {upload_result.returncode}\n"
-                        f"STDOUT:\n{upload_result.stdout}\nSTDERR:\n{upload_result.stderr}"
-                    )
-                    if upload_result.returncode != 0:
-                        self.logger.error(
-                            f"Failed to upload engine to remote target: {upload_result.stderr}"
-                        )
-                        return float("inf")
-
-                    remote_program = [
-                        config.trtexec_safe_path,
-                        "--useCudaGraph",
-                        f"--warmUp={self.warmup_runs}",
-                        f"--iterations={self.timing_runs}",
-                        f"--avgRuns={self.timing_runs}",
-                        "--duration=0",
-                        f"--loadEngine={remote_engine_path}",
-                    ]
-                    remote_command = (
-                        f"LD_LIBRARY_PATH={shlex.quote(config.library_path)}:$LD_LIBRARY_PATH "
-                        f"{shlex.join(remote_program)}"
-                    )
-                    benchmark_command = [
-                        "ssh",
-                        "-oBatchMode=yes",
-                        "-p",
-                        str(config.port),
-                        config.destination,
-                        remote_command,
-                    ]
-                    result = _run_network_command(benchmark_command)
-                    remote_log.append(
-                        f"Benchmark command: {shlex.join(benchmark_command)}\n"
-                        f"Return code: {result.returncode}\n"
-                        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-                    )
-                except Exception as error:
-                    remote_log.append(f"Remote benchmark failed: {error}")
-                    raise
-                finally:
-                    cleanup_command = [
-                        "ssh",
-                        "-oBatchMode=yes",
-                        "-p",
-                        str(config.port),
-                        config.destination,
-                        f"rm -f -- {shlex.quote(remote_engine_path)}",
-                    ]
-                    try:
-                        cleanup_result = _run_network_command(cleanup_command)
-                        remote_log.append(
-                            f"Cleanup command: {shlex.join(cleanup_command)}\n"
-                            f"Return code: {cleanup_result.returncode}\n"
-                            f"STDOUT:\n{cleanup_result.stdout}\nSTDERR:\n{cleanup_result.stderr}"
-                        )
-                        if cleanup_result.returncode != 0:
-                            self.logger.warning(
-                                "Remote engine cleanup failed with return code "
-                                f"{cleanup_result.returncode}: {cleanup_result.stderr}"
-                            )
-                    except Exception as error:
-                        remote_log.append(f"Cleanup failed: {error}")
-                        self.logger.warning(f"Remote engine cleanup failed: {error}")
-                    self._write_log_file(log_file, "\n\n".join([log_content, *remote_log]))
-
-                if result.returncode != 0:
-                    self.logger.error(
-                        f"Remote trtexec_safe failed with return code {result.returncode}: "
-                        f"{result.stderr}"
-                    )
+                result = self._benchmark_remote_engine(
+                    self._remote_benchmark_config, log_file, log_content
+                )
+                if result is None:
                     return float("inf")
                 latency_pattern = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
             else:
