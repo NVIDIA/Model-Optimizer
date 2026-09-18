@@ -27,6 +27,7 @@ Covers:
 import contextlib
 import os
 import shutil
+import subprocess
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -216,6 +217,159 @@ def test_trtexec_run_accepts_bytes_input(trtexec_bench):
 
     with patch("subprocess.run", return_value=mock_result):
         assert trtexec_bench.run(b"fake onnx bytes") == pytest.approx(5.0)
+
+
+def test_trtexec_run_returns_remote_safety_latency(tmp_path):
+    """Remote safety autotuning benchmarks the built engine on the target."""
+    remote_url = (
+        '"ssh://alice@10.0.0.5:2222?'
+        'remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"'
+    )
+    with patch.object(bm, "_check_for_trtexec"):
+        benchmark = TrtExecBenchmark(
+            timing_cache_file=str(tmp_path / "cache.bin"),
+            warmup_runs=2,
+            timing_runs=4,
+            trtexec_args=[
+                f"--remoteAutoTuningConfig={remote_url}",
+                "--safe",
+                "--skipInference",
+            ],
+        )
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"")
+    log_file = tmp_path / "benchmark.log"
+
+    local_build = MagicMock(returncode=0, stdout="Engine built", stderr="")
+    upload = MagicMock(returncode=0, stdout="", stderr="")
+    remote_benchmark = MagicMock(
+        returncode=0,
+        stdout=(
+            "[I] GPU Compute Time: min = 3.40 ms, max = 3.44 ms, mean = 3.41 ms, median = 3.42 ms"
+        ),
+        stderr="",
+    )
+    cleanup = MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(
+        "subprocess.run", side_effect=[local_build, upload, remote_benchmark, cleanup]
+    ) as run_mock:
+        latency = benchmark.run(str(model_path), str(log_file))
+
+    assert latency == pytest.approx(3.42)
+    local_command = run_mock.call_args_list[0].args[0]
+    assert (
+        "--remoteAutoTuningConfig=ssh://alice@10.0.0.5:2222?"
+        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    ) in local_command
+    assert "GPU Compute Time" in log_file.read_text()
+    remote_command = run_mock.call_args_list[2].args[0]
+    assert remote_command[0] == "ssh"
+    assert "trtexec_safe" in remote_command[-1]
+    assert "--useCudaGraph" in remote_command[-1]
+    assert "--warmUp=2" in remote_command[-1]
+    assert "--iterations=4" in remote_command[-1]
+    assert "--avgRuns=4" in remote_command[-1]
+
+
+@pytest.mark.parametrize("config_form", ["inline", "split"])
+def test_trtexec_remote_config_falls_back_when_version_is_unsupported(tmp_path, config_form):
+    """An unsupported TensorRT version preserves the existing local fallback."""
+    remote_url = (
+        "ssh://alice@10.0.0.5:2222?remote_exec_path=/opt/trt/bin&remote_lib_path=/opt/trt/lib"
+    )
+    remote_config_args = (
+        [f"--remoteAutoTuningConfig={remote_url}"]
+        if config_form == "inline"
+        else ["--remoteAutoTuningConfig", remote_url]
+    )
+    with patch.object(bm, "_check_for_trtexec", side_effect=ImportError):
+        benchmark = TrtExecBenchmark(
+            timing_cache_file=str(tmp_path / "cache.bin"),
+            trtexec_args=[
+                *remote_config_args,
+                "--safe",
+                "--skipInference",
+            ],
+        )
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"")
+    local_result = MagicMock(
+        returncode=0,
+        stdout="[I] Latency: min = 2.0 ms, max = 3.0 ms, median = 2.5 ms",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=local_result) as run_mock:
+        assert benchmark.run(str(model_path)) == pytest.approx(2.5)
+
+    assert run_mock.call_count == 1
+    local_command = run_mock.call_args.args[0]
+    assert remote_url not in local_command
+    assert not any(
+        arg == "--remoteAutoTuningConfig" or arg.startswith("--remoteAutoTuningConfig=")
+        for arg in local_command
+    )
+
+
+@pytest.mark.parametrize("failure_kind", ["nonzero", "timeout"])
+def test_trtexec_remote_failure_returns_inf_and_attempts_cleanup(tmp_path, failure_kind):
+    """A target failure is logged, keeps the sentinel, and attempts engine cleanup."""
+    remote_url = "ssh://alice@10.0.0.5?remote_exec_path=/opt/trt/bin&remote_lib_path=/opt/trt/lib"
+    with patch.object(bm, "_check_for_trtexec"):
+        benchmark = TrtExecBenchmark(
+            timing_cache_file=str(tmp_path / "cache.bin"),
+            trtexec_args=[
+                f"--remoteAutoTuningConfig={remote_url}",
+                "--safe",
+                "--skipInference",
+            ],
+        )
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"")
+    log_file = tmp_path / "benchmark.log"
+    local_build = MagicMock(returncode=0, stdout="Engine built", stderr="")
+    upload = MagicMock(returncode=0, stdout="", stderr="")
+    if failure_kind == "nonzero":
+        remote_failure = MagicMock(returncode=1, stdout="", stderr="target execution failed")
+        expected_log = "target execution failed"
+    else:
+        remote_failure = subprocess.TimeoutExpired(cmd="ssh", timeout=600)
+        expected_log = "timed out"
+    cleanup = MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(
+        "subprocess.run", side_effect=[local_build, upload, remote_failure, cleanup]
+    ) as run_mock:
+        assert benchmark.run(str(model_path), str(log_file)) == float("inf")
+
+    cleanup_command = run_mock.call_args_list[-1].args[0]
+    assert cleanup_command[0] == "ssh"
+    assert cleanup_command[-1].startswith("rm -f -- .modelopt_trtexec_benchmark_")
+    assert expected_log in log_file.read_text()
+
+
+def test_trtexec_remote_password_authentication_is_rejected(tmp_path):
+    """Remote safety benchmarking relies on SSH keys instead of URL passwords."""
+    remote_url = (
+        "ssh://alice:secret@10.0.0.5?remote_exec_path=/opt/trt/bin&remote_lib_path=/opt/trt/lib"
+    )
+    with patch.object(bm, "_check_for_trtexec"):
+        benchmark = TrtExecBenchmark(
+            timing_cache_file=str(tmp_path / "cache.bin"),
+            trtexec_args=[
+                f"--remoteAutoTuningConfig={remote_url}",
+                "--safe",
+                "--skipInference",
+            ],
+        )
+
+    with patch("subprocess.run") as run_mock:
+        assert benchmark.run(str(tmp_path / "model.onnx")) == float("inf")
+
+    run_mock.assert_not_called()
 
 
 # --- TensorRTPyBenchmark._alloc_pinned_host ---

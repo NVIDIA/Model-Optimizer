@@ -47,6 +47,33 @@ def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
     return False, None
 
 
+def _run_command(
+    executable: str,
+    args: list[str] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a trusted executable without invoking a shell.
+
+    Args:
+        executable: Trusted executable name or path.
+        args: Arguments to pass to the executable.
+        timeout: Optional subprocess timeout in seconds.
+
+    Returns:
+        The completed subprocess result.
+
+    Raises:
+        FileNotFoundError: If the executable is not found in PATH.
+    """
+    cmd = [executable, *(args or [])]
+    try:
+        # Callers select a trusted executable and argv remains list-form, so no local shell
+        # interprets external input.
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"'{executable}' binary not found in PATH") from e
+
+
 def _run_trtexec(
     args: list[str] | None = None, timeout: float | None = None
 ) -> subprocess.CompletedProcess:
@@ -62,9 +89,8 @@ def _run_trtexec(
     Raises:
         FileNotFoundError: If the 'trtexec' binary is not found in PATH.
     """
-    cmd = ["trtexec", *(args or [])]
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # nosec B603
+        return _run_command("trtexec", args, timeout)
     except FileNotFoundError as e:
         raise FileNotFoundError(
             "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
