@@ -1685,11 +1685,15 @@ def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
 
         structural = unplaced_source_keys(model, str(ckpt))
     except Exception as exc:
-        if not recorded:
-            warnings.warn(
-                f"Could not derive unplaced source keys structurally ({exc}); relying on the "
-                "loader's report, which its architecture may have filtered."
-            )
+        # Warn regardless of whether anything was recorded: a non-empty recorded set is not
+        # proof the union is complete, since the structural pass is what catches keys an
+        # architecture's ignore rules dropped from the recorded set in the first place. Staying
+        # quiet here just because recorded happens to be non-empty is the same silent
+        # degradation this function exists to avoid.
+        warnings.warn(
+            f"Could not derive unplaced source keys structurally ({exc}); relying on the "
+            "loader's report, which its architecture may have filtered."
+        )
     return sorted({*structural, *recorded})
 
 
