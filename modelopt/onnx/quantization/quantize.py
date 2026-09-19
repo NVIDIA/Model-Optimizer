@@ -468,10 +468,9 @@ def quantize(
     quantize_mode: str = "int8",
     calibration_data: CalibrationDataType = None,
     calibration_method: str | None = None,
-    calibration_cache_path: str | None = None,
     calibration_data_reader: CalibrationDataReader | None = None,
     calibration_shapes: str | None = None,
-    calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
+    calibration_eps: Sequence[str] = ("cpu", "cuda:0", "trt"),
     override_shapes: str | None = None,
     op_types_to_quantize: list[str] | None = None,
     op_types_to_exclude: list[str] | None = None,
@@ -491,7 +490,7 @@ def quantize(
     dq_only: bool = False,
     block_size: int | None = None,
     use_zero_point: bool = False,
-    passes: list[str] = ["concat_elimination"],
+    passes: Sequence[str] | None = ("concat_elimination",),
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
@@ -526,10 +525,9 @@ def quantize(
         calibration_data:
             Calibration data, either a numpy array or list/dict of numpy arrays.
         calibration_method:
-            Calibration method choices. Options are int8/fp8: {'entropy' (default), 'max'}
-            and int4: {'awq_clip' (default), 'awq_lite', 'awq_full', 'rtn_dq'}.
-        calibration_cache_path:
-            Path to pre-calculated activation tensor ranges, also known as calibration cache.
+            Calibration method choices. Options are int8: {'entropy' (default), 'max'},
+            fp8: {'max' (default), 'entropy'}, and int4:
+            {'awq_clip' (default), 'awq_lite', 'awq_full', 'rtn_dq'}.
         calibration_data_reader:
             Instance of a CalibrationDataReader object to provide calibration data.
         calibration_shapes:
@@ -693,6 +691,42 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
+    if "calibration_cache_path" in kwargs:
+        raise TypeError(
+            "calibration_cache_path was removed; provide calibration_data or calibration_data_reader instead"
+        )
+    calibration_eps = list(calibration_eps)
+    passes = [] if passes is None else list(passes)
+    op_types_to_quantize = list(op_types_to_quantize) if op_types_to_quantize is not None else None
+    op_types_to_exclude = list(op_types_to_exclude) if op_types_to_exclude is not None else None
+    op_types_to_exclude_fp16 = (
+        list(op_types_to_exclude_fp16) if op_types_to_exclude_fp16 is not None else None
+    )
+    nodes_to_quantize = list(nodes_to_quantize) if nodes_to_quantize is not None else None
+    nodes_to_exclude = list(nodes_to_exclude) if nodes_to_exclude is not None else None
+    trt_plugins = list(trt_plugins) if trt_plugins is not None else None
+    trt_plugins_precision = (
+        list(trt_plugins_precision) if trt_plugins_precision is not None else None
+    )
+    autotune_node_filter_list = (
+        list(autotune_node_filter_list) if autotune_node_filter_list is not None else None
+    )
+    input_shapes_profile = (
+        [dict(profile) for profile in input_shapes_profile]
+        if input_shapes_profile is not None
+        else None
+    )
+
+    if quantize_mode not in {"int8", "fp8", "int4"}:
+        raise ValueError(f"Unsupported quantization mode: {quantize_mode!r}")
+    if quantize_mode in {"int8", "fp8"}:
+        if calibration_method is None:
+            calibration_method = "entropy" if quantize_mode == "int8" else "max"
+        if calibration_method not in {"entropy", "max"}:
+            raise ValueError(
+                f"Unsupported calibration method {calibration_method!r} for {quantize_mode}"
+            )
+
     if trt_rtx_backend not in ("legacy", "abi"):
         raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
     if trt_plugins and "NvTensorRtRtx" in calibration_eps:
@@ -700,6 +734,10 @@ def quantize(
             "TensorRT plugin paths are not supported with the TensorRT-RTX backend. "
             "Remove --trt_plugins or select the classic TensorRT EP."
         )
+    if quantize_mode in {"int8", "fp8"} and (calibration_data is None) == (
+        calibration_data_reader is None
+    ):
+        raise ValueError("Provide exactly one of calibration_data or calibration_data_reader")
 
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
@@ -856,9 +894,8 @@ def quantize(
             autotune_context,
             quantize_func,
             onnx_path=onnx_path,
-            calibration_method=calibration_method or "entropy",
+            calibration_method=calibration_method,
             calibration_data_reader=calibration_data_reader,
-            calibration_cache_path=calibration_cache_path,
             calibration_shapes=calibration_shapes,
             calibration_eps=calibration_eps,
             op_types_to_quantize=op_types_to_quantize,

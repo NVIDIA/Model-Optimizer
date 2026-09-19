@@ -15,7 +15,6 @@
 
 """Provides basic calibration utils."""
 
-import struct
 from typing import TypeAlias
 
 import numpy as np
@@ -149,30 +148,3 @@ class RandomDataProvider(CalibrationDataReader):
     def rewind(self):
         """Rewinds the data reader to the first index."""
         self.calibration_data_reader = iter(self.calibration_data_list)
-
-
-def import_scales_from_calib_cache(cache_path: str) -> dict[str, float]:
-    """Reads TensorRT calibration cache and returns as dictionary.
-
-    Args:
-        cache_path: Calibration cache path.
-
-    Returns:
-        Dictionary with scales in the format {tensor_name: float_scale}.
-    """
-    logger.info(f"Importing scales from calibration cache: {cache_path}")
-    with open(cache_path) as f:
-        scales_dict = {}
-        lines = f.readlines()
-        for i, line in enumerate(lines):
-            if i > 0:  # Skips the first line (i.e., TRT-8501-EntropyCalibration2)
-                layer_name, hex_value = line.replace("\n", "").split(": ")
-                try:
-                    scale = struct.unpack("!f", bytes.fromhex(hex_value))[0]
-                    scales_dict[layer_name + "_scale"] = scale
-                    logger.debug(f"Imported scale for {layer_name}: {scale}")
-                except Exception as e:
-                    logger.error(f"Failed to parse scale for tensor {layer_name}: {e!s}")
-                    raise ValueError(f"Scale value for tensor {layer_name} was not found!")
-
-        return scales_dict

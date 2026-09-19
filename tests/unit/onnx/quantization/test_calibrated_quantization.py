@@ -23,6 +23,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.quantization as moq
+from modelopt.onnx.quantization.__main__ import get_parser
 
 _CALIBRATION_DATA = np.array(
     [
@@ -175,12 +176,7 @@ def test_explicit_calibrated_quantization_graph_contract(
     assert [(opset.domain, opset.version) for opset in model.opset_import] == [("", 19)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Omitted FP8 calibration is expected to default to max",
-)
-def test_future_fp8_omitted_method_defaults_to_max(tmp_path, monkeypatch):
+def test_fp8_omitted_method_defaults_to_max(tmp_path, monkeypatch):
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
     input_path = tmp_path / "matmul.onnx"
     onnx.save_model(_make_matmul_model(), input_path)
@@ -204,112 +200,132 @@ def test_future_fp8_omitted_method_defaults_to_max(tmp_path, monkeypatch):
     assert captured == {"calibration_method": "max"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Calibrated quantization is expected to require an explicit source",
-)
-def test_future_calibrated_quantization_requires_an_explicit_source(tmp_path, monkeypatch):
-    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
-    input_path = tmp_path / "matmul.onnx"
-    onnx.save_model(_make_matmul_model(), input_path)
-
-    def reject_implicit_random_data(*args, **kwargs):
-        raise AssertionError("an implicit random calibration source was created")
-
-    monkeypatch.setattr(quantize_module, "RandomDataProvider", reject_implicit_random_data)
-
-    try:
+@pytest.mark.parametrize("quantize_mode", ["int8", "fp8"])
+def test_calibrated_quantization_rejects_unsupported_method(quantize_mode):
+    with pytest.raises(
+        ValueError,
+        match=rf"Unsupported calibration method 'percentile' for {quantize_mode}",
+    ):
         moq.quantize(
-            str(input_path),
-            quantize_mode="int8",
-            calibration_eps=["cpu"],
-            high_precision_dtype="fp32",
-            passes=[],
-            enable_gemv_detection_for_trt=False,
+            "unused.onnx",
+            quantize_mode=quantize_mode,
+            calibration_method="percentile",
+            calibration_data=_CALIBRATION_DATA,
         )
-    except ValueError:
-        return
-
-    raise AssertionError("quantization accepted a missing calibration source")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Calibrated quantization is expected to reject multiple sources",
+@pytest.mark.parametrize("quantize_mode", ["int8", "fp8"])
+@pytest.mark.parametrize(
+    ("calibration_data", "calibration_data_reader"),
+    [
+        pytest.param(None, None, id="missing"),
+        pytest.param(_CALIBRATION_DATA, object(), id="dual"),
+    ],
 )
-def test_future_calibrated_quantization_rejects_two_sources(tmp_path, monkeypatch):
-    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
-    input_path = tmp_path / "matmul.onnx"
-    onnx.save_model(_make_matmul_model(), input_path)
-    dispatched = False
-
-    class CalibrationReader:
-        def get_next(self):
-            return None
-
-    def capture_int8_dispatch(**kwargs):
-        nonlocal dispatched
-        dispatched = True
-
-    monkeypatch.setattr(quantize_module, "quantize_int8", capture_int8_dispatch)
-
-    try:
+def test_calibrated_quantization_requires_exactly_one_source(
+    quantize_mode, calibration_data, calibration_data_reader
+):
+    with pytest.raises(
+        ValueError,
+        match="exactly one of calibration_data or calibration_data_reader",
+    ):
         moq.quantize(
-            str(input_path),
-            quantize_mode="int8",
-            calibration_data={"input": _CALIBRATION_DATA},
-            calibration_data_reader=CalibrationReader(),
-            calibration_eps=["cpu"],
-            high_precision_dtype="fp32",
-            passes=[],
-            enable_gemv_detection_for_trt=False,
+            "unused.onnx",
+            quantize_mode=quantize_mode,
+            calibration_data=calibration_data,
+            calibration_data_reader=calibration_data_reader,
         )
-    except ValueError:
-        return
-
-    assert not dispatched
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Top-level quantization is expected to accept only exact mode tokens",
-)
-def test_future_top_level_mode_tokens_are_exact(tmp_path, monkeypatch):
-    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
-    input_path = tmp_path / "matmul.onnx"
-    onnx.save_model(_make_matmul_model(), input_path)
-    dispatched = False
-
-    def capture_int4_dispatch(**kwargs):
-        nonlocal dispatched
-        dispatched = True
-
-    monkeypatch.setattr(quantize_module, "quantize_int4", capture_int4_dispatch)
-
-    try:
+def test_top_level_mode_tokens_are_exact():
+    with pytest.raises(ValueError, match="Unsupported quantization mode: 'int4_awq'"):
         moq.quantize(
-            str(input_path),
+            "unused.onnx",
             quantize_mode="int4_awq",
-            calibration_data={"input": _CALIBRATION_DATA},
-            calibration_eps=["cpu"],
-            passes=[],
         )
-    except (RuntimeError, ValueError):
-        return
-
-    assert not dispatched
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Calibration-cache input is expected to be absent from the Python API",
-)
-def test_future_python_api_removes_calibration_cache_input():
+def test_python_api_removes_calibration_cache_input():
     assert "calibration_cache_path" not in inspect.signature(moq.quantize).parameters
+    with pytest.raises(
+        TypeError,
+        match=r"calibration_cache_path.*removed.*calibration_data",
+    ):
+        moq.quantize(
+            "unused.onnx",
+            quantize_mode="int8",
+            calibration_data=_CALIBRATION_DATA,
+            calibration_cache_path="calibration.cache",
+        )
+
+
+def test_cli_api_removes_calibration_cache_input(capsys):
+    parser = get_parser()
+    assert "--calibration_cache_path" not in parser.format_help()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--onnx_path", "unused.onnx", "--calibration_cache_path", "cache"])
+    assert (
+        "--calibration_cache_path was removed; use --calibration_data_path"
+        in capsys.readouterr().err
+    )
+
+
+def test_quantize_has_no_mutable_collection_defaults():
+    signature = inspect.signature(moq.quantize)
+    mutable_defaults = (list, dict, set)
+    assert not any(
+        isinstance(parameter.default, mutable_defaults)
+        for parameter in signature.parameters.values()
+    )
+
+
+def test_quantize_preserves_none_passes(tmp_path):
+    input_path = tmp_path / "matmul.onnx"
+    output_path = tmp_path / "matmul.quant.onnx"
+    onnx.save_model(_make_matmul_model(), input_path)
+
+    moq.quantize(
+        str(input_path),
+        output_path=str(output_path),
+        quantize_mode="int8",
+        calibration_data={"input": _CALIBRATION_DATA},
+        calibration_method="max",
+        calibration_eps=("cpu",),
+        high_precision_dtype="fp32",
+        passes=None,
+        enable_gemv_detection_for_trt=False,
+    )
+
+    assert output_path.exists()
+
+
+def test_quantize_copies_caller_option_collections(tmp_path):
+    class MutationRejectingList(list):
+        def extend(self, values):
+            raise AssertionError("caller collection was mutated")
+
+    input_path = tmp_path / "matmul.onnx"
+    output_path = tmp_path / "matmul.quant.onnx"
+    onnx.save_model(_make_matmul_model(), input_path)
+    op_types_to_quantize = MutationRejectingList(["MatMul"])
+    nodes_to_exclude = MutationRejectingList(["not-a-node"])
+
+    moq.quantize(
+        str(input_path),
+        output_path=str(output_path),
+        quantize_mode="int8",
+        calibration_data={"input": _CALIBRATION_DATA},
+        calibration_method="max",
+        calibration_eps=("cpu",),
+        op_types_to_quantize=op_types_to_quantize,
+        nodes_to_exclude=nodes_to_exclude,
+        high_precision_dtype="fp32",
+        passes=(),
+        enable_gemv_detection_for_trt=False,
+    )
+
+    assert op_types_to_quantize == ["MatMul"]
+    assert nodes_to_exclude == ["not-a-node"]
 
 
 def test_legacy_graph_utils_module_is_removed():
