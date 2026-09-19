@@ -132,7 +132,7 @@ evaluation:
         parallelism: ???  # Number of concurrent requests per each benchmark
         request_timeout: 3600
         max_retries: 10
-        max_new_tokens: 65536  # 64K for reasoning models; use 16384 (16K) for non-reasoning; prefer model card value
+        max_new_tokens: ???  # Resolve per SKILL.md's token-budget rule; match the export description/tag below
         temperature: 1.0       # from model card (reasoning mode); adjust per card
         top_p: 0.95            # from model card (reasoning mode); adjust per card
     target:
@@ -197,7 +197,7 @@ export:
     # would resolve. Cross-server, that makes a same-named experiment here and only
     # modelopt_run_url reaches the PTQ run (Step 4).
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
-    description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
+    description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=???'
     log_logs: true
     log_artifacts: true
     only_required: false
@@ -207,7 +207,7 @@ export:
       model: CHANGEME-served-model-name
       temperature: '1.0'
       top_p: '0.95'
-      max_new_tokens: '65536'
+      max_new_tokens: ???
       # From the checkpoint's .experiment.json when present; drop when absent. Keep the
       # quotes (a bare 20260910 becomes a date) and skip any value containing ${ -- quoting
       # does not stop OmegaConf resolving it.
