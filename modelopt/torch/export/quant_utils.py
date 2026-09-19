@@ -27,6 +27,14 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.quantization.ggml import (
+    IQ1_S_BLOCK_BYTES,
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_BYTES,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+)
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -63,6 +71,8 @@ from .quant_format import (
     QUANTIZATION_INT4_AWQ,
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_MXFP4,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -441,6 +451,36 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
+def uses_iq_quantization(module) -> bool:
+    """Whether any weight quantizer in ``module`` or its children targets an IQ format.
+
+    ``get_quantization_format`` returns the *first* non-``NONE`` format it finds, so in a
+    mixed-format model IQ layers sitting behind, say, an FP8 layer are invisible to it. Callers
+    that must reject IQ specifically need to see every layer.
+
+    This reads ``num_bits`` directly rather than resolving each layer's full format, so an
+    unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
+
+    Known gap, shared with ``get_quantization_format``: ``weight_attr_names`` yields nothing for
+    a TEGroupedLinear, whose parameters are ``weight0..N`` while its quantizer is a single
+    ``GroupedQuantizer`` under ``weight_quantizer``. Neither function sees such a module, so an
+    experts-only IQ model reports no format at all -- not just here. Closing it belongs in
+    ``weight_attr_names``, where it affects every format, rather than in this helper.
+    """
+    for weight_name in weight_attr_names(module):
+        weight_quantizer = representative_weight_quantizer(module, weight_name)
+        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never IQ --
+        # IQ is a single quantizer with backend="ggml".
+        if (
+            weight_quantizer is not None
+            and weight_quantizer.is_enabled
+            and getattr(weight_quantizer, "num_bits", None)
+            in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
+        ):
+            return True
+    return any(uses_iq_quantization(child) for _, child in module.named_children())
+
+
 def get_quantization_format(module) -> str | None:
     """Gets the quantization string.
 
@@ -475,6 +515,24 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
+        if weight_quantizer.num_bits in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            if weight_quantizer.backend != "ggml":
+                raise ValueError("IQ formats require the built-in 'ggml' quantization backend")
+            # Both exporters return before collecting input_scale and before the pre_quant_scale
+            # handling below, so an enabled activation quantizer would be dropped without a trace
+            # and the checkpoint would load as weight-only. Refuse instead.
+            if input_quantizer is not None and input_quantizer.is_enabled:
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export is weight-only, but this layer has an enabled input "
+                    "quantizer. The GGML block payload carries no activation scale, so the "
+                    "activation quantization would be silently lost."
+                )
+            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export does not support an AWQ-style pre_quant_scale."
+                )
+            return weight_quantizer.num_bits
+
         if weight_quantizer.num_bits == 4:
             assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
                 "Invalid block_sizes for INT4 quantizer"
@@ -722,6 +780,26 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
+            }
+        elif v in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            if v == QUANTIZATION_IQ1_S:
+                block_size = IQ1_S_BLOCK_SIZE
+                payload_bytes = IQ1_S_BLOCK_BYTES
+                effective_bits = IQ1_S_EFFECTIVE_BITS
+            else:
+                block_size = IQ2_XS_BLOCK_SIZE
+                payload_bytes = IQ2_XS_BLOCK_BYTES
+                effective_bits = IQ2_XS_EFFECTIVE_BITS
+            if block_size_value != block_size:
+                raise ValueError(
+                    f"{v.upper()} requires block size {block_size}, got {block_size_value}"
+                )
+            layer_config = {
+                "quant_algo": v.upper(),
+                "group_size": block_size,
+                "effective_bits": effective_bits,
+                "block_payload_bytes": payload_bytes,
+                "packing": "ggml",
             }
         else:
             layer_config = {"quant_algo": v}

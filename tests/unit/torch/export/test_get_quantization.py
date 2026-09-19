@@ -33,6 +33,8 @@ from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
@@ -43,9 +45,15 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     postprocess_state_dict,
+    process_layer_quant_config,
     seed_carried_over_exclusions,
+    uses_iq_quantization,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 
 
 class _FakeAttention(torch.nn.Module):
@@ -53,6 +61,165 @@ class _FakeAttention(torch.nn.Module):
         super().__init__()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "quantization_format", "payload_bytes", "effective_bits"),
+    [
+        ("iq1_s", QUANTIZATION_IQ1_S, 50, 1.5625),
+        ("iq2_xs", QUANTIZATION_IQ2_XS, 74, 2.3125),
+    ],
+)
+def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, effective_bits):
+    model = torch.nn.Sequential(torch.nn.Linear(256, 256, bias=False))
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": num_bits,
+                        "block_sizes": {-1: 256},
+                        "backend": "ggml",
+                    },
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    assert get_quantization_format(model) == quantization_format
+    config = get_quant_config(model)
+    assert config["quantization"]["quant_algo"] == num_bits.upper()
+    assert config["quantization"]["block_payload_bytes"] == payload_bytes
+    assert config["quantization"]["effective_bits"] == effective_bits
+    hf_config = convert_hf_quant_config_format(config)
+    assert "config_groups" not in hf_config
+    assert hf_config["group_size"] == 256
+    assert hf_config["effective_bits"] == effective_bits
+    assert hf_config["packing"] == "ggml"
+    assert hf_config["block_payload_bytes"] == payload_bytes
+
+
+def _quantize_sequential(layer_cfgs):
+    """Quantize a two-Linear model, one quantizer config per layer."""
+    model = torch.nn.Sequential(
+        torch.nn.Linear(256, 256, bias=False), torch.nn.Linear(256, 256, bias=False)
+    )
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}, *layer_cfgs],
+            "algorithm": None,
+        },
+    )
+    return model
+
+
+_IQ_WEIGHT_CFG = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
+
+
+def test_uses_iq_quantization_sees_iq_behind_another_format():
+    """get_quantization_format stops at the first format, so the TP guard cannot rely on it."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "0.weight_quantizer", "cfg": {"num_bits": (4, 3)}},
+            {"quantizer_name": "1.weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+        ]
+    )
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+    assert uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_false_without_iq_layers():
+    model = _quantize_sequential(
+        [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    )
+
+    assert not uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_tolerates_sequential_quantizer():
+    """A SequentialQuantizer has is_enabled but no num_bits, and is never IQ.
+
+    save_pretrained calls this on every Megatron export, so reading num_bits directly would
+    raise AttributeError on a W4A8_AWQ model before any format dispatch.
+    """
+    layer = torch.nn.Linear(256, 256, bias=False)
+    layer.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    assert not hasattr(layer.weight_quantizer, "num_bits")
+
+    assert not uses_iq_quantization(torch.nn.Sequential(layer))
+
+
+def test_iq_export_rejects_enabled_input_quantizer():
+    """IQ payloads carry no activation scale, so W-IQ + A-FP8 must not export as weight-only."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "*weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="weight-only"):
+        get_quantization_format(model)
+
+
+def test_iq_hf_config_rejects_mismatched_group_size():
+    """A uniformly-IQ config must validate group_size, not silently rewrite it to the block size.
+
+    The MIXED_PRECISION branch already forwards the per-layer group size; this covers the
+    top-level branch, which did not.
+    """
+    with pytest.raises(ValueError, match="IQ2_XS requires group size 256, got 128"):
+        convert_hf_quant_config_format(
+            {
+                "quantization": {
+                    "quant_algo": "IQ2_XS",
+                    "group_size": 128,
+                    "effective_bits": 2.3125,
+                    "packing": "ggml",
+                    "block_payload_bytes": 74,
+                }
+            }
+        )
+
+
+def test_mixed_iq_config_group_does_not_claim_integer_weight_schema():
+    converted = convert_hf_quant_config_format(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.0.mlp.down_proj": {
+                        "quant_algo": "IQ2_XS",
+                        "group_size": 256,
+                        "effective_bits": 2.3125,
+                        "packing": "ggml",
+                        "block_payload_bytes": 74,
+                    }
+                },
+            }
+        }
+    )
+
+    group = converted["config_groups"]["group_0"]
+    assert "weights" not in group
+    assert group["quant_algo"] == "IQ2_XS"
+    assert group["packing"] == "ggml"
+
+
+def test_iq_quantization_config_rejects_mismatched_block_size():
+    with pytest.raises(ValueError, match="IQ2_XS requires block size 256, got 128"):
+        process_layer_quant_config(
+            {
+                "model.layers.0.mlp.down_proj.quantization": "iq2_xs",
+                "model.layers.0.mlp.down_proj.awq_block_size": 128,
+            }
+        )
 
 
 class _FakeKVCacheQuantizer(torch.nn.Module):
