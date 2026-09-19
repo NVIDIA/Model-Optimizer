@@ -50,7 +50,7 @@ from ._auto_quantize_cost import (
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
-from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
+from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry, has_four_over_six
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
@@ -2169,12 +2169,34 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     # modules override default disables such as ``*lm_head*``.
     quant_cfg.extend(global_entries.values())
     quant_cfg.extend(per_module_entries)
+    # For 4/6, "max" is not a downgrade but wrong -- the flag normalizes the FP8 scales by
+    # 256 on the assumption something picks M=4 -- and QuantizeConfig rejects the pairing.
+    algorithm = "four_over_six" if _has_four_over_six(quant_cfg) else "max"
+    note = (
+        " four_over_six runs its two-point MSE weight-amax search on every weight quantizer,"
+        " including the non-4/6 layers this search assigned other formats; set"
+        " config['algorithm'] explicitly to avoid that."
+        if algorithm == "four_over_six"
+        else ""
+    )
     warnings.warn(
-        "get_auto_quantize_config: returned config uses algorithm='max'. "
+        f"get_auto_quantize_config: returned config uses algorithm={algorithm!r}. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
         "Update config['algorithm'] if a different calibration algorithm is needed (e.g. 'gptq')."
+        + note
     )
-    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
+
+
+def _has_four_over_six(quant_cfg: list[dict]) -> bool:
+    """True if any enabled entry sets the NVFP4 Four-Over-Six block_sizes flag."""
+    for entry in quant_cfg:
+        if entry.get("enable") is False:
+            continue
+        cfg = entry.get("cfg")
+        if any(has_four_over_six(level) for level in (cfg if isinstance(cfg, list) else [cfg])):
+            return True
+    return False
 
 
 def _resolve_best_recipe(search_state, constraints, verbose=False):

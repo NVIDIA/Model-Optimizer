@@ -22,13 +22,7 @@ metadata:
     W4A16 use weight-only NVFP4 4/6 (static, MSE-selected). KV cache FP8.
     Attention BF16.
 quantize:
-  # 4/6: MSE selects per-block between M=6 (keep amax) and M=4 (amax x 6/4).
-  algorithm:
-    method: mse
-    fp8_scale_sweep: false
-    start_multiplier: 1.0   # M=6 (keep amax)
-    stop_multiplier: 1.5    # M=4 (amax x 6/4)
-    step_size: 0.5          # candidates [1.0, 1.5]
+  algorithm: four_over_six
   quant_cfg:
     - quantizer_name: '*'
       enable: false

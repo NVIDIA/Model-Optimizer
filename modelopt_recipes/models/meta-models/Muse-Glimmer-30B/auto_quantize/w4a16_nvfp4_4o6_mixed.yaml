@@ -23,12 +23,7 @@ metadata:
 # families start from W4A16 NVFP4 and are reassigned by AutoQuantize below.
 quantize:
   effective_bits: 4.5
-  algorithm:
-    method: mse
-    fp8_scale_sweep: false
-    start_multiplier: 1.0
-    stop_multiplier: 1.5
-    step_size: 0.5
+  algorithm: four_over_six
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: "*language_model.layers.*.mlp*.weight_quantizer"
@@ -54,12 +49,7 @@ auto_quantize:
         - "*lm_head*"
       candidate_formats:
         - effective_bits: 4.5
-          algorithm:
-            method: mse
-            fp8_scale_sweep: false
-            start_multiplier: 1.0
-            stop_multiplier: 1.5
-            step_size: 0.5
+          algorithm: four_over_six
           quant_cfg:
             - $import: base_disable_all
             - quantizer_name: "*weight_quantizer"

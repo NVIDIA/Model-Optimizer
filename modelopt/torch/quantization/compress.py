@@ -32,6 +32,7 @@ from .backends.gemm_registry import disable_real_quant_gemm, enable_real_quant_g
 from .config import CompressCfgType, CompressConfig
 from .conversion import _replace_quant_module, set_quantizer_attributes_partial
 from .nn.modules.quant_linear import RealQuantLinear
+from .nn.modules.tensor_quantizer import SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper, pack_real_quantize_weight
 from .utils import is_quantized_linear
 
@@ -48,6 +49,48 @@ except ImportError:
     mcore_available = False
 
 RealQuantModuleRegistry = _DMRegistryCls("RealQuant")
+
+
+def _reject_unsupported_real_quant_formats(model: nn.Module) -> None:
+    """Refuse formats real quantization cannot represent, before any weight is packed.
+
+    ``_real_quantize`` asserts the same predicate, but only once
+    :func:`pack_real_quantize_weight` is already walking layers. Screening under the same
+    view and gate reports every offender up front without rejecting layers that would have
+    been skipped anyway.
+    """
+    offenders, any_four_over_six = [], False
+    with SequentialQuantizer.convert_to_single_quantizer(model):
+        for name, module in model.named_modules():
+            weight = getattr(module, "weight", None)
+            quantizer = getattr(module, "weight_quantizer", None)
+            if (
+                name == ""  # pack_real_quantize_weight skips the root module
+                or weight is None
+                or weight.is_meta
+                or weight.numel() == 0
+                or weight.element_size() <= 1
+                or not isinstance(quantizer, TensorQuantizer)
+                or not quantizer.is_enabled
+                or not quantizer._if_quant
+                or quantizer._fake_quant
+                or quantizer._is_real_quantize_support()
+            ):
+                continue
+            offenders.append(f"{name}.weight_quantizer")
+            any_four_over_six |= quantizer.is_four_over_six
+    if offenders:
+        raise NotImplementedError(
+            "mtq.compress does not support the quantization format of these weight "
+            f"quantizers: {offenders}. Use mtq.quantize + export instead, or exclude them "
+            "with the compress config."
+            + (
+                " NVFP4 Four-Over-Six is one such format: the per-block M=4/M=6 choice "
+                "baked into amax is not preserved by real quantization."
+                if any_four_over_six
+                else ""
+            )
+        )
 
 
 def compress_convert(
@@ -106,6 +149,7 @@ def compress_convert(
             )
     # If real quant quantizer is present, real quantize the weights.
     if not skip_real_quantize_weight:
+        _reject_unsupported_real_quant_formats(model)
         pack_real_quantize_weight(model)
 
     def _has_qtensorwrapper(module):

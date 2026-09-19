@@ -17,6 +17,7 @@ Changelog
 - Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
 - Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.
 - Add a reusable local-Hessian NVFP4 PTQ recipe and the quantization recipe used for ``nvidia/Qwen3.8-27B-NVFP4``.
+- Add ``four_over_six`` as a named calibration algorithm for NVFP4 Four-Over-Six, replacing the hand-written MSE stanza it is bit-identical to. Configs that set only one half of 4/6 -- the ``four_over_six`` block_sizes flag without a weight-scale search, or the algorithm without the flag -- are now rejected instead of silently producing a wrongly scaled checkpoint.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

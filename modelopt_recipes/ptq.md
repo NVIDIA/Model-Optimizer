@@ -457,9 +457,9 @@ checkpoint's** quant config verbatim:
 - **`models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
   component map (routed experts NVFP4 W4A4 block-16; shared experts + Mamba
   `in/out_proj` + KV cache FP8; everything else BF16), but the routed-expert
-  weights use **Four-over-Six (4/6)** NVFP4: an MSE search picks each weight's
-  amax multiplier from `[1.0, 1.5]` (M=6 vs. M=4). Activations stay dynamic
-  NVFP4 (not MSE-calibrated).
+  weights use **Four-over-Six (4/6)** NVFP4: the `four_over_six` calibration
+  algorithm picks, per weight block, between the M=6 and M=4 dynamic ranges.
+  Activations stay dynamic NVFP4 (weight-only calibration).
 - **`models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
   Four-over-Six NVFP4 W4A16 to routed experts, shared experts, and the language
   model head; Mamba `in/out_proj` weights and inputs plus the KV cache use FP8,
