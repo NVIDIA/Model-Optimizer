@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -402,3 +403,44 @@ def test_mlflow_checkpoint_tag_is_absolute(monkeypatch, example_utils):
     )
 
     assert Path(example_utils._mlflow_run_tags(args)["checkpoint_path"]).is_absolute()
+
+
+# --- post-quantization sanity-check generate() must not block export ----------------------------
+
+
+def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
+    """A failed optional sanity generation must not prevent checkpoint export."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    full_model = SimpleNamespace(
+        generate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    export_calls = []
+    monkeypatch.setattr(
+        hf_ptq,
+        "export_quantized",
+        lambda *a, **k: export_calls.append((a, k)),
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    with pytest.warns(UserWarning, match="Post-quantization generation sanity check failed"):
+        hf_ptq.post_quantize(
+            args=args,
+            full_model=full_model,
+            language_model=full_model,
+            model_type="llama",
+            tokenizer=None,
+            processor=None,
+            preview_input_ids=torch.zeros(1, 4, dtype=torch.long),
+            preview_attention_mask=None,
+            generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
+            is_nemotron_vl_model=False,
+            first_text_speech_dataset=None,
+            default_padding_side="right",
+            default_pad_token=None,
+            calib_dataloader=None,
+        )
+
+    assert len(export_calls) == 1
