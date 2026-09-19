@@ -171,7 +171,7 @@ def _peek_recipe_type(recipe_file: Path | Traversable) -> RecipeType | None:
     import yaml
 
     try:
-        raw = yaml.safe_load(recipe_file.read_text())
+        raw = yaml.safe_load(recipe_file.read_text(encoding="utf-8"))
         return RecipeType(raw["metadata"]["recipe_type"])
     except (TypeError, KeyError, ValueError):
         return None
@@ -201,7 +201,7 @@ def _load_recipe_from_file(
     if required_section is not None:
         import yaml
 
-        raw = yaml.safe_load(recipe_file.read_text()) or {}
+        raw = yaml.safe_load(recipe_file.read_text(encoding="utf-8")) or {}
         if not isinstance(raw, dict) or required_section not in raw:
             # Strip only the ``speculative_`` prefix so multi-word non-speculative types
             # (e.g. ``auto_quantize``) keep their full name: AUTO_QUANTIZE, not QUANTIZE.

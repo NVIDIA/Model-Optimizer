@@ -120,7 +120,7 @@ def setup_distillation_config(
     elif isinstance(config_or_path, DistillationConfig):
         cfg = config_or_path
     else:
-        with open(config_or_path) as f:
+        with open(config_or_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         cfg = DistillationConfig(**cfg)
 

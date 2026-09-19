@@ -91,7 +91,29 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Record which CPU this runner got
+        # The 0xc000001d crash this job used to hit tracked the host CPU, not the test, so this
+        # is the first thing worth knowing if it ever recurs. See the ONEDNN_MAX_CPU_ISA comment
+        # on the test step below.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name, Description, NumberOfCores | Format-List
+          python -c "import platform; print('machine:', platform.machine(), platform.processor())"
       - name: Run unit tests (without coverage)
+        env:
+          # Cap oneDNN's instruction set. bf16 linear/matmul on CPU dispatch through oneDNN,
+          # which by default picks the highest ISA the host advertises -- Intel AMX on the
+          # Emerald Rapids runners in the Actions fleet. On those hosts that path executes an
+          # instruction that faults with #UD, which surfaces as 0xc000001d and kills the whole
+          # pytest process. AMD EPYC runners have neither AMX nor AVX-512, take the AVX2 path,
+          # and have never shown the crash -- so AVX2 is the ceiling with evidence behind it.
+          # This is a CI mitigation for a torch/oneDNN Windows issue, not a ModelOpt bug: it
+          # changes which kernel runs, not what is being tested. To check whether it is still
+          # needed, drop it and run the suite repeatedly until an Intel host comes up.
+          # See the PR that added this for the six crashes and the host correlation behind it.
+          ONEDNN_MAX_CPU_ISA: "AVX2"
+          DNNL_MAX_CPU_ISA: "AVX2"
         run: pip install nox uv && nox -s "unit-3.12(torch_214, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
@@ -201,9 +223,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
+        # windows is deliberately absent from this condition. It still runs and is still visible,
+        # but it does not gate the merge: the job is flaky for reasons unrelated to the change
+        # under review -- an MSVC extension build racing the per-test timeout, and an
+        # 0xc000001d illegal instruction that depends on which CPU the runner draws. What we
+        # actually care about on that platform is the ONNX surface, so blocking every PR on
+        # unrelated torch flakiness costs more than it catches.
         if: >-
           ${{ needs.linux.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
-            needs.windows.result != 'success' ||
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||

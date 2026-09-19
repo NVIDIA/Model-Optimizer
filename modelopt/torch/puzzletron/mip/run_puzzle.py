@@ -439,7 +439,7 @@ def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
 def run_puzzle(args: DictConfig) -> list[str]:
     # Loads config from args/puzzle_profile
     if args.puzzle_profile is not None:
-        with open(args.puzzle_profile) as f:
+        with open(args.puzzle_profile, encoding="utf-8") as f:
             puzzle_profile = yaml.safe_load(f)
         _override_args_from_profile(args, puzzle_profile)
         mprint(f"Loaded Puzzle profile from {args.puzzle_profile}")
