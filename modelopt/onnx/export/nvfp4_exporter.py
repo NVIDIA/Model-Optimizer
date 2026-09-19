@@ -331,18 +331,14 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         initializer_indices = {
             initializer.name: idx for idx, initializer in enumerate(graph.initializer)
         }
-        value_info_map = {vi.name: vi for vi in graph.value_info}
+        value_info_map = {vi.name: vi for vi in [*graph.value_info, *graph.output]}
         graph_inputs = {inp.name for inp in graph.input}
         cast_output_cache: dict[tuple[str, str], str] = {}
 
-        def _get_precision_dtype() -> str:
-            # Check initializers to determine the precision of the weights
-            precision_dtype = "Half"
-            for initializer in graph.initializer:
-                if initializer.data_type == 16:
-                    precision_dtype = "BFloat16"
-                    break  # Assuming all weights are of the same precision
-            return precision_dtype
+        def _get_precision_dtype(weight_initializer: onnx.TensorProto) -> str:
+            return (
+                "BFloat16" if weight_initializer.data_type == onnx.TensorProto.BFLOAT16 else "Half"
+            )
 
         def _cast_input_dtypes(node: onnx.NodeProto, precision_dtype: str):
             # Change the input types to match weight precision (precision_dtype)
@@ -351,11 +347,15 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 assert maybe_matmul.op_type == "MatMul"
                 node = maybe_matmul
 
-            # Create Cast nodes for each input of the target node except bias
-            for i, input_name in enumerate(node.input[:2]):
+            precision_onnx_dtype = onnx_dtype_map[precision_dtype]
+            cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
+
+            compute_inputs = node.input[:3] if node.op_type == "Gemm" else node.input[:2]
+            for i, input_name in enumerate(compute_inputs):
+                if not input_name:
+                    continue
                 cast_output_name = cast_output_cache.get((input_name, precision_dtype))
                 if cast_output_name is None:
-                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
                     cast_output_name = f"{input_name}_{cast_output_suffix}"
                     cast_output_cache[(input_name, precision_dtype)] = cast_output_name
 
@@ -364,7 +364,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                         "Cast",
                         inputs=[input_name],  # Original input of the target node
                         outputs=[cast_output_name],
-                        to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
+                        to=precision_onnx_dtype,
                     )
 
                     # Insert the Cast node into the graph
@@ -373,8 +373,36 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
 
-        precision_dtype = _get_precision_dtype()
-        logger.debug(f"Using precision dtype: {precision_dtype}")
+            for i, output_name in enumerate(node.output):
+                output_value_info = value_info_map.get(output_name)
+                if output_value_info is None:
+                    continue
+
+                output_dtype = output_value_info.type.tensor_type.elem_type
+                # TRT_FP4QDQ leaves native-BF16 outputs annotated FLOAT; real FP32 boundaries are
+                # explicit Casts. FP16 can convert FP32 graphs, so it restores implicit boundaries.
+                if precision_dtype == "BFloat16" or output_dtype == precision_onnx_dtype:
+                    output_value_info.type.tensor_type.elem_type = precision_onnx_dtype
+                    continue
+
+                precision_output_name = f"{output_name}_{cast_output_suffix}_output"
+                precision_output_value_info = onnx.ValueInfoProto()
+                precision_output_value_info.CopyFrom(output_value_info)
+                precision_output_value_info.name = precision_output_name
+                precision_output_value_info.type.tensor_type.elem_type = precision_onnx_dtype
+                graph.value_info.append(precision_output_value_info)
+                value_info_map[precision_output_name] = precision_output_value_info
+                node.output[i] = precision_output_name
+                graph.node.extend(
+                    [
+                        onnx.helper.make_node(
+                            "Cast",
+                            inputs=[precision_output_name],
+                            outputs=[output_name],
+                            to=output_dtype,
+                        )
+                    ]
+                )
 
         fp4_qdq_nodes = [node for node in graph.node if node.op_type == "TRT_FP4QDQ"]
         logger.debug(f"Found {len(fp4_qdq_nodes)} FP4QDQ nodes to convert")
@@ -383,6 +411,8 @@ class NVFP4QuantExporter(ONNXQuantExporter):
             idx = initializer_indices.get(node.input[0])
             assert idx is not None, f"Initializer for weight '{node.input[0]}' not found."
             initializers_to_delete.append(graph.initializer[idx].name)
+            precision_dtype = _get_precision_dtype(graph.initializer[idx])
+            logger.debug(f"Using precision dtype {precision_dtype} for {node.input[0]}")
 
             # Retrieve compressed data from node attributes
             block_size = node.attribute[0].i
