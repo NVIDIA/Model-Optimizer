@@ -548,8 +548,12 @@ def _carry_over_unplaced_weights(export_dir: Path, model: nn.Module) -> None:
         return
 
     shard_name = "model-carried-over.safetensors"
-    save_file({k: v.detach().contiguous().cpu() for k, v in extra.items()}, str(export_dir / shard_name))
-    print(f"Carrying {len(extra)} checkpoint weight(s) the model has no parameter for into {shard_name}")
+    save_file(
+        {k: v.detach().contiguous().cpu() for k, v in extra.items()}, str(export_dir / shard_name)
+    )
+    print(
+        f"Carrying {len(extra)} checkpoint weight(s) the model has no parameter for into {shard_name}"
+    )
 
     weight_map: dict[str, str] = {}
     total_size = 0

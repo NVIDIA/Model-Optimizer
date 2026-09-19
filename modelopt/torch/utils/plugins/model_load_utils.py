@@ -18,13 +18,15 @@
 import logging
 import os
 import re
-from collections.abc import Iterable
 from itertools import chain
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM

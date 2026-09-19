@@ -35,12 +35,12 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     locate_source_keys,
     off_index_safetensors_files,
     sanitize_hf_config_for_deployment,
 )
-from modelopt.torch.models import hf_model_type, is_moe
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
