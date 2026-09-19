@@ -15,6 +15,7 @@
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
 import copy
+import json
 import logging
 import re
 import warnings
@@ -25,6 +26,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 import modelopt.torch.opt as mto
 from modelopt.torch.models import hf_model_type, is_moe
@@ -48,7 +51,7 @@ from modelopt.torch.utils import get_unwrapped_name, safe_save
 
 from ..layer_utils import get_experts_list
 from ..quant_utils import get_quantization_format
-from ..unified_export_hf import collect_shared_input_modules
+from ..unified_export_hf import collect_shared_input_modules, read_unplaced_weights
 
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
@@ -526,6 +529,42 @@ def _resmooth_experts_for_export(
     return out, requant_weights
 
 
+def _carry_over_unplaced_weights(export_dir: Path, model: nn.Module) -> None:
+    """Write checkpoint weights the model never held as an extra safetensors shard.
+
+    ``save_pretrained`` only ever writes ``model.state_dict()`` (or a copy of it), so a
+    checkpoint weight with no parameter in the built model -- an MTP head, an auxiliary
+    tower -- is never in what it saves, regardless of whether ``state_dict=`` was passed
+    explicitly. :func:`read_unplaced_weights` reads those tensors back from the source
+    checkpoint; this writes them as their own shard and rebuilds the index from every
+    shard on disk (mirroring ``LayerwiseExporter._write_index``), which sidesteps the
+    single-file-vs-sharded distinction ``save_pretrained`` may have already chosen.
+
+    A no-op when there is nothing to carry (the common case: most models have no
+    unplaced weights at all).
+    """
+    extra = read_unplaced_weights(model)
+    if not extra:
+        return
+
+    shard_name = "model-carried-over.safetensors"
+    save_file({k: v.detach().contiguous().cpu() for k, v in extra.items()}, str(export_dir / shard_name))
+    print(f"Carrying {len(extra)} checkpoint weight(s) the model has no parameter for into {shard_name}")
+
+    weight_map: dict[str, str] = {}
+    total_size = 0
+    for shard in sorted(export_dir.glob("*.safetensors")):
+        with safe_open(str(shard), framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 -- safe_open has no __iter__
+                weight_map[key] = shard.name
+        with open(shard, "rb") as fh:
+            header_len = int.from_bytes(fh.read(8), "little")
+        total_size += shard.stat().st_size - 8 - header_len
+
+    index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
+    (export_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+
+
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
@@ -704,6 +743,14 @@ def export_hf_vllm_fq_checkpoint(
                 model._keys_to_ignore_on_save = prev_ignore
         else:
             model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
+
+        # Step 4: carry over checkpoint weights the model never held (an MTP head, an
+        # auxiliary tower). save_pretrained above wrote only model-backed state, same as
+        # export_hf_checkpoint's post_state_dict; this writes the rest as an extra shard,
+        # the one thing save_pretrained's state_dict= path cannot do for the
+        # inplace_mem_efficient branch (it deliberately omits state_dict= there -- see the
+        # comment above -- so there is no state_dict to merge extras into).
+        _carry_over_unplaced_weights(export_dir, model)
 
     finally:
         if not inplace_mem_efficient:

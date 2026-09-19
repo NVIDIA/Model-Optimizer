@@ -38,13 +38,13 @@ from modelopt import __version__
 from modelopt.torch.quantization.ggml import quantize_iq1_s, quantize_iq2_xs
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
-
-from .convert_hf_config import convert_hf_quant_config_format
-from .plugins.hf_checkpoint_utils import (
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
 )
+
+from .convert_hf_config import convert_hf_quant_config_format
 from .plugins.mcore_common import (
     all_mcore_hf_export_mapping,
     all_mcore_hf_vision_passthrough_mapping,

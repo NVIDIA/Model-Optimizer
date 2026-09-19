@@ -15,6 +15,7 @@
 
 """Utils for quantization including scaling factors adjustments."""
 
+import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
@@ -1662,6 +1663,76 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 module.weight_quantizer.amax = weight_amax
 
 
+def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
+    """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
+
+    The single place carried weights reach ``exclude_modules``, for both exporters.
+    :func:`get_quant_config` calls it once the per-layer pass is done, and the layerwise exporter
+    calls it again from ``finalize()`` -- it snapshots its config during ``bind()``, while
+    calibration is still running and long before ``export_hf_checkpoint`` records what it carried,
+    so it has no chance to see them any earlier. Without it a layerwise export copies GLM-4.7's
+    ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
+    NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+
+    Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
+    emitting the same thing, and a literal can never over-match a module the export did in fact
+    quantize -- the risk :func:`_prefix_wildcard_summarize_exclude_modules` has to guard against by
+    consulting ``quantized_layers``, which is unavailable by the time the layerwise path runs.
+
+    Returns the names it added. No-op when the export is not uniformly quantized -- there is no
+    single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
+    a weight from.
+    """
+    names = _get_carried_over_module_names(model)
+    if not names:
+        return []
+    quantization = quant_config.get("quantization")
+    if not isinstance(quantization, dict):
+        return []
+    if quantization.get("quant_algo") in (None, QUANTIZATION_NONE, "MIXED_PRECISION"):
+        return []
+    exclude_modules = quantization.setdefault("exclude_modules", [])
+    added = [n for n in names if not any(fnmatch.fnmatch(n, p) for p in exclude_modules)]
+    if added:
+        exclude_modules.extend(added)
+        exclude_modules.sort()
+    return added
+
+
+def _get_carried_over_module_names(model: nn.Module) -> list[str]:
+    """Return module names for checkpoint weights carried over without a module.
+
+    Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
+    the export verbatim from the source checkpoint (see
+    :func:`modelopt.torch.export.unified_export_hf.read_unplaced_weights`). They
+    have no module in the live model, so the quantizer walk in :func:`get_quant_config` cannot
+    see them and would leave them out of ``exclude_modules`` even though their original-precision
+    weight is written to the checkpoint. A deployment framework then reads the top-level
+    ``quant_algo`` and tries to load e.g. an MTP ``eh_proj`` as an FP8 weight.
+
+    This is the same failure the MoE-router pass above exists to prevent -- only the reason the
+    module is invisible differs (no quantizer there, no module at all here).
+
+    Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
+    actually wrote -- carried tensors plus the off-index sidecars copied verbatim. Those sidecars
+    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
+
+    A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
+    its last component removed. Keys without a dot are top-level tensors with no module and are
+    skipped.
+    """
+    keys = getattr(model, "_modelopt_carried_over_names", None)
+    if keys is None:
+        # Export has not recorded yet (or this model never went through it). The recorded unplaced
+        # list is the best available answer; it is wider than what gets written, so it can name a
+        # module the export did not emit. That way round is harmless -- a deployment framework
+        # ignores an exclusion it finds no weight for, but fails loading one it was never told
+        # about.
+        keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
+
+
 def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     """Return the names of MoE router/gate submodules left in original precision.
 
@@ -1833,6 +1904,15 @@ def get_quant_config(
 
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
+
+    # Carried weights are seeded AFTER the per-layer pass, through the same helper the layerwise
+    # exporter calls. Seeding them into layer_config_dict instead would route them through
+    # _prefix_wildcard_summarize_exclude_modules and emit wildcards here, while the layerwise path
+    # -- which can only act once its config is already built -- emits literals: one model, two
+    # exporters, two different-looking quantization_config.ignore. The summarizer cannot serve both,
+    # because it needs `quantized_layers` to avoid a wildcard swallowing a quantized module and
+    # process_layer_quant_config pops that key before returning.
+    seed_carried_over_exclusions(model, quant_config)
 
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
     needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (
