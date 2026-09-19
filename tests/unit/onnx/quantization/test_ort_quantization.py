@@ -28,15 +28,51 @@ from onnxruntime.quantization.calibrate import (
     TensorsData,
 )
 
-from modelopt.onnx.quantization.ort_patching import (
+from modelopt.onnx.quantization import ort_patches
+from modelopt.onnx.quantization.ort_calibration import (
     _collect_value,
-    _collect_value_histogram_collector_single_node_calibration,
-    _compute_scale_zp,
     _prepare_histogram_data,
-    _quantize_static,
     _restore_histogram_calibration_dtypes,
-    patch_ort_modules,
 )
+from modelopt.onnx.quantization.ort_calibration_per_node import (
+    _collect_value_histogram_collector_single_node_calibration,
+)
+from modelopt.onnx.quantization.ort_patches import patch_ort_modules
+from modelopt.onnx.quantization.ort_quantization import _compute_scale_zp, _quantize_static
+
+
+def test_patch_composition_uses_capability_owners(monkeypatch):
+    patch_targets = (
+        (
+            ort_patches.MinMaxCalibrater,
+            ("augment_graph", "collect_data", "compute_data", "merge_range"),
+        ),
+        (ort_patches.HistogramCalibrater, ("augment_graph", "collect_data")),
+        (
+            ort_patches.HistogramCollector,
+            ("collect", "collect_value", "collect_absolute_value"),
+        ),
+        (ort_patches.calibrate, ("create_calibrator",)),
+        (
+            ort_patches.CalibraterBase,
+            ("__init__", "create_inference_session", "select_tensors_to_calibrate"),
+        ),
+        (ort_patches.QDQQuantizer, ("check_opset_version",)),
+        (ort_patches.BaseQuantizer, ("adjust_tensor_ranges",)),
+        (ort_patches.qdq_quantizer, ("compute_scale_zp",)),
+    )
+    for owner, attributes in patch_targets:
+        for attribute in attributes:
+            monkeypatch.setattr(owner, attribute, getattr(owner, attribute, None), raising=False)
+
+    patch_ort_modules(False)
+    assert HistogramCollector.collect_value is _collect_value
+
+    patch_ort_modules(True)
+    assert (
+        HistogramCollector.collect_value
+        is _collect_value_histogram_collector_single_node_calibration
+    )
 
 
 def test_compute_scale_zp_fp16_overflow_fallback():
