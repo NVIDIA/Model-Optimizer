@@ -79,12 +79,3 @@ quantize:
     - quantizer_name: '*[kv]_bmm_quantizer'
       enable: true
       cfg: {$import: fp8}
-
-    # MTP block -> BF16. Only reachable on the Megatron-Core path, where the block is a
-    # live `model.mtp` submodule the broad `*mixer.*` patterns above match into; the HF
-    # `nemotron_h` class drops the MTP tensors on load
-    # (`_keys_to_ignore_on_load_unexpected = [r"mtp.*"]`), so this is inert there. Must
-    # stay last, after the patterns it undoes. Mirrors the same entry in
-    # `configs/ptq/units/default_disabled_quantizers`, which this recipe does not import.
-    - quantizer_name: 'mtp.*'
-      enable: false
