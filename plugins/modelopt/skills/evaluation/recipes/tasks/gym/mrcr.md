@@ -5,6 +5,9 @@
 - Benchmark: <https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mrcr>
 - Resource server: <https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mrcr/configs/mrcr.yaml>
 - Dataset: `openai/mrcr` (HF, gated → `HF_TOKEN`)
+- **Source of truth:** `configs/benchmarks/mrcr/bench.yaml` + `manifest.yaml` (1M) and
+  `configs/benchmarks/mrcr-128k/` (128K) in nvidia-eval-factory-benchmarking
+  (`dl/JoC/competitive_evaluation/…`) — re-check before a scored run.
 
 Long-context retrieval. Each task is a long multi-turn conversation with N
 near-identical "needle" responses; the model must reproduce the Nth verbatim
@@ -61,6 +64,21 @@ The n3 variants drop over-long samples, so all three are different datasets and
 candidate, and set it in **both** `data_prep_params` and `collect_rollout_params`
 — changing one prepares one dataset and rolls out another.
 
+The metric prefix column is the **manifest metric key**: upstream certifies 1M on
+`mrcr_n3_1m_benchmark_simple_agent/pass@1/accuracy` and 128K on
+`mrcr_n3_128k_benchmark_simple_agent/pass@1/accuracy`.
+
+**128K is now its own upstream benchmark, on a newer launcher schema.**
+`configs/benchmarks/mrcr-128k/` is a separate slug with its own manifest, and its
+`bench.yaml` uses the condensed gym block — `benchmark: mrcr/config_n3_128k`,
+`runtime_dependencies: tiktoken transformers`, `prepare_args` / `run_args` — against the
+`gym_runtime` container, instead of this template's `data_prep_params` /
+`collect_rollout_params` / inline `command:` bootstrap. Both reach the same Gym pin
+(`a431501a`); the condensed form just moves the bootstrap into the runtime image. This
+template stays on the explicit form, which is what the 1M `bench.yaml` still ships.
+If you switch a config to the condensed schema, switch the container with it — the
+`pre_cmd` and `command:` blocks here have no effect there.
+
 The `num_repeats` column is what each variant **declares upstream**, not
 necessarily what runs: for `type: benchmark` datasets the value is a placeholder
 and the runner decides. The template therefore pins `++num_repeats=1` in
@@ -90,10 +108,16 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
 - Fan out via `execution.num_nodes` / `num_instances` (HAProxy pattern A —
   `references/multi-node.md`). **Size these from the cluster's GPUs-per-node**, do
   not copy: pick TP for the model, fill the node with DP, then choose instances for
-  the replica count you want. `parallelism` is the total across instances, so
-  `--max-num-seqs = ceil(parallelism / num_instances / DP)`. The golden ran 4 nodes
-  × (TP2 × DP2) on 4-GPU nodes = 8 replicas, `ceil(256/4/2) = 32` each; the same 8
-  replicas on 8-GPU nodes is 2 × (TP2 × DP4).
+  the replica count you want. The golden ran 4 nodes × (TP2 × DP2) on 4-GPU nodes =
+  8 replicas; the same 8 replicas on 8-GPU nodes is 2 × (TP2 × DP4).
+- **`parallelism` is 512 and is NOT a server cap — do not derive `--max-num-seqs`
+  from it.** The canonical `bench.yaml` raised it from 256 with the comment that MRCR
+  prompts run to 1M tokens, "so allow the endpoint to queue requests while keeping
+  Gym's client concurrency bounded". It sets `++num_samples_in_parallel` and
+  `++global_aiohttp_connector_limit_per_host`; the server's in-flight cap is
+  independent and deliberately smaller (the golden's 8 replicas × `--max-num-seqs 32`
+  = 256, half of 512 — the rest queue). The old `ceil(parallelism / num_instances / DP)`
+  identity was a coincidence at 256 and is wrong at 512.
 - **`--max-num-seqs` is a ceiling, not a target.** MRCR is the most KV-bound task
   in the skill — ~1M input tokens per request against AA-LCR's ~120K — so AA-LCR's
   rule applies harder: oversubscribe and vLLM preempts, and recomputing a 1M-token
@@ -140,27 +164,26 @@ NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
 ## Canary
 
-MRCR's gym path takes `++limit=N` (the launcher-level `limit_samples` does not
-reach the gym). **Not verified on this pinned commit** — treat the first ~30 min
-of the real run as the canary. `++limit` caps rollouts
-only: the 1M tokenize/drop-over-long **prepare pass still runs in full**, so a
-5-sample canary is not cheap. Append it to `collect_rollout_params` in your copy
-of the YAML — easier than re-pasting the whole folded scalar through `-o`:
+**`limit_samples` now reaches the gym.** The canonical `bench.yaml` gates the override
+on it — `{% if config.params.limit_samples is not none %}++limit={{config.params.limit_samples}}{% endif %}`
+— and the template carries the same line, so `-o ++config.params.limit_samples=5` (or
+editing `limit_samples:` in your copy) produces `++limit=5`.
 
-```yaml
-                collect_rollout_params: >-
-                  ...
-                  ++limit=5          # canary only — remove for the scored run
-```
-
-Then watch the first ~30 min of the real run:
+`++limit` caps **rollouts only**: the 1M tokenize/drop-over-long **prepare pass still
+runs in full**, so a 5-sample canary is not cheap, and `pass@1` from a limited run is
+not a score. Also watch the first ~30 min of the real run:
 
 ```bash
 RD=<output_dir>/<run>/nemo_gym.0
 grep -A1 "=== NeMo Gym commit ===" $RD/logs/client-*.log | grep -c a431501a  # pin applied
 grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log   # pre_cmd didn't take
 wc -l $RD/artifacts/evaluator_rollouts.jsonl                     # rollouts flowing
+ls $RD/artifacts/model_calls | head                              # observability capture on
 ```
+
+`++observability_enabled=true` + `++model_call_capture_dir` are canonical and write
+per-call records under `artifacts/model_calls` — useful for diagnosing the prefix-gate
+failure below. They grow with the run; drop them only if you are short on space.
 
 **Preempted vs timed out.** A 1M run routinely exceeds 4h. `TIMEOUT` auto-resumes
 from the response cache; `CANCELLED by <uid>` (preemption) does not — its chained
@@ -203,8 +226,11 @@ flat. Before quoting, check truncation: `eval_factory_metrics.json` →
 at `--max-model-len 1100000`).
 
 Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
-needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /
-4 instances. Use it to sanity-check shape, not as a bar for another model — a
+needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, 0 failures, 4 nodes / 4
+instances, Gym `a431501a`, toolchain `0.2.7+20260722.eb3ddf2a` — the sign-off run
+recorded in the upstream `manifest.yaml`. That run used `parallelism: 256`; the
+canonical `bench.yaml` has since moved to 512, which is a throughput change, not a
+scoring one. Use the shape to sanity-check, not as a bar for another model — a
 rollout count well below 2363 (full runs only — a `++limit` canary is expected
 to be short) means tasks were lost (e.g. a walltime resume) and
 the score covers fewer tasks than the reference.

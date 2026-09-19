@@ -42,7 +42,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
-3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
@@ -64,6 +64,8 @@ for an "AA" request. If the user asks for MRCR:
 2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
    sets the context cap, dataset *and* metric prefix; the three are not
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+   Upstream now carries 1M and 128K as two separate benchmarks with their own
+   manifests and metric keys — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
    `transformers`; prepare fails without it) and
