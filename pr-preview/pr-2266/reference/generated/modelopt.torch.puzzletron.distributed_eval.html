@@ -1,0 +1,1755 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>distributed_eval - Model Optimizer 0.0.1.dev1+g5e39d4ca1</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="evaluation" href="modelopt.torch.puzzletron.evaluation.html" /><link rel="prev" title="tournament" href="modelopt.torch.puzzletron.distillation.tournament.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="distributed_eval"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.__init__"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.as_completed"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.as_completed()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.cancel"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.cancel()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.close"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.close()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.from_campaign"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.from_campaign()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.lookup"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.lookup()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.status"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.status()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.submit()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit_many"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.submit_many()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.wait"><code class="docutils literal notranslate"><span class="pre">AsyncEvaluationClient.wait()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord"><code class="docutils literal notranslate"><span class="pre">AttemptRecord</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.attempt_id"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.attempt_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.error"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.error</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.finished_at"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.finished_at</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.leased_at"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.leased_at</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.metadata"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.metadata</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.model_config"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.request_id"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.request_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.schema_version"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.schema_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.status"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.status</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_boot_id"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.worker_boot_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_id"><code class="docutils literal notranslate"><span class="pre">AttemptRecord.worker_id</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus"><code class="docutils literal notranslate"><span class="pre">AttemptStatus</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CANCELLED"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.CANCELLED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CONFLICT"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.CONFLICT</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.DUPLICATE"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.DUPLICATE</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.FAILED"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.FAILED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.LEASED"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.LEASED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.RETRY"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.RETRY</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.SUCCEEDED"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.SUCCEEDED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.__new__"><code class="docutils literal notranslate"><span class="pre">AttemptStatus.__new__()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign"><code class="docutils literal notranslate"><span class="pre">Campaign</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.__init__"><code class="docutils literal notranslate"><span class="pre">Campaign.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.campaign_id"><code class="docutils literal notranslate"><span class="pre">Campaign.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.coordinator_lease"><code class="docutils literal notranslate"><span class="pre">Campaign.coordinator_lease()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.create"><code class="docutils literal notranslate"><span class="pre">Campaign.create()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.open"><code class="docutils literal notranslate"><span class="pre">Campaign.open()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.root"><code class="docutils literal notranslate"><span class="pre">Campaign.root</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.validate_request"><code class="docutils literal notranslate"><span class="pre">Campaign.validate_request()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest"><code class="docutils literal notranslate"><span class="pre">CampaignManifest</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.automodel_recipe"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.automodel_recipe</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.campaign_id"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.data"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.data</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.descriptor"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.descriptor</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.evaluator_revision"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.evaluator_revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.force_hf"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.force_hf</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metadata"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.metadata</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metrics"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.metrics</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.model</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model_config"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.name"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.name</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.parallelism"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.parallelism</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.precision"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.precision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_atol"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.result_atol</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_rtol"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.result_rtol</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.schema_version"><code class="docutils literal notranslate"><span class="pre">CampaignManifest.schema_version</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind"><code class="docutils literal notranslate"><span class="pre">ErrorKind</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANCELLED"><code class="docutils literal notranslate"><span class="pre">ErrorKind.CANCELLED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANDIDATE"><code class="docutils literal notranslate"><span class="pre">ErrorKind.CANDIDATE</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.INTERNAL"><code class="docutils literal notranslate"><span class="pre">ErrorKind.INTERNAL</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.INVALID_REQUEST"><code class="docutils literal notranslate"><span class="pre">ErrorKind.INVALID_REQUEST</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.PROCESS_GROUP"><code class="docutils literal notranslate"><span class="pre">ErrorKind.PROCESS_GROUP</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.RESOURCE_EXHAUSTED"><code class="docutils literal notranslate"><span class="pre">ErrorKind.RESOURCE_EXHAUSTED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.TIMEOUT"><code class="docutils literal notranslate"><span class="pre">ErrorKind.TIMEOUT</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.TRANSPORT"><code class="docutils literal notranslate"><span class="pre">ErrorKind.TRANSPORT</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.UNSUPPORTED"><code class="docutils literal notranslate"><span class="pre">ErrorKind.UNSUPPORTED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.WORKER_LOST"><code class="docutils literal notranslate"><span class="pre">ErrorKind.WORKER_LOST</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.__new__"><code class="docutils literal notranslate"><span class="pre">ErrorKind.__new__()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient"><code class="docutils literal notranslate"><span class="pre">EvaluationClient</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.__init__"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.batch"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.batch()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.cancel"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.cancel()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.close"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.close()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.evaluate"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.evaluate()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.from_campaign"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.from_campaign()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.lookup"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.lookup()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.status"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.status()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.submit"><code class="docutils literal notranslate"><span class="pre">EvaluationClient.submit()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError"><code class="docutils literal notranslate"><span class="pre">EvaluationError</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.kind"><code class="docutils literal notranslate"><span class="pre">EvaluationError.kind</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.message"><code class="docutils literal notranslate"><span class="pre">EvaluationError.message</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.model_config"><code class="docutils literal notranslate"><span class="pre">EvaluationError.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.retryable"><code class="docutils literal notranslate"><span class="pre">EvaluationError.retryable</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.set_default_retryable"><code class="docutils literal notranslate"><span class="pre">EvaluationError.set_default_retryable()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.traceback"><code class="docutils literal notranslate"><span class="pre">EvaluationError.traceback</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle"><code class="docutils literal notranslate"><span class="pre">EvaluationHandle</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.campaign_id"><code class="docutils literal notranslate"><span class="pre">EvaluationHandle.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.model_config"><code class="docutils literal notranslate"><span class="pre">EvaluationHandle.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.request_id"><code class="docutils literal notranslate"><span class="pre">EvaluationHandle.request_id</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.campaign_id"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.data"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.data</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.evaluator_revision"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.evaluator_revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.from_wire"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.from_wire()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.handler"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.handler</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metadata"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.metadata</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metrics"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.metrics</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.model</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model_config"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.payload"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.payload</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.precision"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.precision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.request_id"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.request_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.schema_version"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.schema_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.to_wire"><code class="docutils literal notranslate"><span class="pre">EvaluationRequest.to_wire()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult"><code class="docutils literal notranslate"><span class="pre">EvaluationResult</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.artifacts"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.artifacts</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.campaign_id"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.completed_at"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.completed_at</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.counts"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.counts</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.metrics"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.metrics</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.model_config"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.provenance"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.provenance</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.reduction_state"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.reduction_state</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.request_id"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.request_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.schema_version"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.schema_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.timing"><code class="docutils literal notranslate"><span class="pre">EvaluationResult.timing</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.cp_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.cp_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.distributed_backend"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.distributed_backend</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.dp_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.dp_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.ep_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.ep_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.fsdp"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.fsdp</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.gpus_per_task"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.gpus_per_task</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.model_config"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.pp_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.pp_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.sequence_parallel"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.sequence_parallel</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.tp_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.tp_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.validate_world_and_gpu_ownership"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.validate_world_and_gpu_ownership()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.world_size"><code class="docutils literal notranslate"><span class="pre">ParallelismSpec.world_size</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord"><code class="docutils literal notranslate"><span class="pre">WorkerRecord</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.boot_id"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.boot_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.campaign_id"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.campaign_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.capabilities"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.capabilities</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.current_request_id"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.current_request_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.endpoint"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.endpoint</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.heartbeat_at"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.heartbeat_at</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.host"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.host</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.model_config"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.parallelism"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.parallelism</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.port"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.port</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.schema_version"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.schema_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.started_at"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.started_at</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.state"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.state</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.worker_id"><code class="docutils literal notranslate"><span class="pre">WorkerRecord.worker_id</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState"><code class="docutils literal notranslate"><span class="pre">WorkerState</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.BUSY"><code class="docutils literal notranslate"><span class="pre">WorkerState.BUSY</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.DRAINING"><code class="docutils literal notranslate"><span class="pre">WorkerState.DRAINING</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.FAILED"><code class="docutils literal notranslate"><span class="pre">WorkerState.FAILED</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.IDLE"><code class="docutils literal notranslate"><span class="pre">WorkerState.IDLE</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.STARTING"><code class="docutils literal notranslate"><span class="pre">WorkerState.STARTING</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.__new__"><code class="docutils literal notranslate"><span class="pre">WorkerState.__new__()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.prefix_cache_id"><code class="docutils literal notranslate"><span class="pre">prefix_cache_id()</span></code></a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../1_modelopt_api.html"><span itemprop="name">modelopt API</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.html"><span itemprop="name">torch</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="3" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.puzzletron.html"><span itemprop="name">puzzletron</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="4" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">distributed_eval</strong>
+        <meta itemprop="position" content="5" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="distributed-eval">
+<h1>distributed_eval<a class="headerlink" href="#distributed-eval" title="Link to this heading">#</a></h1>
+<p id="module-modelopt.torch.puzzletron.distributed_eval">Optional, fault-tolerant distributed evaluation for Puzzletron.</p>
+<p>This package is intentionally isolated from the existing local evaluator and
+<code class="docutils literal notranslate"><span class="pre">rpc_eval</span></code> scaffold.  Import it explicitly when distributed evaluation is
+desired; importing <a class="reference internal" href="modelopt.torch.puzzletron.html#module-modelopt.torch.puzzletron" title="modelopt.torch.puzzletron"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.puzzletron</span></code></a> does not start services or
+change scoring behavior.</p>
+<p class="rubric">Classes</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient" title="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AsyncEvaluationClient</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord" title="modelopt.torch.puzzletron.distributed_eval.AttemptRecord"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AttemptRecord</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus" title="modelopt.torch.puzzletron.distributed_eval.AttemptStatus"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AttemptStatus</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign" title="modelopt.torch.puzzletron.distributed_eval.Campaign"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Campaign</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest" title="modelopt.torch.puzzletron.distributed_eval.CampaignManifest"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CampaignManifest</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind" title="modelopt.torch.puzzletron.distributed_eval.ErrorKind"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ErrorKind</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient" title="modelopt.torch.puzzletron.distributed_eval.EvaluationClient"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EvaluationClient</span></code></a></p></td>
+<td><p>Blocking facade backed by one persistent asyncio loop thread.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError" title="modelopt.torch.puzzletron.distributed_eval.EvaluationError"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EvaluationError</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.EvaluationHandle"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EvaluationHandle</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EvaluationRequest</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.EvaluationResult"><code class="xref py py-obj docutils literal notranslate"><span class="pre">EvaluationResult</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec" title="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ParallelismSpec</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord" title="modelopt.torch.puzzletron.distributed_eval.WorkerRecord"><code class="xref py py-obj docutils literal notranslate"><span class="pre">WorkerRecord</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState" title="modelopt.torch.puzzletron.distributed_eval.WorkerState"><code class="xref py py-obj docutils literal notranslate"><span class="pre">WorkerState</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Functions</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.prefix_cache_id" title="modelopt.torch.puzzletron.distributed_eval.prefix_cache_id"><code class="xref py py-obj docutils literal notranslate"><span class="pre">prefix_cache_id</span></code></a></p></td>
+<td><p>Stable identity reserved for a future topology-specific prefix cache.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AsyncEvaluationClient</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">coordinator</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>coordinator</strong> (<em>AsyncEvaluationCoordinator</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.as_completed">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">as_completed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handles</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.as_completed" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>handles</strong> (<em>Iterable</em><em>[</em><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>AsyncIterator</em>[<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.cancel">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">cancel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.cancel" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em> | </em><em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.close">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">close</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.close" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.from_campaign">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_campaign</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">campaign_dir</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.from_campaign" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>campaign_dir</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient" title="modelopt.torch.puzzletron.distributed_eval.client.AsyncEvaluationClient"><em>AsyncEvaluationClient</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.lookup">
+<span class="sig-name descname"><span class="pre">lookup</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.lookup" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em> | </em><em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.status">
+<span class="sig-name descname"><span class="pre">status</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.status" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">submit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">request</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>request</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit_many">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">submit_many</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">requests</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.submit_many" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>requests</strong> (<em>Iterable</em><em>[</em><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.wait">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">wait</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AsyncEvaluationClient.wait" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em> | </em><em>str</em>)</p></li>
+<li><p><strong>timeout</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AttemptRecord</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.attempt_id">
+<span class="sig-name descname"><span class="pre">attempt_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.attempt_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.error">
+<span class="sig-name descname"><span class="pre">error</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError" title="modelopt.torch.puzzletron.distributed_eval.EvaluationError"><span class="pre">EvaluationError</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.error" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.finished_at">
+<span class="sig-name descname"><span class="pre">finished_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">datetime</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.finished_at" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.leased_at">
+<span class="sig-name descname"><span class="pre">leased_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">datetime</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.leased_at" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.metadata" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.request_id">
+<span class="sig-name descname"><span class="pre">request_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.request_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.schema_version">
+<span class="sig-name descname"><span class="pre">schema_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.schema_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.status">
+<span class="sig-name descname"><span class="pre">status</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus" title="modelopt.torch.puzzletron.distributed_eval.AttemptStatus"><span class="pre">AttemptStatus</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.status" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_boot_id">
+<span class="sig-name descname"><span class="pre">worker_boot_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_boot_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_id">
+<span class="sig-name descname"><span class="pre">worker_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptRecord.worker_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AttemptStatus</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CANCELLED">
+<span class="sig-name descname"><span class="pre">CANCELLED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'cancelled'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CANCELLED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CONFLICT">
+<span class="sig-name descname"><span class="pre">CONFLICT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'conflict'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.CONFLICT" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.DUPLICATE">
+<span class="sig-name descname"><span class="pre">DUPLICATE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'duplicate'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.DUPLICATE" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.FAILED">
+<span class="sig-name descname"><span class="pre">FAILED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'failed'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.FAILED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.LEASED">
+<span class="sig-name descname"><span class="pre">LEASED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'leased'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.LEASED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.RETRY">
+<span class="sig-name descname"><span class="pre">RETRY</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'retry'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.RETRY" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.SUCCEEDED">
+<span class="sig-name descname"><span class="pre">SUCCEEDED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'succeeded'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.SUCCEEDED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.AttemptStatus.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.AttemptStatus.__new__" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">Campaign</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">root</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">manifest</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>root</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>manifest</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest" title="modelopt.torch.puzzletron.distributed_eval.schema.CampaignManifest"><em>CampaignManifest</em></a>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.campaign_id">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.coordinator_lease">
+<span class="sig-name descname"><span class="pre">coordinator_lease</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.coordinator_lease" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Iterator</em>[<em>None</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.create">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">create</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">root</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">manifest</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.create" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>root</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>manifest</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest" title="modelopt.torch.puzzletron.distributed_eval.schema.CampaignManifest"><em>CampaignManifest</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign" title="modelopt.torch.puzzletron.distributed_eval.campaign.Campaign"><em>Campaign</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.open">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">open</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">root</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.open" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>root</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.Campaign" title="modelopt.torch.puzzletron.distributed_eval.campaign.Campaign"><em>Campaign</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.root">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">root</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Path</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.root" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.Campaign.validate_request">
+<span class="sig-name descname"><span class="pre">validate_request</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">request</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.Campaign.validate_request" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>request</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">CampaignManifest</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.automodel_recipe">
+<span class="sig-name descname"><span class="pre">automodel_recipe</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.automodel_recipe" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.campaign_id">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.data">
+<span class="sig-name descname"><span class="pre">data</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.data" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.descriptor">
+<span class="sig-name descname"><span class="pre">descriptor</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.descriptor" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.evaluator_revision">
+<span class="sig-name descname"><span class="pre">evaluator_revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.evaluator_revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.force_hf">
+<span class="sig-name descname"><span class="pre">force_hf</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.force_hf" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metadata" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metrics">
+<span class="sig-name descname"><span class="pre">metrics</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.metrics" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model">
+<span class="sig-name descname"><span class="pre">model</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.name" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.parallelism">
+<span class="sig-name descname"><span class="pre">parallelism</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec" title="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec"><span class="pre">ParallelismSpec</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.parallelism" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.precision">
+<span class="sig-name descname"><span class="pre">precision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.precision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_atol">
+<span class="sig-name descname"><span class="pre">result_atol</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_atol" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_rtol">
+<span class="sig-name descname"><span class="pre">result_rtol</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.result_rtol" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.CampaignManifest.schema_version">
+<span class="sig-name descname"><span class="pre">schema_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.CampaignManifest.schema_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ErrorKind</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANCELLED">
+<span class="sig-name descname"><span class="pre">CANCELLED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'cancelled'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANCELLED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANDIDATE">
+<span class="sig-name descname"><span class="pre">CANDIDATE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'candidate'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.CANDIDATE" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.INTERNAL">
+<span class="sig-name descname"><span class="pre">INTERNAL</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'internal'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.INTERNAL" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.INVALID_REQUEST">
+<span class="sig-name descname"><span class="pre">INVALID_REQUEST</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'invalid_request'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.INVALID_REQUEST" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.PROCESS_GROUP">
+<span class="sig-name descname"><span class="pre">PROCESS_GROUP</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'process_group'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.PROCESS_GROUP" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.RESOURCE_EXHAUSTED">
+<span class="sig-name descname"><span class="pre">RESOURCE_EXHAUSTED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'resource_exhausted'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.RESOURCE_EXHAUSTED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.TIMEOUT">
+<span class="sig-name descname"><span class="pre">TIMEOUT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'timeout'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.TIMEOUT" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.TRANSPORT">
+<span class="sig-name descname"><span class="pre">TRANSPORT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'transport'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.TRANSPORT" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.UNSUPPORTED">
+<span class="sig-name descname"><span class="pre">UNSUPPORTED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'unsupported'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.UNSUPPORTED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.WORKER_LOST">
+<span class="sig-name descname"><span class="pre">WORKER_LOST</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'worker_lost'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.WORKER_LOST" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ErrorKind.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind.__new__" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">EvaluationClient</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Blocking facade backed by one persistent asyncio loop thread.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">campaign_dir</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>campaign_dir</strong> (<em>str</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.batch">
+<span class="sig-name descname"><span class="pre">batch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">requests</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.batch" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>requests</strong> (<em>Iterable</em><em>[</em><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a><em>]</em>)</p></li>
+<li><p><strong>timeout</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.cancel">
+<span class="sig-name descname"><span class="pre">cancel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.cancel" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em> | </em><em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.close">
+<span class="sig-name descname"><span class="pre">close</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.close" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.evaluate">
+<span class="sig-name descname"><span class="pre">evaluate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">request</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.evaluate" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>request</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a>)</p></li>
+<li><p><strong>timeout</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.from_campaign">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_campaign</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">campaign_dir</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.from_campaign" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>campaign_dir</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient" title="modelopt.torch.puzzletron.distributed_eval.client.EvaluationClient"><em>EvaluationClient</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.lookup">
+<span class="sig-name descname"><span class="pre">lookup</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.lookup" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a><em> | </em><em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationResult"><em>EvaluationResult</em></a> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.status">
+<span class="sig-name descname"><span class="pre">status</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.status" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationClient.submit">
+<span class="sig-name descname"><span class="pre">submit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">request</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationClient.submit" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>request</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationHandle"><em>EvaluationHandle</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">EvaluationError</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.kind">
+<span class="sig-name descname"><span class="pre">kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ErrorKind" title="modelopt.torch.puzzletron.distributed_eval.ErrorKind"><span class="pre">ErrorKind</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.kind" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.message">
+<span class="sig-name descname"><span class="pre">message</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.message" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.retryable">
+<span class="sig-name descname"><span class="pre">retryable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.retryable" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.set_default_retryable">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">set_default_retryable</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.set_default_retryable" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationError.traceback">
+<span class="sig-name descname"><span class="pre">traceback</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationError.traceback" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationHandle">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">EvaluationHandle</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.campaign_id">
+<span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.request_id">
+<span class="sig-name descname"><span class="pre">request_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationHandle.request_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">EvaluationRequest</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.campaign_id">
+<span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.data">
+<span class="sig-name descname"><span class="pre">data</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.data" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.evaluator_revision">
+<span class="sig-name descname"><span class="pre">evaluator_revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.evaluator_revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.from_wire">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_wire</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">payload</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.from_wire" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>payload</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest" title="modelopt.torch.puzzletron.distributed_eval.schema.EvaluationRequest"><em>EvaluationRequest</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.handler">
+<span class="sig-name descname"><span class="pre">handler</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.handler" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metadata" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metrics">
+<span class="sig-name descname"><span class="pre">metrics</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.metrics" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model">
+<span class="sig-name descname"><span class="pre">model</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.payload" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.precision">
+<span class="sig-name descname"><span class="pre">precision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.precision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.request_id">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">request_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.request_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.schema_version">
+<span class="sig-name descname"><span class="pre">schema_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.schema_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.to_wire">
+<span class="sig-name descname"><span class="pre">to_wire</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationRequest.to_wire" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">EvaluationResult</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.artifacts">
+<span class="sig-name descname"><span class="pre">artifacts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.artifacts" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.campaign_id">
+<span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.completed_at">
+<span class="sig-name descname"><span class="pre">completed_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">datetime</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.completed_at" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.counts">
+<span class="sig-name descname"><span class="pre">counts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.counts" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.metrics">
+<span class="sig-name descname"><span class="pre">metrics</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.metrics" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.provenance">
+<span class="sig-name descname"><span class="pre">provenance</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.provenance" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.reduction_state">
+<span class="sig-name descname"><span class="pre">reduction_state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.reduction_state" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.request_id">
+<span class="sig-name descname"><span class="pre">request_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.request_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.schema_version">
+<span class="sig-name descname"><span class="pre">schema_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.schema_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.EvaluationResult.timing">
+<span class="sig-name descname"><span class="pre">timing</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.EvaluationResult.timing" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ParallelismSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.cp_size">
+<span class="sig-name descname"><span class="pre">cp_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.cp_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.distributed_backend">
+<span class="sig-name descname"><span class="pre">distributed_backend</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.distributed_backend" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.dp_size">
+<span class="sig-name descname"><span class="pre">dp_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.dp_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.ep_size">
+<span class="sig-name descname"><span class="pre">ep_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.ep_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.fsdp">
+<span class="sig-name descname"><span class="pre">fsdp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.fsdp" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.gpus_per_task">
+<span class="sig-name descname"><span class="pre">gpus_per_task</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.gpus_per_task" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.pp_size">
+<span class="sig-name descname"><span class="pre">pp_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.pp_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.sequence_parallel">
+<span class="sig-name descname"><span class="pre">sequence_parallel</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.sequence_parallel" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.tp_size">
+<span class="sig-name descname"><span class="pre">tp_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.tp_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.validate_world_and_gpu_ownership">
+<span class="sig-name descname"><span class="pre">validate_world_and_gpu_ownership</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.validate_world_and_gpu_ownership" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.world_size">
+<span class="sig-name descname"><span class="pre">world_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec.world_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">WorkerRecord</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">StrictModel</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.boot_id">
+<span class="sig-name descname"><span class="pre">boot_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.boot_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.campaign_id">
+<span class="sig-name descname"><span class="pre">campaign_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.campaign_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.capabilities">
+<span class="sig-name descname"><span class="pre">capabilities</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.capabilities" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.current_request_id">
+<span class="sig-name descname"><span class="pre">current_request_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.current_request_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.endpoint">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">endpoint</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.endpoint" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.heartbeat_at">
+<span class="sig-name descname"><span class="pre">heartbeat_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">datetime</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.heartbeat_at" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.host">
+<span class="sig-name descname"><span class="pre">host</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.host" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'frozen':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.parallelism">
+<span class="sig-name descname"><span class="pre">parallelism</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.ParallelismSpec" title="modelopt.torch.puzzletron.distributed_eval.ParallelismSpec"><span class="pre">ParallelismSpec</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.parallelism" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.port">
+<span class="sig-name descname"><span class="pre">port</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.port" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.schema_version">
+<span class="sig-name descname"><span class="pre">schema_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.schema_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.started_at">
+<span class="sig-name descname"><span class="pre">started_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">datetime</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.started_at" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.state">
+<span class="sig-name descname"><span class="pre">state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState" title="modelopt.torch.puzzletron.distributed_eval.WorkerState"><span class="pre">WorkerState</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.state" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerRecord.worker_id">
+<span class="sig-name descname"><span class="pre">worker_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerRecord.worker_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">WorkerState</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.BUSY">
+<span class="sig-name descname"><span class="pre">BUSY</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'busy'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.BUSY" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.DRAINING">
+<span class="sig-name descname"><span class="pre">DRAINING</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'draining'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.DRAINING" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.FAILED">
+<span class="sig-name descname"><span class="pre">FAILED</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'failed'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.FAILED" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.IDLE">
+<span class="sig-name descname"><span class="pre">IDLE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'idle'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.IDLE" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.STARTING">
+<span class="sig-name descname"><span class="pre">STARTING</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'starting'</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.STARTING" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.WorkerState.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.WorkerState.__new__" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.distributed_eval.prefix_cache_id">
+<span class="sig-name descname"><span class="pre">prefix_cache_id</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">campaign_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefix_signature</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefix_length</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallelism</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.distributed_eval.prefix_cache_id" title="Link to this definition">#</a></dt>
+<dd><p>Stable identity reserved for a future topology-specific prefix cache.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>campaign_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>model</strong> (<em>Any</em>)</p></li>
+<li><p><strong>data</strong> (<em>Any</em>)</p></li>
+<li><p><strong>prefix_signature</strong> (<em>Any</em>)</p></li>
+<li><p><strong>prefix_length</strong> (<em>int</em>)</p></li>
+<li><p><strong>parallelism</strong> (<em>Any</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="modelopt.torch.puzzletron.distillation.tournament.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">tournament</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="modelopt.torch.puzzletron.evaluation.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">evaluation</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>
