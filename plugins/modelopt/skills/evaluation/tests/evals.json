@@ -1,5 +1,51 @@
 [
   {
+    "name": "standalone-launching-evals-small-truncation",
+    "skills": ["launching-evals"],
+    "query": "Analyze this completed Qwen GPQA invocation in a fresh repository session, without an evaluator role or prior evaluation skill context: all 3168 expected responses scored, score 90.5619 versus reference 89.2, 13 finish_reason=length at max_new_tokens=131072. All other validity checks pass; the output budget matches the reference and prompt plus output fits deployed context=262144. Is the run valid, or should I uncap reasoning output and rerun? Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Follows AGENTS.md (also exposed via CLAUDE.md) to read evaluation/references/run-validation.md before reporting scores, without preloading the evaluation skill",
+      "Reports 13/3168 = approximately 0.4104% as a visible warning, retaining the score and affected responses",
+      "Does not invalidate or retry solely for this truncation, uncap reasoning output, or replace the protocol-matched token/context limits with vendored fixed limits",
+      "Does not infer negligible score impact from the low rate or validity from beating the reference",
+      "Reports complete sample/scoring coverage and the independent validity and token-budget checks"
+    ]
+  },
+  {
+    "name": "truncation-boundary-and-denominator",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "Three independent tasks each have 10000 unique evaluated-model responses with complete sample and scoring coverage and all other checks passing. A has 99 length-capped responses, B has 100, C has 101. Logs also contain 5000 duplicate cache records, 100 transport retry attempts, and 10000 judge responses per task. Classify each for the parent; do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Uses 10000 as each denominator, excluding duplicates, transport retry attempts, and judge calls; does not pool tasks",
+      "Reports A 99/10000 = 0.99% and B 100/10000 = 1.0% as warnings without automatic invalidation or retry",
+      "Reports C 101/10000 = 1.01% as above tolerance even if rounded to 1.0%; returns findings and a recommendation without automatic resubmission or a success verdict"
+    ]
+  },
+  {
+    "name": "small-truncation-does-not-waive-failures",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "Review separate runs with 1/1000 length-capped responses each. A scored only 999/1000 expected samples; B has an exhausted request failure; C contains an empty output; D has a parser failure with a fallback score; E uses the wrong benchmark version. All scores exceed the reference. Can the parent accept them under the truncation tolerance?",
+    "files": [],
+    "expected_behavior": [
+      "Reports 1/1000 = 0.1% but does not waive any run's independent failure",
+      "Separately identifies incomplete scoring coverage, request failure, empty output, parsing failure, and benchmark configuration mismatch",
+      "Returns findings and recommendations to the parent without automatically resubmitting; exceeding the reference is not proof of validity"
+    ]
+  },
+  {
+    "name": "truncation-unverified-and-token-budget",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "A run has no reliable response denominator or finish reasons. Another has 5/1000 length-capped responses, max_new_tokens=131072, deployed context=131072, and 4096-token prompts; its reference protocol uses a 65536 output budget. Should I remove the output cap or keep increasing it until the reference score passes?",
+    "files": [],
+    "expected_behavior": [
+      "Marks the first run's truncation unverified, not 0% or within tolerance",
+      "Reports the second run's 5/1000 = 0.5% but flags reference-budget mismatch and insufficient context for prompt plus configured output",
+      "Does not uncap or increase limits to pass the target; returns a protocol-justified recommendation for approval without automatically resubmitting"
+    ]
+  },
+  {
     "name": "nemotron3-nano-bf16-reasoning",
     "skills": ["evaluation"],
     "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
