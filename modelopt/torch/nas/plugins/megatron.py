@@ -15,7 +15,6 @@
 
 """Plugin to add NAS/Pruning support for megatron-core Language models like GPT and Mamba."""
 
-import copy
 import types
 from abc import ABC
 from collections.abc import Callable, Sequence
@@ -35,10 +34,6 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
-from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
-from megatron.core.models.hybrid.hybrid_layer_specs import (
-    hybrid_stack_spec as _te_hybrid_stack_spec,
-)
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
@@ -56,7 +51,6 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
-from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from modelopt.torch.nas.modules import DynamicModuleList
@@ -91,21 +85,8 @@ except ImportError:
 # Attention module types that _DynamicTransformerLayer converts.
 _ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
 
-__all__ = ["get_te_hybrid_stack_spec"]
-
-
-def get_te_hybrid_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
-    """Return the TE Hybrid stack spec."""
-    if moe_grouped_gemm:
-        return _te_hybrid_stack_spec
-
-    # The upstream TE hybrid stack spec hardcodes TEGroupedMLP for MoE.
-    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
-    te_hybrid_stack_spec = copy.deepcopy(_te_hybrid_stack_spec)
-    te_hybrid_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
-        use_te=True, num_experts=8, moe_grouped_gemm=False
-    )
-    return te_hybrid_stack_spec
+# This module only registers DynamicModules; it exports no public API.
+__all__ = []
 
 
 # Local Parallel Linear DynamicModules ##########################################################################
