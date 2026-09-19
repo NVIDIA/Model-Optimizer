@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -229,6 +230,28 @@ def _export_fused_experts(
 
     # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
     _delete_fused_moe_source_attrs(module)
+
+
+@contextmanager
+def _release_exported_tensors(root: nn.Module):
+    """Drop what the export pass adds to ``root``, once the block has persisted it.
+
+    The handlers register scale buffers on ``root``'s existing sub-modules and
+    :func:`_export_fused_experts` attaches per-expert holder modules; an accelerate offload
+    window reclaims neither, so running the pass once per layer accumulates them. An export
+    that raises releases nothing, leaving the layer intact to be inspected.
+    """
+    before = {name: (set(mod._modules), set(mod._buffers)) for name, mod in root.named_modules()}
+
+    yield
+
+    # list(): deleting a child mutates the _modules dict the traversal walks.
+    for name, module in list(root.named_modules()):
+        children_before, buffers_before = before.get(name, (set(), set()))
+        for child_name in set(module._modules) - children_before:
+            delattr(module, child_name)
+        for buf_name in set(module._buffers) - buffers_before:
+            module._buffers[buf_name] = None
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):
