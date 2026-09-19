@@ -73,11 +73,75 @@
     ]
   },
   {
+    "name": "mlflow-pre-submit-safeguard",
+    "skills": ["evaluation"],
+    "query": "Launch using my existing NEL 0.2.6 config with MLflow auto-export enabled. Generated configs and logs cannot be checked before the CPU exporter uploads them.",
+    "files": [],
+    "expected_behavior": [
+      "Applies the common Step 8 pre-submit safeguard despite skipping config generation; the same gate applies to shortcut-generated configs",
+      "Sets execution.auto_export.destinations to [] before both canary and full submission, retaining MLflow export settings",
+      "Plans checked, sanitized manual delivery from existing results rather than relying on a post-upload scan"
+    ]
+  },
+  {
+    "name": "mlflow-auto-export-verification",
+    "skills": ["evaluation"],
+    "query": "My full evaluation succeeded. The CPU auto-export is still running and MLflow has a same-named canary run. Finish the handoff once export completes.",
+    "files": [],
+    "expected_behavior": [
+      "Checks the separate export job and does not start a competing manual export while it is active",
+      "Finds each full-run MLflow run by invocation and task identity rather than accepting the same-named canary",
+      "Verifies canonical score, evaluated configuration, coverage, and required diagnostic artifact contents against existing results",
+      "Returns verified task-to-run URLs and invocation IDs with separate evaluation and export outcomes, without exporting again"
+    ]
+  },
+  {
+    "name": "mlflow-manual-export-recovery",
+    "skills": ["evaluation"],
+    "query": "Evaluation completed, but the CPU export job failed importing python:3.12.7-slim. One task has a partial MLflow run missing config and diagnostics; another has no run. Recover their exports without rerunning evaluation.",
+    "files": [],
+    "expected_behavior": [
+      "Checks export job state and existing runs by invocation/task identity, rechecking before recovery to avoid duplicates",
+      "Inspects the installed launcher version and CLI help before choosing supported export, image/config, and artifact options",
+      "Repairs or manually exports existing results only; never runs or resumes evaluation to repair export",
+      "Determines whether partial-run repair is supported instead of assuming export idempotency; records any unavoidable replacement run",
+      "Secret-scans and redacts uploaded configs/logs without removing non-secret evaluation provenance",
+      "Verifies scores, configs, and diagnostics in MLflow after recovery; returns actual URLs and invocation IDs with export marked manually verified"
+    ]
+  },
+  {
+    "name": "mlflow-export-blocked-before-cleanup",
+    "skills": ["evaluation"],
+    "query": "Four tasks completed, but all auto-exports failed. Manual export is also blocked by MLflow authentication. Cleanup of the cluster results is due. Report the outcome.",
+    "files": [],
+    "expected_behavior": [
+      "Reports evaluation outcomes separately from blocked or unverified MLflow delivery for all four tasks",
+      "Names the authentication blocker and does not fabricate URLs, infer absent runs from access failure, or claim export success",
+      "Preserves small sanitized results/config/coverage/diagnostic and export-failure evidence with invocation/task IDs in an approved durable location before cleanup",
+      "Reports absolute evidence paths, launcher version and sanitized recovery attempt; flags inability to preserve evidence before destructive cleanup",
+      "Does not upload secrets, copy bulk caches as backup, or rerun evaluation"
+    ]
+  },
+  {
+    "name": "nel-next-explicit-push-verification",
+    "skills": ["evaluation"],
+    "query": "My nel-next SLURM evaluation completed. The merged bundles are safe to upload, but the wrapper stages only eval-*.json; logs remain on the cluster. Deliver verified MLflow results.",
+    "files": [],
+    "expected_behavior": [
+      "Preserves the explicit nel-next.sh mlflow-push -r <run_id> -c <cfg> workflow rather than expecting SLURM auto-export or substituting legacy export syntax",
+      "Checks outgoing bundles and export metadata before pushing and follows the verification gate directly from the nel-next run flow, without relying on excluded Steps 1-9",
+      "Verifies each pushed run by run/bundle job identity, scores, configuration, and required diagnostics before returning actual URLs",
+      "Attaches missing sanitized diagnostic evidence to the identified runs and rechecks contents; does not assume copy_logs=true uploads unstaged logs",
+      "Reports incomplete or blocked delivery if required evidence cannot be delivered, without rerunning evaluation"
+    ]
+  },
+  {
     "name": "scicode-eight-run-average",
     "skills": ["evaluation"],
     "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",
     "files": [],
     "expected_behavior": [
+      "Applies Step 8's pre-upload safeguard on the AA shortcut path, disabling auto-export before canary and full submission if generated artifacts cannot be checked before upload",
       "Keeps num_repeats at 1 and plans at least 8 independent SciCode submissions instead",
       "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
       "Reports the SciCode score as the mean of the pooled runs with standard error and run count",

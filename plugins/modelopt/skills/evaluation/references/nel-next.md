@@ -199,7 +199,7 @@ with its own `run_id`, copying the shared `services:` block.
   containing `${` — `experiment_name` included, since the same pass resolves the block. Keep `tracking_uri` as `${MLFLOW_TRACKING_URI}` — cross-server, the inherited name
   makes a same-named experiment here and `modelopt_run_url` is the only route back.
 
-## Run (dry-run → canary → full) → push to MLflow
+## Run (dry-run → canary → full) → push → verify MLflow delivery
 
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
@@ -207,13 +207,24 @@ set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 "$NEL" eval run <cfg>.yaml --submit                                 # full
 "$NEL" eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
-"$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
 ```
+
+Before pushing, apply [Before upload](mlflow-verification.md#before-upload) to
+all outgoing bundles and export metadata. The wrapper fetches the cluster's
+`eval-*.json` unchanged; if they need redaction, use the installed nel-next
+exporter's supported local-bundle path with sanitized copies instead.
+
+```bash
+"$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push checked merged bundle(s)
+```
+
+Then apply [MLflow delivery verification](mlflow-verification.md), including its
+nel-next evidence-repair path, before handoff or cleanup.
 
 `eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and
 submits via SSH; a built-in afternotok chain auto-resumes across walltime windows;
-sharded runs auto-merge. **SLURM does not auto-export** — `mlflow-push` is the final
-step: it reads the config's `export_config.mlflow`, stages each merged bundle's
+sharded runs auto-merge. **SLURM does not auto-export** — `mlflow-push` reads the
+config's `export_config.mlflow`, stages each merged bundle's
 `eval-*.json` off the cluster (the dev box doesn't mount the run dir), and exports with
 `emit_traces=false` (the default emits one trace per sample → minutes-long hang).
 Idempotent (re-push updates the same run, deduped by `job_id`); forward extra exporter

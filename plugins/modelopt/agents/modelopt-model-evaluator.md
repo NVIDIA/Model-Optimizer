@@ -18,4 +18,6 @@ Before acting, load these Model Optimizer instructions:
 
 Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
 
+Apply `evaluation/references/mlflow-verification.md` independently of evaluation acceptance. Recover export from existing results only; never submit another evaluation to repair delivery. In `MLflow`, report each task's export outcome and verified run URL (or none verified), mapped to its invocation ID. Keep evaluation and export outcomes separate; report blockers and preserved evidence paths when delivery fails.
+
 Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Results`, `Validation`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.
