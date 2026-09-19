@@ -57,6 +57,24 @@ Default success rule: maximize the chosen performance objective while keeping
 each benchmark within 1 percentage point of the matching BF16/FP16 baseline.
 Near-threshold or noisy regressions require reruns before making a decision.
 
+## Recipe Guidance
+
+Before choosing a recipe, read `modelopt_recipes/ptq.md` in the source checkout
+used for PTQ. Resolve all `modelopt_recipes/...` paths against that checkout.
+If it is missing, follow
+[Env-1. Get ModelOpt source](../common/environment-setup.md#env-1-get-modelopt-source).
+Report if the guide cannot be read.
+
+Use the guide to choose quantization scope, KV-cache scheme, and calibration
+method. Inspect the recipe YAML and its imported configs. When handing the
+recipe to `ptq`, ensure the quantization run uses the recipe and imported configs
+reviewed. Then perform the existing coverage, compatibility, and evaluation
+checks.
+
+Cite the sections behind your choice and explain any departures from their
+advice. Re-read the guide after pulling changes, switching branches or checkouts,
+or editing it. Otherwise, reuse the guidance already read.
+
 ## Search Space
 
 Keep the search space explicit. A candidate recipe is a tuple across these axes:
@@ -96,6 +114,7 @@ Do not collapse the search to one dimension such as numeric format only. Read
      estimates.
 
 3. **Pick baselines and first candidates**
+   - Apply [Recipe Guidance](#recipe-guidance) before selecting candidates.
    - Always include BF16/FP16 and a near-lossless FP8/W8A8 baseline unless FP8
      itself is the target.
    - For ModelOpt work, start from `modelopt_recipes`: model-specific recipes
@@ -161,6 +180,9 @@ verbosity, positional exclusions, and decision.
 
 ## References
 
+- For scope, KV-cache, and calibration guidance, read `modelopt_recipes/ptq.md`
+  in the PTQ source checkout before selecting candidates; see
+  [Recipe Guidance](#recipe-guidance) for when to re-read it.
 - For recipe design, search-space details, sensitivity, and active-cost
   accounting, read `references/recipe_iteration.md`.
 - For a concrete prior case study, read `references/qwen36_case_study.md` only
