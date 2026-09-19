@@ -1593,6 +1593,21 @@ def _revert_quant_config_names_best_effort(
     return hf_quant_config
 
 
+def _source_checkpoint(model: nn.Module) -> str | None:
+    """Where the model's original checkpoint lives, or ``None`` if nothing is known.
+
+    Prefers ``_modelopt_source_checkpoint`` (recorded at load time by
+    ``record_unplaced_source_keys``). A model that reached export without going through that path
+    still knows its own provenance via ``config._name_or_path``, and the several places this is
+    asked must agree on the answer -- otherwise, for instance, a weight is carried but its sidecar
+    tensors never reach ``exclude_modules`` because the two halves disagreed about where the
+    checkpoint was.
+    """
+    return getattr(model, "_modelopt_source_checkpoint", None) or getattr(
+        getattr(model, "config", None), "_name_or_path", None
+    )
+
+
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
     """Unplaced checkpoint keys a shard actually provides.
 
@@ -1605,9 +1620,7 @@ def carryable_unplaced_keys(model: nn.Module) -> list[str]:
     Best-effort by design: it is used to decide how loudly to complain, so an unreadable index
     answers "nothing to carry" rather than raising from inside a diagnostic.
     """
-    ckpt = getattr(model, "_modelopt_source_checkpoint", None) or getattr(
-        getattr(model, "config", None), "_name_or_path", None
-    )
+    ckpt = _source_checkpoint(model)
     if not ckpt or not Path(ckpt).is_dir():
         return []
     keys = unplaced_keys_for(model, ckpt)
@@ -1633,13 +1646,7 @@ def off_index_tensor_names(model: nn.Module) -> list[str]:
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
-    # Same fallback as read_unplaced_weights: a model that reached the export
-    # without going through record_unplaced_source_keys still knows its own provenance, and the
-    # two halves of the mechanism must agree about where the source checkpoint is -- otherwise
-    # its weights are carried but its sidecar tensors never reach exclude_modules.
-    ckpt = getattr(model, "_modelopt_source_checkpoint", None) or getattr(
-        getattr(model, "config", None), "_name_or_path", None
-    )
+    ckpt = _source_checkpoint(model)
     if not ckpt or not Path(ckpt).is_dir():
         return []
     try:
@@ -1723,8 +1730,6 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
     """
-    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
-
     # The recorded list is never treated as final, empty or not. An earlier revision returned
     # early when the loader recorded [], reasoning that it "had already answered" -- but
     # Transformers filters unexpected_keys through _keys_to_ignore_on_load_unexpected, and
@@ -1733,7 +1738,7 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     #
     # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
     # there is nothing to carry must not depend on an optional import succeeding.
-    ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
+    ckpt = _source_checkpoint(model)
     if not ckpt or not Path(ckpt).is_dir():
         # A hub id rather than a local path, or no provenance at all -- nothing to read. Quiet
         # when nothing was recorded, because there is no reason to think anything is missing. But
