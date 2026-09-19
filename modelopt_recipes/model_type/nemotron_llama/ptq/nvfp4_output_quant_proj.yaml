@@ -20,6 +20,7 @@
 # Output quantizers must stay scoped to GEMM outputs: a DynamicQuantize on
 # non-GEMM outputs (embeddings, pooling) fails to compile in TensorRT.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
@@ -27,7 +28,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: 'Llama-Nemotron embedding PTQ recipe (nvfp4 + projection output quantizers): same numerics as the general nvfp4 preset, plus dynamic NVFP4
     output quantizers on the projection Linears so TensorRT engines carry FP4 activations between layers.'
 quantize:
