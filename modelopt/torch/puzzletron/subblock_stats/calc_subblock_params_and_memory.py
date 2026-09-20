@@ -105,7 +105,14 @@ def calculate_additive_metrics(
     decode_flops = 2 * active_params * batch_size * decode_tokens
 
     if isinstance(subblock_config, AttentionConfig) and not subblock_config.no_op:
-        kv_dim = calculate_kv_dim(subblock_config.num_kv_heads, n_head, n_embd)
+        effective_head_dim = (
+            subblock_config.qk_head_dim
+            if subblock_config.qk_head_dim is not None
+            else _language_model_attr(model_config, descriptor, "head_dim", None)
+        )
+        kv_dim = calculate_kv_dim(
+            subblock_config.num_kv_heads, n_head, n_embd, head_dim=effective_head_dim
+        )
         kv_cache_bytes_per_token = kv_dim * sizeof_dtype(kv_cache_dtype)
         query_heads = int(subblock_config.num_query_heads or n_head)
         head_dim = int(subblock_config.qk_head_dim or (n_embd // n_head))
@@ -170,8 +177,16 @@ def calculate_additive_metrics(
     }
 
 
-def _language_model_attr(config: PretrainedConfig, descriptor: type[ModelDescriptor], name: str, default=None):
-    return getattr(descriptor.get_language_model_config(config), name, getattr(config, name, default))
+def _language_model_attr(
+    config: PretrainedConfig, descriptor: type[ModelDescriptor], name: str, default=None
+):
+    """Retrieve an attribute from language model config or top-level config."""
+    lm_config = (
+        descriptor.get_language_model_config(config)
+        if descriptor is not None and hasattr(descriptor, "get_language_model_config")
+        else config
+    )
+    return getattr(lm_config, name, getattr(config, name, default))
 
 
 def _configured_subblock(
@@ -554,7 +569,14 @@ def calculate_attention_memory(
     if isinstance(sliding_window, int):
         seq_len = min(seq_len, sliding_window)
 
-    kv_dim = calculate_kv_dim(attention_config.num_kv_heads, n_head, n_embd)
+    effective_head_dim = (
+        attention_config.qk_head_dim
+        if getattr(attention_config, "qk_head_dim", None) is not None
+        else _language_model_attr(model_config, descriptor, "head_dim", None)
+    )
+    kv_dim = calculate_kv_dim(
+        attention_config.num_kv_heads, n_head, n_embd, head_dim=effective_head_dim
+    )
     total_num_tokens = seq_len * batch_size
     kv_cache_size = total_num_tokens * kv_dim
     if num_params is None:

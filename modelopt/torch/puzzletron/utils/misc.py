@@ -35,20 +35,31 @@ __all__ = [
 ]
 
 
-def calculate_kv_dim(num_kv_heads: int, n_head: int, n_embd: int) -> int:
+def calculate_kv_dim(
+    num_kv_heads: int,
+    n_head: int | None = None,
+    n_embd: int | None = None,
+    head_dim: int | None = None,
+) -> int:
     """Calculate the key-value dimension for grouped-query attention.
 
     Args:
         num_kv_heads: Number of key-value heads.
         n_head: Total number of attention heads.
         n_embd: Embedding dimension.
+        head_dim: Explicit dimension per attention head. If provided, takes precedence over n_embd // n_head.
 
     Returns:
         Combined dimension for key and value tensors (2 * num_kv_heads * head_size).
     """
     if num_kv_heads is None:
         return 0
-    head_size = n_embd // n_head
+    if head_dim is not None:
+        head_size = head_dim
+    elif n_head is not None and n_embd is not None and n_head > 0:
+        head_size = n_embd // n_head
+    else:
+        head_size = 0
     kv_dim = 2 * num_kv_heads * head_size
     return kv_dim
 
