@@ -42,6 +42,7 @@ from modelopt.onnx.quantization.qdq_utils import (
     replace_zero_scale_with_smallest_nonzero,
 )
 from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+from modelopt.onnx.utils import get_opset_version
 
 
 def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool = False):
@@ -343,8 +344,7 @@ def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
         value_info=value_info,
     )
 
-    model = helper.make_model(graph)
-    return model
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
 
 
 class TestQuantizeWeightsToInt4:
@@ -665,6 +665,8 @@ class TestFP4QDQTo2DQ:
 
         # Run FP4QDQ to 2DQ conversion
         converted_model = NVFP4QuantExporter.process_model(model)
+
+        assert get_opset_version(converted_model) == 23
 
         # Verify TRT_FP4QDQ node is removed
         fp4qdq_nodes = [node for node in converted_model.graph.node if node.op_type == "TRT_FP4QDQ"]

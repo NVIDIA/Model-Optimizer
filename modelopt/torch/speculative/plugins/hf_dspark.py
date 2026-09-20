@@ -443,18 +443,20 @@ class HFDSparkModel(HFDFlashModel):
 
         hid_offset = 1
         selected = [model_output.hidden_states[lid + hid_offset] for lid in self.target_layer_ids]
-        target_hidden = torch.cat(selected, dim=-1)
+        # Same sharding hazard as HFDFlashModel.pseudo_speculative_generate: gather onto the
+        # draft's device before the cat rather than assuming one GPU holds every target layer.
+        device = self._base_device()
+        target_hidden = torch.cat([h.to(device) for h in selected], dim=-1)
 
         block_size = self.dflash_block_size
         bsz = input_ids.shape[0]
-        device = input_ids.device
 
         # Block input: anchor at position 0, mask tokens elsewhere (parallel backbone).
         block_ids = torch.full(
             (bsz, block_size), self.mask_token_id, dtype=torch.long, device=device
         )
-        block_ids[:, 0] = base_token.squeeze(-1)
-        noise_embedding = self._base_model_embeddings(block_ids)
+        block_ids[:, 0] = base_token.squeeze(-1).to(device)
+        noise_embedding = self._base_model_embeddings(block_ids).to(device)
 
         ctx_len = target_hidden.shape[1]
         ctx_positions = torch.arange(ctx_len, device=device)
@@ -473,7 +475,7 @@ class HFDSparkModel(HFDFlashModel):
         # Autoregressive Markov sampling over the block.
         m = self.dflash_module
         num_tokens = min(steps, block_size)
-        prev_token = base_token.squeeze(-1)  # anchor precedes block position 0
+        prev_token = base_token.squeeze(-1).to(device)  # anchor precedes block position 0
         state = None
         draft_tokens = []
         for k in range(num_tokens):
@@ -481,4 +483,4 @@ class HFDSparkModel(HFDFlashModel):
             tok = (backbone_logits[:, k, :] + bias).argmax(dim=-1)
             draft_tokens.append(tok)
             prev_token = tok
-        return base_token, torch.stack(draft_tokens, dim=1)
+        return base_token, torch.stack(draft_tokens, dim=1).to(input_ids.device)

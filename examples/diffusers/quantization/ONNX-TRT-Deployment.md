@@ -28,12 +28,12 @@ python quantize.py \
 
 #### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantize.py)
 
-*In our example code, FP4 is only supported for Flux. However, you can modify our script to enable FP4 format support for your own model.*
+FP4 ONNX export is supported for Flux and SDXL.
 
 ```sh
 python quantize.py \
     --model {flux-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
-    --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
+    --format {fp8|fp4} --batch-size 2 --calib-size {128|256} \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --onnx-dir {ONNX_DIR}
 ```

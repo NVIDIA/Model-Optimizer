@@ -64,11 +64,8 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
                 ):
                     if hasattr(module, attr):
                         getattr(module, attr).disable()
-                setattr(module, "_disable_fp8_mha", True)
 
                 print(f"Disabled Attention layer quantization for layer {name}")
-            else:
-                setattr(module, "_disable_fp8_mha", False)
 
 
 def filter_func_ltx_video(name: str) -> bool:

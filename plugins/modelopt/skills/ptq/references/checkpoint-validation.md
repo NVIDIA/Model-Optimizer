@@ -61,7 +61,7 @@ for k in vis_q[:8]: print('  ', k)
 "
 ```
 
-Nonzero → the ViT was quantized; re-quantize with the `huggingface/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` exclusions.
+Nonzero → the ViT was quantized; re-quantize with the `model_type/<model_type>/ptq/` recipe or add `*visual*`/`*vision_tower*` exclusions.
 
 ## Expected quantization patterns by recipe
 

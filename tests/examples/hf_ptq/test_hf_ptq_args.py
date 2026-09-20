@@ -502,7 +502,7 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
     aq = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe"
     ).auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
@@ -523,12 +523,12 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
     recipe = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(
         recipe.auto_quantize, args, fixed_quantize_config=recipe.quantize
     )
-    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    model_ptq = load_recipe("model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
 
     assert inputs["quantization_formats"] == []
     assert inputs["fixed_quantization_config"] == model_ptq.quantize.model_dump()
@@ -1082,3 +1082,47 @@ def test_recipe_superseded_action_is_wired_to_both_flags(monkeypatch):
         assert isinstance(by_dest[dest], RecipeSupersededAction), (
             f"--{dest} lost its deprecation action"
         )
+
+
+# --- post-quantization sanity-check generate() must not block export ----------------------------
+
+
+def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
+    """A device-placement issue (e.g. `device_map="auto"` offloading a layer to CPU on a
+    unified-memory single-GPU host) can make the post-PTQ sanity `generate()` raise. That must
+    not discard the completed calibration: export should still run. Regression test for
+    NVBug 6752977."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    full_model = SimpleNamespace(
+        generate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    export_calls = []
+    monkeypatch.setattr(
+        hf_ptq,
+        "export_quantized",
+        lambda *a, **k: export_calls.append((a, k)),
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    args = SimpleNamespace(specdec_offline_dataset=None, verbose=False)
+
+    with pytest.warns(UserWarning, match="Post-quantization generation sanity check failed"):
+        hf_ptq.post_quantize(
+            args=args,
+            full_model=full_model,
+            language_model=full_model,
+            model_type="llama",
+            tokenizer=None,
+            processor=None,
+            preview_input_ids=torch.zeros(1, 4, dtype=torch.long),
+            preview_attention_mask=None,
+            generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
+            is_nemotron_vl_model=False,
+            first_text_speech_dataset=None,
+            default_padding_side="right",
+            default_pad_token=None,
+            calib_dataloader=None,
+        )
+
+    assert len(export_calls) == 1
