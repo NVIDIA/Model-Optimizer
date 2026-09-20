@@ -16,8 +16,11 @@ from modelopt.torch.puzzletron.utils.misc import calculate_kv_dim
 
 
 class DummyDescriptor:
+    """Dummy model descriptor for testing configuration extraction."""
+
     @staticmethod
     def get_language_model_config(config):
+        """Return the given model configuration directly."""
         return config
 
 

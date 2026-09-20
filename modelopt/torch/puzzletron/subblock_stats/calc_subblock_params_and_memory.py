@@ -180,6 +180,7 @@ def calculate_additive_metrics(
 def _language_model_attr(
     config: PretrainedConfig, descriptor: type[ModelDescriptor], name: str, default=None
 ):
+    """Retrieve an attribute from language model config or top-level config."""
     lm_config = (
         descriptor.get_language_model_config(config)
         if descriptor is not None and hasattr(descriptor, "get_language_model_config")
