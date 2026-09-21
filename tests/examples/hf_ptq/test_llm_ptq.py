@@ -76,6 +76,10 @@ def test_ptq_whisper(command):
         PTQCommand(quant="int8_weight_only", kv_cache_quant="none"),
         PTQCommand(quant="int4_awq", kv_cache_quant="none"),
         PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
+        # GGML IQ weight-only, recipe-driven. These encoders require every weight's input
+        # dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
+        PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)
