@@ -227,6 +227,7 @@ Determine the registry from the image URI:
 | `nvcr.io/nvidia/...` | NGC |
 | `vllm/vllm-openai:...`, `lmsysorg/sglang:...`, or no registry prefix | DockerHub |
 | `ghcr.io/...` | GitHub Container Registry |
+| `gitlab.example.com/group/...` | GitLab container registry |
 | `docker.io/...` | DockerHub (explicit) |
 
 Then check credentials based on the runtime:
@@ -241,6 +242,7 @@ Look for `machine <registry>` lines:
 - NGC → `machine nvcr.io`
 - DockerHub → `machine auth.docker.io`
 - GHCR → `machine ghcr.io`
+- GitLab → `machine <gitlab-host>` (**without the URI port**)
 
 #### Docker
 
@@ -277,6 +279,11 @@ machine nvcr.io
 EOF
 ```
 
+For GitLab, use the secure ephemeral flow in `credentials.md` rather than placing a token in a
+shell command. Its URI is
+`docker://<gitlab-user>@<gitlab-host>:<reachable-port>#<group/project/image>:<tag>`; the
+credential `machine` omits the port. Import by tag on Enroot 4.1.x, not `:tag@sha256:...`.
+
 **Docker:**
 
 ```bash
@@ -299,10 +306,12 @@ echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 4. After the user fixes auth or switches images, verify the image is **actually pullable** before submitting (credentials alone don't guarantee the image exists):
 
 ```bash
-# enroot — test pull (aborts after manifest fetch)
-enroot import --output /dev/null docker://<registry>#<image> 2>&1 | head -10
-# Success: shows "Fetching image manifest" + layer info
-# Failure: shows "401 Unauthorized" or "404 Not Found"
+# enroot — a real import verifies blob/layer access; manifest success alone is insufficient
+probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/enroot-probe.XXXXXX")
+enroot import --output "$probe_dir/image.sqsh" "docker://<user>@<registry>#<image>:<tag>"
+test -s "$probe_dir/image.sqsh"
+rm -f "$probe_dir/image.sqsh" && rmdir "$probe_dir"
+# Failure before auth often reports 401; an HTTP proxy rejection reports CONNECT ... 403.
 
 # docker
 docker manifest inspect <image> 2>&1 | head -5
@@ -317,7 +326,9 @@ singularity pull --dry-run docker://<image> 2>&1 | head -5
 
 | Symptom | Runtime | Cause | Fix |
 | --- | --- | --- | --- |
-| `curl: (22) ... error: 401` | enroot | No credentials for registry | Add to `~/.config/enroot/.credentials` |
+| `curl: (22) ... error: 401` before manifests | enroot | Credential missing or not matched | Check URI user and the port-free credential `machine` |
+| Manifests succeed, layers return 401 | enroot 4.1.x + GitLab proxy | Digest URI let Enroot skip bearer auth | Import the tag-only URI; verify its digest before and after |
+| `CONNECT tunnel failed, response 403` | any | Network proxy blocked the registry host/port | Use an allowed registry endpoint or ask network operators; token changes cannot fix it |
 | `pyxis: failed to import docker image` | enroot | Auth failed or rate limit | Check credentials; DockerHub free: 100 pulls/6h per IP |
 | `unauthorized: authentication required` | docker | No `docker login` | Run `docker login [registry]` |
 | Image pulls on some nodes but not others | any | Cached on one node only | Pre-cache image or ensure auth on all nodes |

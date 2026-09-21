@@ -472,7 +472,17 @@ Public images → submit without preflight. Private/restricted → check credent
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 ```
 
-Add credentials per the common skill's `slurm-setup.md` §6 if missing. If you can't add, switch to a compatible public image (e.g. `nvcr.io/nvidia/vllm:<YY.MM>-py3` — check catalog.ngc.nvidia.com). **Do not retry more than once** after an auth failure.
+Add credentials per the common skill's `credentials.md` and `slurm-setup.md` §6 if missing.
+For GitLab + Enroot, use its exact ephemeral flow: GitLab username, port-free credential
+`machine`, and `docker://<user>@<host>:<reachable-port>#<repo>:<tag>`. On Enroot 4.1.x,
+**do not pin the import URI with `@sha256:`**; record the tag digest before and after import
+instead. A manifest-only check is not a preflight — complete a real import so at least one layer
+is fetched. If you can't add credentials, switch to a compatible public image (e.g.
+`nvcr.io/nvidia/vllm:<YY.MM>-py3` — check catalog.ngc.nvidia.com).
+
+Diagnose before retrying: registry HTTP 401 means authentication was absent, unmatched, or skipped;
+`CONNECT ... 403` is a network-proxy denial that a different token cannot fix. **Do not retry more
+than once** after an auth failure.
 
 ---
 

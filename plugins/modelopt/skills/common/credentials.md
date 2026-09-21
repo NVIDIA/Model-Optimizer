@@ -70,6 +70,58 @@ chmod 600 "$CREDS"
 
 Without this, `srun --container-image=nvcr.io/...` fails with `401 Unauthorized` when the compute node tries to pull.
 
+## GitLab container registry (Enroot)
+
+Use a GitLab username plus a token with `read_registry`. A token environment variable alone is not
+a credential entry: Enroot reads `$ENROOT_CONFIG_PATH/.credentials`. Materialize the token into a
+mode-0600 file without putting it in arguments or logs:
+
+```bash
+# Feed the token on stdin; for example: <secret-manager-command> | bash gitlab-enroot-import.sh
+IFS= read -r gitlab_token
+registry_host=gitlab.example.com
+registry_port=443
+registry_user='<gitlab-username>'
+repository=group/project/image
+tag='<tag>'
+output='<image>.sqsh'
+
+auth_root=${XDG_RUNTIME_DIR:-/dev/shm}
+[ -d "$auth_root" ] || auth_root=${TMPDIR:-/tmp}
+auth_dir=$(mktemp -d "$auth_root/enroot-auth.XXXXXX")
+cleanup() {
+    unset gitlab_token
+    find "$auth_dir" -type f -delete
+    rmdir "$auth_dir"
+}
+trap cleanup EXIT INT TERM
+umask 077
+printf 'machine %s login %s password %s\n' \
+    "$registry_host" "$registry_user" "$gitlab_token" > "$auth_dir/.credentials"
+unset gitlab_token
+chmod 600 "$auth_dir/.credentials"
+
+ENROOT_CONFIG_PATH="$auth_dir" enroot import --output "$output" \
+    "docker://${registry_user}@${registry_host}:${registry_port}#${repository}:${tag}"
+```
+
+Important details:
+
+- The `machine` value is the hostname **without a port**, even when the URI includes one.
+  Enroot 4.1.x removes the port before matching `.credentials`.
+- Use the endpoint reachable from the compute node. Some networks expose GitLab's registry on
+  `443`; a proxy-blocked registry port produces `CONNECT ... 403` before registry authentication.
+- Import by tag with Enroot 4.1.x. Do not append `@sha256:...`: some GitLab proxies allow the
+  manifest-by-digest request anonymously, so Enroot skips bearer login and later gets 401 on blobs.
+  For reproducibility, record `enroot digest --arch <arch> <tag-only-uri>` before and after import
+  and require the values to match.
+- Use the GitLab username, not a guessed service username. A password prompt means Enroot did not
+  match the credential entry; check the URI user and port-free `machine` value.
+
+For a persistent setup, append the same one-line entry to
+`~/.config/enroot/.credentials`, set mode 0600, and protect it as a secret. Setting a token
+environment variable alone is insufficient: the URI user must match an entry in the credential file.
+
 ## Docker Hub login
 
 Only needed if you hit rate limits pulling public images:
@@ -84,4 +136,5 @@ docker login
 |---|---|---|
 | `HF_TOKEN` | Gated HF models / datasets | Env var (`export HF_TOKEN=...`) or `.env` |
 | NGC API key | `nvcr.io` image pulls | `docker login` or `~/.config/enroot/.credentials` |
+| GitLab registry token | Private GitLab image pulls | GitLab username + Enroot/Docker credential store |
 | Docker Hub | Rate-limited public image pulls | `docker login` |

@@ -157,7 +157,8 @@ with its own `run_id`, copying the shared `services:` block.
 - **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
   against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
   pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
-  Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
+  Private gitlab-master image → cluster needs the GitLab Enroot flow from SKILL Step 7.5
+  (username, port-free credential host, tag-only import on Enroot 4.1.x, and a real layer preflight).
 - **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600). A
   smaller proxy timeout silently truncates long agent turns.
 - **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
