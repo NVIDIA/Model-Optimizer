@@ -110,6 +110,13 @@ def test_distillation_model_multiloss_balancer():
     distillation_model.compute_kd_loss(student_loss=output.mean())
 
 
+def test_static_loss_balancer_weights_summing_to_one_do_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        # sum() gives 0.9999999999999999 on Python < 3.12
+        mtd.StaticLossBalancer([0.7, 0.2, 0.1])
+
+
 def test_distillation_model_mft():
     student = tiny_mobilenet().train()
     config = {

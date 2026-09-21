@@ -18,6 +18,7 @@
 """Basic loss balancers for Distillation task."""
 
 import abc
+import math
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -95,7 +96,7 @@ class StaticLossBalancer(DistillationLossBalancer):
         if isinstance(kd_loss_weight, float):
             kd_loss_weight = [kd_loss_weight]
 
-        sum_kd_loss_weight = sum(kd_loss_weight)
+        sum_kd_loss_weight = math.fsum(kd_loss_weight)
         if sum_kd_loss_weight < 0.0 or sum_kd_loss_weight > 1.0:
             raise ValueError(
                 "The sum of values of kd_loss_weight should be [0., 1.],"
@@ -135,6 +136,6 @@ class StaticLossBalancer(DistillationLossBalancer):
             loss * weight for loss, weight in zip(kd_loss_dict.values(), self._kd_loss_weight)
         )
         if output_loss is not None:
-            aggregate_loss += (1.0 - sum(self._kd_loss_weight)) * output_loss
+            aggregate_loss += (1.0 - math.fsum(self._kd_loss_weight)) * output_loss
 
         return aggregate_loss
