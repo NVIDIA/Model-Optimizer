@@ -78,8 +78,17 @@ def test_ptq_whisper(command):
         PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
         # GGML IQ weight-only, recipe-driven. These encoders require every weight's input
         # dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
-        PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
-        PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
+        # Measured 18m17s for the pair on 2xH100, over the 300s tests/examples default. The
+        # packing does run on GPU; the cost is the codebook search over every linear, once on
+        # the first calibration forward and again at export.
+        pytest.param(
+            PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
+            marks=pytest.mark.timeout(1800),
+        ),
+        pytest.param(
+            PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
+            marks=pytest.mark.timeout(1800),
+        ),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)
