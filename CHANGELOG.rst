@@ -13,7 +13,7 @@ Changelog
 
 *Quantization*
 
-- Add IQ1_S and IQ2_XS weight-only fake quantization with GGML-compatible 256-value block encoders and built-in ``iq1_s`` / ``iq2_xs`` PTQ recipes.
+- Add IQ1_S and IQ2_XS weight-only quantization with GGML-compatible 256-value block encoders, built-in ``iq1_s`` / ``iq2_xs`` PTQ recipes, and unified HF and Megatron export of the packed blocks. Quantized weights must have a final dimension divisible by 256, and Megatron export requires tensor and pipeline parallel sizes of 1.
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
 - Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
 - Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.

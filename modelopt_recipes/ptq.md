@@ -140,8 +140,9 @@ activations and tensor-core math are what deliver the throughput.
   GPT-OSS family (see `examples/gpt-oss`).
 - **`iq1_s` / `iq2_xs`** — GGML-compatible IQ1_S or IQ2_XS weights on all linear
   layers, with BF16 activations. No calibration data is required. Quantized weights must have a
-  final dimension divisible by 256. These recipes configure simulated weight quantization only;
-  packed checkpoint export is added separately.
+  final dimension divisible by 256. Unified HF export writes the packed GGML blocks; Megatron
+  export additionally requires tensor and pipeline parallel sizes of 1, and does not support
+  fused-MoE experts.
 
 ---
 
