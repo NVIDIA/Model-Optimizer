@@ -447,7 +447,12 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
         declared = peek_declared_schema(metadata_file)
     except ValueError:  # multiple modelopt-schema comments; load_config reports it
         declared = None
-    rtype = _RECIPE_SCHEMA_PATHS.get(declared) or metadata.recipe_type
+    # dict.get(declared, ...) is what ruff (SIM401) wants here, but its key type is str,
+    # not str | None like `declared` -- mypy rejects that call, so the if/else stays.
+    if declared in _RECIPE_SCHEMA_PATHS:  # noqa: SIM401
+        rtype = _RECIPE_SCHEMA_PATHS[declared]
+    else:
+        rtype = metadata.recipe_type
     if rtype is None:
         raise ValueError(
             f"Recipe directory {recipe_dir}: {metadata_file} must set 'recipe_type' or "
