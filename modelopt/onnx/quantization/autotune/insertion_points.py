@@ -509,8 +509,10 @@ def merge_resolved_insertion_points(
 
     Additionally, when a tensor has Q/DQ at some consumers and the remaining uncovered
     consumers are all Concat nodes, the insertion is promoted to tensor-level. Concat is
-    a byte-level copy in TRT — quantizing its input has no accuracy cost and enables
-    INT8 Concat fusion when all Concat inputs are INT8.
+    a byte-level copy in TRT — quantizing its input enables INT8 Concat fusion when all
+    Concat inputs are INT8. Note: this promotion does not check whether the Concat's
+    other inputs are also quantized. If they are not, TRT cannot fuse the Concat to INT8
+    and the promoted Q/DQ adds quantization error on a branch the search did not select.
 
     Args:
         graph: The ONNX graph containing the nodes
@@ -541,7 +543,7 @@ def merge_resolved_insertion_points(
                 for node_idx in uncovered
             )
             if uncovered_all_concat:
-                # Promote to tensor-level: Concat is byte-copy, safe to quantize
+                # Promote to tensor-level: Concat is byte-copy, INT8 fusion possible
                 results.add(
                     ResolvedInsertionPoint(
                         tensor_name=tensor_name, node_index=None, input_index=None
