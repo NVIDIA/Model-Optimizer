@@ -535,7 +535,7 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `general/ptq/nvfp4_experts_only_mse-kv_fp8_cast` — expert-only NVFP4 with MSE-swept static
   weight scales and dynamic inputs, plus an FP8 KV cache in cast mode — as published in
   `nvidia/Kimi-K2.6-NVFP4`.
-- **`models/nvidia/Qwen3.5-397B-A17B/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8`** aliases the
+- **`models/Qwen/Qwen3.5-397B-A17B/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8`** aliases the
   `qwen3_5_moe` architecture recipe
   `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
   on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
