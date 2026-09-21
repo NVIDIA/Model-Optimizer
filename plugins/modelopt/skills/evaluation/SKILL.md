@@ -43,7 +43,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
-4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
+4. Follow `references/nel-next.md`'s run flow: dry-run → canary → full → checked MLflow push → delivery verification.
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
 
@@ -134,7 +134,7 @@ Ask the 5 questions via AskUserQuestion (categories must match `nel skills build
 
 1. **Execution:** Local / SLURM
 2. **Deployment:** None (External) / vLLM / SGLang / NIM / TRT-LLM. Prefer vLLM unless the user/card says otherwise.
-3. **Auto-export:** None / MLflow / wandb
+3. **Auto-export:** None / MLflow / wandb.
 4. **Model type:** Base / Chat / Reasoning
 5. **Benchmarks** (multi-select): standard / code / math_reasoning / safety / multilingual
 
@@ -480,6 +480,10 @@ Add credentials per the common skill's `slurm-setup.md` §6 if missing. If you c
 
 Run directly when the user asked to launch; otherwise ask before submitting.
 
+**Before submitting any canary or full run** (including shortcut and existing
+configs), apply `references/mlflow-verification.md#before-upload`: disable
+auto-export if generated artifacts cannot be checked before automatic upload.
+
 **Env setup:** `.env` is normally already created and filled back in Step 1 (via `modelopttools:eval-config`), at the **workspace root** — the dir you run `nel` from, not under the skill dir. Ensure it exists and source it — do **not** clobber an existing `.env`:
 
 ```bash
@@ -537,9 +541,13 @@ Remove `limit_samples` overrides; keep canary-validated parallelism. If the cana
 
 ---
 
-### Step 9 — Verify completed run
+### Step 9 — Verify completed run and MLflow delivery
 
 Before pulling/reporting scores, validate the run. Read `references/run-validation.md` for NEL timeout/resume behavior, completed-run validation, diagnostics, and score harvesting. For a baseline that will be compared with a candidate, also perform its **External Baseline Sanity Check** before a success verdict, then hand the validated runs to `compare-results` for baseline-vs-candidate deltas.
+
+Then apply `references/mlflow-verification.md`: verify each task's actual MLflow
+run, recover failed/incomplete exports from existing results without rerunning
+evaluation, and report evaluation and export outcomes separately.
 
 ---
 
