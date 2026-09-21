@@ -28,6 +28,10 @@ Changelog
 
 **Backward Breaking Changes**
 
+- The ``modelopt.onnx.quantization.ort_patching`` module has been removed with no
+  compatibility shim; update direct imports to use ``ort_session`` for model loading
+  and session setup, ``ort_calibration`` or ``ort_calibration_per_node`` for calibration,
+  ``ort_quantization`` for static Q/DQ quantization, and ``ort_patches`` for patch composition.
 - The ``modelopt.onnx.quantization.graph_utils`` module has been removed with no
   compatibility shim; update direct imports using this migration map:
 

@@ -39,7 +39,7 @@ from modelopt.onnx.quantization.graph_selection import (
     find_nodes_to_exclude,
 )
 from modelopt.onnx.quantization.int8 import _find_nodes_to_quantize
-from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
+from modelopt.onnx.quantization.ort_quantization import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
 from modelopt.onnx.quantization.precision_utils import (
     _convert_to_runtime_precision,

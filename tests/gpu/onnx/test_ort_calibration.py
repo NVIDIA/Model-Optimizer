@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for modelopt.onnx.quantization.ort_patching module."""
+"""Unit tests for the ONNX Runtime quantization capabilities."""
 
 from unittest.mock import Mock, patch
 
@@ -37,26 +37,32 @@ from onnxruntime.quantization.qdq_quantizer import QDQQuantizer
 from onnxruntime.quantization.quant_utils import QuantType
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 
-from modelopt.onnx.quantization.ort_patching import (
-    _adjust_tensor_ranges,
-    _augment_graph_min_max_calibrater_single_node_calibration,
-    _check_opset_version,
+from modelopt.onnx.quantization.ort_calibration import (
     _collect_absolute_value,
     _collect_data_histogram_calibrator,
-    _collect_data_min_max_calibrater_single_node_calibration,
     _collect_data_minmax_calibrator,
-    _collect_histogram_collector_single_node_calibration,
     _collect_value,
+    _compute_data_minmax_calibrator,
+    _init_calibrater_base,
+    _merge_range_minmax_calibrator,
+    _select_tensors_to_calibrate,
+)
+from modelopt.onnx.quantization.ort_calibration_per_node import (
+    _augment_graph_min_max_calibrater_single_node_calibration,
+    _collect_data_min_max_calibrater_single_node_calibration,
+    _collect_histogram_collector_single_node_calibration,
     _collect_value_histogram_collector_single_node_calibration,
     _compute_data_min_max_calibrater_single_node_calibration,
-    _compute_data_minmax_calibrator,
-    _create_calibrator_with_extra_options,
-    _create_inference_session_with_ep_config,
-    _init_calibrater_base,
     _merge_range_min_max_calibrater_single_node_calibration,
-    _merge_range_minmax_calibrator,
+)
+from modelopt.onnx.quantization.ort_quantization import (
+    _adjust_tensor_ranges,
+    _check_opset_version,
+    _create_calibrator_with_extra_options,
     _quantize_static,
-    _select_tensors_to_calibrate,
+)
+from modelopt.onnx.quantization.ort_session import (
+    _create_inference_session_with_ep_config,
     load_model_with_shape_infer,
 )
 
@@ -123,9 +129,9 @@ class TestModelLoading:
         model_path = tmp_path / "test_model.onnx"
         onnx.save(simple_onnx_model, str(model_path))
 
-        with patch("modelopt.onnx.quantization.ort_patching.onnx_utils") as mock_ssi:
+        with patch("modelopt.onnx.quantization.ort_session.onnx_utils") as mock_ssi:
             mock_ssi.infer_shapes.return_value = simple_onnx_model
-            with patch("modelopt.onnx.quantization.ort_patching.add_infer_metadata") as mock_aim:
+            with patch("modelopt.onnx.quantization.ort_session.add_infer_metadata") as mock_aim:
                 result = load_model_with_shape_infer(model_path)
 
                 mock_ssi.infer_shapes.assert_called_once()
@@ -491,9 +497,11 @@ class TestStaticQuantization:
 
         with (
             patch(
-                "modelopt.onnx.quantization.ort_patching.calibrate.create_calibrator"
+                "modelopt.onnx.quantization.ort_quantization.calibrate.create_calibrator"
             ) as mock_create,
-            patch("modelopt.onnx.quantization.ort_patching.QDQQuantizer") as mock_quantizer_class,
+            patch(
+                "modelopt.onnx.quantization.ort_quantization.QDQQuantizer"
+            ) as mock_quantizer_class,
         ):
             mock_calibrator = Mock()
             mock_calibrator.collect_data = Mock()
@@ -528,7 +536,7 @@ class TestInitialization:
         mock_calibrater = Mock()
 
         with patch(
-            "modelopt.onnx.quantization.ort_patching.load_model_with_shape_infer"
+            "modelopt.onnx.quantization.ort_calibration.load_model_with_shape_infer"
         ) as mock_load:
             mock_load.return_value = simple_onnx_model
 
