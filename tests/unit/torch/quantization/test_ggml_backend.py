@@ -22,8 +22,10 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml.backend as backend_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
 from modelopt.torch.quantization.ggml.common import narrow_to_float32
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
@@ -135,3 +137,34 @@ def test_narrow_to_float32_matches_the_cuda_load_float_policy():
     assert torch.equal(
         narrowed, torch.tensor([0.0, 0.0, 0.0, largest, -largest, 1.5], dtype=torch.float32)
     )
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_weight_is_packed_once_across_forwards(monkeypatch, num_bits, module):
+    """The packed weight is reused across forwards rather than re-encoded each time.
+
+    TensorQuantizer hands the backend a fresh view of the weight on every forward, so a cache
+    that checked tensor identity never hit: the codebook search reran on every forward, roughly
+    100x during a generate loop and over 90% of a PTQ run's wall clock.
+    """
+    packer = f"quantize_{num_bits}"
+    original = getattr(module, packer)
+    calls = []
+
+    def counting(weight, **kwargs):
+        calls.append(tuple(weight.shape))
+        return original(weight, **kwargs)
+
+    monkeypatch.setattr(module, packer, counting)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+    )
+    weight = torch.randn(4, 256)
+
+    with torch.inference_mode():  # what generate() runs under
+        for _ in range(5):
+            quantizer(weight)
+
+    assert calls == [(4, 256)], f"expected one pack, got {len(calls)}"

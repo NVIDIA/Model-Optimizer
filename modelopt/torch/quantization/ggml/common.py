@@ -16,7 +16,6 @@
 """Shared validation for GGML-compatible block quantizers."""
 
 import math
-import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -27,7 +26,19 @@ GGML_BLOCK_SIZE = 256
 
 @dataclass
 class _PackedWeightCache:
-    input_ref: weakref.ReferenceType
+    """One weight's packed payload, reused across forwards.
+
+    ``input_tensor`` is a strong reference on purpose. It pins the storage, so the ``data_ptr``
+    inside ``input_key`` cannot be recycled by a later allocation while this entry is live --
+    which is the hazard a weakref was meant to cover. It costs nothing in practice: the storage
+    belongs to the module's weight, which outlives the quantizer anyway.
+
+    A weakref cannot do that job here. TensorQuantizer hands the backend a fresh view of the
+    weight on every forward, so a weakref to it dies as soon as that forward returns, and an
+    identity check against it never matches again.
+    """
+
+    input_tensor: torch.Tensor
     input_key: tuple[object, ...]
     format_name: str
     block_chunk_size: int
@@ -66,7 +77,6 @@ def fake_quantize_with_cache(
     if (
         isinstance(cache, _PackedWeightCache)
         and input_key is not None
-        and cache.input_ref() is inputs
         and cache.input_key == input_key
         and cache.format_name == format_name
         and cache.block_chunk_size == block_chunk_size
@@ -76,7 +86,7 @@ def fake_quantize_with_cache(
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         if input_key is not None:
             quantizer._quantizer_cache = _PackedWeightCache(
-                input_ref=weakref.ref(inputs),
+                input_tensor=inputs,
                 input_key=input_key,
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,
