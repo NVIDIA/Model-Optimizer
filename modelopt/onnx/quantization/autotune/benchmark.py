@@ -70,35 +70,61 @@ def _check_remote_connectivity(trtexec_args: list[str], retries: int = 3) -> Non
     Raises:
         RemoteConnectionError: If the remote board is unreachable after all retries.
     """
-    config_value = None
+    config_value: str | None = None
     for i, arg in enumerate(trtexec_args):
         if arg.startswith("--remoteAutoTuningConfig="):
             config_value = arg.split("=", 1)[1]
             break
-        elif arg == "--remoteAutoTuningConfig" and i + 1 < len(trtexec_args):
-            config_value = trtexec_args[i + 1]
+        elif arg == "--remoteAutoTuningConfig":
+            if i + 1 < len(trtexec_args):
+                config_value = trtexec_args[i + 1]
+            else:
+                config_value = ""  # trailing flag, no value
             break
 
     if config_value is None:
-        return
+        return  # flag not present at all
 
     config_value = config_value.strip("'\"")
 
-    parsed = urllib.parse.urlparse(config_value)
-    hostname = parsed.hostname
-    if not hostname:
+    if not config_value:
         raise RemoteConnectionError(
-            f"Missing hostname in remote autotuning URI (scheme={parsed.scheme!r})"
+            "--remoteAutoTuningConfig is present but has no value; "
+            "provide a valid remote autotuning configuration string"
         )
 
     try:
+        parsed = urllib.parse.urlparse(config_value)
+        hostname = parsed.hostname
+    except ValueError:
+        logger.warning(
+            "Could not parse --remoteAutoTuningConfig URI; skipping connectivity pre-check."
+        )
+        return
+    if not hostname:
+        logger.warning(
+            "Could not parse hostname from --remoteAutoTuningConfig; "
+            "skipping connectivity pre-check."
+        )
+        return
+
+    try:
         port = parsed.port
-    except ValueError as e:
-        raise RemoteConnectionError(
-            f"Invalid port in remote autotuning URI: {parsed.scheme}://{hostname} - {e}"
-        ) from e
+    except ValueError:
+        logger.warning(
+            "Could not parse port from --remoteAutoTuningConfig (host=%s); "
+            "skipping connectivity pre-check.",
+            hostname,
+        )
+        return
     if port is None:
-        port = _DEFAULT_PORTS.get(parsed.scheme, 22)
+        port = _DEFAULT_PORTS.get(parsed.scheme)
+    if port is None:
+        logger.warning(
+            "Unknown scheme %r in --remoteAutoTuningConfig; skipping connectivity pre-check.",
+            parsed.scheme,
+        )
+        return
 
     last_error = _try_connect(hostname, port, retries)
     if last_error is not None:
@@ -249,10 +275,22 @@ class TrtExecBenchmark(Benchmark):
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
             remote_connection_retries: Number of TCP connection attempts to the remote
-                         board before giving up (default: 3). Only used when
-                         --remoteAutoTuningConfig is present in trtexec_args.
+                         board before giving up (default: 3, valid range: 1–10).
+                         Only used when --remoteAutoTuningConfig is present in
+                         trtexec_args.
+
+        Raises:
+            ValueError: If *remote_connection_retries* is not an integer in [1, 10].
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
+        if (
+            not isinstance(remote_connection_retries, int)
+            or not 1 <= remote_connection_retries <= 10
+        ):
+            raise ValueError(
+                f"remote_connection_retries must be an integer between 1 and 10, "
+                f"got {remote_connection_retries!r}"
+            )
         self._remote_connection_retries = remote_connection_retries
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
         self.temp_dir = tempfile.mkdtemp(prefix="trtexec_benchmark_")
