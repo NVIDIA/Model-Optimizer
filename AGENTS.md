@@ -41,8 +41,10 @@ These instructions apply to AI-assisted work in this repository.
 
 - **Keep each PR that goes up for review under ~500 changed lines of source.**
   Large PRs stall in review; exceed the budget only when the change genuinely
-  cannot be split (e.g. a mechanical rename or generated files). Check with
-  `git diff --stat <base>...HEAD` before opening.
+  cannot be split — a mechanical rename, generated files, or a self-contained
+  drop such as a new example or a new model/backend that has no working
+  intermediate state. Check the size with `git diff --stat <base>...HEAD`
+  before opening.
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already over budget, offer a series of smaller PRs and, once the user
   agrees, do the split — don't open the big one and ask afterwards.
@@ -58,10 +60,11 @@ These instructions apply to AI-assisted work in this repository.
   reviewers know it is one slice of a planned split, and link the sibling PRs.
 - **Every sub-PR stands on its own:** it builds, it carries unit tests for the
   code it introduces, and CI passes on it without the later PRs.
-- **Submit the whole change as a draft PR for the big picture.** Keep it in
-  draft, say in its description that it is reference-only and not for merge,
-  link it from each sub-PR, and list the sub-PRs in it. Rebase or close it as
-  the series lands.
+- **When a split makes the whole hard to follow, the full change may also go
+  up as a draft PR** — for reference only, never as a second review request.
+  Keep it in draft, say in its description that it is not for merge, link it
+  from each sub-PR, and list the sub-PRs in it. Rebase or close it as the
+  series lands.
 
 ## Contributing and PR readiness
 
