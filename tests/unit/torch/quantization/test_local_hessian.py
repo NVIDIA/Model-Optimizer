@@ -23,6 +23,7 @@ import torch.nn as nn
 from _test_utils.torch.quantization.models import SimpleConv, SimpleLinear
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_calib as model_calib_module
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
@@ -69,6 +70,13 @@ def _make_forward_loop(seed=0):
     return forward_loop
 
 
+@pytest.mark.parametrize("calibrate_fn", [mse_calibrate, local_hessian_calibrate])
+@pytest.mark.parametrize("value", [[-2], (2, 1), (False, 1), (-126, 0)])
+def test_direct_calibration_rejects_invalid_fp8_scale_sweep(calibrate_fn, value):
+    with pytest.raises(ValueError, match="fp8_scale_sweep"):
+        calibrate_fn(nn.Linear(2, 2), lambda model: model(torch.ones(1, 2)), fp8_scale_sweep=value)
+
+
 class TestLocalHessianAccumulator:
     def test_accumulate_shape_samples_fp32_buffer(self):
         torch.manual_seed(0)
@@ -112,6 +120,21 @@ class TestLocalHessianAccumulator:
 
 
 class TestLocalHessianCalibrateDense:
+    def test_bounded_sweep_is_forwarded_to_weight_search(self, monkeypatch):
+        model = SimpleLinear()
+        forward_loop = _make_forward_loop()
+        mtq.quantize(model, INT8_WEIGHT_CFG, forward_loop=forward_loop)
+        calls = []
+        monkeypatch.setattr(
+            model_calib_module,
+            "_mse_calibrate_weights",
+            lambda *args, **kwargs: calls.append(kwargs),
+        )
+
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=[-2, 6])
+
+        assert calls[0]["fp8_scale_sweep"] == (-2, 6)
+
     def test_refines_amax_beyond_max_and_plain_mse(self):
         forward_loop = _make_forward_loop()
         torch.manual_seed(0)
