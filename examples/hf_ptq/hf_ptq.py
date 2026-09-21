@@ -41,9 +41,7 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     layerwise_export_block,
-    load_mtp_weights,
     mlflow_run,
-    mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
     recipe_layerwise_blocks,
     resolve_checkpoint_dir,
@@ -621,11 +619,6 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
             hf_config=hf_config,
         )
-        # The FSDP2 loader drops MTP weights (re-attached BF16 at export); flag their prefixes now
-        # so the pre-quant exclusion below skips any MTP module from_config did build.
-        mtp_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
-        if mtp_prefixes:
-            full_model._mtp_layer_prefixes = mtp_prefixes
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
@@ -1013,7 +1006,15 @@ def export_quantized(
             )
 
             # Copy custom model files (Python files and JSON configs) for TensorRT-LLM export
-            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+            # TRT-LLM checkpoints are rank<N>.safetensors plus their own config; nothing
+            # there reads an off-index sidecar, and the exclude_modules seeding that gives
+            # one meaning happens only inside export_hf_checkpoint.
+            copy_custom_model_files(
+                args.pyt_ckpt_path,
+                export_path,
+                args.trust_remote_code,
+                copy_off_index_weights=False,
+            )
         else:
             # Check arguments for unified_hf export format and set to default if unsupported arguments are provided
             assert args.sparsity_fmt == "dense", (
@@ -1029,20 +1030,19 @@ def export_quantized(
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
+                # save_pretrained inside the exporter writes model-backed state only; weights
+                # the loader could not place (an MTP head, an auxiliary tower) are carried over
+                # as an extra shard afterward -- see _carry_over_unplaced_weights.
                 export_hf_vllm_fq_checkpoint(
                     full_model, export_dir=export_path, inplace_mem_efficient=True
                 )
             else:
-                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
-                    full_model, args.pyt_ckpt_path
-                )
-                if mtp_layer_prefixes:
-                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
-
+                # Weights the loader could not place (an MTP head, an auxiliary tower) are
+                # carried over by the exporter from the keys recorded at load time; nothing
+                # architecture-specific is needed here.
                 export_hf_checkpoint(
                     full_model,
                     export_dir=export_path,
-                    extra_state_dict=mtp_state_dict,
                 )
 
                 if args.qformat == "w4a16_nvfp4":
@@ -1070,6 +1070,7 @@ def export_quantized(
                 export_path,
                 args.trust_remote_code,
                 exclude_files=exclude_files,
+                copy_off_index_weights=not is_tensorrt_llm_export,
             )
 
         args.checkpoint_exported = True
@@ -1475,22 +1476,6 @@ def quantize_main(
                     quant_cfg,
                     KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
-
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
-        # These layers are typically speculative decoding layers that should be exported as-is.
-        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
-        # identified by index.
-        mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
-        if args.layerwise_export and not mtp_layer_prefixes:
-            # Only the FSDP2 loader flags these before quantization, and the exclusions must
-            # be in quant_cfg before mtq.quantize converts the first layer.
-            mtp_layer_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
-        if mtp_layer_prefixes:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            for prefix in mtp_layer_prefixes:
-                pattern = f"*{prefix}*"
-                quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
-                print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
         # still in it, two --export_path values would share one checkpoint dir.
