@@ -45,14 +45,9 @@ deploy_benchmark_dynamo = get_deploy_models(dynamic_control_flow=False)
 # the compile-failure path. Full structural and numeric-type coverage still runs in the
 # (cheap) non-dynamo ``test_onnx_export_and_inputs`` below.
 _DYNAMO_REPRESENTATIVE_MODELS = {
-    "TensorModel",  # plain single tensor
-    "ListMultiModel",  # list of tensors (arg flattening)
     "ListDictModel",  # mixed list + dict nesting
-    "NestedModel",  # deeply nested inputs
-    "DictMultiModel",  # dict inputs
     "ArgsKwargsModel1",  # args + kwargs (success)
     "ArgsKwargsModel2",  # args + kwargs (compile_fail path)
-    "TwoOutModel",  # multiple outputs
     "NestedOutModel",  # nested outputs
 }
 deploy_benchmark_dynamo = {
@@ -65,6 +60,11 @@ class _FP8ModelWithBuffer(nn.Sequential):
 
     def forward(self, inputs):
         return super().forward(inputs) + self.fp32_buffer
+
+
+class _PythonScalarArgs(nn.Module):
+    def forward(self, x, flag: bool = True, count: int = 2, scale: float = 1.5):
+        return x * scale + count if flag else x / scale - count
 
 
 def _make_fp8_model(source_dtype, kind="fp8"):
@@ -123,22 +123,71 @@ def _export_fp8_model(source_dtype, weights_dtype):
 )
 def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
     # One numeric type is enough here — numeric-type coverage is in test_onnx_export_and_inputs.
-    for active in range(1):
-        # retrieve args
-        model.get.active = active
-        model.get.set_default_counter()
-        args = model.get_args()
+    model.get.active = 0
+    model.get.set_default_counter()
+    args = model.get_args()
+    with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
+        onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
+        model_bytes = OnnxBytes.from_bytes(onnx_bytes).get_onnx_model_file_bytes()
 
-        with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
-            onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
-            onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
-            model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
+    if not model.compile_fail:
+        exported = onnx.load_model_from_string(model_bytes)
+        assert next(item.version for item in exported.opset_import if item.domain == "") == 23
 
-        if model.compile_fail:
-            continue
 
-        assert model_bytes != b""
-        assert onnx.load_model_from_string(model_bytes)
+def test_onnx_export_explicit_python_scalars():
+    payload, _ = get_onnx_bytes_and_metadata(
+        _PythonScalarArgs().eval(),
+        (torch.ones(1), False, 3, 2.5),
+        dynamo_export=True,
+        onnx_opset=23,
+    )
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+
+    onnx.checker.check_model(exported)
+    assert [value.name for value in exported.graph.input] == ["x"]
+    assert [node.op_type for node in exported.graph.node if node.op_type in {"Div", "Sub"}] == [
+        "Div",
+        "Sub",
+    ]
+
+
+def test_legacy_export_default_opset_remains_20():
+    payload, _ = get_onnx_bytes_and_metadata(nn.Identity(), (torch.ones(1),))
+    exported = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes()
+    )
+
+    assert next(item.version for item in exported.opset_import if item.domain == "") == 20
+
+
+def test_load_only_ignores_export_options(tmp_path):
+    value = onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [onnx.helper.make_node("Identity", ["x"], ["out"])],
+            "load_only",
+            [value],
+            [onnx.helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1])],
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 20)],
+    )
+    model_path = tmp_path / "load_only.onnx"
+    onnx.save(model, model_path)
+
+    payload, _ = get_onnx_bytes_and_metadata(
+        nn.Identity(),
+        (torch.ones(1),),
+        onnx_load_path=str(model_path),
+        dynamo_export=True,
+        onnx_opset=20,
+        dynamic_axes={"x": {0: "batch"}},
+    )
+
+    loaded = onnx.load_model_from_string(OnnxBytes.from_bytes(payload).get_onnx_model_file_bytes())
+    assert next(item.version for item in loaded.opset_import if item.domain == "") == 20
 
 
 @pytest.mark.parametrize("model", deploy_benchmark_all.values(), ids=deploy_benchmark_all.keys())

@@ -36,6 +36,7 @@ from evaluation import evaluate
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES, RecipeSupersededAction
+from modelopt.torch._deploy.utils.torch_onnx import is_int4_quantized
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
 
@@ -541,6 +542,17 @@ def main():
         type=str,
     )
     parser.add_argument(
+        "--dynamo_export",
+        action="store_true",
+        help="Use the torch.export-based ONNX exporter. Requires ONNX opset 23 or newer.",
+    )
+    parser.add_argument(
+        "--onnx_opset",
+        type=int,
+        default=None,
+        help="ONNX opset version. Defaults to 20, or 23 with --dynamo_export.",
+    )
+    parser.add_argument(
         "--calibration_data_size",
         type=int,
         default=512,
@@ -611,6 +623,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.dynamo_export and args.onnx_opset is not None and args.onnx_opset < 23:
+        parser.error("--dynamo_export requires --onnx_opset=23 or newer.")
 
     recipe = load_recipe(args.recipe) if args.recipe is not None else None
     if recipe is not None and not isinstance(
@@ -706,6 +721,12 @@ def main():
     # Blackwell has no tactic for an FP8 Q→Conv fusion on the first RGB layer.
     _disable_low_channel_fp8_conv_input_quantizers(quantized_model)
 
+    if args.trt_build and is_int4_quantized(quantized_model):
+        parser.error(
+            "--trt_build is not supported when the exported graph contains INT4 AWQ weights; "
+            "export ONNX without --trt_build."
+        )
+
     # Print quantization summary
     print("\nQuantization Summary:")
     mtq.print_quant_summary(quantized_model)
@@ -730,15 +751,20 @@ def main():
         args.onnx_save_path,
         device,
         weights_dtype="fp16",
+        dynamo_export=args.dynamo_export,
+        onnx_opset=args.onnx_opset,
     )
 
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")
 
     if args.trt_build:
-        build_trt_engine(args.onnx_save_path)
+        build_trt_engine(
+            args.onnx_save_path,
+            decomposable_attentions=args.dynamo_export,
+        )
 
 
-def build_trt_engine(onnx_path):
+def build_trt_engine(onnx_path, *, decomposable_attentions=False):
     """Build a TensorRT engine from the exported ONNX model using trtexec."""
     cmd = [
         "trtexec",
@@ -746,6 +772,8 @@ def build_trt_engine(onnx_path):
         "--stronglyTyped",
         "--builderOptimizationLevel=4",
     ]
+    if decomposable_attentions:
+        cmd.append("--decomposableAttentions=*")
     print(f"\nBuilding TensorRT engine: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

@@ -14,13 +14,91 @@
 # limitations under the License.
 
 
+import importlib.util
+import os
+import sys
 from collections import defaultdict
+from pathlib import Path
 
 import onnx
 import pytest
+import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
 from modelopt.recipe import load_recipe
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_example_module(name, relative_path):
+    spec = importlib.util.spec_from_file_location(name, _REPO_ROOT / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("dynamo_export", [False, True])
+def test_export_to_onnx_defers_default_opset_to_modelopt(monkeypatch, tmp_path, dynamo_export):
+    download_example_onnx = _load_example_module(
+        "download_example_onnx_for_test", "examples/onnx_ptq/download_example_onnx.py"
+    )
+
+    export_call = {}
+
+    def fake_export(**kwargs):
+        export_call.update(kwargs)
+        return b"onnx", {}
+
+    class FakeOnnxBytes:
+        def write_to_disk(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(download_example_onnx, "get_onnx_bytes_and_metadata", fake_export)
+    monkeypatch.setattr(
+        download_example_onnx.OnnxBytes,
+        "from_bytes",
+        lambda _onnx_bytes: FakeOnnxBytes(),
+    )
+
+    download_example_onnx.export_to_onnx(
+        torch.nn.Linear(2, 2),
+        (1, 2),
+        tmp_path / "model.onnx",
+        torch.device("cpu"),
+        dynamo_export=dynamo_export,
+    )
+
+    assert export_call["dynamo_export"] is dynamo_export
+    assert export_call["onnx_opset"] is None
+
+
+def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):
+    torch_quant_to_onnx = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "torch_quant_to_onnx.py",
+            "--onnx_save_path",
+            str(tmp_path / "model.onnx"),
+            "--dynamo_export",
+            "--onnx_opset=22",
+        ],
+    )
+    monkeypatch.setattr(
+        torch_quant_to_onnx.timm,
+        "create_model",
+        lambda *_args, **_kwargs: pytest.fail("invalid opset should fail before model loading"),
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        torch_quant_to_onnx.main()
+
+    assert "--dynamo_export requires --onnx_opset=23 or newer" in capsys.readouterr().err
+
 
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
@@ -93,6 +171,34 @@ def test_torch_onnx(tmp_path, model_key, qformat):
 
     if model_key == "resnet50" and qformat in _RESNET_RECIPE_QFORMATS:
         _assert_residual_inputs_are_quantized(onnx_save_path)
+
+
+@pytest.mark.timeout(600)
+def test_torch_onnx_dynamo_fp8_default_opset(tmp_path):
+    timm_model_name, model_kwargs = _MODELS["vit_tiny"]
+    onnx_save_path = tmp_path / "vit_tiny.fp8.dynamo.onnx"
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name=timm_model_name,
+        model_kwargs=model_kwargs,
+        qformat="fp8",
+        onnx_save_path=str(onnx_save_path),
+        calibration_data_size="1",
+    )
+    cmd_parts.extend(["--no_pretrained", "--dynamo_export", "--trt_build"])
+
+    env = os.environ.copy()
+    env["TORCH_EXTENSIONS_DIR"] = str(tmp_path / "torch_extensions")
+    env["TRITON_CACHE_DIR"] = str(tmp_path / "triton_cache")
+    run_example_command(cmd_parts, "torch_onnx", env=env)
+
+    model = onnx.load(onnx_save_path, load_external_data=True)
+    onnx.checker.check_model(model, full_check=True)
+    assert next(opset.version for opset in model.opset_import if not opset.domain) == 23
+    assert any(
+        initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+        for initializer in model.graph.initializer
+    )
 
 
 def test_torch_onnx_recipe_flag(tmp_path):

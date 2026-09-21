@@ -119,11 +119,15 @@ def _quantize_impl(
     exponent_bits: int = 0,
     unsigned: bool = False,
     narrow_range: bool = True,
+    trt_high_precision_dtype: str | None = None,
+    block_size: int | None = None,
+    axis: int | None = None,
 ):
     if num_bits == 8 and exponent_bits == 4:
         return scaled_e4m3_impl(inputs=inputs, amax=amax)
     elif isinstance(num_bits, int):
-        return fake_quant_impl(
+        quantize_impl = fake_quant_impl if inputs.is_cuda else _tensor_quant
+        return quantize_impl(
             inputs=inputs,
             amax=amax,
             num_bits=num_bits,
@@ -143,14 +147,15 @@ def _quantize_impl_abstract(
     exponent_bits: int = 0,
     unsigned: bool = False,
     narrow_range: bool = True,
+    trt_high_precision_dtype: str | None = None,
+    block_size: int | None = None,
+    axis: int | None = None,
 ) -> torch.Tensor:
     """Register an abstract implementation for quantizing tensor.
 
     This abstract function returns an empty tensor with the same shape and dtype.
     """
-    output = torch.empty_like(input)
-
-    return output
+    return torch.empty_like(input)
 
 
 # Argument types: Tensor, int, NoneType, int, int, int, int,
@@ -162,6 +167,8 @@ def _dynamic_block_quantize_impl(
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    trt_high_precision_dtype: str | None = None,
+    onnx_quantizer_type: str | None = None,
 ):
     scale_bits = (scale_exponent_bits, scale_num_bits - scale_exponent_bits - 1)
     if exponent_bits != 0:
@@ -203,14 +210,14 @@ def _dynamic_block_quantize_impl_abstract(
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    trt_high_precision_dtype: str | None = None,
+    onnx_quantizer_type: str | None = None,
 ):
     """Register an abstract implementation for dynamic block quantization.
 
     This abstract function returns an empty tensor with the same shape and dtype.
     """
-    output = torch.empty_like(inputs)
-
-    return output
+    return torch.empty_like(inputs)
 
 
 quantize_op = _quantize_impl
@@ -223,17 +230,20 @@ try:
     torch.library.define(
         "tensorrt::quantize_op",
         "(Tensor input, Tensor amax, int num_bits, int exponent_bits, "
-        "bool unsigned, bool narrow_range) -> Tensor",
+        "bool unsigned, bool narrow_range, str? trt_high_precision_dtype=None, "
+        "int? block_size=None, int? axis=None) -> Tensor",
     )
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op",
         "(Tensor input, int block_size, Tensor amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, str? trt_high_precision_dtype=None, "
+        "str? onnx_quantizer_type=None) -> Tensor",
     )
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op.overload",
         "(Tensor input, int block_size, None amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, str? trt_high_precision_dtype=None, "
+        "str? onnx_quantizer_type=None) -> Tensor",
     )
 
     # Implement the None amax case
@@ -245,6 +255,8 @@ try:
         exponent_bits: int,
         scale_num_bits: int,
         scale_exponent_bits: int,
+        trt_high_precision_dtype: str | None = None,
+        onnx_quantizer_type: str | None = None,
     ):
         return torch.empty_like(inputs)
 
@@ -368,10 +380,21 @@ class FakeTensorQuantFunction(Function):
 
         def legacy_quant_func():
             # The LegacyFakeTensorQuantFunction support cpu and amax with any shape that can be broadcasted to inputs.
-            outputs = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-            return outputs
+            return _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
 
-        if not inputs.is_cuda:
+        if torch.compiler.is_exporting():
+            outputs = quantize_op(
+                inputs,
+                amax,
+                num_bits=num_bits,
+                exponent_bits=0,
+                unsigned=unsigned,
+                narrow_range=narrow_range,
+                trt_high_precision_dtype=trt_high_precision_dtype,
+                block_size=block_size,
+                axis=axis,
+            )
+        elif not inputs.is_cuda:
             outputs = legacy_quant_func()
         else:
             try:
@@ -382,6 +405,9 @@ class FakeTensorQuantFunction(Function):
                     exponent_bits=0,
                     unsigned=unsigned,
                     narrow_range=narrow_range,
+                    trt_high_precision_dtype=trt_high_precision_dtype,
+                    block_size=block_size,
+                    axis=axis,
                 )
             except (AttributeError, ValueError):
                 # AttributeError: cuda_ext is not imported, possibly due to CPU only installation
@@ -447,6 +473,7 @@ class ScaledE4M3Function(Function):
             exponent_bits=4,
             unsigned=False,
             narrow_range=False,
+            trt_high_precision_dtype=trt_high_precision_dtype,
         )
 
         if bias is not None:
@@ -461,7 +488,6 @@ class ScaledE4M3Function(Function):
 
 
 def _dynamic_block_quantize_forward(
-    ctx,
     inputs,
     block_size,
     amax,
@@ -469,7 +495,6 @@ def _dynamic_block_quantize_forward(
     scale_bits,
     trt_high_precision_dtype=None,
     onnx_quantizer_type="dynamic",
-    pass_through_bwd=True,
 ):
     """Forward method."""
     if isinstance(num_bits, int):
@@ -482,7 +507,7 @@ def _dynamic_block_quantize_forward(
     assert isinstance(scale_bits, tuple) and len(scale_bits) == 2
     scale_exponent_bits = scale_bits[0]
     scale_num_bits = scale_bits[0] + scale_bits[1] + 1
-    outputs = dynamic_block_quantize_op(
+    return dynamic_block_quantize_op(
         inputs,
         block_size,
         amax,
@@ -490,8 +515,9 @@ def _dynamic_block_quantize_forward(
         exponent_bits,
         scale_num_bits,
         scale_exponent_bits,
+        trt_high_precision_dtype,
+        onnx_quantizer_type,
     )
-    return outputs
 
 
 class DynamicBlockQuantizationFunction(Function):
@@ -551,7 +577,6 @@ class DynamicBlockQuantizationFunction(Function):
         """Forward method."""
         _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
         return _dynamic_block_quantize_forward(
-            ctx,
             inputs,
             block_size,
             amax,
@@ -559,7 +584,6 @@ class DynamicBlockQuantizationFunction(Function):
             scale_bits,
             trt_high_precision_dtype,
             onnx_quantizer_type,
-            pass_through_bwd,
         )
 
     @staticmethod
