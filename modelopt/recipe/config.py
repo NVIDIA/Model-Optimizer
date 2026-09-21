@@ -74,9 +74,9 @@ class RecipeMetadataConfig(ModeloptBaseConfig):
         "the ``# modelopt-schema:`` comment naming the recipe's schema class already says "
         "which kind it is -- and it is the same declaration that makes the file "
         "``$import``-able -- so the class fills this in. Still read and still honoured, so "
-        "no existing recipe needs changing, but new recipes should leave it out. It remains "
-        "the only option where there is no schema comment to read, as in a directory-format "
-        "recipe's ``metadata.yml``. When both are present they must agree.",
+        "no existing recipe needs changing, but new recipes should leave it out -- including "
+        "in a directory-format recipe's ``metadata.yml``, which supports the same comment. "
+        "When both are present they must agree.",
     )
     description: str = ModeloptField(
         default=_DEFAULT_RECIPE_DESCRIPTION,

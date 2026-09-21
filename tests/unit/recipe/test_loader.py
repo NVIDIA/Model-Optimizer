@@ -874,9 +874,33 @@ def test_recipe_class_rejects_a_contradicting_recipe_type():
         )
 
 
-def test_load_recipe_dir_without_recipe_type_raises(tmp_path):
-    """A directory recipe has no schema comment, so its metadata must state the kind."""
+def test_load_recipe_dir_without_recipe_type_or_schema_raises(tmp_path):
+    """A directory recipe with neither a schema comment nor recipe_type is rejected."""
     (tmp_path / "metadata.yml").write_text("description: no kind stated\n")
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
+    with pytest.raises(ValueError, match="recipe_type"):
+        load_recipe(tmp_path)
+
+
+def test_load_recipe_dir_from_schema_comment(tmp_path):
+    """metadata.yml can declare its kind with a schema comment instead of recipe_type."""
+    (tmp_path / "metadata.yml").write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "description: Dir test via schema comment.\n"
+    )
+    (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
+    recipe = load_recipe(tmp_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert recipe.metadata.recipe_type == RecipeType.PTQ
+
+
+def test_load_recipe_dir_schema_comment_and_recipe_type_must_agree(tmp_path):
+    """A directory recipe stating both must agree, same as a single-file recipe."""
+    (tmp_path / "metadata.yml").write_text(
+        "# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe\n"
+        "recipe_type: speculative_eagle\n"
+        "description: Disagreement.\n"
+    )
     (tmp_path / "quantize.yml").write_text("algorithm: max\nquant_cfg: []\n")
     with pytest.raises(ValueError, match="recipe_type"):
         load_recipe(tmp_path)

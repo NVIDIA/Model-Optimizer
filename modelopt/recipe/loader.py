@@ -233,8 +233,7 @@ def _peek_recipe_type(
        carry it;
     2. ``metadata.recipe_type`` in the YAML body. **Deprecated** -- still read and still
        honoured, so no existing recipe has to change, but a new one should declare its
-       schema instead. It remains the only option for a directory recipe's
-       ``metadata.yml``, which has no comment preamble to read;
+       schema instead;
     3. the recipe this one **delegates to** via a top-level ``$import``. A checkpoint
        alias states neither of the above: its kind is whatever its base is, and the base
        must declare a schema to be importable at all, so the walk terminates.
@@ -434,18 +433,30 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     Each file is loaded independently. The file name provides the recipe
     section key: ``metadata.yml`` becomes metadata, and ``quantize.yml`` becomes
     quantize.
+
+    ``metadata.yml``'s kind is resolved the same way a single-file recipe's is (see
+    :func:`_peek_recipe_type`), minus the ``$import``-delegation source: a directory
+    recipe's metadata has nowhere to delegate from. A ``# modelopt-schema:`` comment is
+    checked first, then the (deprecated) ``recipe_type`` field; if both are present,
+    :class:`~modelopt.recipe.config.ModelOptRecipeBase` rejects a disagreement.
     """
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
 
-    if metadata.recipe_type is None:
+    try:
+        declared = peek_declared_schema(metadata_file)
+    except ValueError:  # multiple modelopt-schema comments; load_config reports it
+        declared = None
+    rtype = _RECIPE_SCHEMA_PATHS.get(declared) or metadata.recipe_type
+    if rtype is None:
         raise ValueError(
-            f"Recipe directory {recipe_dir}: {metadata_file} must set 'recipe_type'. A "
-            "directory recipe has no schema comment naming the recipe class, so its "
-            "metadata is the only place the kind can come from."
+            f"Recipe directory {recipe_dir}: {metadata_file} must set 'recipe_type' or "
+            "declare a '# modelopt-schema: modelopt.recipe.config.ModelOpt<Kind>Recipe' "
+            "comment. A directory recipe's metadata.yml is the only place its kind can "
+            "come from."
         )
-    if metadata.recipe_type == RecipeType.PTQ:
+    if rtype == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
         quantize_cfg = load_config(quantize_file, schema_type=QuantizeConfig)
         return ModelOptPTQRecipe(metadata=metadata, quantize=quantize_cfg)
-    raise ValueError(f"Unsupported recipe type: {metadata.recipe_type!r}")
+    raise ValueError(f"Unsupported recipe type: {rtype!r}")

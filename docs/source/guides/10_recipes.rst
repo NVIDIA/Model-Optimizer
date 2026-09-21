@@ -392,17 +392,13 @@ comment, or inherit it from the recipe it delegates to; see `Declaring a recipe'
      - Required
      - Description
    * - ``recipe_type``
-     - No\ [1]_
+     - No
      - The optimization category.  Determines which configuration sections are
        expected (e.g., ``"ptq"`` expects a ``quantize`` section).  See
        :class:`~modelopt.recipe.config.RecipeType` for supported values.
    * - ``description``
      - No
      - A human-readable summary of what the recipe does.
-
-.. [1] Required for a directory-format recipe's ``metadata.yml``, which has no comment
-   preamble to declare a schema in.  Optional and deprecated for a single-file recipe;
-   see `Declaring a recipe's kind`_.
 
 
 Type-specific configuration sections
@@ -587,8 +583,9 @@ likes, and the loader takes the first that answers: a ``# modelopt-schema:`` com
 naming its schema class, ``metadata.recipe_type``, or -- as here -- the recipe it
 delegates to.  ``metadata.recipe_type`` is **deprecated**: it is still read and still
 honoured, so no existing recipe needs changing, but new recipes should declare their
-schema instead.  It remains the only option for a directory-format recipe's
-``metadata.yml``, which has no comment preamble to read.
+schema instead.  A directory-format recipe's ``metadata.yml`` can declare a schema
+comment too, the same way; delegation is the one source that does not apply to it,
+since a directory recipe has no top-level ``$import`` to inherit a kind from.
 
 Stating more than one is allowed, but they must agree, and that extends across the
 import: a recipe and the recipe it delegates to must be the same kind, since the import
