@@ -140,7 +140,6 @@ def quantize(
     onnx_path: str,
     calibration_method: str = "entropy",
     calibration_data_reader: CalibrationDataReader = None,
-    calibration_cache_path: str | None = None,
     calibration_shapes: str | dict | None = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     op_types_to_quantize: list[str] | None = None,
@@ -168,6 +167,10 @@ def quantize(
 
     Currently, ['Conv', 'Gemm', 'MatMul', 'Residual-Add'] quantization is supported.
     """
+    if "calibration_cache_path" in kwargs:
+        raise TypeError(
+            "calibration_cache_path was removed; provide calibration_data_reader instead"
+        )
     configure_logging(level=log_level.upper())
     logger.info("Starting FP8 quantization process")
     t_start = time.time()

@@ -29,6 +29,8 @@ import modelopt.onnx.quantization as moq
 def int8_test_helper(tmp_path, high_precision_dtype, **kwargs):
     model_torch = SimpleMLP()
     input_tensor = torch.randn(2, 16, 16)
+    if "calibration_data" not in kwargs and "calibration_data_reader" not in kwargs:
+        kwargs["calibration_data"] = {"input": input_tensor.numpy()}
 
     onnx_path = os.path.join(tmp_path, "model.onnx")
     export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path)

@@ -479,37 +479,6 @@ def insert_qdq_nodes(
     )
 
 
-def replace_scale_values(graph: onnx.GraphProto, act_scales_dict: dict[str, float]) -> None:
-    """Replace scale values in the graph with values from calibration cache.
-
-    Args:
-        graph: ONNX graph to modify
-        act_scales_dict: Dictionary mapping scale tensor names to their new values
-    """
-    logger.debug(f"Replacing scale values for {len(act_scales_dict)} tensors")
-    initializer_indices = {init.name: idx for idx, init in enumerate(graph.initializer)}
-
-    for node in graph.node:
-        if node.op_type != "QuantizeLinear":
-            continue
-
-        scale_name = node.input[1]
-        if scale_name in act_scales_dict:
-            if scale_name not in initializer_indices:
-                raise ValueError(f"Scale tensor '{scale_name}' not found in graph initializers")
-
-            scale = onnx.numpy_helper.from_array(
-                np.float32(act_scales_dict[scale_name]), scale_name
-            )
-            graph.initializer[initializer_indices[scale_name]].CopyFrom(scale)
-            logger.debug(f"Updated scale value for {scale_name}")
-        else:
-            # For weight quantizers, verify the weight tensor exists
-            weight_name = node.input[0]
-            if weight_name not in initializer_indices:
-                raise ValueError(f"Weight tensor '{weight_name}' not found in graph initializers")
-
-
 def has_qdq_nodes(onnx_model: onnx.ModelProto):
     """Check if the onnx graph already has QDQ nodes."""
     qdq_ops = {QUANTIZE_NODE_NAME, DEQUANTIZE_NODE_NAME}

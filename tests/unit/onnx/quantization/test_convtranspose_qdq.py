@@ -59,6 +59,7 @@ def test_convtranspose_qdq(model_and_input, onnx_paths, high_precision_type):
         str(onnx_path),
         quantize_mode="int8",
         output_path=str(quant_onnx_path),
+        calibration_data=dummy_input.numpy(),
         high_precision_type=high_precision_type,
     )
 

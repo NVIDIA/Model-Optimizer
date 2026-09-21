@@ -34,8 +34,18 @@ from _test_utils.onnx.lib_test_models import (
 )
 from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
-from modelopt.onnx.quantization.quantize import quantize
+from modelopt.onnx.quantization.calib_utils import RandomDataProvider
+from modelopt.onnx.quantization.quantize import quantize as _quantize
 from modelopt.onnx.utils import get_opset_version, save_onnx
+
+
+def quantize(onnx_path, **kwargs):
+    """Quantize with an explicitly constructed calibration source."""
+    _quantize(
+        onnx_path,
+        calibration_data_reader=RandomDataProvider(onnx_path),
+        **kwargs,
+    )
 
 
 def assert_nodes_are_not_quantized(nodes):

@@ -31,6 +31,12 @@ from modelopt.onnx.quantization.quantize import quantize
 __all__ = ["main"]
 
 
+def _removed_calibration_cache_path(value: str) -> str:
+    raise argparse.ArgumentTypeError(
+        "--calibration_cache_path was removed; use --calibration_data_path"
+    )
+
+
 def parse_input_shapes_profile(value: str) -> list[dict[str, str]]:
     """Parse input shapes profile from an inline JSON value or a JSON file path."""
     try:
@@ -127,14 +133,14 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["max", "entropy", "awq_clip", "rtn_dq"],
         help=(
-            "Calibration method choices for int8/fp8: {entropy (default), max}, "
-            "int4: {awq_clip (default), rtn_dq}."
+            "Calibration method choices for int8: {entropy (default), max}; "
+            "fp8: {max (default), entropy}; int4: {awq_clip (default), rtn_dq}."
         ),
     )
     group.add_argument(
         "--calibration_data_path",
         type=str,
-        help="Calibration data in npz/npy format. If None, random data for calibration will be used.",
+        help="Calibration data in npz/npy format. Required for int8 and fp8.",
     )
     group.add_argument(
         "--trust_calibration_data",
@@ -143,9 +149,10 @@ def get_parser() -> argparse.ArgumentParser:
     )
     group.add_argument(
         "--calibration_cache_path",
-        type=str,
-        help="Pre-calculated activation tensor scaling factors aka calibration cache path.",
+        type=_removed_calibration_cache_path,
+        help=argparse.SUPPRESS,
     )
+
     argparser.add_argument(
         "--calibration_shapes",
         type=str,
@@ -544,7 +551,6 @@ def main():
         quantize_mode=args.quantize_mode,
         calibration_data=calibration_data,
         calibration_method=args.calibration_method,
-        calibration_cache_path=args.calibration_cache_path,
         calibration_shapes=args.calibration_shapes,
         calibration_eps=args.calibration_eps,
         trt_rtx_backend=args.trt_rtx_backend,

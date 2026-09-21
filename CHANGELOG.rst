@@ -28,6 +28,12 @@ Changelog
 
 **Backward Breaking Changes**
 
+- ONNX ``quantize`` now accepts only the exact ``int8``, ``fp8``, and ``int4`` mode
+  names, and INT8/FP8 require exactly one explicit ``calibration_data`` or
+  ``calibration_data_reader`` source. Implicit random calibration and
+  ``calibration_cache_path`` / ``--calibration_cache_path`` were removed; omitted
+  calibration methods default to ``entropy`` for INT8 and ``max`` for FP8.
+
 - The ``modelopt.onnx.quantization.graph_utils`` module has been removed with no
   compatibility shim; update direct imports using this migration map:
 

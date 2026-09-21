@@ -28,7 +28,6 @@ from onnxruntime.quantization import CalibrationMethod
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.logging_config import configure_logging, logger
-from modelopt.onnx.quantization.calib_utils import import_scales_from_calib_cache
 from modelopt.onnx.quantization.graph_indexing import expand_node_names_from_patterns
 from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
@@ -53,7 +52,7 @@ from modelopt.onnx.quantization.qdq_graph import (
     get_concat_eliminated_tensors,
     remove_partial_input_qdq,
 )
-from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
+from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
 
 def _find_nodes_to_quantize(
@@ -122,7 +121,6 @@ def quantize(
     onnx_path: str,
     calibration_method: str = "entropy",
     calibration_data_reader: CalibrationDataReader = None,
-    calibration_cache_path: str | None = None,
     calibration_shapes: str | dict | None = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     op_types_to_quantize: list[str] | None = None,
@@ -150,6 +148,10 @@ def quantize(
     Quantization of ['Add', 'AveragePool', 'BatchNormalization', 'Clip', 'Conv', 'ConvTranspose',
     'Gemm', 'GlobalAveragePool', 'MatMul', 'MaxPool', 'Mul'] op types are supported.
     """
+    if "calibration_cache_path" in kwargs:
+        raise TypeError(
+            "calibration_cache_path was removed; provide calibration_data_reader instead"
+        )
     configure_logging(level=log_level.upper())
     logger.info(f"Starting INT8 quantization with method: {calibration_method}")
     t_start = time.time()
@@ -230,23 +232,6 @@ def quantize(
                 )
                 nodes_to_quantize = [node.name for node in quantizable_nodes]
 
-    # Read the calibration cache and quantize nodes for which activation scale values are cached
-    if calibration_cache_path:
-        act_scales_dict = import_scales_from_calib_cache(calibration_cache_path)
-        logger.info(f"Using calibration cache from {calibration_cache_path}")
-        iq_quantized_nodes = []
-        quantized_tensors = [tensor_name.replace("_scale", "") for tensor_name in act_scales_dict]
-        for node in graph.nodes:
-            iq_quantized_nodes.extend(
-                [node.name for node_input in node.inputs if node_input.name in quantized_tensors]
-            )
-
-        logger.info(
-            f"Skipping quantization of nodes: {set(nodes_to_quantize) - set(iq_quantized_nodes)}"
-        )
-        if not autotune:
-            nodes_to_quantize = list(set(nodes_to_quantize).intersection(iq_quantized_nodes))
-
     # Update the list of nodes to quantize
     nodes_to_quantize = [
         node_name for node_name in nodes_to_quantize if node_name not in nodes_to_exclude
@@ -300,9 +285,6 @@ def quantize(
         graph = gs.import_onnx(onnx_model)
         remove_partial_input_qdq(graph, no_quantize_inputs)
         onnx_model = gs.export_onnx(graph)
-
-        if calibration_cache_path:
-            replace_scale_values(onnx_model.graph, act_scales_dict)
 
     onnx_model = _convert_to_runtime_precision(
         onnx_model,

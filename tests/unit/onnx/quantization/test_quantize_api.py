@@ -232,7 +232,8 @@ def test_fp8_autotune_subthreshold_result_uses_precision_matched_fallback(monkey
     output_path = tmp_path / "autotuned.onnx"
     autotune_dir = tmp_path / "autotune"
     autotune_dir.mkdir()
-    export_as_onnx(SimpleMLP(), torch.randn(2, 16, 16), onnx_filename=str(onnx_path), opset=19)
+    input_tensor = torch.randn(2, 16, 16)
+    export_as_onnx(SimpleMLP(), input_tensor, onnx_filename=str(onnx_path), opset=19)
 
     def fake_find_nodes(model, quantize_mode, trt_plugins, high_precision_dtype, **kwargs):
         nodes = [node.name for node in model.graph.node if node.op_type in {"Gemm", "MatMul"}]
@@ -262,6 +263,7 @@ def test_fp8_autotune_subthreshold_result_uses_precision_matched_fallback(monkey
         str(onnx_path),
         output_path=str(output_path),
         quantize_mode="fp8",
+        calibration_data=input_tensor.numpy(),
         calibration_eps=["cpu"],
         autotune=True,
         autotune_output_dir=str(autotune_dir),
@@ -383,11 +385,14 @@ def test_quantize_opset_handling(
     # Setup: create and export model
     model_torch = SimpleMLP()
     input_tensor = torch.randn(2, 16, 16)
+    calibration_kwargs = (
+        {"calibration_data": input_tensor.numpy()} if quant_mode in {"int8", "fp8"} else {}
+    )
     onnx_path = os.path.join(tmp_path, "model.onnx")
     export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path, opset=export_opset)
 
     # Run quantization
-    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=request_opset)
+    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=request_opset, **calibration_kwargs)
 
     # Verify output opset
     output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
