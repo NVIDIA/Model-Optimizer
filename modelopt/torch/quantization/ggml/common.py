@@ -16,6 +16,7 @@
 """Shared validation for GGML-compatible block quantizers."""
 
 import math
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -28,22 +29,32 @@ GGML_BLOCK_SIZE = 256
 class _PackedWeightCache:
     """One weight's packed payload, reused across forwards.
 
-    ``input_tensor`` is a strong reference on purpose. It pins the storage, so the ``data_ptr``
-    inside ``input_key`` cannot be recycled by a later allocation while this entry is live --
-    which is the hazard a weakref was meant to cover. It costs nothing in practice: the storage
-    belongs to the module's weight, which outlives the quantizer anyway.
+    ``base_ref`` points at the parameter, not at the tensor the backend was handed.
+    TensorQuantizer passes a fresh view of the weight on every forward, so a weakref to that
+    view dies as soon as the forward returns and an identity check against it never matches
+    again -- which is what kept this cache from ever hitting.
 
-    A weakref cannot do that job here. TensorQuantizer hands the backend a fresh view of the
-    weight on every forward, so a weakref to it dies as soon as that forward returns, and an
-    identity check against it never matches again.
+    Keeping it a weakref matters: a strong reference would pin full-precision storage alive and
+    defeat offloaded or meta-device flows. Tying the entry to the parameter's lifetime means the
+    payload stops being reused exactly when the weight it came from is released.
     """
 
-    input_tensor: torch.Tensor
+    base_ref: weakref.ReferenceType
     input_key: tuple[object, ...]
     format_name: str
     block_chunk_size: int
     packed_weights: torch.Tensor
     weight_shape: torch.Tensor
+
+
+def _cache_base(inputs: torch.Tensor) -> torch.Tensor:
+    """The tensor whose lifetime the cached payload should follow.
+
+    ``inputs`` is a per-forward view; ``inputs._base`` is the parameter behind it, which lives
+    as long as the module does.
+    """
+    base = inputs._base
+    return inputs if base is None else base
 
 
 def _input_cache_key(inputs: torch.Tensor) -> tuple[object, ...] | None:
@@ -73,10 +84,12 @@ def fake_quantize_with_cache(
 ) -> torch.Tensor:
     """Fake-quantize a weight while caching its compact packed representation."""
     input_key = _input_cache_key(inputs)
+    cache_base = _cache_base(inputs)
     cache = getattr(quantizer, "_quantizer_cache", None)
     if (
         isinstance(cache, _PackedWeightCache)
         and input_key is not None
+        and cache.base_ref() is cache_base
         and cache.input_key == input_key
         and cache.format_name == format_name
         and cache.block_chunk_size == block_chunk_size
@@ -86,7 +99,7 @@ def fake_quantize_with_cache(
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         if input_key is not None:
             quantizer._quantizer_cache = _PackedWeightCache(
-                input_tensor=inputs,
+                base_ref=weakref.ref(cache_base),
                 input_key=input_key,
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,

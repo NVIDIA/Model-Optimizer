@@ -58,8 +58,8 @@ supported combinations.
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
-| `iq1_s` | IQ1_S W1A16, all linears | none | GGML IQ auto search (no calibration) |
-| `iq2_xs` | IQ2_XS W2A16, all linears | none | GGML IQ auto search (no calibration) |
+| `iq1_s` | IQ1_S W1A16, all linears | none | none (no calibration) |
+| `iq2_xs` | IQ2_XS W2A16, all linears | none | none (no calibration) |
 
 </details>
 
@@ -115,7 +115,7 @@ activations are quantized too** (W4A4/W8A8 vs weight-only W4A16).
 > keeps that sensitive path at a safer precision than NVFP4 while still halving those
 > weights vs. BF16.
 
-#### Weight-only schemes (W4A16 — activations stay BF16)
+#### Weight-only schemes (activations stay BF16)
 
 Quantize weights only; activations run in BF16. This shrinks the model
 (memory-bound decode win) with much lower accuracy risk than W4A4, and **needs no
