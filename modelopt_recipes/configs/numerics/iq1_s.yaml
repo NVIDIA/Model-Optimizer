@@ -17,7 +17,9 @@
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: iq1_s
-# Storage cost: 50 packed bytes * 8 / 256 weights. Keep in sync with IQ1_S_BLOCK_BYTES.
+# Cost metadata for AutoQuantize's compression estimate only; it drives no packing or
+# numerics. num_bits is the string "iq1_s", so the generic estimator cannot derive the
+# storage cost: 50 packed bytes * 8 / 256 weights. Keep in sync with IQ1_S_BLOCK_BYTES.
 effective_bits: 1.5625
 block_sizes:
   -1: 256
