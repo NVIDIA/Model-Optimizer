@@ -15,12 +15,9 @@
 
 """Pure-function tests for ``modelopt.torch.utils.plugins.model_load_utils``."""
 
-import json
-
 import pytest
 import torch
 from packaging.version import Version
-from safetensors.torch import save_file
 
 pytest.importorskip("accelerate")
 
@@ -28,60 +25,8 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_plan,
     _convert_keys,
     _resolve_target,
-    read_safetensors_subset,
-    weight_map_for,
+    record_unplaced_source_keys,
 )
-
-
-def test_weight_map_for_sharded(tmp_path):
-    save_file({"a.weight": torch.zeros(2)}, str(tmp_path / "shard1.safetensors"))
-    save_file({"b.weight": torch.zeros(2)}, str(tmp_path / "shard2.safetensors"))
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {"weight_map": {"a.weight": "shard1.safetensors", "b.weight": "shard2.safetensors"}}
-        )
-    )
-
-    assert weight_map_for(str(tmp_path)) == {
-        "a.weight": "shard1.safetensors",
-        "b.weight": "shard2.safetensors",
-    }
-
-
-def test_weight_map_for_single_file(tmp_path):
-    save_file(
-        {"a.weight": torch.zeros(2), "b.weight": torch.zeros(2)},
-        str(tmp_path / "model.safetensors"),
-    )
-
-    assert weight_map_for(str(tmp_path)) == {
-        "a.weight": "model.safetensors",
-        "b.weight": "model.safetensors",
-    }
-
-
-def test_weight_map_for_missing(tmp_path):
-    with pytest.raises(RuntimeError, match="No safetensors checkpoint"):
-        weight_map_for(str(tmp_path))
-
-
-def test_read_safetensors_subset(tmp_path):
-    save_file(
-        {"a.weight": torch.tensor([1.0, 2.0]), "a.bias": torch.tensor([3.0])},
-        str(tmp_path / "shard1.safetensors"),
-    )
-    save_file({"b.weight": torch.tensor([4.0])}, str(tmp_path / "shard2.safetensors"))
-    weight_map = {
-        "a.weight": "shard1.safetensors",
-        "a.bias": "shard1.safetensors",
-        "b.weight": "shard2.safetensors",
-    }
-
-    result = read_safetensors_subset(str(tmp_path), weight_map, lambda n: n.startswith("a."))
-
-    assert set(result.keys()) == {"a.weight", "a.bias"}
-    assert torch.equal(result["a.weight"], torch.tensor([1.0, 2.0]))
-    assert torch.equal(result["a.bias"], torch.tensor([3.0]))
 
 
 def _build_tiny_qwen3_moe():
@@ -154,3 +99,32 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
     for e in range(n_exp):
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.gate_proj.weight")[0] == gname
         assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.up_proj.weight")[0] == gname
+
+
+# --- the loader's own accounting of what it could not place --------------------------------------
+
+
+def test_record_unplaced_source_keys_stores_sorted_keys_and_provenance():
+    model = torch.nn.Linear(2, 2)
+    keys = record_unplaced_source_keys(model, "/ckpt/path", ["z.weight", "a.weight"])
+
+    assert keys == ["a.weight", "z.weight"]
+    assert model._modelopt_unplaced_source_keys == ["a.weight", "z.weight"]
+    assert model._modelopt_source_checkpoint == "/ckpt/path"
+
+
+def test_record_unplaced_source_keys_distinguishes_none_from_empty():
+    """An empty list is an ANSWER -- the loader placed everything -- not "nobody asked".
+
+    The export re-derives the set only when the attribute is absent, so recording [] has to stick;
+    treating it as falsy-and-therefore-unknown would make every clean load pay a re-derivation.
+    """
+    model = torch.nn.Linear(2, 2)
+    assert record_unplaced_source_keys(model, "/ckpt/path", None) == []
+    assert model._modelopt_unplaced_source_keys == []
+    assert model._modelopt_source_checkpoint == "/ckpt/path"
+
+
+def test_record_unplaced_source_keys_accepts_any_iterable():
+    model = torch.nn.Linear(2, 2)
+    assert record_unplaced_source_keys(model, "/c", iter(["b", "a"])) == ["a", "b"]

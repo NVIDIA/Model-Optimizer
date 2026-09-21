@@ -33,17 +33,27 @@ from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
 from modelopt.torch.export.quant_utils import (
+    _get_carried_over_module_names,
     _has_large_fp8_scale,
     get_kv_cache_scaling_factor,
     get_quant_config,
     get_quantization_format,
     postprocess_state_dict,
+    process_layer_quant_config,
+    seed_carried_over_exclusions,
+    uses_iq_quantization,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 
 
 class _FakeAttention(torch.nn.Module):
@@ -51,6 +61,165 @@ class _FakeAttention(torch.nn.Module):
         super().__init__()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "quantization_format", "payload_bytes", "effective_bits"),
+    [
+        ("iq1_s", QUANTIZATION_IQ1_S, 50, 1.5625),
+        ("iq2_xs", QUANTIZATION_IQ2_XS, 74, 2.3125),
+    ],
+)
+def test_iq_quantization_config(num_bits, quantization_format, payload_bytes, effective_bits):
+    model = torch.nn.Sequential(torch.nn.Linear(256, 256, bias=False))
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {
+                        "num_bits": num_bits,
+                        "block_sizes": {-1: 256},
+                        "backend": "ggml",
+                    },
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    assert get_quantization_format(model) == quantization_format
+    config = get_quant_config(model)
+    assert config["quantization"]["quant_algo"] == num_bits.upper()
+    assert config["quantization"]["block_payload_bytes"] == payload_bytes
+    assert config["quantization"]["effective_bits"] == effective_bits
+    hf_config = convert_hf_quant_config_format(config)
+    assert "config_groups" not in hf_config
+    assert hf_config["group_size"] == 256
+    assert hf_config["effective_bits"] == effective_bits
+    assert hf_config["packing"] == "ggml"
+    assert hf_config["block_payload_bytes"] == payload_bytes
+
+
+def _quantize_sequential(layer_cfgs):
+    """Quantize a two-Linear model, one quantizer config per layer."""
+    model = torch.nn.Sequential(
+        torch.nn.Linear(256, 256, bias=False), torch.nn.Linear(256, 256, bias=False)
+    )
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}, *layer_cfgs],
+            "algorithm": None,
+        },
+    )
+    return model
+
+
+_IQ_WEIGHT_CFG = {"num_bits": "iq1_s", "block_sizes": {-1: 256}, "backend": "ggml"}
+
+
+def test_uses_iq_quantization_sees_iq_behind_another_format():
+    """get_quantization_format stops at the first format, so the TP guard cannot rely on it."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "0.weight_quantizer", "cfg": {"num_bits": (4, 3)}},
+            {"quantizer_name": "1.weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+        ]
+    )
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+    assert uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_false_without_iq_layers():
+    model = _quantize_sequential(
+        [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    )
+
+    assert not uses_iq_quantization(model)
+
+
+def test_uses_iq_quantization_tolerates_sequential_quantizer():
+    """A SequentialQuantizer has is_enabled but no num_bits, and is never IQ.
+
+    save_pretrained calls this on every Megatron export, so reading num_bits directly would
+    raise AttributeError on a W4A8_AWQ model before any format dispatch.
+    """
+    layer = torch.nn.Linear(256, 256, bias=False)
+    layer.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    assert not hasattr(layer.weight_quantizer, "num_bits")
+
+    assert not uses_iq_quantization(torch.nn.Sequential(layer))
+
+
+def test_iq_export_rejects_enabled_input_quantizer():
+    """IQ payloads carry no activation scale, so W-IQ + A-FP8 must not export as weight-only."""
+    model = _quantize_sequential(
+        [
+            {"quantizer_name": "*weight_quantizer", "cfg": _IQ_WEIGHT_CFG},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="weight-only"):
+        get_quantization_format(model)
+
+
+def test_iq_hf_config_rejects_mismatched_group_size():
+    """A uniformly-IQ config must validate group_size, not silently rewrite it to the block size.
+
+    The MIXED_PRECISION branch already forwards the per-layer group size; this covers the
+    top-level branch, which did not.
+    """
+    with pytest.raises(ValueError, match="IQ2_XS requires group size 256, got 128"):
+        convert_hf_quant_config_format(
+            {
+                "quantization": {
+                    "quant_algo": "IQ2_XS",
+                    "group_size": 128,
+                    "effective_bits": 2.3125,
+                    "packing": "ggml",
+                    "block_payload_bytes": 74,
+                }
+            }
+        )
+
+
+def test_mixed_iq_config_group_does_not_claim_integer_weight_schema():
+    converted = convert_hf_quant_config_format(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.layers.0.mlp.down_proj": {
+                        "quant_algo": "IQ2_XS",
+                        "group_size": 256,
+                        "effective_bits": 2.3125,
+                        "packing": "ggml",
+                        "block_payload_bytes": 74,
+                    }
+                },
+            }
+        }
+    )
+
+    group = converted["config_groups"]["group_0"]
+    assert "weights" not in group
+    assert group["quant_algo"] == "IQ2_XS"
+    assert group["packing"] == "ggml"
+
+
+def test_iq_quantization_config_rejects_mismatched_block_size():
+    with pytest.raises(ValueError, match="IQ2_XS requires block size 256, got 128"):
+        process_layer_quant_config(
+            {
+                "model.layers.0.mlp.down_proj.quantization": "iq2_xs",
+                "model.layers.0.mlp.down_proj.awq_block_size": 128,
+            }
+        )
 
 
 class _FakeKVCacheQuantizer(torch.nn.Module):
@@ -606,3 +775,165 @@ def test_moe_router_names_handle_root_module():
     block = _FakeMoEBlock(hidden=16)
     # name == "" for the root module; the router must be "gate", not ".gate".
     assert _get_unquantized_moe_router_names(block) == ["gate"]
+
+
+def test_carried_over_weights_are_excluded_from_quantization():
+    """A carried MTP head has no module, so nothing in the quantizer walk can see it.
+
+    Its original-precision weight is copied into the export verbatim, so it must still reach
+    ``exclude_modules`` -- otherwise a deployment framework reads the top-level ``quant_algo``
+    and tries to load ``eh_proj`` as an NVFP4 weight. Same failure as the MoE router above,
+    different cause: no quantizer there, no module at all here.
+    """
+    hidden = 16
+    model = _FakeMoEModel(hidden=hidden)
+    mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
+
+    # The loader could not place these; the exporter copies them straight from the checkpoint.
+    model._modelopt_unplaced_source_keys = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.eh_proj.bias",
+        "model.mtp.embed_tokens.weight",
+    ]
+
+    quant_config = get_quant_config(model)
+    assert quant_config["quantization"]["quant_algo"] == "NVFP4"
+
+    exclude_modules = quant_config["quantization"]["exclude_modules"]
+    for carried in ("model.mtp.eh_proj", "model.mtp.embed_tokens"):
+        assert any(fnmatch.fnmatch(carried, pattern) for pattern in exclude_modules), (
+            f"carried weight {carried!r} missing from exclude_modules: {exclude_modules}"
+        )
+    # The quantized experts must NOT be excluded.
+    assert not any(fnmatch.fnmatch("block.experts.0", pattern) for pattern in exclude_modules), (
+        f"Quantized expert wrongly excluded: {exclude_modules}"
+    )
+
+
+def test_carried_over_module_names_strip_parameter_and_dedup():
+    """Keys are ``<module>.<param>``; two params of one module yield one module name."""
+    model = torch.nn.Module()
+    # No attribute at all -- the common case, and every non-carry-over caller.
+    assert _get_carried_over_module_names(model) == []
+
+    model._modelopt_unplaced_source_keys = [
+        "a.b.weight",
+        "a.b.bias",  # same module as above
+        "c.weight",
+        "toplevel",  # no dot: no owning module, skipped
+    ]
+    assert _get_carried_over_module_names(model) == ["a.b", "c"]
+
+
+def test_carried_over_names_prefer_what_the_export_actually_wrote():
+    """Off-index sidecars never appear in unexpected_keys, so the unplaced list alone misses them.
+
+    GLM-4.7 ships its MTP head in a standalone ``mtp.safetensors`` that the loader never opens.
+    The export copies it verbatim, so its tensors are in the checkpoint in original precision and
+    must reach ``exclude_modules`` -- the same requirement as a carried weight, via the other
+    mechanism. The export records both under ``_modelopt_carried_over_names``.
+    """
+    model = torch.nn.Module()
+    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
+    # What the export actually wrote: the carried weight plus the copied sidecar's tensors.
+    model._modelopt_carried_over_names = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",  # only in the sidecar
+    ]
+    assert _get_carried_over_module_names(model) == [
+        "model.mtp.eh_proj",
+        "model.mtp.embed_tokens",
+    ]
+
+
+def test_carried_over_names_fall_back_before_the_export_records():
+    """Callers that never ran the export still get the wider unplaced answer."""
+    model = torch.nn.Module()
+    model._modelopt_unplaced_source_keys = ["model.mtp.eh_proj.weight"]
+    assert _get_carried_over_module_names(model) == ["model.mtp.eh_proj"]
+
+    # An export that wrote nothing is an answer, not a missing one -- do not fall back to the
+    # wider list and claim exclusions for weights the checkpoint does not contain.
+    model._modelopt_carried_over_names = []
+    assert _get_carried_over_module_names(model) == []
+
+
+def test_seed_carried_over_exclusions_adds_missing_names():
+    """The layerwise exporter snapshots its config before the carried set exists, so it re-seeds."""
+    model = torch.nn.Module()
+    model._modelopt_carried_over_names = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",
+    ]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["lm_head"]}}
+    added = seed_carried_over_exclusions(model, cfg)
+
+    assert added == ["model.mtp.eh_proj", "model.mtp.embed_tokens"]
+    assert cfg["quantization"]["exclude_modules"] == [
+        "lm_head",
+        "model.mtp.eh_proj",
+        "model.mtp.embed_tokens",
+    ]
+
+
+def test_seed_carried_over_exclusions_respects_existing_wildcards():
+    """A recipe that already excluded mtp* must not gain redundant per-module entries."""
+    model = torch.nn.Module()
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": ["model.mtp*"]}}
+
+    assert seed_carried_over_exclusions(model, cfg) == []
+    assert cfg["quantization"]["exclude_modules"] == ["model.mtp*"]
+
+
+def test_seed_carried_over_exclusions_noop_without_a_uniform_format():
+    """No single quant_algo means nothing for a deployment framework to misapply."""
+    model = torch.nn.Module()
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
+    for algo in (None, "MIXED_PRECISION"):
+        cfg = {"quantization": {"quant_algo": algo}}
+        assert seed_carried_over_exclusions(model, cfg) == []
+        assert "exclude_modules" not in cfg["quantization"]
+
+
+def test_both_export_paths_exclude_carried_weights_identically():
+    """The unified and layerwise exporters must emit the same exclusions for the same model.
+
+    They reach exclude_modules at different times -- get_quant_config after its per-layer pass,
+    the layerwise exporter from finalize() because bind() snapshotted its config during
+    calibration -- so it is easy for them to drift into different formats (wildcards one side,
+    literals the other) for identical inputs. Both go through seed_carried_over_exclusions now;
+    this pins that they agree.
+    """
+    hidden = 16
+    model = _FakeMoEModel(hidden=hidden)
+    mtq.quantize(model, _nvfp4_all_linears_config, lambda m: m(torch.randn(2, hidden)))
+    model._modelopt_carried_over_names = [
+        "model.mtp.eh_proj.weight",
+        "model.mtp.embed_tokens.weight",
+    ]
+
+    # Unified: seeded inside get_quant_config.
+    unified = get_quant_config(model)["quantization"]["exclude_modules"]
+
+    # Layerwise: the same config minus the carried names, re-seeded at finalize() time.
+    layerwise_cfg = {
+        "quantization": {
+            "quant_algo": "NVFP4",
+            "exclude_modules": [e for e in unified if not e.startswith("model.mtp")],
+        }
+    }
+    seed_carried_over_exclusions(model, layerwise_cfg)
+
+    assert sorted(layerwise_cfg["quantization"]["exclude_modules"]) == sorted(unified)
+
+
+def test_seeded_exclusions_are_literal_module_names():
+    """Exact names, not prefix wildcards: a literal cannot over-match a quantized module."""
+    model = torch.nn.Module()
+    model._modelopt_carried_over_names = ["model.mtp.eh_proj.weight"]
+    cfg = {"quantization": {"quant_algo": "NVFP4", "exclude_modules": []}}
+
+    assert seed_carried_over_exclusions(model, cfg) == ["model.mtp.eh_proj"]
+    assert cfg["quantization"]["exclude_modules"] == ["model.mtp.eh_proj"]
+    assert not any("*" in e for e in cfg["quantization"]["exclude_modules"])
