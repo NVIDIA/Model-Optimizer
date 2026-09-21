@@ -392,13 +392,17 @@ comment, or inherit it from the recipe it delegates to; see `Declaring a recipe'
      - Required
      - Description
    * - ``recipe_type``
-     - Yes
+     - No\ [1]_
      - The optimization category.  Determines which configuration sections are
        expected (e.g., ``"ptq"`` expects a ``quantize`` section).  See
        :class:`~modelopt.recipe.config.RecipeType` for supported values.
    * - ``description``
      - No
      - A human-readable summary of what the recipe does.
+
+.. [1] Required for a directory-format recipe's ``metadata.yml``, which has no comment
+   preamble to declare a schema in.  Optional and deprecated for a single-file recipe;
+   see `Declaring a recipe's kind`_.
 
 
 Type-specific configuration sections
