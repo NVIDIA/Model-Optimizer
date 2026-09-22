@@ -15,6 +15,22 @@
 
 """Export package for Hugging Face and Megatron-based models."""
 
+# hf_checkpoint_utils lives under modelopt.torch.utils.plugins (general HF-checkpoint-file logic,
+# not export-specific -- see its module docstring), but re-exported here since existing callers
+# outside this package (e.g. modelopt.torch.puzzletron, examples/megatron_bridge) import these
+# names from modelopt.torch.export directly.
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_hf_ckpt_remote_code,
+    copy_non_safetensor_files_from_ckpt,
+    copy_off_index_safetensors,
+    indexed_weight_map,
+    load_multimodal_components,
+    locate_source_keys,
+    off_index_safetensors_files,
+    resolve_checkpoint_file,
+    sanitize_hf_config_for_deployment,
+)
+
 from .convert_hf_config import *
 from .model_utils import *
 from .moe_utils import *
