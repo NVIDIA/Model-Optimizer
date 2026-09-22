@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import warnings
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -47,7 +47,11 @@ from transformers import (
 
 from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
-from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_safetensor_files_from_ckpt,
+    copy_off_index_safetensors,
+)
+from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
 try:
     from huggingface_hub import snapshot_download
@@ -422,142 +426,6 @@ def get_processor(
             return None
 
 
-def get_inlined_mtp_prefixes(config: Any) -> list[str]:
-    """Turn an HF config into the list of state-dict prefixes for inlined-MTP layers."""
-    # ``or 0``: some configs set num_nextn_predict_layers=None rather than omit it.
-    num_nextn = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
-    if not num_nextn:
-        return []
-    num_hidden = config.num_hidden_layers
-    return [f"model.layers.{i}" for i in range(num_hidden, num_hidden + num_nextn)]
-
-
-def _keys_to_prefixes(keys: Iterable[str]) -> set[str]:
-    """Invert separate-file MTP keys into the prefixes the exporter needs for exclude_modules.
-    ``"mtp.fc.weight"`` → ``{"mtp"}``; ``"mtp.layers.0.q_proj.weight"`` →
-    ``{"mtp", "mtp.layers.0"}``. ``"model"`` top-level is dropped to avoid the
-    ``"model*"`` wildcard covering the whole backbone.
-    """
-    prefixes: set[str] = set()
-    for key in keys:
-        parts = key.split(".")
-        if parts and parts[0] != "model":
-            prefixes.add(parts[0])
-        for i, part in enumerate(parts):
-            if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
-                prefixes.add(".".join(parts[: i + 2]))
-                break
-    return prefixes
-
-
-def _load_tensors_matching(
-    model_dir: Path, predicate: Callable[[str], bool]
-) -> dict[str, torch.Tensor]:
-    """Stream tensors satisfying ``predicate(key)`` from every safetensors
-    source in ``model_dir`` (indexed shards + standalone files, each opened
-    at most once).
-    """
-    tensors: dict[str, torch.Tensor] = {}
-    seen_shards: set[str] = set()
-
-    index_file = model_dir / "model.safetensors.index.json"
-    if index_file.exists():
-        with open(index_file) as f:
-            weight_map = json.load(f)["weight_map"]
-        per_shard: dict[str, list[str]] = {}
-        for key, shard_name in weight_map.items():
-            if predicate(key):
-                per_shard.setdefault(shard_name, []).append(key)
-        for shard_name, keys in per_shard.items():
-            seen_shards.add(shard_name)
-            with safe_open(str(model_dir / shard_name), framework="pt", device="cpu") as f:
-                for k in keys:
-                    tensors[k] = f.get_tensor(k)
-
-    for shard in sorted(model_dir.glob("*.safetensors")):
-        if shard.name in seen_shards:
-            continue
-        with safe_open(str(shard), framework="pt", device="cpu") as f:
-            for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-                if predicate(k):
-                    tensors[k] = f.get_tensor(k)
-    return tensors
-
-
-def _apply_to_model_state_dict(
-    model: torch.nn.Module, tensors: dict[str, torch.Tensor]
-) -> dict[str, torch.Tensor]:
-    """Load tensors with a slot in ``model.state_dict()`` in-place; return the
-    rest as orphans for ``extra_state_dict``.
-    """
-    model_state = model.state_dict()
-    in_state_dict = {k: v for k, v in tensors.items() if k in model_state}
-    out_state_dict = {k: v for k, v in tensors.items() if k not in model_state}
-    if in_state_dict:
-        model.load_state_dict(in_state_dict, strict=False)
-    return out_state_dict
-
-
-def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
-    """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
-
-    Local-index-only, matching :func:`load_mtp_weights`, so detection and re-attach stay in sync.
-    """
-    index_file = Path(model_path) / "model.safetensors.index.json"
-    if not index_file.exists():
-        return []
-    weight_map = json.load(open(index_file))["weight_map"]
-    mtp_keys = [k for k, v in weight_map.items() if "mtp" in k or "mtp" in v]
-    return list(_keys_to_prefixes(mtp_keys))
-
-
-def load_mtp_weights(
-    model: torch.nn.Module, model_path: str
-) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """Detect and load MTP weights. Support matrix:
-
-        Convention     Architectures             On-disk shape
-        -------------  ------------------------  -------------------------------
-        inlined        GLM-5.1 (``GlmMoeDsa``),  ``model.layers.{N}.*``
-                       DeepSeek-V3
-        separate-file  GLM-4.7                   standalone ``mtp.safetensors``
-        separate-file  Qwen3-Next                indexed ``mtp.*`` tail shard
-
-    Inlined ``N`` in ``[num_hidden, num_hidden + num_nextn_predict_layers)``;
-    may be orphaned at ``from_pretrained`` time if the HF class only builds
-    ``num_hidden`` decoders.
-
-    Returns ``(prefixes, not_in_state_dict)``: ``prefixes`` populates
-    ``quantization_config.exclude_modules``; ``not_in_state_dict`` is fed to
-    ``export_hf_checkpoint(extra_state_dict=...)``.
-    """
-    model_dir = Path(model_path)
-
-    inlined_prefixes = set(get_inlined_mtp_prefixes(model.config))
-    inlined_tuple = tuple(p + "." for p in inlined_prefixes)
-
-    # Combined predicate covering both conventions in one pass.
-    def predicate(key: str) -> bool:
-        return key.startswith(inlined_tuple) or "mtp" in key
-
-    tensors = _load_tensors_matching(model_dir, predicate)
-    if not tensors:
-        return [], {}
-
-    separate_keys = [k for k in tensors if not k.startswith(inlined_tuple)]
-    prefixes = inlined_prefixes | _keys_to_prefixes(separate_keys)
-
-    not_in_state_dict = _apply_to_model_state_dict(model, tensors)
-
-    print(
-        f"✓ Detected {len(tensors)} MTP tensors under {sorted(prefixes)} "
-        f"(loaded into model: {len(tensors) - len(not_in_state_dict)}, "
-        f"orphaned: {len(not_in_state_dict)})"
-    )
-
-    return sorted(prefixes), not_in_state_dict
-
-
 def get_dtype(dtype):
     if dtype == "bf16":
         dtype = torch.bfloat16
@@ -590,7 +458,6 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         return
 
     from huggingface_hub import hf_hub_download
-    from safetensors import safe_open
 
     is_local = os.path.isdir(ckpt_path)
 
@@ -737,6 +604,46 @@ def _fmt_max_memory(max_memory: dict) -> str:
     return "\n".join(parts)
 
 
+def _resolved_local_dir(ckpt_path: str) -> str:
+    """Return the local directory ``ckpt_path`` names, resolving a hub id to its snapshot.
+
+    The export re-reads the source checkpoint by path to carry over the weights the loader could
+    not place. Recording the hub id instead would leave it reading ``org/model``, which is not a
+    directory -- so every carried weight would be dropped with a warning. ``from_pretrained`` has
+    already populated the cache by the time this runs, so the lookup is local and offline.
+    """
+    if Path(ckpt_path).is_dir():
+        return str(ckpt_path)
+    if snapshot_download is None:
+        return str(ckpt_path)
+    try:
+        return snapshot_download(ckpt_path, local_files_only=True)
+    except Exception:
+        # No snapshot to point at; the export falls back to its own provenance handling.
+        return str(ckpt_path)
+
+
+def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
+    """``from_pretrained`` that records what the loader could not place.
+
+    ``output_loading_info=True`` makes Transformers return its own accounting of the load;
+    ``unexpected_keys`` -- keys present in the checkpoint but not in the model's architecture --
+    is exactly the set the export has to carry over (an MTP head, an auxiliary tower). Taking it
+    from the loader means no name patterns and no second pass over the index, and it already
+    accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
+    replay to avoid mistaking a renamed key for an unplaced one.
+    """
+    model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
+    unexpected = loading_info.get("unexpected_keys") or []
+    record_unplaced_source_keys(model, _resolved_local_dir(ckpt_path), unexpected)
+    if unexpected:
+        print(
+            f"✓ {len(unexpected)} checkpoint key(s) the model has no parameter for "
+            f"(e.g. {min(unexpected)}); the export will carry them over unchanged."
+        )
+    return model
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -846,7 +753,8 @@ def get_model(
         )
 
     if is_speculative(hf_config):
-        model = AutoModelForCausalLM.from_pretrained(
+        model = _from_pretrained_recording(
+            AutoModelForCausalLM,
             ckpt_path,
             device_map=device_map,
             **model_kwargs,
@@ -855,7 +763,8 @@ def get_model(
         from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
 
         with patch_compressed_linear_loading():
-            model = AutoModelForCausalLM.from_pretrained(
+            model = _from_pretrained_recording(
+                AutoModelForCausalLM,
                 ckpt_path,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
@@ -879,7 +788,8 @@ def get_model(
         # materialization. Sequential keeps each shard's dequant on a single device
         # (the whole model lands on one GPU when it fits there).
         model_kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
-        model = AutoModelForCausalLM.from_pretrained(
+        model = _from_pretrained_recording(
+            AutoModelForCausalLM,
             ckpt_path,
             device_map="cpu" if device == "cpu" else "sequential",
             **model_kwargs,
@@ -965,7 +875,8 @@ def get_model(
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
         if _disk_offload:
             model_kwargs2["offload_folder"] = offload_folder
-        model = auto_model_module.from_pretrained(
+        model = _from_pretrained_recording(
+            auto_model_module,
             ckpt_path,
             device_map=device_map,
             **model_kwargs2,
@@ -1079,6 +990,7 @@ def copy_custom_model_files(
     export_path: str,
     trust_remote_code: bool = False,
     exclude_files: Iterable[str] | None = None,
+    copy_off_index_weights: bool = True,
 ):
     """Copy source checkpoint sidecar files to an HF PTQ export.
 
@@ -1098,6 +1010,11 @@ def copy_custom_model_files(
         export_path: Path to the exported model directory
         trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
         exclude_files: Additional source file names to skip.
+        copy_off_index_weights: Copy safetensors the loader never opens (GLM-4.7's
+            ``mtp.safetensors``). Only the unified-HF export gives them meaning -- it seeds their
+            tensor names into ``quantization_config.ignore`` -- so a TensorRT-LLM export, whose
+            checkpoint is ``rank<N>.safetensors`` plus its own ``config.json``, should pass False
+            rather than carry gigabytes nothing there reads.
     """
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
@@ -1130,6 +1047,13 @@ def copy_custom_model_files(
         exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
     )
 
+    # Safetensors the loader never opens are sidecars too: untouched by quantization and absent
+    # from the export, so copy them rather than leave them behind. Skipped by the call above,
+    # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
+    copied_weights = (
+        copy_off_index_safetensors(source_dir, export_dir) if copy_off_index_weights else []
+    )
+    copied_files = [*copied_files, *copied_weights]
     if copied_files:
         for file_name in copied_files:
             print(f"Copied checkpoint sidecar file: {file_name}")
