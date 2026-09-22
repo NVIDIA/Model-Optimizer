@@ -136,14 +136,17 @@ class Benchmark(ABC):
         """
         return self.run(path_or_bytes, log_file)
 
-    def _write_log_file(self, file: Path | str | None, content: str) -> None:
+    def _write_log_file(
+        self, file: Path | str | None, content: str, *, append: bool = False
+    ) -> None:
         if file is None:
             return
         if isinstance(file, str):
             file = Path(file)
         try:
             file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text(content)
+            with open(file, "a" if append else "w") as fh:
+                fh.write(content)
             self.logger.debug(f"Saved logs to: {file}")
         except Exception as e:
             self.logger.warning(f"Failed to save logs to {file}: {e}")
@@ -243,7 +246,7 @@ class _RemoteAutotuningConfig:
     user: str
     ip: str
     port: int
-    bin_path: str  # dirname of ``remote_exec_path``
+    bin_path: str  # dirname of ``remote_exec_path`` — directory containing trtexec_safe / trtexec
     lib_path: str  # value of ``remote_lib_path``
 
 
@@ -296,6 +299,13 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
             f"Missing required query parameters in --remoteAutoTuningConfig: {missing}"
         )
 
+    exec_path = options["remote_exec_path"]
+    if not exec_path.startswith("/"):
+        raise ValueError(
+            f"remote_exec_path must be an absolute path (got {exec_path!r}). "
+            "Use a path like /usr/local/bin/trtexec."
+        )
+
     port = parsed.port if parsed.port is not None else 22
     if not 1 <= port <= 65535:
         raise ValueError(f"Invalid port {port} in --remoteAutoTuningConfig: must be 1-65535")
@@ -303,9 +313,49 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
         user=parsed.username,
         ip=parsed.hostname,
         port=port,
-        bin_path=os.path.dirname(options["remote_exec_path"]),
+        bin_path=os.path.dirname(exec_path),
         lib_path=options["remote_lib_path"],
     )
+
+
+# Flags from trtexec_args forwarded to the remote measurement run (--loadEngine=).
+# --minShapes / --optShapes / --maxShapes are build-time only: they define optimization profiles
+# embedded in the engine and are meaningless (or error-prone) with --loadEngine.  They already
+# reach the local engine build via _base_cmd.extend(trtexec_args); do not repeat them here.
+# --shapes sets the runtime input shapes for the timing pass and is needed on both sides.
+# Timing knobs (--warmUp, --iterations, --avgRuns, --duration, --useCudaGraph) are hardcoded
+# in remote_run_cmd; build-only flags (--safe, --skipInference, --remoteAutoTuningConfig,
+# --saveEngine, --timingCacheFile, --onnx, --stronglyTyped, --staticPlugins) are excluded.
+_REMOTE_MEASUREMENT_PREFIXES = (
+    "--shapes",
+    "--useSpinWait",
+    "--infStreams",
+    "--streams",
+    "--noDataTransfers",
+)
+
+
+def _extract_measurement_flags(trtexec_args: list[str]) -> list[str]:
+    """Return the subset of ``trtexec_args`` that must be forwarded to the remote measurement run.
+
+    Handles both ``--flag=value`` (single element) and ``--flag value`` (two elements) forms.
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(trtexec_args):
+        arg = trtexec_args[i]
+        if any(arg == p or arg.startswith(p + "=") for p in _REMOTE_MEASUREMENT_PREFIXES):
+            result.append(arg)
+            # Two-arg form: bare --flag followed by its value (value doesn't start with --)
+            if (
+                "=" not in arg
+                and i + 1 < len(trtexec_args)
+                and not trtexec_args[i + 1].startswith("--")
+            ):
+                i += 1
+                result.append(trtexec_args[i])
+        i += 1
+    return result
 
 
 def _ensure_remote_autotuning_flags(trtexec_args: list[str], *, log: Any = None) -> list[str]:
@@ -390,7 +440,7 @@ class TrtExecBenchmark(Benchmark):
             if remote_engine_path is not None
             else f"trtexec_benchmark_model_{uuid.uuid4().hex}.trt"
         )
-        self.remote_bin_path: str = "trtexec"
+        self.remote_bin_path: str = ""
         self.remote_lib_path: str = ""
         # Probed once on the first run() call: True → use trtexec_safe, False → trtexec --safe.
         # None means not yet probed.  All candidates in an autotune run use the same binary so
@@ -572,6 +622,14 @@ class TrtExecBenchmark(Benchmark):
                     else:
                         trt_path = os.path.join(self.remote_bin_path, "trtexec")
                         extra_flags = "--safe "
+                    # Forward shape and measurement flags so dynamic-shape engines are ranked
+                    # at the user's intended profile, not at whatever trtexec defaults to.
+                    measurement_flags = _extract_measurement_flags(self.trtexec_args)
+                    measurement_flags_str = (
+                        (" " + " ".join(shlex.quote(f) for f in measurement_flags))
+                        if measurement_flags
+                        else ""
+                    )
                     remote_run_cmd = [
                         "ssh",
                         "-oBatchMode=yes",
@@ -581,7 +639,8 @@ class TrtExecBenchmark(Benchmark):
                         f"{self.remote_user}@{self.remote_ip}",
                         f"{ld_path} {shlex.quote(trt_path)} {extra_flags}--useCudaGraph "
                         f"--warmUp={self.warmup_runs} --iterations={self.timing_runs} "
-                        f"--avgRuns={self.timing_runs} --duration=0 "
+                        f"--avgRuns={self.timing_runs} --duration=0"
+                        f"{measurement_flags_str} "
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
                     result = subprocess.run(
@@ -590,6 +649,24 @@ class TrtExecBenchmark(Benchmark):
                         text=True,
                         timeout=self.network_timeout_seconds,
                     )  # nosec B603 — list-form, no shell=True; user/host validated against leading -
+                    self._write_log_file(
+                        log_file,
+                        "\n".join(
+                            [
+                                "\nRemote timing run:",
+                                "=" * 80,
+                                "STDOUT:",
+                                "=" * 80,
+                                _redact_url_password(result.stdout),
+                                "\n" + "=" * 80,
+                                "STDERR:",
+                                "=" * 80,
+                                _redact_url_password(result.stderr),
+                                "\n" + "=" * 80,
+                            ]
+                        ),
+                        append=True,
+                    )
                 finally:
                     # Cleanup remote engine file after benchmarking to avoid disk filling up
                     cleanup_cmd = [
@@ -622,7 +699,10 @@ class TrtExecBenchmark(Benchmark):
                     f"{_redact_url_password(result.stdout)}\n{_redact_url_password(result.stderr)}"
                 )
                 return float("inf")
-            # trtexec_safe / trtexec --safe emit "GPU Compute Time"; local trtexec emits "Latency"
+            # trtexec_safe emit "GPU Compute Time"; trtexec emits "GPU Compute Time" and "Latency".
+            # Invariant: _remote_use_trtexec_safe is set (True or False) by the probe above before
+            # we reach this point on any remote run, so `is not None` reliably distinguishes trtexec_safe
+            # from trtexec without consulting has_remote_config again.
             _latency_pattern = (
                 r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
                 if self._remote_use_trtexec_safe is not None

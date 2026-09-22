@@ -188,6 +188,10 @@ def test_parse_remote_autotuning_url_defaults_port_to_22():
             "ssh://alice@host?remote_exec_path=/a&remote_exec_path=/b&remote_lib_path=/y",
             "Duplicate query parameters",
         ),
+        (
+            "ssh://alice@host?remote_exec_path=trtexec&remote_lib_path=/y",
+            "absolute path",
+        ),
     ],
 )
 def test_parse_remote_autotuning_url_validation_errors(url, match):
@@ -855,6 +859,32 @@ def test_remote_run_uses_safe_flag_when_probe_absent(remote_bench, tmp_path):
     assert "--useCudaGraph" in remote_cmd_str
     assert "--avgRuns=" in remote_cmd_str
     assert "--duration=0" in remote_cmd_str
+
+
+def test_remote_run_forwards_measurement_flags(tmp_path, trtexec_version_ok):
+    """Shape and measurement flags in trtexec_args are forwarded to the remote run command."""
+    shapes_arg = "--shapes=input:1x3x224x224"
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}", shapes_arg, "--noDataTransfers"],
+    )
+    b._remote_use_trtexec_safe = True  # skip probe
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_stdout = "[I] GPU Compute Time: median = 2.0 ms"
+    ssh_proc = _make_proc(stdout=safe_stdout)
+    cleanup_proc = _make_proc()
+
+    with patch(
+        "subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc, cleanup_proc]
+    ) as run_mock:
+        b.run(str(tmp_path / "m.onnx"))
+
+    remote_cmd_str = run_mock.call_args_list[2].args[0][-1]
+    assert shapes_arg in remote_cmd_str
+    assert "--noDataTransfers" in remote_cmd_str
+    # Build-only flags must NOT appear in the remote measurement command
+    assert "--remoteAutoTuningConfig" not in remote_cmd_str
 
 
 def test_remote_run_ssh_failure_returns_inf_and_logs_stderr(remote_bench, tmp_path, caplog):

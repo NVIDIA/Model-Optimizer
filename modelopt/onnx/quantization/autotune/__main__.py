@@ -102,16 +102,20 @@ def run_autotune() -> int:
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
     if trtexec_args and isinstance(trtexec_args, str):
         trtexec_args = trtexec_args.split()
-    benchmark_instance = init_benchmark_instance(
-        use_trtexec=args.use_trtexec,
-        plugin_libraries=args.plugin_libraries,
-        timing_cache_file=args.timing_cache,
-        warmup_runs=args.warmup_runs,
-        timing_runs=args.timing_runs,
-        trtexec_args=trtexec_args,
-        network_timeout_minutes=args.network_timeout_minutes,
-        remote_engine_path=args.remote_engine_path,
-    )
+    try:
+        benchmark_instance = init_benchmark_instance(
+            use_trtexec=args.use_trtexec,
+            plugin_libraries=args.plugin_libraries,
+            timing_cache_file=args.timing_cache,
+            warmup_runs=args.warmup_runs,
+            timing_runs=args.timing_runs,
+            trtexec_args=trtexec_args,
+            network_timeout_minutes=args.network_timeout_minutes,
+            remote_engine_path=args.remote_engine_path,
+        )
+    except (ValueError, ImportError) as e:
+        logger.error(str(e))
+        return 1
 
     if benchmark_instance is None:
         logger.error("Failed to initialize TensorRT benchmark")

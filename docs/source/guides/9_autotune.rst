@@ -257,7 +257,7 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 * ssh and scp must be available on the local machine
 * sshkey based authentication must be used for the remote machine.
 * Only one instance of remote auto tuning can be run at a time since the remote timing server and latency measurement processes share the GPU but do not coordinate execution; thus latency measurements would not be accurate if multiple instances are run concurrently.
-* ``--useCudaGraph``, ``--avgRuns``, and ``--duration=0`` are forwarded to the remote ``trtexec_safe`` (or ``trtexec --safe``) call so measurement settings match those used during local engine builds.
+* The remote measurement run uses ``--useCudaGraph --duration=0`` for a pure GPU timing pass. ``--shapes`` (runtime input shapes) and measurement flags (``--useSpinWait``, ``--infStreams``, ``--streams``, ``--noDataTransfers``) passed via ``--trtexec_benchmark_args`` are forwarded to the remote run. Build-time profile flags (``--minShapes``, ``--optShapes``, ``--maxShapes``) apply only to the local engine build and are not forwarded.
 
 .. note::
 
