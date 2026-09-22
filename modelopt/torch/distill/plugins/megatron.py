@@ -69,8 +69,6 @@ class DistillationConfig:
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
         logit_kl_top_p_min_k: Minimum number of Top-K entries kept per token when top-P is active.
-        logit_kl_ghost_token: Whether ``TopKLogitsKLLoss`` appends a "ghost" token holding the
-            probability mass outside the kept entries to both distributions (default: ``True``).
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -82,7 +80,6 @@ class DistillationConfig:
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
     logit_kl_top_p_min_k: int = 1
-    logit_kl_ghost_token: bool = True
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -186,7 +183,6 @@ def setup_distillation_config(
                     top_k=cfg.logit_kl_topk,
                     top_p=cfg.logit_kl_top_p,
                     top_p_min_k=cfg.logit_kl_top_p_min_k,
-                    add_ghost_token=cfg.logit_kl_ghost_token,
                 )
             else:
                 criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
@@ -422,14 +418,14 @@ class TopKLogitsKLLoss(LogitsKLLoss):
     NOTE: Will gather Top-K logits per rank, so mind the value of K for memory and communication.
 
     Both distributions are normalized over the *full* vocabulary (not re-normalized over the
-    Top-K), matching the offline cached-logits KD loss in Megatron-LM. Optional refinements:
+    Top-K), matching the offline cached-logits KD loss in Megatron-LM. A "ghost" token holding the
+    probability mass outside the kept entries, ``log(1 - sum(kept probs))``, is appended to both
+    student and teacher, so the KL is taken between two proper distributions over K + 1 buckets and
+    also penalizes mass the student places outside the teacher's kept entries.
 
-    * **Top-P (nucleus)**: after sorting the Top-K by teacher probability, only the smallest prefix
-      whose cumulative teacher mass reaches ``top_p`` (with a floor of ``top_p_min_k`` entries)
-      contributes to the loss.
-    * **Ghost token**: a synthetic extra entry holding the probability mass outside the kept
-      entries, ``log(1 - sum(kept probs))``, is appended to both student and teacher so the loss
-      also penalizes mass the student places outside the teacher's nucleus.
+    Optionally, **Top-P (nucleus)** truncation keeps only the smallest prefix of the teacher-sorted
+    Top-K whose cumulative teacher mass reaches ``top_p`` (with a floor of ``top_p_min_k`` entries);
+    the truncated entries' mass moves into the ghost token.
     """
 
     def __init__(
@@ -441,7 +437,6 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         *,
         top_p: float | None = None,
         top_p_min_k: int = 1,
-        add_ghost_token: bool = True,
     ):
         """Constructor.
 
@@ -452,8 +447,6 @@ class TopKLogitsKLLoss(LogitsKLLoss):
             top_k: The number of top vocabulary entries to keep from the teacher's distribution.
             top_p: Optional nucleus threshold in (0, 1] applied on top of the Top-K selection.
             top_p_min_k: Minimum number of entries kept per token when ``top_p`` is active.
-            add_ghost_token: Whether to append a residual "ghost" token holding the out-of-Top-K
-                probability mass to both distributions.
         """
         super().__init__(model_config, temperature, reverse)
         assert top_k >= 1, f"{top_k=}"
@@ -462,7 +455,6 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         self.top_k = top_k
         self.top_p = top_p
         self.top_p_min_k = top_p_min_k
-        self.add_ghost_token = add_ghost_token
 
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
         """Forward function.
@@ -533,19 +525,18 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         # Ghost token: residual probability mass outside the kept entries, for both distributions.
         # Computed in log space as log(1 - exp(log_kept)) = log(-expm1(log_kept)), which stays
         # accurate and differentiable when the kept mass is close to 1.
-        if self.add_ghost_token:
-            neg_tiny = -1e-7  # keep log(kept_mass) strictly below 0 so expm1 stays negative
-            student_log_kept = torch.logsumexp(
-                student_logp.masked_fill(~mask, float("-inf")), dim=-1, keepdim=True
-            ).clamp(max=neg_tiny)
-            teacher_log_kept = torch.logsumexp(
-                teacher_logp.masked_fill(~mask, float("-inf")), dim=-1, keepdim=True
-            ).clamp(max=neg_tiny)
-            student_residual = torch.log(-torch.expm1(student_log_kept))
-            teacher_residual = torch.log(-torch.expm1(teacher_log_kept))
-            student_logp = torch.cat([student_logp, student_residual], dim=-1)
-            teacher_logp = torch.cat([teacher_logp, teacher_residual], dim=-1)
-            mask = torch.cat([mask, mask.new_ones((*mask.shape[:-1], 1))], dim=-1)
+        neg_tiny = -1e-7  # keep log(kept_mass) strictly below 0 so expm1 stays negative
+        student_log_kept = torch.logsumexp(
+            student_logp.masked_fill(~mask, float("-inf")), dim=-1, keepdim=True
+        ).clamp(max=neg_tiny)
+        teacher_log_kept = torch.logsumexp(
+            teacher_logp.masked_fill(~mask, float("-inf")), dim=-1, keepdim=True
+        ).clamp(max=neg_tiny)
+        student_residual = torch.log(-torch.expm1(student_log_kept))
+        teacher_residual = torch.log(-torch.expm1(teacher_log_kept))
+        student_logp = torch.cat([student_logp, student_residual], dim=-1)
+        teacher_logp = torch.cat([teacher_logp, teacher_residual], dim=-1)
+        mask = torch.cat([mask, mask.new_ones((*mask.shape[:-1], 1))], dim=-1)
 
         # Sparse KL divergence: sum_i q_i * (log q_i - log p_i) over kept entries.
         p, q = student_logp, teacher_logp
@@ -597,8 +588,7 @@ class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
         intermediate_loss = sum(loss_dict.values()) / max(len(loss_dict), 1)
 
         if intermediate_loss > 0:
-            # abs(): the Top-K partial KL without a ghost token is not a true KL and can be negative.
-            dynamic_scale = logits_loss.detach().abs() / intermediate_loss.detach()
+            dynamic_scale = logits_loss.detach() / intermediate_loss.detach()
             intermediate_loss_scaled = intermediate_loss * dynamic_scale
         else:
             intermediate_loss = logits_loss.new_tensor(intermediate_loss)

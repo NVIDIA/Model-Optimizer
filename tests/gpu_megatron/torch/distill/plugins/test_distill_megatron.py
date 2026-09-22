@@ -326,16 +326,15 @@ def test_logits_kl_loss(dist_workers):
 
 
 @pytest.mark.parametrize(
-    ("top_p", "top_p_min_k", "ghost_token"),
-    [(None, 1, True), (None, 1, False), (0.9, 1, True), (0.9, 3, False)],
+    ("top_p", "top_p_min_k"),
+    [(None, 1), (0.9, 1), (0.9, 3)],
 )
-def test_topk_logits_kl_loss(dist_workers, top_p, top_p_min_k, ghost_token, top_k: int = 5):
+def test_topk_logits_kl_loss(dist_workers, top_p, top_p_min_k, top_k: int = 5):
     """Test TopKLogitsKLLoss with TP parallelism."""
     kd_kwargs = {
         "logit_kl_topk": top_k,
         "logit_kl_top_p": top_p,
         "logit_kl_top_p_min_k": top_p_min_k,
-        "logit_kl_ghost_token": ghost_token,
     }
     dist_workers.run(partial(_test_topk_logits_kl_loss, kd_kwargs))
 
@@ -352,13 +351,8 @@ def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
     student, teacher = _make_loss_inputs()
     dense = LogitsKLLoss(cfg)(student, teacher)[0]
-    topk = TopKLogitsKLLoss(cfg, top_k=student.size(-1), add_ghost_token=True)(student, teacher)[0]
+    topk = TopKLogitsKLLoss(cfg, top_k=student.size(-1))(student, teacher)[0]
     assert torch.allclose(dense, topk, atol=1e-6)
-    # Without ghost token, the unnormalized Top-K KL over the full vocab is also the dense KL.
-    topk_no_ghost = TopKLogitsKLLoss(cfg, top_k=student.size(-1), add_ghost_token=False)(
-        student, teacher
-    )[0]
-    assert torch.allclose(dense, topk_no_ghost, atol=1e-5)
 
 
 def test_topk_logits_kl_loss_numerics_ghost_token_reference():
@@ -366,7 +360,7 @@ def test_topk_logits_kl_loss_numerics_ghost_token_reference():
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
     student, teacher = _make_loss_inputs()
     k = 4
-    loss = TopKLogitsKLLoss(cfg, top_k=k, add_ghost_token=True)(student, teacher)[0]
+    loss = TopKLogitsKLLoss(cfg, top_k=k)(student, teacher)[0]
 
     q_full = F.log_softmax(teacher, dim=-1)
     p_full = F.log_softmax(student, dim=-1)
@@ -396,9 +390,7 @@ def test_logits_kl_losses_temperature_scaling(temperature):
     assert torch.allclose(dense, ref_dense, atol=1e-5)
 
     k = 4
-    topk = TopKLogitsKLLoss(cfg, temperature=temperature, top_k=k, add_ghost_token=True)(
-        student, teacher
-    )[0]
+    topk = TopKLogitsKLLoss(cfg, temperature=temperature, top_k=k)(student, teacher)[0]
     _, idx = torch.topk(teacher, k, dim=-1)
     q_k, p_k = q.gather(-1, idx), p.gather(-1, idx)
     q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
@@ -410,40 +402,33 @@ def test_logits_kl_losses_temperature_scaling(temperature):
 
 
 def test_topk_logits_kl_loss_top_p_masks_tail():
-    """Top-P zeroes out-of-nucleus entries and honors the min_k floor."""
+    """Top-P moves out-of-nucleus mass into the ghost token and honors the min_k floor."""
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
     student, teacher = _make_loss_inputs()
     k = 8
     q_full = F.log_softmax(teacher, dim=-1)
     q_k, idx = torch.topk(q_full, k, dim=-1)
     p_k = F.log_softmax(student, dim=-1).gather(-1, idx)
+
+    def reference(keep):
+        partial = (keep * q_k.exp() * (q_k - p_k)).sum(-1)
+        q_rest = torch.log1p(-(q_k.exp() * keep).sum(-1))
+        p_rest = torch.log1p(-(p_k.exp() * keep).sum(-1))
+        return (partial + q_rest.exp() * (q_rest - p_rest)).transpose(0, 1)
+
     probs = q_k.exp()
     keep = (probs.cumsum(-1) - probs) < 0.5
-
-    # No ghost token: loss is exactly the masked partial KL sum.
-    loss = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5, add_ghost_token=False)(student, teacher)[0]
-    ref = (keep * probs * (q_k - p_k)).sum(-1).transpose(0, 1)
-    assert torch.allclose(loss, ref, atol=1e-5)
     assert not keep.all(), "test inputs should produce some truncation"
+    loss = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5)(student, teacher)[0]
+    assert torch.allclose(loss, reference(keep), atol=1e-6)
+    assert loss.shape == (student.size(1), student.size(0))
 
-    # min_k floor forces at least min_k entries even when nucleus is tiny.
+    # min_k floor forces at least min_k entries even when the nucleus is tiny.
     min_k = 3
-    loss_min = TopKLogitsKLLoss(cfg, top_k=k, top_p=1e-6, top_p_min_k=min_k, add_ghost_token=False)(
-        student, teacher
-    )[0]
-    ref_min = ((torch.arange(k) < min_k) * probs * (q_k - p_k)).sum(-1).transpose(0, 1)
-    assert torch.allclose(loss_min, ref_min, atol=1e-5)
+    loss_min = TopKLogitsKLLoss(cfg, top_k=k, top_p=1e-6, top_p_min_k=min_k)(student, teacher)[0]
+    assert torch.allclose(loss_min, reference(torch.arange(k) < min_k), atol=1e-6)
 
-    # Ghost token with top-P: residual is mass outside the kept nucleus, distributions sum to 1.
-    loss_ghost = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5, add_ghost_token=True)(student, teacher)[
-        0
-    ]
-    q_rest = torch.log1p(-(probs * keep).sum(-1, keepdim=True))
-    p_rest = torch.log1p(-(p_k.exp() * keep).sum(-1, keepdim=True))
-    ref_ghost = ref + (q_rest.exp() * (q_rest - p_rest)).sum(-1).transpose(0, 1)
-    assert torch.allclose(loss_ghost, ref_ghost, atol=1e-6)
-    assert loss_ghost.shape == (student.size(1), student.size(0))
-    loss_ghost.sum().backward()
+    loss.sum().backward()
     assert student.grad is not None and torch.isfinite(student.grad).all()
 
 
@@ -509,13 +494,6 @@ def test_loss_balancer_convex_combination():
     )
     assert torch.allclose(out["kd_loss"], torch.tensor(0.75 * 2.0 + 0.25 * (0.5 + 0.5)))
     assert torch.allclose(out["logits_loss"], logits)
-
-    # A negative logits loss (possible for Top-K KL without ghost token) must not flip the sign of
-    # the intermediate-loss contribution.
-    out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=1.0)(
-        {key: lm, "LogitsKLLoss_0": -logits, "HiddenStateCosineLoss_0": inter}
-    )
-    assert torch.allclose(out["kd_loss"], -logits + logits)  # -0.5 + abs(-0.5) * (4.0 / 4.0) = 0
 
     # alpha=1 ignores the LM loss entirely; skip_original_loss does the same regardless of alpha.
     out = LogitsAndIntermediatesLossBalancer(kd_loss_alpha=1.0)({key: lm, "LogitsKLLoss_0": logits})

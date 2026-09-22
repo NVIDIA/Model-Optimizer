@@ -24,7 +24,7 @@ Changelog
 
 **Backward Breaking Changes**
 
-- ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and by default appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs; set ``logit_kl_ghost_token: false`` to drop the ghost token.
+- ``modelopt.torch.distill.plugins.megatron.TopKLogitsKLLoss`` (``logit_kl_topk`` in ``DistillationConfig``) now normalizes both distributions over the full vocabulary instead of re-normalizing over the Top-K entries, and by default appends a "ghost" token holding the probability mass outside the Top-K to both student and teacher (matching Megatron-LM's offline cached-logits KD loss). Loss values change for existing ``logit_kl_topk`` runs.
 - ``LogitsAndIntermediatesLossBalancer`` (Megatron distillation plugin) no longer rescales the distillation loss to the magnitude of the LM loss. The total is now the fixed convex combination ``(1 - alpha) * lm_loss + alpha * kd_loss`` with ``DistillationConfig.kd_loss_alpha`` (default ``0.9``, in [0, 1]), matching Megatron-LM's offline cached-logits KD. ``skip_lm_loss`` is now derived from ``kd_loss_alpha`` (skipped iff ``1.0``), so the LM loss is computed by default where it was previously skipped. ``examples/megatron_bridge/distill.py`` gains ``--kd_loss_alpha``.
 - Layerwise calibration now uses prior-layer QDQ activations by default
   (``layerwise.get_qdq_activations_from_prev_layer=True``). Set it to ``False`` to
