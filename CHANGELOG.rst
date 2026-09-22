@@ -13,6 +13,7 @@ Changelog
 
 *Quantization*
 
+- Add Q8_0 weight-only quantization with 32-value GGML blocks, packed unified HF and Megatron export, and a built-in ``q8_0`` PTQ recipe.
 - Add IQ1_S and IQ2_XS weight-only quantization with GGML-compatible 256-value block encoders, built-in ``iq1_s`` / ``iq2_xs`` PTQ recipes, and unified HF and Megatron export of the packed blocks. Quantized weights must have a final dimension divisible by 256, and Megatron export requires tensor and pipeline parallel sizes of 1.
 - Add ``iq2_xxs`` weight-only quantization with a CUDA encoder and a ``general/ptq`` recipe, at 2.0625 bits per weight between ``iq1_s`` and ``iq2_xs``. The same 256-value block constraint applies.
 - A recipe can now **delegate its whole body to another recipe** with a top-level ``$import``; any top-level key given alongside it overrides the imported one. ``metadata.recipe_type`` became optional along with it: a recipe states its kind with a ``# modelopt-schema:`` comment, with ``metadata.recipe_type``, or by delegating to a recipe that does, and only a recipe that another file imports has to carry the schema comment. Whatever a recipe does state must be true: a schema comment and a ``recipe_type`` must agree, and so must a recipe and the recipe it delegates to. ``modelopt_recipes/models/`` uses this for checkpoint entries that a portable recipe already reproduces: the entry aliases that recipe instead of copying it.

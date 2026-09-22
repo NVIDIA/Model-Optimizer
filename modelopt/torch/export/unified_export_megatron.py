@@ -35,7 +35,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -57,7 +57,7 @@ from .plugins.mcore_custom import (
 )
 from .plugins.megatron_importer import GPTModelImporter, _get_mamba_conv1d
 from .quant_format import (
-    IQ_FORMATS,
+    GGML_FORMATS,
     KV_CACHE_FP8,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
@@ -319,21 +319,19 @@ class GPTModelExporter:
 
         quantization_format = self._get_quantization_format(self.model)
         if self._any_rank_uses_iq_quantization():
-            # Both sizes below are identical on every rank, and the IQ flag is agreed across
+            # Both sizes below are identical on every rank, and the GGML flag is agreed across
             # ranks, so these raise everywhere or nowhere. Raising on only a subset would strand
             # the rest in the collectives further down.
             if get_tensor_model_parallel_world_size() != 1:
                 raise NotImplementedError(
-                    "Megatron IQ1_S/IQ2_XS unified export currently requires tensor model "
-                    "parallel size 1"
+                    "Megatron GGML unified export currently requires tensor model parallel size 1"
                 )
             # Requiring PP=1 is also what makes the per-expert fused-MoE rejection safe: with
             # every rank holding the same layers, that check runs on all of them rather than
             # only the stages that happen to own an MoE block.
             if pp_size != 1:
                 raise NotImplementedError(
-                    "Megatron IQ1_S/IQ2_XS unified export currently requires pipeline model "
-                    "parallel size 1"
+                    "Megatron GGML unified export currently requires pipeline model parallel size 1"
                 )
 
         # Main export process
@@ -351,7 +349,7 @@ class GPTModelExporter:
             quantization = "NVFP4"
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
-        elif quantization_format in IQ_FORMATS:
+        elif quantization_format in GGML_FORMATS:
             quantization = quantization_format.upper()
 
         if is_last_stage_main_rank:
@@ -1115,7 +1113,7 @@ class GPTModelExporter:
             self._record_excluded_module(prefix)
         block_size = get_weight_block_size(module)
 
-        is_iq = qformat in IQ_FORMATS
+        is_iq = qformat in GGML_FORMATS
         name_to_value = self._get_weight_bias(
             module, dtype, name_to_value, keep_weight_device=is_iq
         )
@@ -1125,7 +1123,7 @@ class GPTModelExporter:
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
-        # IQ formats derive all block metadata directly from the weight and do not use amax or
+        # GGML formats derive all block metadata directly from the weight and do not use amax or
         # separately exported scaling tensors. Keep the weight on-device until it can be packed
         # along its contraction axis, so the CUDA packer can be used.
         if is_iq:
@@ -1150,13 +1148,13 @@ class GPTModelExporter:
         return name_to_value, qformat, block_size
 
     def _any_rank_uses_iq_quantization(self) -> bool:
-        """Whether any rank's local stage holds an IQ layer.
+        """Whether any rank's local stage holds a GGML layer.
 
         Two reasons this is not ``self._get_quantization_format(self.model) in (...)``. That
-        returns only the first non-NONE format in the tree, so a mixed-format model whose IQ
+        returns only the first non-NONE format in the tree, so a mixed-format model whose GGML
         layers follow, say, an FP8 one would slip past the caller's guard and pack TP-sharded
         weights as whole ones. And the scan is rank-local: under pipeline parallelism a stage
-        holding no IQ layer would skip the raise and then block in the next collective while its
+        holding no GGML layer would skip the raise and then block in the next collective while its
         peers exit. Agree across ranks first, mirroring ``_gather_exclude_modules``.
         """
         local_uses_iq = uses_iq_quantization(self.model)
@@ -1185,23 +1183,23 @@ class GPTModelExporter:
     @staticmethod
     def _pack_iq_weight(weight: torch.Tensor, qformat: str) -> torch.Tensor:
         """Pack one ``[out, in]`` weight and return its CPU payload."""
-        quantize_iq = IQ_FORMAT_REGISTRY[qformat].quantize
-        packed_weight, _ = quantize_iq(weight)
+        quantize_ggml = GGML_FORMAT_REGISTRY[qformat].quantize
+        packed_weight, _ = quantize_ggml(weight)
         return packed_weight.detach().cpu()
 
     @classmethod
     def _get_iq_weight_state(
         cls, weight_key: str, weight: torch.Tensor, qformat: str
     ) -> dict[str, torch.Tensor]:
-        """Pack one ``[out, in]`` weight into the IQ checkpoint representation."""
+        """Pack one ``[out, in]`` weight into the GGML checkpoint representation."""
         return {weight_key: cls._pack_iq_weight(weight, qformat)}
 
     @staticmethod
     def _reject_unsupported_fused_iq_export(qformat: str) -> None:
-        """Reject fused-expert IQ payloads until a deployment loader owns their layout.
+        """Reject fused-expert GGML payloads until a deployment loader owns their layout.
 
         Raised from inside the per-expert loops, so it only runs on ranks that own an expert.
-        The guards in ``save_pretrained`` are what make that safe: IQ export requires PP=1 and
+        The guards in ``save_pretrained`` are what make that safe: GGML export requires PP=1 and
         TP=1, so every rank holds the same layers and reaches the same loops, and expert
         parallelism shards a set of experts quantized alike -- so every rank arrives here with
         the same ``qformat`` and they raise together rather than stranding each other in a
@@ -1210,10 +1208,10 @@ class GPTModelExporter:
         The one gap left is a rank holding no local expert at all, which needs expert-parallel
         size to exceed the expert count. Worth revisiting if that becomes a supported topology.
         """
-        if qformat in IQ_FORMATS:
+        if qformat in GGML_FORMATS:
             raise NotImplementedError(
-                "Fused-MoE IQ export requires a deployment loader that supports "
-                "[num_experts, out_features, in_features // 256, payload_bytes]"
+                "Fused-MoE GGML export requires a deployment loader that supports "
+                "[num_experts, out_features, in_features // block_size, payload_bytes]"
             )
 
     def _record_layer_quant_config(self, prefix: str, qformat: str | None, block_size: int | None):
@@ -1280,7 +1278,7 @@ class GPTModelExporter:
             weight = weight + 1.0
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
-        if qformat in IQ_FORMATS:
+        if qformat in GGML_FORMATS:
             self._state_dict.update(self._get_iq_weight_state(prefix + "weight", weight, qformat))
         elif weight_scale is None:
             self._state_dict[prefix + "weight"] = weight
@@ -1327,7 +1325,7 @@ class GPTModelExporter:
         gate_proj_weight = weight[:ffn_hidden_size, :]
         up_proj_weight = weight[ffn_hidden_size:, :]
 
-        if qformat in IQ_FORMATS:
+        if qformat in GGML_FORMATS:
             self._state_dict.update(
                 self._get_iq_weight_state(gate_proj_prefix + "weight", gate_proj_weight, qformat)
             )
@@ -1501,7 +1499,7 @@ class GPTModelExporter:
                 seen_qformat, seen_block_size = qformat, block_size
 
                 weight = state_dict[weight_key].to(self.dtype)
-                if qformat not in IQ_FORMATS:
+                if qformat not in GGML_FORMATS:
                     weight = weight.cpu()
                 weight_scale_cpu = (
                     weight_scale.detach().cpu().clone() if weight_scale is not None else None
@@ -1533,7 +1531,7 @@ class GPTModelExporter:
                     ]
 
                 for shard_prefix, shard_weight, shard_scale in shards:
-                    if qformat in IQ_FORMATS:
+                    if qformat in GGML_FORMATS:
                         local_expert_state.update(
                             self._get_iq_weight_state(
                                 shard_prefix + "weight", shard_weight, qformat
@@ -1702,7 +1700,7 @@ class GPTModelExporter:
         proj_weights = [_take(weight, s, hidden_size, g) for s, g in zip(slices, gated)]
         proj_keys = [p + "weight" for p in prefixes]
 
-        if qformat in IQ_FORMATS:
+        if qformat in GGML_FORMATS:
             for key, weight in zip(proj_keys, proj_weights):
                 self._state_dict.update(self._get_iq_weight_state(key, weight, qformat))
         elif weight_scale is None:
@@ -1820,7 +1818,7 @@ class GPTModelExporter:
         proj_keys = [p + "weight" for p in proj_prefixes]
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
-        if qformat in IQ_FORMATS:
+        if qformat in GGML_FORMATS:
             for proj_prefix, proj_weight in zip(proj_prefixes, proj_weights):
                 if proj_prefix in keep_bf16:
                     self._state_dict[proj_prefix + "weight"] = proj_weight.cpu()

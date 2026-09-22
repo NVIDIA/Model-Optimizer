@@ -61,6 +61,7 @@ supported combinations.
 | `iq1_s` | IQ1_S W1A16, eligible linears | none | none (no calibration) |
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), eligible linears | none | none (no calibration) |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), eligible linears | none | none (no calibration) |
+| `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
 
@@ -139,11 +140,12 @@ activations and tensor-core math are what deliver the throughput.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
-- **`iq1_s` / `iq2_xxs` / `iq2_xs`** — GGML-compatible IQ weights
-  on the eligible linear layers, with BF16 activations; `lm_head`, MoE routers,
-  `conv1d` and the vision branch stay in BF16 like every other preset. The formats
-  trade size against accuracy in order: 1.56, 2.06 and 2.31 bits per weight. No calibration data is
-  required. Quantized weights must have a final dimension divisible by 256.
+- **`iq1_s` / `iq2_xxs` / `iq2_xs` / `q8_0`** — GGML-compatible weight-only
+  quantization on the eligible linear layers, with BF16 activations; `lm_head`, MoE routers,
+  `conv1d` and the vision branch stay in BF16 like every other preset. The IQ formats
+  trade size against accuracy at 1.56, 2.06 and 2.31 bits per weight; Q8_0 uses 8.5 bits per
+  weight. No calibration data is required. IQ weights must have a final dimension divisible by
+  256; Q8_0 requires divisibility by 32.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support
   fused-MoE experts.
