@@ -15,11 +15,11 @@
 
 # IQ1_S weight-only PTQ.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   preset: configs/ptq/presets/model/iq1_s
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies uniform GGML-compatible IQ1_S weight-only quantization to eligible linear layers.
     This is not a mixed per-tensor precision preset. No calibration data is required.
