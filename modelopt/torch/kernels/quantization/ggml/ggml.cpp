@@ -24,6 +24,7 @@
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
 at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor q8_0_pack_cuda(at::Tensor input);
 
 namespace {
 
@@ -71,6 +72,12 @@ at::Tensor iq2_xxs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   return iq2_xxs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
 }
 
+at::Tensor q8_0_pack(at::Tensor input) {
+  TORCH_CHECK(input.is_cuda(), "Q8_0 packing requires a CUDA input");
+  modelopt::ggml::check_scalar_pack_input("Q8_0", input, 32);
+  return q8_0_pack_cuda(input.contiguous());
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -95,4 +102,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "Returns uint8 [numel / 256, 66] on the input device. Non-finite input elements are "
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate.");
+  module.def("q8_0_pack", &q8_0_pack,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "
+             "Non-finite input elements are treated as zero during packing, and finite elements "
+             "outside the float32 range saturate.");
 }
