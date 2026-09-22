@@ -16,9 +16,8 @@
 # FP8 E4M3 fake quantization of the GatedDeltaNet (linear attention) recurrent state with a
 # dynamic scale computed inside the kernel from the state itself (no calibration). The state is
 # ``[N, H, K, V]`` for ``N`` sequences; ``axis: [0, 1]`` scales each sequence's head state on its
-# own, in tiles of ``gdn_state_qdq_block_v`` value columns (default: the kernel's 64-column tile,
-# two scales per head for V = 128; set 128 on the quantized module for one scale per head). This
-# is the only configuration the kernel implements. Applied at every kernel chunk boundary
+# own, with one scale per full-K by 64-value-column tile (two scales per head for V = 128).
+# This is the only configuration the module supports. Applied at every kernel chunk boundary
 # (64 tokens) during calibration, QAT and QAD; needs fla-core==0.5.1 and Triton.
 # See ``modelopt.torch.quantization.plugins.gated_delta_net``.
 

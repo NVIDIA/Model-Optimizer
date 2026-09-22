@@ -17,7 +17,7 @@ Changelog
 - Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
 - Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.
 - Add a reusable local-Hessian NVFP4 PTQ recipe and the quantization recipe used for ``nvidia/Qwen3.8-27B-NVFP4``.
-- Add experimental dynamic FP8 fake quantization of GatedDeltaNet chunk-boundary states and WY activations for training, with saved execution policies and differentiable GDN/KDA references. The fused GDN path requires ``fla-core==0.5.1`` and chunk size 64; state emulation requires SM89 or newer.
+- Add experimental dynamic FP8 fake quantization of GatedDeltaNet chunk-boundary states and WY activations for training through the standard ``quant_cfg`` interface. The fused GDN path requires ``fla-core==0.5.1`` and chunk size 64; state emulation requires SM89 or newer.
 
 *Megatron Framework (M-LM / M-Bridge)*
 

@@ -32,8 +32,7 @@ from typing import Any
 import torch
 
 from ..config import QuantizerAttributeConfig
-from ..linear_attention.config import LinearAttentionConfig
-from ..linear_attention.validation import validate_gdn_quantizer
+from ..linear_attention.utils import validate_gdn_quantizer
 from ..nn import QuantModule, TensorQuantizer
 
 __all__ = ["GatedDeltaNetStateQuantMixin"]
@@ -64,27 +63,29 @@ class GatedDeltaNetStateQuantMixin(QuantModule):
     with ``quant_cfg`` entries on ``*gdn_state_quantizer`` / ``*gdn_w_quantizer`` such as the
     ``configs/ptq/units/gdn_state_fp8_dynamic`` and ``gdn_w_fp8_dynamic`` recipe units. The state
     quantizer carries the fused QDQ configuration. Both sites currently require dynamic
-    E4M3 and identity STE. The execution policy is saved in ModelOpt metadata.
+    E4M3 and identity STE. State QDQ uses fixed 64-column value tiles and 64-token chunks.
     """
 
     def _setup(self):
-        self.gdn_state_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
-        self.gdn_w_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
-        self.linear_attention_config = LinearAttentionConfig()
-
-    @property
-    def gdn_state_qdq_block_v(self) -> int:
-        """Value-column scale grouping from the saved execution policy."""
-        return self.linear_attention_config.state.block_v
+        for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
+            self._register_temp_attribute(
+                name, TensorQuantizer(QuantizerAttributeConfig(enable=False))
+            )
 
     def validate_linear_attention(self) -> None:
         """Reject numerical settings that the fused training path cannot implement."""
-        for state, quantizer in ((True, self.gdn_state_quantizer), (False, self.gdn_w_quantizer)):
+        for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
+            quantizer = getattr(self, name)
             if quantizer.is_enabled:
-                validate_gdn_quantizer(quantizer, state=state)
+                validate_gdn_quantizer(quantizer, name=name)
+        # The state handle configures fused QDQ; W's grouping is executed by TensorQuantizer.
+        if self.gdn_state_quantizer.is_enabled and self.gdn_state_quantizer.axis != (0, 1):
+            raise ValueError(
+                "gdn_state_quantizer supports only axis=(0, 1) with 64-column value tiling"
+            )
 
     def modelopt_post_restore(self, prefix: str = ""):
-        """Validate restored quantizers before using the saved execution policy."""
+        """Validate restored quantizers against the fused training kernel requirements."""
         super().modelopt_post_restore(prefix)
         self.validate_linear_attention()
 
@@ -102,14 +103,14 @@ class GatedDeltaNetStateQuantMixin(QuantModule):
                 "GatedDeltaNet quantizers require the fla chunked kernel; the deterministic torch "
                 f"kernel ({gated_delta_rule!r}) is not supported."
             )
-        chunk_size = kwargs.pop("chunk_size", self.linear_attention_config.chunk_size)
-        if chunk_size != self.linear_attention_config.chunk_size:
+        chunk_size = kwargs.pop("chunk_size", 64)
+        if chunk_size != 64:
             raise ValueError("GDN fake quantization supports only chunk_size=64")
         return _state_qdq_chunk_gated_delta_rule()(
             *args,
             chunk_size=chunk_size,
             state_qdq=int(quantize_state),
-            state_qdq_block_v=self.gdn_state_qdq_block_v,
+            state_qdq_block_v=64,
             w_quantizer=self.gdn_w_quantizer if quantize_w else None,
             **kwargs,
         )

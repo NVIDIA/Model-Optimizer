@@ -161,8 +161,6 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
 
-from .linear_attention.config import LinearAttentionPolicyEntry
-
 
 class QuantizerCfgEntry(ModeloptBaseConfig):
     """A single entry in a ``quant_cfg`` list."""
@@ -1568,11 +1566,6 @@ def normalize_quant_cfg_list(
 
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
-
-    linear_attention: list[LinearAttentionPolicyEntry] = ModeloptField(
-        default=[],
-        title="Execution policies for supported linear-attention training modules",
-    )
 
     quant_cfg: QuantizeQuantCfgType = ModeloptField(
         default=[{"quantizer_name": "*", "cfg": {"num_bits": 8, "axis": None}}],

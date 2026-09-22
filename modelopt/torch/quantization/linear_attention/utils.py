@@ -13,22 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Capabilities of the initial fused GDN fake-quant path."""
+"""Shared helpers for linear-attention quantization."""
 
 from ..nn import TensorQuantizer
 
 __all__ = []
 
 
-def validate_gdn_quantizer(quantizer: TensorQuantizer, *, state: bool) -> None:
-    name = "gdn_state_quantizer" if state else "gdn_w_quantizer"
-    axis = (0, 1) if state else (0, 1, 2)
+def validate_gdn_quantizer(quantizer: TensorQuantizer, *, name: str) -> None:
+    """Check the dynamic E4M3 contract and the custom backward's identity STE."""
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
     if not (
         quantizer._dynamic
         and quantizer.num_bits == (4, 3)
-        and quantizer.axis == axis
         and quantizer.block_sizes is None
         and quantizer.fake_quant
         and quantizer._pass_through_bwd
@@ -39,7 +37,7 @@ def validate_gdn_quantizer(quantizer: TensorQuantizer, *, state: bool) -> None:
         and not quantizer._use_constant_amax
     ):
         raise ValueError(
-            f"{name} supports only dynamic E4M3 fake quantization with axis={axis}, "
+            f"{name} supports only dynamic E4M3 fake quantization with "
             "pass_through_bwd=True, no block_sizes, rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
         )

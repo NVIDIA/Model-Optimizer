@@ -16,8 +16,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
-
-from modelopt.torch.quantization.linear_attention import (
+from _test_utils.torch.quantization.linear_attention_reference import (
     chunk_gdn_reference,
     recurrent_delta_rule_reference,
     state_fp8_qdq_reference,

@@ -13,7 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable references for linear attention."""
-
-from .config import *
-from .reference import *
+"""Helpers for linear-attention quantization."""
