@@ -50,6 +50,7 @@
 # in_proj_b BF16 exclusion cannot be expressed here; `_gated_delta_net_slicing` in
 # modelopt/torch/export/unified_export_megatron.py re-splits it on export and writes those two
 # out in BF16.
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
@@ -59,7 +60,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     Megatron-Core W4A4 (NVFP4 weights and activations, block 16) on MoE routed experts, shared
     experts and dense MLP; W4A4 NVFP4 on the output layer; FP8 W8A8 on softmax-attention and

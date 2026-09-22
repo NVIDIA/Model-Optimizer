@@ -15,22 +15,22 @@ unless the response starts with the required prefix**. Stratified by needle coun
 A 0.2.6 `nel` `nemo_gym` task (not nel-next), so Steps 1–9 apply. **Standalone** —
 one gym eval per config, never mixed with other tasks.
 
-Run it through **`"$SKILL_DIR/scripts/nel-gdpval.sh"`**, the same pinned-launcher
-wrapper GDPVal uses — the name is GDPVal-flavoured but the pin is gym-wide. This
-config forwards `NEL_INVOCATION_ID`, and an unpinned `nel` from PATH can emit the
-re-export without first assigning it, exiting on `NEL_INVOCATION_ID: unbound
-variable` under `set -u` before the client starts. See `references/gym-gdpval.md`
-for the failure signature and the procedure for adopting a newer launcher.
+Run it through **`"$SKILL_DIR/scripts/nel-gym.sh"`**, the pinned-launcher wrapper
+for the gym path. This config forwards `NEL_INVOCATION_ID`, and an unpinned `nel`
+from PATH can emit the re-export without first assigning it, exiting on
+`NEL_INVOCATION_ID: unbound variable` under `set -u` before the client starts. See
+**`references/gym.md`** for the failure signature and the procedure for adopting a
+newer launcher.
 
-**Not an AA benchmark** — never generate it for an "AA" request. It shares
-`recipes/tasks/gym/` with GDPVal, which *is* AA: the dir groups by **harness**,
-not suite, so read membership per task.
+**Not an AA benchmark** — never generate it for an "AA" request. The `gym/` dir
+groups by **harness**, not suite, so read membership per task rather than from the
+path.
 
-Much lighter than GDPVal: `simple_agent`, **no SIF sandbox, no judge, no Tavily** —
-`HF_TOKEN` is the only secret, and the cost is context length rather than agent
-turns. Like GDPVal it needs `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
-`pre_cmd`), plus `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in
-the FDF mapping, so submission is refused without it.
+Light as gym tasks go: `simple_agent`, **no judge** — `HF_TOKEN` is the only
+secret, and the cost is context length rather than agent turns. It needs
+`NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a `pre_cmd`), plus
+`NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
+submission is refused without it.
 
 ## Config
 
@@ -42,8 +42,9 @@ recipes/examples/gym/example_mrcr.yaml   # SLURM + vLLM, 1M variant
 ```
 
 The gym bootstrap `command:` block (install_on_the_fly, sub-venv setup, rollout
-heredoc, Ray teardown) is **shared with GDPVal**; `references/gym-gdpval.md`
-documents that machinery and a fix there applies to both examples.
+heredoc, Ray teardown) is **shared across every gym example**;
+`references/gym.md` documents that machinery and a fix there applies to all of
+them.
 
 ### Variant — pick first
 
@@ -141,7 +142,7 @@ NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
 MRCR's gym path takes `++limit=N` (the launcher-level `limit_samples` does not
 reach the gym). **Not verified on this pinned commit** — treat the first ~30 min
-of the real run as the canary, as the GDPVal recipe does. `++limit` caps rollouts
+of the real run as the canary. `++limit` caps rollouts
 only: the 1M tokenize/drop-over-long **prepare pass still runs in full**, so a
 5-sample canary is not cheap. Append it to `collect_rollout_params` in your copy
 of the YAML — easier than re-pasting the whole folded scalar through `-o`:

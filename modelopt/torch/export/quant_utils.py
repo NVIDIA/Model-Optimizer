@@ -15,6 +15,7 @@
 
 """Utils for quantization including scaling factors adjustments."""
 
+import fnmatch
 import logging
 from collections import defaultdict
 from collections.abc import Generator
@@ -26,6 +27,14 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.quantization.ggml import (
+    IQ1_S_BLOCK_BYTES,
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_BYTES,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+)
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -62,6 +71,8 @@ from .quant_format import (
     QUANTIZATION_INT4_AWQ,
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
+    QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_XS,
     QUANTIZATION_MXFP4,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -440,6 +451,36 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
+def uses_iq_quantization(module) -> bool:
+    """Whether any weight quantizer in ``module`` or its children targets an IQ format.
+
+    ``get_quantization_format`` returns the *first* non-``NONE`` format it finds, so in a
+    mixed-format model IQ layers sitting behind, say, an FP8 layer are invisible to it. Callers
+    that must reject IQ specifically need to see every layer.
+
+    This reads ``num_bits`` directly rather than resolving each layer's full format, so an
+    unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
+
+    Known gap, shared with ``get_quantization_format``: ``weight_attr_names`` yields nothing for
+    a TEGroupedLinear, whose parameters are ``weight0..N`` while its quantizer is a single
+    ``GroupedQuantizer`` under ``weight_quantizer``. Neither function sees such a module, so an
+    experts-only IQ model reports no format at all -- not just here. Closing it belongs in
+    ``weight_attr_names``, where it affects every format, rather than in this helper.
+    """
+    for weight_name in weight_attr_names(module):
+        weight_quantizer = representative_weight_quantizer(module, weight_name)
+        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never IQ --
+        # IQ is a single quantizer with backend="ggml".
+        if (
+            weight_quantizer is not None
+            and weight_quantizer.is_enabled
+            and getattr(weight_quantizer, "num_bits", None)
+            in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
+        ):
+            return True
+    return any(uses_iq_quantization(child) for _, child in module.named_children())
+
+
 def get_quantization_format(module) -> str | None:
     """Gets the quantization string.
 
@@ -474,6 +515,24 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
+        if weight_quantizer.num_bits in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            if weight_quantizer.backend != "ggml":
+                raise ValueError("IQ formats require the built-in 'ggml' quantization backend")
+            # Both exporters return before collecting input_scale and before the pre_quant_scale
+            # handling below, so an enabled activation quantizer would be dropped without a trace
+            # and the checkpoint would load as weight-only. Refuse instead.
+            if input_quantizer is not None and input_quantizer.is_enabled:
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export is weight-only, but this layer has an enabled input "
+                    "quantizer. The GGML block payload carries no activation scale, so the "
+                    "activation quantization would be silently lost."
+                )
+            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export does not support an AWQ-style pre_quant_scale."
+                )
+            return weight_quantizer.num_bits
+
         if weight_quantizer.num_bits == 4:
             assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
                 "Invalid block_sizes for INT4 quantizer"
@@ -721,6 +780,26 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
+            }
+        elif v in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+            if v == QUANTIZATION_IQ1_S:
+                block_size = IQ1_S_BLOCK_SIZE
+                payload_bytes = IQ1_S_BLOCK_BYTES
+                effective_bits = IQ1_S_EFFECTIVE_BITS
+            else:
+                block_size = IQ2_XS_BLOCK_SIZE
+                payload_bytes = IQ2_XS_BLOCK_BYTES
+                effective_bits = IQ2_XS_EFFECTIVE_BITS
+            if block_size_value != block_size:
+                raise ValueError(
+                    f"{v.upper()} requires block size {block_size}, got {block_size_value}"
+                )
+            layer_config = {
+                "quant_algo": v.upper(),
+                "group_size": block_size,
+                "effective_bits": effective_bits,
+                "block_payload_bytes": payload_bytes,
+                "packing": "ggml",
             }
         else:
             layer_config = {"quant_algo": v}
@@ -1584,6 +1663,76 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 module.weight_quantizer.amax = weight_amax
 
 
+def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
+    """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
+
+    The single place carried weights reach ``exclude_modules``, for both exporters.
+    :func:`get_quant_config` calls it once the per-layer pass is done, and the layerwise exporter
+    calls it again from ``finalize()`` -- it snapshots its config during ``bind()``, while
+    calibration is still running and long before ``export_hf_checkpoint`` records what it carried,
+    so it has no chance to see them any earlier. Without it a layerwise export copies GLM-4.7's
+    ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
+    NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+
+    Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
+    emitting the same thing, and a literal can never over-match a module the export did in fact
+    quantize -- the risk :func:`_prefix_wildcard_summarize_exclude_modules` has to guard against by
+    consulting ``quantized_layers``, which is unavailable by the time the layerwise path runs.
+
+    Returns the names it added. No-op when the export is not uniformly quantized -- there is no
+    single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
+    a weight from.
+    """
+    names = _get_carried_over_module_names(model)
+    if not names:
+        return []
+    quantization = quant_config.get("quantization")
+    if not isinstance(quantization, dict):
+        return []
+    if quantization.get("quant_algo") in (None, QUANTIZATION_NONE, "MIXED_PRECISION"):
+        return []
+    exclude_modules = quantization.setdefault("exclude_modules", [])
+    added = [n for n in names if not any(fnmatch.fnmatch(n, p) for p in exclude_modules)]
+    if added:
+        exclude_modules.extend(added)
+        exclude_modules.sort()
+    return added
+
+
+def _get_carried_over_module_names(model: nn.Module) -> list[str]:
+    """Return module names for checkpoint weights carried over without a module.
+
+    Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
+    the export verbatim from the source checkpoint (see
+    :func:`modelopt.torch.export.unified_export_hf.read_unplaced_weights`). They
+    have no module in the live model, so the quantizer walk in :func:`get_quant_config` cannot
+    see them and would leave them out of ``exclude_modules`` even though their original-precision
+    weight is written to the checkpoint. A deployment framework then reads the top-level
+    ``quant_algo`` and tries to load e.g. an MTP ``eh_proj`` as an FP8 weight.
+
+    This is the same failure the MoE-router pass above exists to prevent -- only the reason the
+    module is invisible differs (no quantizer there, no module at all here).
+
+    Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
+    actually wrote -- carried tensors plus the off-index sidecars copied verbatim. Those sidecars
+    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
+
+    A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
+    its last component removed. Keys without a dot are top-level tensors with no module and are
+    skipped.
+    """
+    keys = getattr(model, "_modelopt_carried_over_names", None)
+    if keys is None:
+        # Export has not recorded yet (or this model never went through it). The recorded unplaced
+        # list is the best available answer; it is wider than what gets written, so it can name a
+        # module the export did not emit. That way round is harmless -- a deployment framework
+        # ignores an exclusion it finds no weight for, but fails loading one it was never told
+        # about.
+        keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
+
+
 def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
     """Return the names of MoE router/gate submodules left in original precision.
 
@@ -1755,6 +1904,15 @@ def get_quant_config(
 
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
+
+    # Carried weights are seeded AFTER the per-layer pass, through the same helper the layerwise
+    # exporter calls. Seeding them into layer_config_dict instead would route them through
+    # _prefix_wildcard_summarize_exclude_modules and emit wildcards here, while the layerwise path
+    # -- which can only act once its config is already built -- emits literals: one model, two
+    # exporters, two different-looking quantization_config.ignore. The summarizer cannot serve both,
+    # because it needs `quantized_layers` to avoid a wildcard swallowing a quantized module and
+    # process_layer_quant_config pops that key before returning.
+    seed_carried_over_exclusions(model, quant_config)
 
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
     needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (

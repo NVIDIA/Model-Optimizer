@@ -170,7 +170,7 @@ evaluation:
       # ??? on purpose: MRCR REQUIRES a git-backed Gym image so the pin below can
       # apply, and the bootstrap exits 1 without one. The public
       # nvcr.io/nvidia/eval-factory/nemo-gym:* images have a NON-git /opt/Gym and
-      # will not run this benchmark (GDPVal differs — its baked fallback is valid).
+      # will not run this benchmark.
       # NVIDIA-internal: modelopttools:eval-config Step 3d names a working image.
       container: ???
       nemo_evaluator_config:
@@ -195,9 +195,9 @@ evaluation:
                   source .venv/bin/activate
                   # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
                   # images bake Gym at a fixed version (not a git repo) — use it as-is.
-                  # MRCR REQUIRES the pin (N3 1M prepare path). Unlike GDPVal rubric
-                  # mode there is no valid fallback, so refuse to run unpinned rather
-                  # than score a different benchmark green.
+                  # MRCR REQUIRES the pin (N3 1M prepare path) — there is no valid
+                  # fallback, so refuse to run unpinned rather than score a different
+                  # benchmark green.
                   if [ -d .git ]; then
                     git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
                     git fetch oss_pin

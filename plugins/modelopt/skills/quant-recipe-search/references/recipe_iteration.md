@@ -128,7 +128,11 @@ model benefits from them.
    - Existing production recipe if one exists.
 
 4. Pick first candidates:
-   - Start from `modelopt_recipes` when ModelOpt is available.
+   - Start from `modelopt_recipes` when ModelOpt is available. Before selecting a
+     ModelOpt recipe, read `modelopt_recipes/ptq.md` in the source checkout used
+     for PTQ. Use it to understand the available schemes and model-specific
+     exceptions, then apply the search strategy and evaluation criteria in this
+     reference.
    - Prefer model-specific recipes, then general PTQ presets, then recipe
      fragments.
    - Add one AutoQuant candidate in the requested primary family when AutoQuant

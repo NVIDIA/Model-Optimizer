@@ -1,7 +1,7 @@
 # EAGLE3 speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptEagleRecipe
 metadata:
-  recipe_type: speculative_eagle
   description: EAGLE3 training recipe (model/data/training/eagle bundled).
 
 # maps to ModelArguments (main.py)

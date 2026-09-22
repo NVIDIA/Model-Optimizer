@@ -29,18 +29,11 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.calib_utils import import_scales_from_calib_cache
-from modelopt.onnx.quantization.graph_utils import (
-    build_non_residual_input_map,
-    classify_partially_quantized_weighted_ops,
-    classify_partition_nodes,
-    expand_node_names_from_patterns,
-    filter_quantizable_kgen_heads,
-    find_conv_to_layernorm_nodes,
+from modelopt.onnx.quantization.graph_indexing import expand_node_names_from_patterns
+from modelopt.onnx.quantization.graph_selection import (
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
-    get_concat_eliminated_tensors,
-    remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
@@ -51,6 +44,15 @@ from modelopt.onnx.quantization.partitioning import (
     get_skipped_output_layers,
 )
 from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
+from modelopt.onnx.quantization.qdq_graph import (
+    build_non_residual_input_map,
+    classify_partially_quantized_weighted_ops,
+    classify_partition_nodes,
+    filter_quantizable_kgen_heads,
+    find_conv_to_layernorm_nodes,
+    get_concat_eliminated_tensors,
+    remove_partial_input_qdq,
+)
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
 
 
