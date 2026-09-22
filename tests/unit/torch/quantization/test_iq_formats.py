@@ -30,6 +30,7 @@ from _test_utils.torch.quantization.iq_llama_cpp_vectors import (
 )
 
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
+import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -41,6 +42,7 @@ FORMATS = {
     "iq1_s": (iq1_s_module, 50, 2048, 1.5625),
     "iq2_xxs": (iq2_xxs_module, 66, 256, 2.0625),
     "iq2_xs": (iq2_xs_module, 74, 512, 2.3125),
+    "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
 }
 NAMES = sorted(FORMATS)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.

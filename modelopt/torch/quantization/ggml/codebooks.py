@@ -178,6 +178,33 @@ _IQ2_XXS_GRID_ZLIB_B64 = (
     "Xf5hzoD21KEk6CpbkT/vBJbU"
 )
 
+# Compact byte representation of the canonical [1024, 8] IQ2_S grid.
+_IQ2_S_GRID_ZLIB_B64 = (
+    "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"
+)
+
 
 @cache
 def iq1_s_grid_bytes() -> bytes:
@@ -195,3 +222,9 @@ def iq2_xs_grid_bytes() -> bytes:
 def iq2_xxs_grid_bytes() -> bytes:
     """Decoded bytes of the [256, 8] IQ2_XXS magnitude table."""
     return zlib.decompress(base64.b64decode(_IQ2_XXS_GRID_ZLIB_B64))
+
+
+@cache
+def iq2_s_grid_bytes() -> bytes:
+    """Decoded bytes of the [1024, 8] IQ2_S magnitude table."""
+    return zlib.decompress(base64.b64decode(_IQ2_S_GRID_ZLIB_B64))
