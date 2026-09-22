@@ -30,6 +30,7 @@ from collections import namedtuple
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
@@ -99,19 +100,44 @@ class _OneLinear(torch.nn.Module):
         return torch.randn(1, 4, 32, generator=generator)
 
 
-def _search(model, method="aumann_shapley", effective_bits=6.0, method_options=None, **kwargs):
+class _HardRoutedModel(torch.nn.Module):
+    """Tiny model whose upstream quantization flips a non-differentiable expert route."""
+
+    def __init__(self):
+        super().__init__()
+        self.upstream = torch.nn.Linear(4, 4, bias=False)
+        self.expert_logits = torch.nn.Parameter(
+            torch.tensor([[-2.0, 2.0, -1.0, 1.0], [2.0, -2.0, 1.0, -1.0]])
+        )
+        self.register_buffer("router", torch.tensor([1.0, -1.98, 0.0, 0.0]))
+        with torch.no_grad():
+            self.upstream.weight.copy_(torch.eye(4))
+            self.upstream.weight[0].copy_(torch.tensor([0.37, 0.82, -0.23, 1.0]))
+
+    def selected_expert(self, hidden_states):
+        """Return the hard-selected expert index."""
+        return ((hidden_states * self.router).sum(dim=-1) > 0).long()
+
+    def forward(self, x):
+        hidden_states = self.upstream(x)
+        expert = self.selected_expert(hidden_states)
+        # Keep a small differentiable path while making the hard route dominate output damage.
+        return self.expert_logits[expert] + 1e-3 * hidden_states
+
+
+def _search(model, method="aumann_shapley", effective_bits=6.0, **kwargs):
     """Run auto_quantize with the given method."""
+    method_name = method.get("method") if isinstance(method, dict) else method
     return mtq.auto_quantize(
         model,
         constraints={"effective_bits": effective_bits} if effective_bits is not None else None,
         quantization_formats=list(SEARCH_FORMATS),
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
-        loss_func=(lambda output, data: output.sum()) if method == "gradient" else None,
+        loss_func=(lambda output, data: output.sum()) if method_name == "gradient" else None,
         num_calib_steps=2,
         num_score_steps=2,
         method=method,
-        method_options=method_options,
         **kwargs,
     )
 
@@ -119,7 +145,7 @@ def _search(model, method="aumann_shapley", effective_bits=6.0, method_options=N
 @pytest.fixture(scope="module")
 def shapley_state():
     """Shared aumann_shapley search state."""
-    _model, state = _search(_Block(), method_options={"num_path_nodes": 2})
+    _model, state = _search(_Block(), method={"method": "aumann_shapley", "num_path_nodes": 2})
     return state
 
 
@@ -188,9 +214,54 @@ def test_config_applies_and_resolve_tightens(shapley_state):
 def test_completeness_one_group():
     """With a single group the path integral must recover the measured corner damage."""
     _model, state = _search(
-        _OneLinear(), effective_bits=16.0, method_options={"num_path_nodes": 32}
+        _OneLinear(),
+        effective_bits=16.0,
+        method={"method": "aumann_shapley", "num_path_nodes": 32},
     )
     assert state["damage_model"]["completeness"] == pytest.approx(1.0, rel=0.05)
+
+
+def test_hard_routing_invalidates_incomplete_damage_estimate():
+    """A route discontinuity missed by path gradients must not produce a valid damage quote."""
+    model = _HardRoutedModel().eval()
+    data = torch.ones(1, 1, 4)
+    weight = model.upstream.weight.detach()
+    scale = weight.abs().amax(dim=1, keepdim=True) / 7
+    quantized_weight = (weight / scale).round() * scale
+    route_before = model.selected_expert(F.linear(data, weight))
+    route_after = model.selected_expert(F.linear(data, quantized_weight))
+    assert not torch.equal(route_before, route_after)
+
+    weight_only_int4 = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer*",
+                "enable": True,
+                "cfg": {"num_bits": 4, "axis": 0},
+            },
+        ],
+        "algorithm": "max",
+    }
+    _model, state = mtq.auto_quantize(
+        model,
+        constraints={},
+        quantization_formats=[(weight_only_int4, "W4A16")],
+        data_loader=[data],
+        forward_step=lambda search_model, batch: search_model(batch),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method={"method": "aumann_shapley", "max_predicted_damage": 0.01},
+    )
+
+    damage_model = state["damage_model"]
+    assert damage_model["f_corner"] > 0
+    assert damage_model["completeness"] < damage_model["completeness_threshold"]
+    assert "low_attribution_completeness" in damage_model["approximation_flags"]
+    assert damage_model["valid"] is False
+    assert state["best"]["predicted_damage_valid"] is False
+    assert math.isnan(state["best"]["predicted_damage"])
+    assert state["best"]["is_satisfied"] is False
 
 
 def test_damage_bound_mode_respects_the_quote(shapley_state):
@@ -198,7 +269,9 @@ def test_damage_bound_mode_respects_the_quote(shapley_state):
     epsilon = 0.5 * shapley_state["damage_model"]["f_corner"]
 
     _model, sla_state = _search(
-        _Block(), effective_bits=None, method_options={"max_predicted_damage": epsilon}
+        _Block(),
+        effective_bits=None,
+        method={"method": "aumann_shapley", "max_predicted_damage": epsilon},
     )
     assert sla_state["best"]["is_satisfied"]
     assert sla_state["best"]["predicted_damage"] <= epsilon + 1e-12
@@ -348,7 +421,11 @@ def test_both_targets_rejected_before_model_conversion():
 
     model = _Block()
     with pytest.raises(ValueError, match="not both"):
-        _search(model, effective_bits=8.0, method_options={"max_predicted_damage": 1e-3})
+        _search(
+            model,
+            effective_bits=8.0,
+            method={"method": "aumann_shapley", "max_predicted_damage": 1e-3},
+        )
     assert type(model.mlp) is torch.nn.Linear
     assert not any(isinstance(m, TensorQuantizer) for m in model.modules())
 
@@ -577,26 +654,28 @@ def test_raw_scores_survive_the_base_monotonicity_clamp(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("method", "options", "exception"),
+    ("method", "exception"),
     [
-        ("aumann_shapley", [("num_path_nodes", 2)], TypeError),
-        ("aumann_shapley", {"unknown_option": 1}, ValueError),
-        ("aumann_shapley", {"num_score_steps": 999}, ValueError),
-        ("aumann_shapley", {"num_path_nodes": True}, ValueError),
-        ("aumann_shapley", {"num_path_nodes": 1.5}, ValueError),
-        ("aumann_shapley", {"num_path_nodes": 0}, ValueError),
-        ("aumann_shapley", {"damage_link": "unsupported"}, ValueError),
-        ("aumann_shapley", {"solver": "lp"}, ValueError),
-        ("aumann_shapley", {"max_predicted_damage": float("inf")}, ValueError),
-        ("aumann_shapley", {"max_predicted_damage": -1.0}, ValueError),
-        ("kl_div", {"num_path_nodes": 2}, ValueError),
+        ([("method", "aumann_shapley")], TypeError),
+        ({}, ValueError),
+        ({"method": 1}, TypeError),
+        ({"method": "aumann_shapley", "unknown_option": 1}, ValueError),
+        ({"method": "aumann_shapley", "num_score_steps": 999}, ValueError),
+        ({"method": "aumann_shapley", "num_path_nodes": True}, ValueError),
+        ({"method": "aumann_shapley", "num_path_nodes": 1.5}, ValueError),
+        ({"method": "aumann_shapley", "num_path_nodes": 0}, ValueError),
+        ({"method": "aumann_shapley", "damage_link": "unsupported"}, ValueError),
+        ({"method": "aumann_shapley", "solver": "lp"}, ValueError),
+        ({"method": "aumann_shapley", "max_predicted_damage": float("inf")}, ValueError),
+        ({"method": "aumann_shapley", "max_predicted_damage": -1.0}, ValueError),
+        ({"method": "kl_div", "num_path_nodes": 2}, ValueError),
     ],
 )
-def test_invalid_method_options_leave_model_untouched(method, options, exception):
-    """Reject invalid method options before converting the model."""
+def test_invalid_method_configs_leave_model_untouched(method, exception):
+    """Reject invalid method configurations before converting the model."""
     model = _Block()
     with pytest.raises(exception):
-        _search(model, method=method, method_options=options)
+        _search(model, method=method)
     assert type(model.mlp) is torch.nn.Linear
     assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
 
@@ -643,18 +722,27 @@ def test_zero_attributions_invert_to_exact_zero():
 def test_scoring_signature_guards_resume(tmp_path):
     """Scoring signature guards resume."""
     checkpoint = str(tmp_path / "state.pth")
-    _search(_Block(), checkpoint=checkpoint, method_options={"num_path_nodes": 2})
+    _search(
+        _Block(),
+        checkpoint=checkpoint,
+        method={"method": "aumann_shapley", "num_path_nodes": 2},
+    )
 
     # Changing what the stored scores mean must be rejected.
     with pytest.raises(ValueError, match="scoring signature"):
-        _search(_Block(), checkpoint=checkpoint, method_options={"num_path_nodes": 3})
+        _search(
+            _Block(),
+            checkpoint=checkpoint,
+            method={"method": "aumann_shapley", "num_path_nodes": 3},
+        )
 
     # Changing only the solve target reuses the stored scores.
     _model, state = _search(
         _Block(),
         effective_bits=None,
         checkpoint=checkpoint,
-        method_options={
+        method={
+            "method": "aumann_shapley",
             "num_path_nodes": 2,
             "max_predicted_damage": 1.0,
         },
@@ -664,7 +752,9 @@ def test_scoring_signature_guards_resume(tmp_path):
 
 def _shapley_data_parallel(rank, size, baseline):
 
-    _model, state = _search(_Block(seed=0), method_options={"num_path_nodes": 2})
+    _model, state = _search(
+        _Block(seed=0), method={"method": "aumann_shapley", "num_path_nodes": 2}
+    )
     state_rank0 = DistributedProcessGroup.get_dist_syncd_obj(
         state if rank == 0 else None, DistributedProcessGroup(None), lambda a: a[0]
     )
@@ -687,7 +777,9 @@ def _shapley_data_parallel(rank, size, baseline):
 
 def test_data_parallel_aumann_shapley(skip_on_windows):
     """Data parallel aumann shapley."""
-    _model, single = _search(_Block(seed=0), method_options={"num_path_nodes": 2})
+    _model, single = _search(
+        _Block(seed=0), method={"method": "aumann_shapley", "num_path_nodes": 2}
+    )
     baseline = {
         "n_score_tokens": single["damage_model"]["n_score_tokens"],
         "f_corner": single["damage_model"]["f_corner"],
@@ -840,7 +932,7 @@ def test_infinite_candidate_never_wins_the_allocation(monkeypatch):
     _inject_scores_and_corner(
         monkeypatch,
         {"INT4_BLOCKWISE_WEIGHT_ONLY_CFG": 2e-6, "INT8_DEFAULT_CFG": float("inf")},
-        0.4,
+        2e-6,
     )
     _model, state = _search(_OneLinear(), effective_bits=8.0)
 
@@ -1145,12 +1237,16 @@ def test_additive_link_bound_is_certified_when_the_fit_is_valid(monkeypatch):
     _inject_scores_and_corner(
         monkeypatch,
         {"INT4_BLOCKWISE_WEIGHT_ONLY_CFG": 0.01, "INT8_DEFAULT_CFG": 0.02},
-        corner=0.4,
+        corner=0.01,
     )
     _model, state = _search(
         _OneLinear(),
         effective_bits=None,
-        method_options={"damage_link": "additive", "max_predicted_damage": 1.0},
+        method={
+            "method": "aumann_shapley",
+            "damage_link": "additive",
+            "max_predicted_damage": 1.0,
+        },
     )
 
     assert state["damage_model"]["valid"] is True
@@ -1172,7 +1268,11 @@ def test_additive_link_does_not_certify_an_invalid_fit(monkeypatch):
     _model, state = _search(
         _OneLinear(),
         effective_bits=None,
-        method_options={"damage_link": "additive", "max_predicted_damage": 1e-3},
+        method={
+            "method": "aumann_shapley",
+            "damage_link": "additive",
+            "max_predicted_damage": 1e-3,
+        },
     )
 
     assert state["damage_model"]["valid"] is False

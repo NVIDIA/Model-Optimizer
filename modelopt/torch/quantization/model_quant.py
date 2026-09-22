@@ -38,8 +38,6 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
-# The _auto_quantize_shapley import registers the "aumann_shapley" method on load.
-from . import _auto_quantize_shapley  # noqa: F401
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
@@ -380,6 +378,24 @@ def _process_quantization_formats(formats, custom_name_prefix):
     return processed
 
 
+def _parse_auto_quantize_method(
+    method: str | dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Split an AutoQuantize method config into its name and method-specific options."""
+    if method is None or isinstance(method, str):
+        return method, {}
+    if not isinstance(method, dict):
+        raise TypeError(f"`method` must be a string or dict, got {type(method).__name__}.")
+    if "method" not in method:
+        raise ValueError("An AutoQuantize method dictionary must contain a 'method' key.")
+
+    method_config = dict(method)
+    method_name = method_config.pop("method")
+    if not isinstance(method_name, str):
+        raise TypeError("The 'method' value in an AutoQuantize method dictionary must be a string.")
+    return method_name, method_config
+
+
 def _auto_quantize_kv_cache(
     model: nn.Module,
     constraints: dict[str, Any],
@@ -490,11 +506,10 @@ def auto_quantize(
     num_calib_steps: int = 512,
     num_score_steps: int = 128,
     verbose: bool = False,
-    method: str | None = None,
+    method: str | dict[str, Any] | None = None,
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
-    method_options: dict[str, Any] | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -656,17 +671,21 @@ def auto_quantize(
             A higher value could increase the time taken for performing ``auto_quantize``; reducing it speeds up the
             sensitivity score estimation phase and typically affects accuracy less than lowering ``num_calib_steps``.
         verbose: If True, prints the search progress/intermediate results.
-        method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
-            to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
-            linear programming search, and requires ``loss_func`` or ``forward_backward_step``),
-            ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
-            threshold-based binary search, and only requires ``forward_step`` returning logits), and
-            ``"aumann_shapley"`` (path-integral damage attributions, calibrated against a
-            directly measured reference point; label-free like ``"kl_div"``, and additionally
-            reports a ``predicted_damage`` estimate for the selected recipe. Scoring passes grow
-            with the number of candidate formats and path nodes, not with the number of
-            whole-model configurations the search considers -- see
-            :mod:`modelopt.torch.quantization._auto_quantize_shapley`).
+        method: Method to use for estimating sensitivity loss, either as a string or a dictionary
+            whose ``"method"`` entry selects the method and whose remaining entries configure it.
+            Higher loss indicates greater sensitivity to quantization. Options are ``"gradient"``
+            (default; uses gradient-based loss estimation, linear programming search, and requires
+            ``loss_func`` or ``forward_backward_step``), ``"kl_div"`` (uses KL divergence between
+            unquantized and quantized outputs, relies on threshold-based binary search, and only
+            requires ``forward_step`` returning logits), and ``"aumann_shapley"`` (path-integral
+            damage attributions, calibrated against a directly measured reference point; label-free
+            like ``"kl_div"``, and additionally reports a ``predicted_damage`` estimate for the
+            selected recipe). For example, use
+            ``{"method": "aumann_shapley", "num_path_nodes": 2}`` or
+            ``{"method": "aumann_shapley", "max_predicted_damage": 1e-3}``. Scoring passes grow
+            with the number of candidate formats and path nodes, not with the number of whole-model
+            configurations the search considers -- see
+            :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -684,9 +703,6 @@ def auto_quantize(
             active while searched modules are scored, is calibrated only with its own algorithm,
             and remains part of the effective-bits numerator and denominator. This is one
             integrated AutoQuantize operation, not staged PTQ followed by AutoQuantize.
-        method_options: Optional method-specific settings merged into the searcher config and
-            validated by the selected method (e.g. ``{"num_path_nodes": 2}`` or
-            ``{"max_predicted_damage": 1e-3}`` for ``method="aumann_shapley"``).
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -739,10 +755,13 @@ def auto_quantize(
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
 
+    method_name, method_config = _parse_auto_quantize_method(method)
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
     if is_kv_search:
         assert constraints is not None
         assert quantization_formats is not None
+        if method_config:
+            raise ValueError("cost_model='kv_cache' does not accept method-specific options.")
         return _auto_quantize_kv_cache(
             model,
             constraints,
@@ -755,13 +774,13 @@ def auto_quantize(
             num_calib_steps=num_calib_steps,
             num_score_steps=num_score_steps,
             verbose=verbose,
-            method=method,
+            method=method_name,
             checkpoint=checkpoint,
             module_search_spaces=module_search_spaces,
             fixed_quantization_config=fixed_quantization_config,
         )
 
-    method = method or "gradient"
+    method_name = method_name or "gradient"
 
     if fixed_quantization_config is None and quantization_formats is None:
         quantization_formats = [mtq.NVFP4_AWQ_LITE_CFG, mtq.FP8_DEFAULT_CFG]
@@ -856,11 +875,11 @@ def auto_quantize(
             )
 
     # Select the appropriate searcher based on method
-    if method not in AUTO_QUANTIZE_SEARCHERS:
+    if method_name not in AUTO_QUANTIZE_SEARCHERS:
         raise ValueError(
-            f"Invalid method: {method}. Valid options are {sorted(AUTO_QUANTIZE_SEARCHERS)}."
+            f"Invalid method: {method_name}. Valid options are {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
-    searcher = AUTO_QUANTIZE_SEARCHERS[method]()
+    searcher = AUTO_QUANTIZE_SEARCHERS[method_name]()
 
     search_config = {
         "quantization_formats": processed_quantization_formats,
@@ -876,18 +895,16 @@ def auto_quantize(
         "verbose": verbose,
         "checkpoint": checkpoint,
     }
-    if method_options is not None:
-        if not isinstance(method_options, dict):
-            raise TypeError(f"method_options must be a dict, got {type(method_options).__name__}")
+    if method_config:
         # Only the selected method's declared options are accepted; core inputs (loaders,
         # steps, checkpoint, ...) cannot be overridden here.
-        invalid = set(method_options) - searcher.method_options_keys
+        invalid = set(method_config) - searcher.method_config_keys
         if invalid:
             raise ValueError(
-                f"Invalid method_options {sorted(invalid)} for method={method!r}. "
-                f"Supported options: {sorted(searcher.method_options_keys)}."
+                f"Invalid options {sorted(invalid)} for method={method_name!r}. "
+                f"Supported options: {sorted(searcher.method_config_keys)}."
             )
-        search_config.update(method_options)
+        search_config.update(method_config)
     # Validate the full search config (including method-option values and cross-field
     # consistency with the constraints) before the model is converted, so a rejected
     # configuration leaves the model untouched. The searcher re-sanitizes the

@@ -47,12 +47,14 @@ scores better than a less aggressive one, which keeps estimates conservative
 (``b_unprojected`` retains the unadjusted values). ``predicted_damage`` is an estimate from
 this model, not a bound on realized deployment KL; ``damage_model["valid"]``,
 ``approximation_flags`` and ``completeness`` -- the fraction of the measured damage the
-summed contributions reproduce, 1.0 being exact -- record how far to trust it.
+summed contributions reproduce, 1.0 being exact -- record how far to trust it. Severe
+incompleteness invalidates the estimate because path gradients can miss discontinuities such as
+hard expert-routing changes.
 
 An efficient implementation of the estimator in https://arxiv.org/abs/2607.12266, validated
 empirically against it.
 
-Method-specific ``method_options``:
+Method-specific options in the ``method`` dictionary:
 
 - ``num_path_nodes`` (default 2): how many steps between the unquantized and quantized
   model to measure at.
@@ -97,6 +99,8 @@ _COVERAGE_QUADRATURE_NODES, _COVERAGE_QUADRATURE_WEIGHTS = np.polynomial.legendr
 )
 _COVERAGE_QUADRATURE_NODES = 0.5 * (_COVERAGE_QUADRATURE_NODES + 1.0)
 _COVERAGE_QUADRATURE_WEIGHTS *= 0.5
+_MIN_ATTRIBUTION_COMPLETENESS = 0.1
+_LOW_ATTRIBUTION_COMPLETENESS_FLAG = "low_attribution_completeness"
 
 
 @dataclass(frozen=True)
@@ -319,11 +323,26 @@ def _predict_damage(c, b_sum):
     return float(c * (1.0 - np.exp(-max(float(b_sum), 0.0))))
 
 
+def _attribution_completeness(corner_mass: float, f_corner: float) -> float:
+    """Return the fraction of measured corner damage explained by path attributions."""
+    return corner_mass / max(f_corner, 1e-12)
+
+
+def _has_low_attribution_completeness(completeness: float, f_corner: float) -> bool:
+    """Whether a positive finite corner has severely incomplete path attributions."""
+    return (
+        math.isfinite(f_corner)
+        and f_corner > 1e-12
+        and math.isfinite(completeness)
+        and completeness < _MIN_ATTRIBUTION_COMPLETENESS
+    )
+
+
 class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
     """AutoQuantize searcher scoring with Aumann-Shapley damage attributions (see module doc)."""
 
     method_name = "aumann_shapley"
-    method_options_keys = frozenset({"num_path_nodes", "damage_link", "max_predicted_damage"})
+    method_config_keys = frozenset({"num_path_nodes", "damage_link", "max_predicted_damage"})
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -423,7 +442,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         ):
             raise ValueError(
                 "Provide either constraints['effective_bits'] or "
-                "method_options['max_predicted_damage'], not both: the damage-bound mode "
+                "method['max_predicted_damage'], not both: the damage-bound mode "
                 "solves for the minimum effective bits itself."
             )
 
@@ -771,11 +790,17 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         corner_removed: bool,
     ) -> tuple[bool, list[str]]:
         """Return ordered diagnostic flags and whether the fit can be certified."""
+        completeness = _attribution_completeness(attributions.corner_mass, f_corner)
         diagnostics = (
             ("non_finite_measurements", not math.isfinite(f_corner), True),
             ("non_finite_scores_excluded", bool(excluded), False),
             ("corner_format_excluded", corner_removed, True),
             ("non_finite_candidate_forced", bool(forced_candidates), True),
+            (
+                _LOW_ATTRIBUTION_COMPLETENESS_FLAG,
+                _has_low_attribution_completeness(completeness, f_corner),
+                True,
+            ),
             ("heterogeneous_ladders", attributions.heterogeneous_ladders, False),
             ("negative_attribution_mass", attributions.negative_mass > 1e-3, False),
         )
@@ -843,10 +868,27 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
                 }
             )
 
+        completeness = _attribution_completeness(attributions.corner_mass, f_corner)
         damage_model["valid"] = fit.valid
         damage_model["approximation_flags"] = flags
-        damage_model["completeness"] = attributions.corner_mass / max(f_corner, 1e-12)
+        damage_model["completeness"] = completeness
+        damage_model["completeness_threshold"] = _MIN_ATTRIBUTION_COMPLETENESS
         return damage_model
+
+    @staticmethod
+    def _invalidate_incomplete_damage_model(damage_model: dict | None) -> None:
+        """Apply the current completeness policy to live or restored damage state."""
+        if not damage_model or "completeness" not in damage_model:
+            return
+        damage_model["completeness_threshold"] = _MIN_ATTRIBUTION_COMPLETENESS
+        completeness = float(damage_model["completeness"])
+        f_corner = float(damage_model.get("f_corner", float("nan")))
+        if not _has_low_attribution_completeness(completeness, f_corner):
+            return
+        flags = damage_model.setdefault("approximation_flags", [])
+        if _LOW_ATTRIBUTION_COMPLETENESS_FLAG not in flags:
+            flags.append(_LOW_ATTRIBUTION_COMPLETENESS_FLAG)
+        damage_model["valid"] = False
 
     def initialize_candidate_stats(self):
         """Initialize candidate stats, then convert raw attributions through the damage link.
@@ -880,6 +922,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
                 "valid": False,
                 "approximation_flags": ["no_scored_tokens"],
                 "completeness": float("nan"),
+                "completeness_threshold": _MIN_ATTRIBUTION_COMPLETENESS,
                 "f_corner": float("nan"),
                 "n_score_tokens": 0,
                 "damage_reference": None,
@@ -939,6 +982,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Solve either the effective-bits or predicted-damage constraint with LPS."""
+        self._invalidate_incomplete_damage_model(getattr(self, "damage_model", None))
         max_predicted_damage = self.config.get("max_predicted_damage")
         if max_predicted_damage is not None:
             recipes, is_satisfied = self._run_damage_bound_search(

@@ -677,7 +677,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
-    method_options_keys: frozenset[str] = frozenset()
+    method_config_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -2295,3 +2295,8 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
             matched_enable = enable
 
     return matched, matched_enable
+
+
+# Late import avoids a circular dependency: the Aumann-Shapley searcher builds on the
+# AutoQuantize classes above and registers itself in AUTO_QUANTIZE_SEARCHERS on import.
+from . import _auto_quantize_shapley as _auto_quantize_shapley  # noqa: E402
