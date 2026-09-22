@@ -44,9 +44,9 @@ Check logs for silent errors that may invalidate results:
 
 1. **Methodology consistency**: Verify same benchmark versions, prompt templates, sampling params, and infrastructure across all models. Flag discrepancies.
 2. **HF model card compliance**: Read the model's HuggingFace model card. Flag any deviations in inference parameters (temperature, top_p, max_new_tokens, deployment args, reasoning flags, etc.).
-3. **Reasoning model validation**: Verify temp > 0, top_p > 0, `max_tokens` = null (allow full output length).  
+3. **Reasoning model validation**: Verify temp > 0, top_p > 0; `max_tokens` / `max_new_tokens` uses the creator-disclosed maximum output length, unless the model card specifies a budget used for the applicable evaluation (see `../../evaluation/SKILL.md`, Step 3).
    NOTE: `use_reasoning: False` in adapter_config does NOT mean reasoning is disabled — it only controls the reasoning interceptor. Whether reasoning is active depends on the model's own controls (deployment args, system prompt, API payload fields, etc.).
-4. **Non-reasoning model validation**: Verify `max_tokens` = 16k
+4. **Non-reasoning model validation**: Verify `max_tokens` / `max_new_tokens` = 16384, lowered for smaller context/output caps, unless the model card specifies a budget used for the applicable evaluation.
 5. **Max model length**: Verify `max-model-len` = 131072 (leaderboard-recommended). Long context benchmarks (AA LCR, RULER) and agentic benchmarks may require a longer `max-model-len`.
 6. **RULER tasks**: Check thinking disabled, walltime=4h, rope-scaling for Qwen models
 7. **AA baseline comparison**: Compare results against Artificial Analysis published scores. Exact match not expected — flag significant deviations.

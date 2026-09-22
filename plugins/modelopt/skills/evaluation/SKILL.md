@@ -288,12 +288,14 @@ nemo_evaluator_config:
       parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
       request_timeout: 3600
       max_retries: 10
-      max_new_tokens: 65536  # see rule below
+      max_new_tokens: ???  # resolve from the token-budget rule below
       temperature: 1.0    # from model card (reasoning); adjust
       top_p: 0.95         # from model card (reasoning); adjust
 ```
 
 Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
+
+**For `max_new_tokens`, the token-budget rule below takes precedence over table recommendations and family fallbacks.**
 
 **Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
 
@@ -305,13 +307,10 @@ overridden task is reported under sampling params it did not use.
 
 #### `max_new_tokens` — mandatory model-card lookup
 
-1. **Fetch the HF model card before writing the value.** Not optional.
-2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
-   **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
-3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
-4. If the card is genuinely silent after a thorough read **and** the family table offers no usable pattern, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
-5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
-6. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
+1. **Read the HF model card before setting the value.** Identify the model's reasoning mode, creator-disclosed maximum output length, and any `max_tokens` / `max_new_tokens` used for the applicable evaluation. Cite the source and rationale in a config comment; quickstart examples are not evaluation budgets.
+2. **Non-reasoning:** use **16384**, lowered for smaller output caps or available context after input tokens. **Reasoning:** use the maximum output length allowed and disclosed by the model creators. Do not substitute 65536, a same-family budget, or the context-window size for an undisclosed output maximum.
+3. **An explicit model-card budget used for the applicable evaluation can override these defaults.** Do not apply another benchmark's budget or choose the highest number mentioned. Keep one top-level `max_new_tokens` (no per-task overrides); conflicting benchmark-specific budgets require separate configs.
+4. Verify that the output budget fits alongside the input, including accumulated multi-turn history. Surface conflicts rather than silently clipping a creator/evaluation budget. Check `finish_reason: length` after the run (`references/run-validation.md`); a higher cap does not fix runaway reasoning.
 
 #### Quantization-aware benchmark defaults
 
