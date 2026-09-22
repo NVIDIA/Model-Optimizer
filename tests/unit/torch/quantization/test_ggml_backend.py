@@ -168,3 +168,48 @@ def test_ggml_weight_is_packed_once_across_forwards(monkeypatch, num_bits, modul
             quantizer(weight)
 
     assert calls == [(4, 256)], f"expected one pack, got {len(calls)}"
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_decode_chunk_is_sized_independently_of_the_encode_chunk(
+    monkeypatch, num_bits, module
+):
+    """The decode runs every forward; the encode runs once and holds the big temporaries.
+
+    Sharing one constant between them is what made IQ2_XS four times slower end to end than
+    IQ1_S, so pin that the decode gets its own, larger chunk.
+    """
+    seen = {}
+    original = getattr(module, f"dequantize_{num_bits}")
+
+    def recording(packed_weights, weight_shape, **kwargs):
+        seen["block_chunk_size"] = kwargs["block_chunk_size"]
+        return original(packed_weights, weight_shape, **kwargs)
+
+    monkeypatch.setattr(module, f"dequantize_{num_bits}", recording)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+    )
+    quantizer(torch.randn(4, 256))
+
+    assert seen["block_chunk_size"] == module._DEFAULT_DECODE_CHUNK_SIZE
+    assert module._DEFAULT_DECODE_CHUNK_SIZE > module._DEFAULT_BLOCK_CHUNK_SIZE
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_decode_is_invariant_to_chunk_size(num_bits, module):
+    """Chunking the decode is a memory bound, not a numerical choice."""
+    torch.manual_seed(0)
+    weight = torch.randn(3, 1024, dtype=torch.bfloat16)
+    packed, shape = getattr(module, f"quantize_{num_bits}")(weight)
+    dequantize = getattr(module, f"dequantize_{num_bits}")
+
+    reference = dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=1)
+    for chunk in (2, 7, 4096):
+        assert torch.equal(
+            dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=chunk), reference
+        )

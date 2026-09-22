@@ -79,6 +79,7 @@ def fake_quantize_with_cache(
     *,
     format_name: str,
     block_chunk_size: int,
+    decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     dequantize: Callable[..., torch.Tensor],
 ) -> torch.Tensor:
@@ -109,11 +110,13 @@ def fake_quantize_with_cache(
         else:
             quantizer._quantizer_cache = None
 
+    # Sized separately from the encode chunk: packing happens once per weight and is bounded
+    # by its search temporaries, while this runs on every forward and is bounded by launches.
     reconstructed = dequantize(
         packed_weights,
         weight_shape,
         dtype=inputs.dtype,
-        block_chunk_size=block_chunk_size,
+        block_chunk_size=decode_chunk_size,
     )
     return inputs + (reconstructed - inputs).detach()
 
