@@ -73,9 +73,10 @@ the validated runs are comparable:
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
    INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant
    comparison against the released precision (e.g. INT4 vs NVFP4, as for
-   Kimi-K2.6) is still a valid result; just compare like-for-like, **state which
-   precision the baseline is**, and apply the gate relative to that baseline
-   rather than to an assumed BF16.
+   Kimi-K2.6) is still a valid result. **State which precision the baseline is**
+   and apply only an acceptance criterion explicitly defined for that precision.
+   If the requested gate is relative to BF16 and no BF16 baseline is available,
+   report that gate as inconclusive; do not reinterpret it as an FP8/INT4 gate.
 
 For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
 the two means — see the evaluation skill's `recipes/tasks/aa/scicode.md`. Fewer

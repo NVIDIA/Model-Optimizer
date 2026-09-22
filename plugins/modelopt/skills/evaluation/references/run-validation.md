@@ -29,7 +29,7 @@ single-model run:
 3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
 4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
 5. Confirm sample accounting: expected samples/repeats match completed, scored samples; no unexpected dropped/skipped/failed samples, `unknown_agent_error`, `failed_samples_policy` aborts, empty outputs, or partial result files.
-6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess output-limit termination such as `finish_reason: length` using the accounting below; it is not by itself a parsing failure. Check for parser errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 7. Complete the **Timeout and Output-Limit Accounting** below for every task,
    including non-reasoning models and successful runs.
 
@@ -70,6 +70,14 @@ Interpret the score under its actual protocol:
 - Benchmark-defined time/token limits can legitimately produce failures; retain
   them in the official metric according to that protocol. Report the limit-hit
   rates rather than automatically declaring every nonzero rate invalid.
+- A run may be **valid with warnings** when a small fraction of responses hit
+  output limits or trials hit benchmark-defined timeouts, provided sample/repeat
+  and scoring coverage are complete, limits match the intended protocol, and all
+  other validation checks pass. Report the affected counts and any observed score
+  impact; do not fail or automatically rerun solely because the rate is nonzero.
+  Apply any explicit task/user tolerance. A low rate alone is not proof of
+  negligible impact or a universal exemption for infrastructure failures, and
+  run validity alone does not establish a quantization-feasibility verdict.
 - Infrastructure failures, unexpected exclusions, or mismatched limits require
   investigation before a model-quality verdict. Unknown accounting makes this
   validation incomplete; a score may be shown as provisional, not validated.
