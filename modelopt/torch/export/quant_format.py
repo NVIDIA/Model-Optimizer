@@ -19,7 +19,7 @@ Backend-specific names live with their backend: the TensorRT-LLM checkpoint layo
 constants, for example, are in :mod:`modelopt.torch.export.trtllm.model_config`.
 """
 
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 
 QUANTIZATION_NONE = None
 QUANTIZATION_FP8 = "fp8"
@@ -41,22 +41,24 @@ QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
 QUANTIZATION_IQ1_S = "iq1_s"
 QUANTIZATION_IQ2_XXS = "iq2_xxs"
 QUANTIZATION_IQ2_XS = "iq2_xs"
+QUANTIZATION_Q8_0 = "q8_0"
 
-# Every GGML IQ format, derived from the registry the quantization backend dispatches through, so
-# export and dispatch cannot disagree about which formats exist. They share the weight-only,
-# 256-value-block, per-module-scale shape, so export treats them as one family. A format's block
-# geometry and packer are read from IQ_FORMAT_REGISTRY directly.
+# Every GGML format is derived from the registry the quantization backend dispatches through, so
+# export and dispatch cannot disagree about which formats exist. A format's block geometry and
+# packer are read from GGML_FORMAT_REGISTRY directly. IQ_FORMATS remains the vector-codebook
+# subset for callers that specifically need it.
 #
 # Registering a format therefore declares it exportable, and that is intended rather than a side
 # effect: fake quant is dequantize(quantize(w)), so a format cannot be dispatched without the
 # packer and block geometry that are all export reads.
 IQ_FORMATS = frozenset(IQ_FORMAT_REGISTRY)
+GGML_FORMATS = frozenset(GGML_FORMAT_REGISTRY)
 
 
 # Formats whose scales are purely per-module, so export never merges them across the q/k/v
 # and gate/up groups that share an input. Every other format unifies input_amax (and, for
 # NVFP4, weight_scale_2) across such a group, which only a whole-model forward can discover.
-FUSION_FREE_FORMATS = IQ_FORMATS | frozenset(
+FUSION_FREE_FORMATS = GGML_FORMATS | frozenset(
     {
         QUANTIZATION_FP8,
         QUANTIZATION_NONE,
