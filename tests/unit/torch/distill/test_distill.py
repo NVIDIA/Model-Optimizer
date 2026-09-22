@@ -184,6 +184,7 @@ def test_logits_distillation(distillation_model):
 
 
 def test_logits_distillation_with_padded_vocabulary():
+    """Truncate aligned teacher logits when the teacher has a padded vocabulary tail."""
     logits_s = torch.randn(2, 4, 8)
     logits_t = torch.randn(2, 4, 10)
     criterion = mtd.LogitsDistillationLoss(vocab_size=8)
@@ -199,10 +200,18 @@ def test_logits_distillation_with_padded_vocabulary():
 
 
 def test_logits_distillation_rejects_vocab_size_larger_than_logits():
+    """Reject a configured vocabulary size that exceeds either logits tensor."""
     criterion = mtd.LogitsDistillationLoss(vocab_size=8)
 
     with pytest.raises(ValueError, match="cannot exceed"):
         criterion(torch.randn(2, 7), torch.randn(2, 9))
+
+
+@pytest.mark.parametrize("vocab_size", [0, -1, True, 1.5])
+def test_logits_distillation_rejects_invalid_vocab_size(vocab_size):
+    """Reject non-positive, boolean, and non-integer vocabulary sizes."""
+    with pytest.raises(ValueError, match="positive integer"):
+        mtd.LogitsDistillationLoss(vocab_size=vocab_size)
 
 
 def test_minimal_state_dict_mode():

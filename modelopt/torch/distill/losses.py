@@ -48,7 +48,9 @@ class LogitsDistillationLoss(Loss):
         super().__init__()
         self._temperature: float = temperature
         self._reduction: str = reduction
-        if vocab_size is not None and vocab_size <= 0:
+        if vocab_size is not None and (
+            isinstance(vocab_size, bool) or not isinstance(vocab_size, int) or vocab_size <= 0
+        ):
             raise ValueError("`vocab_size` must be a positive integer or None.")
         self._vocab_size: int | None = vocab_size
 
