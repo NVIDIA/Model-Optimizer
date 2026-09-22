@@ -46,7 +46,8 @@ Three reverse primitives cover the conversion_mapping cases:
   ``input_scale`` are duplicated to each part (they are per-tensor and shared).
 * **Merge** — re-fuse tensors split by a conversion mapping (e.g. RADIO
   ``attention.{q,k,v}_proj`` -> ``attn.qkv``). Complete tensor groups are concatenated
-  in source-pattern order and the conversion's sub-model scope is preserved.
+  in source-pattern order and the conversion's sub-model scope is preserved. A merge
+  with per-tensor scalar quantization state is ambiguous and triggers the safe fallback.
 
 MoE experts need only **Rename**: ModelOpt's export already expands the fused,
 stacked in-memory experts (``experts.gate_up_proj`` of shape ``[E, 2F, H]``) into
@@ -180,7 +181,7 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
 def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> None:
     """Merge all complete tensor groups matched by a reversed ``WeightConverter``."""
     converter = rule.converter
-    source_patterns = tuple(converter.source_patterns)
+    source_patterns = tuple(_as_list(converter.source_patterns))
     groups: dict[str, dict[str, str]] = {}
 
     for key in state_dict:
@@ -196,6 +197,12 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
             )
         sources[source_pattern] = key
 
+    if not groups:
+        raise QuantConversionUnsupportedError(
+            f"merge rule for {source_patterns} matched no state-dict key "
+            f"(scope_prefix={getattr(converter, 'scope_prefix', None)!r})"
+        )
+
     for target_key, sources in groups.items():
         missing = [pattern for pattern in source_patterns if pattern not in sources]
         if missing:
@@ -207,6 +214,12 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
         if any(tensor.dim() == 0 for tensor in tensors):
             raise QuantConversionUnsupportedError(
                 f"cannot merge per-tensor scalar quantization state into '{target_key}'"
+            )
+        dtypes = {tensor.dtype for tensor in tensors}
+        if len(dtypes) > 1:
+            raise QuantConversionUnsupportedError(
+                f"cannot merge mixed dtypes {sorted(str(dtype) for dtype in dtypes)} "
+                f"into '{target_key}'"
             )
         if target_key in state_dict and target_key not in source_keys:
             raise QuantConversionUnsupportedError(f"merge collision on '{target_key}'")
@@ -544,6 +557,11 @@ def _build_reverse_rules(
                 # Dense fused linear survives in the state dict -> un-fuse (split).
                 split_rules.append(_dense_split_rule(rev, ops))
             elif len(ops) == 1 and isinstance(ops[0], Concatenate):
+                if not callable(getattr(rev, "rename_source_key", None)):
+                    raise QuantConversionUnsupportedError(
+                        "WeightConverter.rename_source_key is unavailable in this transformers "
+                        "version; cannot reverse a merge scope-aware"
+                    )
                 merge_rules.append(
                     _MergeRule(
                         converter=rev,
