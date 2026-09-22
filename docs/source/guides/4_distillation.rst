@@ -193,6 +193,18 @@ models is known as Soft-label Distillation. In this case, one could even omit th
 classification loss altogether if the teacher's outputs are purely preferred over whatever the
 ground truth labels may be.
 
+When teacher and student logits use the same token IDs but have different vocabulary dimensions
+because one model has a padded vocabulary tail, pass the shared vocabulary size to
+:class:`LogitsDistillationLoss <modelopt.torch.distill.losses.LogitsDistillationLoss>`:
+
+.. code-block:: python
+
+    criterion = mtd.LogitsDistillationLoss(vocab_size=151936)
+
+This restricts both tensors to their first ``vocab_size`` entries before the distributions are
+computed. Use this only when those token IDs are aligned; it does not remap vocabulary IDs or
+account for tokens that occur outside the selected range.
+
 
 .. _1: https://arxiv.org/abs/1803.03635
 

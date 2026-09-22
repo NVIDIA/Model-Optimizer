@@ -183,6 +183,28 @@ def test_logits_distillation(distillation_model):
     optimizer.step()
 
 
+def test_logits_distillation_with_padded_vocabulary():
+    logits_s = torch.randn(2, 4, 8)
+    logits_t = torch.randn(2, 4, 10)
+    criterion = mtd.LogitsDistillationLoss(vocab_size=8)
+
+    loss = criterion(logits_s, logits_t)
+
+    expected = torch.nn.functional.kl_div(
+        torch.nn.functional.log_softmax(logits_s, dim=-1),
+        torch.nn.functional.softmax(logits_t[..., :8], dim=-1),
+        reduction="mean",
+    )
+    assert torch.allclose(loss, expected)
+
+
+def test_logits_distillation_rejects_vocab_size_larger_than_logits():
+    criterion = mtd.LogitsDistillationLoss(vocab_size=8)
+
+    with pytest.raises(ValueError, match="cannot exceed"):
+        criterion(torch.randn(2, 7), torch.randn(2, 9))
+
+
 def test_minimal_state_dict_mode():
     student = tiny_mobilenet().train()
     config = {
