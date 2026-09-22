@@ -26,7 +26,7 @@ def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     """Dispatch an IQ quantizer to its format-specific implementation."""
     num_bits = getattr(quantizer, "num_bits", None)
     extra_args = getattr(quantizer, "backend_extra_args", None) or {}
-    unknown_args = set(extra_args) - {"block_chunk_size"}
+    unknown_args = set(extra_args) - {"block_chunk_size", "decode_chunk_size"}
     if unknown_args:
         raise ValueError(f"Unsupported ggml backend_extra_args: {sorted(unknown_args)}")
     if num_bits == "iq1_s":

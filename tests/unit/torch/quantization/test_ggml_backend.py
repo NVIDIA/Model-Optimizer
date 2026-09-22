@@ -66,19 +66,28 @@ def test_ggml_codecs_are_exported_from_quantization_package():
     assert mtq.quantize_iq2_xs is iq2_xs_module.quantize_iq2_xs
 
 
-def test_ggml_backend_forwards_block_chunk_size(monkeypatch):
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {"block_chunk_size": 17},
+        {"decode_chunk_size": 19},
+        {"block_chunk_size": 17, "decode_chunk_size": 19},
+    ],
+)
+def test_ggml_backend_forwards_chunk_sizes(monkeypatch, extra_args):
+    """Both chunk knobs are per-quantizer tunable; they bound different loops."""
     received = {}
 
-    def fake_quant(inputs, _quantizer, *, block_chunk_size):
-        received["block_chunk_size"] = block_chunk_size
+    def fake_quant(inputs, _quantizer, **kwargs):
+        received.update(kwargs)
         return inputs
 
     monkeypatch.setattr(backend_module, "iq1_s_fake_quant", fake_quant)
     inputs = torch.ones(1, 256)
-    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args={"block_chunk_size": 17})
+    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args=extra_args)
 
     assert ggml_fake_quant(inputs, quantizer) is inputs
-    assert received == {"block_chunk_size": 17}
+    assert received == extra_args
 
 
 def test_ggml_backend_rejects_unknown_extra_arg():
