@@ -454,32 +454,47 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
     assert not any("language_model.visual" in k for k in reverted)
 
 
-def test_scoped_weight_converter_is_refused():
-    """A scoped ``WeightConverter`` must fall back rather than emit unscoped rules.
-
-    Converter-derived rules (expert leaf renames, dense splits) match by module suffix,
-    so they cannot be confined to a sub-model subtree the way an anchored rename can.
-    No current architecture scopes a converter -- transformers only scopes
-    ``WeightRenaming``/``PrefixChange`` -- so if one ever appears, refusing the whole
-    conversion keeps the in-memory names (a warning) instead of silently rewriting an
-    identically-named module in a sibling namespace.
-    """
+def test_scoped_radio_qkv_converter_restores_hub_layout():
+    """RADIO Q/K/V tensors are re-fused in scope before hub-name renames run."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: optional dependency, guarded by the importorskip above.
-    from transformers.core_model_loading import Chunk, WeightConverter
+    from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
 
-    conv = WeightConverter(
-        source_patterns="mlp.gate_up_proj",
-        target_patterns=["mlp.gate_proj", "mlp.up_proj"],
+    qkv = WeightConverter(
+        source_patterns="attn.qkv",
+        target_patterns=["attention.q_proj", "attention.k_proj", "attention.v_proj"],
         operations=[Chunk(dim=0)],
     )
-    conv.scope_prefix = "model.language_model"
-    _set_scope_attr(conv, "base_model_prefix", "model")
-    model = types.SimpleNamespace(_weight_conversions=[conv])
+    qkv.scope_prefix = "vision_model"
+    _set_scope_attr(qkv, "base_model_prefix", "")
+    radio_blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
+    radio_blocks.scope_prefix = "vision_model"
+    _set_scope_attr(radio_blocks, "base_model_prefix", "")
+    projector = WeightRenaming("mlp1", "vision_projector.mlp1")
 
-    sd = _nvfp4_linear("model.language_model.layers.0.mlp.gate_up_proj", 8, 16)
-    with pytest.raises(QuantConversionUnsupportedError, match="scoped WeightConverter"):
-        revert_weight_conversion_quant_aware(model, sd)
+    model = types.SimpleNamespace(_weight_conversions=[qkv, radio_blocks, projector])
+
+    q = torch.full((2, 3), 1.0)
+    k = torch.full((2, 3), 2.0)
+    v = torch.full((2, 3), 3.0)
+    language_q = torch.full((2, 3), 4.0)
+    sd = {
+        "vision_model.encoder.layer.0.attention.q_proj.weight": q,
+        "vision_model.encoder.layer.0.attention.k_proj.weight": k,
+        "vision_model.encoder.layer.0.attention.v_proj.weight": v,
+        "vision_projector.mlp1.0.weight": torch.randn(3, 3),
+        # Same leaf outside the converter's scope must not start an incomplete group.
+        "language_model.layers.0.attention.q_proj.weight": language_q,
+    }
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    qkv_key = "vision_model.radio_model.model.blocks.0.attn.qkv.weight"
+    assert torch.equal(out[qkv_key], torch.cat((q, k, v), dim=0))
+    assert "mlp1.0.weight" in out
+    assert out["language_model.layers.0.attention.q_proj.weight"] is language_q
+    assert not any("vision_model.encoder" in key for key in out)
+    assert not any("vision_projector.mlp1" in key for key in out)
 
 
 def test_split_collision_raises():

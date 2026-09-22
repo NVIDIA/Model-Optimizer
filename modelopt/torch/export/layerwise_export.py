@@ -214,7 +214,7 @@ class LayerwiseExporter:
             return
         model = self._model
         assert_layerwise_export_supported(model)
-        # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
+        # Tensor transforms regroup state across keys; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
         model_type = hf_model_type(model)

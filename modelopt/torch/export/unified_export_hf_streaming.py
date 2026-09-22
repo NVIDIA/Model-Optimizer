@@ -213,22 +213,22 @@ def _parse_shard_size(size: int | str) -> int:
 
 
 def _assert_no_split_rules(model: nn.Module) -> None:
-    """Refuse to stream a model whose conversion mapping needs tensor-level splits.
+    """Refuse to stream a model whose conversion mapping regroups tensors.
 
-    A split rule regroups tensors across the whole state dict, which per-tensor name reversal
-    cannot do.
+    Split and merge rules regroup tensors across the whole state dict, which per-tensor name
+    reversal cannot do.
     """
     try:
-        split_rules, _, _ = _build_reverse_rules(model)
+        split_rules, merge_rules, _, _ = _build_reverse_rules(model)
     except Exception:
         return  # build_reverse_name_mapper reports the failure with a warning
-    if split_rules:
+    if split_rules or merge_rules:
         raise NotImplementedError(
-            "Streaming export cannot reverse tensor-level split rules in this model's "
+            "Streaming export cannot reverse tensor-level split or merge rules in this model's "
             "transformers conversion mapping: it reverses names one tensor at a time, while a "
-            "split rule regroups tensors across the whole state dict. Export the model resident "
-            "instead -- without disk/CPU offload and without FSDP2 -- so the full state dict is "
-            "built in memory."
+            "tensor transform regroups tensors across the whole state dict. Export the model "
+            "resident instead -- without disk/CPU offload and without FSDP2 -- so the full state "
+            "dict is built in memory."
         )
 
 
@@ -332,8 +332,8 @@ def _export_transformers_checkpoint_streaming(
 
     - Tied weights are dropped by *name* from ``_tied_weights_keys`` (data_ptr is meaningless
       once weights move host<->device); see the TODO below on adopting ``all_tied_weights_keys``.
-    - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
-      time, so they are rejected up front rather than exported incorrectly.
+    - Conversion mappings that need tensor-level splits or merges cannot be reversed one
+      tensor at a time, so they are rejected up front rather than exported incorrectly.
 
     Args:
         model: the full torch model to export, carrying accelerate offload hooks.
@@ -351,7 +351,7 @@ def _export_transformers_checkpoint_streaming(
         ``quantization_config`` into ``config.json``.
 
     Raises:
-        NotImplementedError: if the model's conversion mapping contains split rules.
+        NotImplementedError: if the model's conversion mapping regroups tensors.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
     # Deferred: the huggingface plugin imports transformers at module scope, and transformers
@@ -395,8 +395,8 @@ def _export_transformers_checkpoint_streaming(
     # --- Name mapper for per-tensor key reversal ---
     # Tensor names are applied inline; quant config names are handled by the caller.
     # Renames are all a per-tensor pass can reverse. The batch path additionally runs
-    # revert_weight_conversion_quant_aware() for split rules, which need the whole state
-    # dict to regroup tensors, so refuse rather than emit fused tensors under unfused
+    # revert_weight_conversion_quant_aware() for splits and merges, which need the whole
+    # state dict to regroup tensors, so refuse rather than emit tensors under mismatched
     # hub keys.
     name_mapper = _build_reverse_name_mapper_or_none(model)
 
@@ -635,8 +635,8 @@ def _export_fsdp2_checkpoint_streaming(
     # view to compare storage against. tied_map covers dict-style and MoE ties.
     tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
 
-    # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
-    # so refuse rather than write fused tensors under unfused hub names.
+    # Tensor transforms regroup state across keys, which a per-unit pass cannot do, so refuse
+    # rather than write tensors under mismatched hub names.
     name_mapper = _build_reverse_name_mapper_or_none(model)
     if name_mapper is not None:
         tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
