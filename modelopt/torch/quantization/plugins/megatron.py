@@ -876,7 +876,7 @@ if HAS_TE:
                 quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
 
         def _expert_parallel_groups(self):
-            """Return the process groups used to place fused experts globally."""
+            """Return ``(ep_group, expt_tp_group, expt_dp_group)`` for fused experts."""
             pg_collection = getattr(self, "_pg_collection", None)
             if pg_collection is not None:
                 return pg_collection.ep, pg_collection.expt_tp, pg_collection.expt_dp
