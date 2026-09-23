@@ -938,7 +938,10 @@ if HAS_TE:
                 else:
                     shared_state[k] = v
 
-            # Shared quantizer buffers: replicated across experts, plain base offsets.
+            # Shared quantizer buffers have no expert identity in their keys or offsets. Keep the
+            # dense TP/DP defaults so replica IDs distinguish EP ranks; using expt_tp/expt_dp here
+            # would collide across EP ranks. Expert-axis sharding would require an EP-aware
+            # replica ID in addition to the expert process groups.
             shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
             sharded_state_dict.update(
                 make_sharded_tensors_for_checkpoint(
