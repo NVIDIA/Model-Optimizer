@@ -39,3 +39,6 @@ quant_cfg:
   - quantizer_name: '*bmm2_output_quantizer'
     cfg:
       $import: fp8
+  - parent_class: 'nn.LayerNorm'
+    quantizer_name: '*'
+    enable: false

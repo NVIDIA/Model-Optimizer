@@ -21,7 +21,6 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import json
 import logging
 import os
-import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -44,6 +43,10 @@ from modelopt.torch.speculative.plugins.hf_dflash import (
     HFDFlashModel,
     _dpace_position_weights,
     build_target_layer_ids,
+)
+from modelopt.torch.speculative.plugins.master_weight_adamw import (
+    MasterWeightAdamW,
+    VerifyMasterWeightsCallback,
 )
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
 from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
@@ -952,153 +955,330 @@ def _converted(fp32_master_weights=None, num_hidden_layers=4):
 
 
 class TestDFlashFp32MasterWeights:
-    """``dflash_fp32_master_weights``: what is promoted, and what the optimizer inherits.
+    """``dflash_fp32_master_weights``: the extra precision lives in the OPTIMIZER.
 
-    The parameter dtype is the visible half; the OPTIMIZER's dtype is the point of the
-    change, and it is not decided until AdamW allocates its moments with ``zeros_like(p)``
-    inside the first step. A test that looked only at parameters would pass while the
-    feature was broken.
+    The model is untouched -- draft and frozen base share a dtype either way -- so what has
+    to be pinned is that the optimizer holds an fp32 master copy and fp32 moments, and that
+    a resume does not quietly round them back down.
     """
 
-    def test_flag_off_leaves_the_draft_in_the_base_dtype(self):
-        model = _converted(fp32_master_weights=False)
-        assert model._base_model.dtype == torch.bfloat16
-        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
-
-    def test_flag_on_promotes_only_the_draft(self):
-        model = _converted(fp32_master_weights=True)
-        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.float32}
-        # The frozen base is deliberately left alone: no trainable parameters, no
-        # optimizer state, and promoting it would change the hidden states the draft
-        # is trained against.
-        assert model._base_model.dtype == torch.bfloat16
-
-    def test_adam_moments_follow_the_parameters(self):
-        """The half that actually matters, and the one a parameter check would miss.
-
-        The forward runs under ``torch.autocast`` because the flag needs one: a promoted
-        fp32 draft is fed bf16 hidden states by the frozen target. HF Trainer supplies it
-        under ``TrainingArguments.bf16``, so this mirrors the training path.
-        """
-        moments = {}
-        for flag, expected in ((False, torch.bfloat16), (True, torch.float32)):
+    def test_the_draft_matches_the_base_dtype_either_way(self):
+        """The flag must not move the model, or something has to reconcile dtypes again."""
+        for flag in (False, True):
             model = _converted(fp32_master_weights=flag)
-            model.train()
-            trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
-            optimizer = torch.optim.AdamW(trainable, lr=1e-4)
-            with torch.autocast("cpu", dtype=torch.bfloat16):
-                out = model(**_dflash_batch(model.dflash_config.vocab_size))
-            out.loss.backward()
-            optimizer.step()
+            assert model._base_model.dtype == torch.bfloat16
+            assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
 
-            seen = {
-                state[key].dtype
-                for state in optimizer.state.values()
-                for key in ("exp_avg", "exp_avg_sq")
-            }
-            assert seen == {expected}, f"flag={flag}: moment dtypes {seen}"
-            moments[flag] = seen
-        assert moments[False] != moments[True]
-
-    def test_promotion_keeps_the_full_precision_draw(self):
-        """Promoted and unpromoted runs share a draw; only the stored precision differs.
-
-        The draft is drawn in fp32 by ``_init_weights``. An unpromoted run rounds that draw
-        to the base model's dtype; a promoted one keeps it. So the two arms of a
-        bf16-vs-fp32 comparison start from the same initialization, each at the precision it
-        trains in, rather than from two different draws.
-        """
-        torch.manual_seed(1234)
-        bf16_model = _converted(fp32_master_weights=False)
-        torch.manual_seed(1234)
-        fp32_model = _converted(fp32_master_weights=True)
-
-        bf16_params = dict(bf16_model.dflash_module.named_parameters())
-        fp32_params = dict(fp32_model.dflash_module.named_parameters())
-        assert bf16_params.keys() == fp32_params.keys()
-        keeps_finer_bits = False
-        for name, bf16_param in bf16_params.items():
-            promoted = fp32_params[name]
-            assert promoted.dtype == torch.float32
-            # Same draw: rounding the promoted copy down recovers the unpromoted arm exactly.
-            assert torch.equal(promoted.to(torch.bfloat16), bf16_param), name
-            keeps_finer_bits |= not torch.equal(promoted, bf16_param.float())
-        assert keeps_finer_bits, "the promoted draft should hold bits bf16 cannot represent"
-
-    def test_promotion_survives_a_checkpoint_restore(self):
-        """A resumed run must not quietly drop back to the base dtype.
-
-        ``modify()`` runs with the base on meta during ``from_pretrained``, so it cannot
-        place the draft at all. If nothing re-applies it, the draft resumes at the loaded
-        dtype and AdamW allocates its moments to match, which switches the feature off for
-        the whole remainder of a long run.
-        """
-        mto.enable_huggingface_checkpointing()
+    def test_forward_and_generate_need_no_autocast(self):
+        """Nothing in the model holds a dtype the rest of it does not, so nothing wraps."""
         model = _converted(fp32_master_weights=True)
-        reference = {n: p.detach().clone() for n, p in model.dflash_module.named_parameters()}
+        model.train()
+        assert torch.isfinite(model(**_dflash_batch(model.dflash_config.vocab_size)).loss)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
 
-        with tempfile.TemporaryDirectory() as tmp:
-            model.save_pretrained(tmp)
-            # `dtype="auto"` is what the resume path in examples/speculative_decoding/main.py
-            # uses, and it is also what collapses every tensor onto the base model's dtype.
-            restored = AutoModelForCausalLM.from_pretrained(tmp, dtype="auto")
+    def test_master_and_moments_are_fp32_for_a_bf16_draft(self):
+        """The half that matters: AdamW's moments follow the master, not the parameter."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        optimizer.step()
 
-            # What the restore leaves behind on its own, which is the bug this guards: the
-            # draft comes back at the base model's dtype with the flag still set.
-            assert {p.dtype for p in restored.dflash_module.parameters()} == {
-                restored._base_model.dtype
-            }
+        assert {p.dtype for p in trainable} == {torch.bfloat16}
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in optimizer.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
 
-            restored.restore_draft_precision(tmp)
-
-        assert {p.dtype for p in restored.dflash_module.parameters()} == {torch.float32}
-        assert hasattr(restored.dflash_module, "rotary_emb")
-        # The checkpoint stores the draft in fp32; reloading at the stored dtype is what
-        # keeps a resume from costing the run a rounding of its master weights.
-        for name, param in restored.dflash_module.named_parameters():
-            assert torch.equal(param.detach(), reference[name]), name
-
-        restored.train()
-        optimizer = torch.optim.AdamW(
-            [p for p in restored.dflash_module.parameters() if p.requires_grad], lr=1e-4
-        )
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            out = restored(**_dflash_batch(restored.dflash_config.vocab_size))
-        out.loss.backward()
+    def test_plain_adamw_leaves_the_moments_in_bf16(self):
+        """The control, and the reason the flag exists at all."""
+        model = _converted(fp32_master_weights=False)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
         optimizer.step()
         assert {
             state[key].dtype
             for state in optimizer.state.values()
             for key in ("exp_avg", "exp_avg_sq")
-        } == {torch.float32}
+        } == {torch.bfloat16}
 
-    def test_generation_names_the_flag_instead_of_failing_on_a_matmul(self):
-        """AR validation runs outside the Trainer's autocast, so it has to say so.
+    def test_resume_does_not_round_the_master_back_down(self):
+        """``Optimizer.load_state_dict`` casts float state to the parameter's dtype.
 
-        ``pseudo_speculative_generate`` is called directly by ``AcceptanceRateValidation``
-        under ``estimate_ar``, which is outside the wrapper HF Trainer puts around
-        ``forward``. Without the guard a promoted draft dies there on a bare
-        ``F.linear`` dtype mismatch, potentially hours into a run.
+        For a bf16 model that silently rounds the master copy and both moments on every
+        resume, which is precisely the loss this optimizer exists to avoid and produces no
+        error at all. ``MasterWeightAdamW`` puts them back from the incoming state dict.
         """
         model = _converted(fp32_master_weights=True)
-        model.eval()
-        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-2)
+        for _ in range(2):
+            model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+        saved = optimizer.state_dict()
+        reference = {
+            i: {k: v.clone() for k, v in state.items() if isinstance(v, torch.Tensor)}
+            for i, state in saved["state"].items()
+        }
 
+        restored = MasterWeightAdamW(trainable, lr=1e-2)
+        restored.load_state_dict(saved)
+
+        params = [p for group in restored.param_groups for p in group["params"]]
+        for i, state in reference.items():
+            got = restored.state[params[i]]
+            for key in ("master", "exp_avg", "exp_avg_sq"):
+                assert got[key].dtype == torch.float32, f"{key} came back as {got[key].dtype}"
+                assert torch.equal(got[key], state[key]), key
+
+    def test_resume_from_plain_adamw_upcasts_instead_of_crashing(self):
+        """The upgrade path every in-flight job takes, and the one that used to crash.
+
+        A checkpoint written before this flag defaulted to ``True`` holds moments but no
+        master, so an all-or-nothing state guard skipped the master and ``step()`` died on a
+        bare ``KeyError``. Those moments are also bf16, so restoring them verbatim would trade
+        the crash for a run where the feature is silently absent.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+
+        plain = torch.optim.AdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        model.zero_grad(set_to_none=True)
+        saved = plain.state_dict()
+        assert {
+            state[key].dtype for state in plain.state.values() for key in ("exp_avg", "exp_avg_sq")
+        } == {torch.bfloat16}
+
+        resumed = MasterWeightAdamW(trainable, lr=1e-2)
+        resumed.load_state_dict(saved)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        resumed.step()
+
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in resumed.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+        assert {p.dtype for p in trainable} == {torch.bfloat16}
+
+    def test_resume_keyed_by_name_still_restores_fp32(self):
+        """FSDP2 restores through torch's distributed checkpoint, which keys state by FQN.
+
+        It hands ``load_state_dict`` a dict whose ids are strings rather than the integers a
+        plain ``torch.save`` round trip produces, and does not convert them back. Anything
+        that only recognises integer ids silently restores nothing and leaves the base class's
+        downcast to the parameter dtype standing.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        optimizer.step()
+
+        saved = optimizer.state_dict()
+        names = {i: f"dflash_module.p{i}" for i in range(len(trainable))}
+        saved["state"] = {names[i]: state for i, state in saved["state"].items()}
+        for group in saved["param_groups"]:
+            group["params"] = [names[i] for i in group["params"]]
+
+        restored = MasterWeightAdamW(trainable, lr=1e-2)
+        restored.load_state_dict(saved)
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in restored.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+
+    def test_resume_does_not_restore_the_fused_kernel(self):
+        """``load_state_dict`` takes every hyperparameter from the checkpoint, not this run.
+
+        ``TrainingArguments.optim`` defaults to ``adamw_torch_fused``, so a checkpoint written
+        before the flag was on carries ``fused``; restoring it undoes the switch to foreach
+        that building this optimizer performs, and ``step()`` refuses fused before it reaches
+        the master. The resume would fail on the most ordinary checkpoint there is.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        model.zero_grad(set_to_none=True)
+        saved = plain.state_dict()
+        for group in saved["param_groups"]:
+            group["fused"] = True
+
+        resumed = MasterWeightAdamW(trainable, lr=1e-2, foreach=True)
+        resumed.load_state_dict(saved)
+        assert not any(group["fused"] for group in resumed.param_groups)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        resumed.step()
+
+    def test_resume_drops_a_master_the_parameter_no_longer_needs(self):
+        """A master left on an fp32 parameter goes stale and later rolls the weights back.
+
+        ``step()`` updates an fp32 parameter directly, so a master restored onto one never
+        advances again -- but it is still written to the next checkpoint, and the resume after
+        that copies it over a parameter thousands of steps newer.
+        """
+        bf16 = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        source = MasterWeightAdamW(bf16.parameters(), lr=1e-2)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        source.step()
+        assert all("master" in state for state in source.state.values())
+
+        fp32 = torch.nn.Linear(16, 16, bias=False)
+        resumed = MasterWeightAdamW(fp32.parameters(), lr=1e-2)
+        resumed.load_state_dict(source.state_dict())
+        assert all("master" not in state for state in resumed.state.values())
+
+    def test_a_restore_that_skipped_load_state_dict_heals_the_master_too(self):
+        """Not every restore reaches ``load_state_dict`` -- DeepSpeed never calls it.
+
+        On those paths the base class's cast to the parameter's dtype stands, and a bf16
+        master reads as present, so it survives the per-key creation and is then updated in
+        bf16. That is the loss this optimizer exists to prevent, arrived at from the other
+        side, and the functional update promotes rather than raising, so nothing says so.
+        """
+        bf16 = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        optimizer = MasterWeightAdamW(bf16.parameters(), lr=1e-2)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        optimizer.step()
+        for state in optimizer.state.values():
+            for key in ("master", "exp_avg", "exp_avg_sq"):
+                state[key] = state[key].to(torch.bfloat16)
+
+        bf16.zero_grad(set_to_none=True)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        optimizer.step()
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in optimizer.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+
+    def test_a_closure_may_call_backward(self):
+        """``step(closure)`` is documented to re-evaluate the loss, which means ``backward()``."""
+        model = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        optimizer = MasterWeightAdamW(model.parameters(), lr=1e-2)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = model(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean()
+            loss.backward()
+            return loss
+
+        assert optimizer.step(closure) is not None
+
+    def test_differentiable_is_refused_rather_than_ignored(self):
+        """The update runs on a master and is copied back, so a graph would stop at the copy."""
+        model = torch.nn.Linear(16, 16, bias=False)
+        optimizer = MasterWeightAdamW(model.parameters(), lr=1e-2, differentiable=True)
+        model(torch.randn(4, 16)).pow(2).mean().backward()
+        with pytest.raises(ValueError, match="differentiable"):
+            optimizer.step()
+
+    def test_the_callback_stays_armed_when_no_step_landed(self):
+        """An empty optimizer state means nothing happened, not that everything is fine.
+
+        A ``GradScaler`` can skip the first step on a non-finite gradient; consuming the
+        tripwire there would pass the whole run on a check that examined nothing.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=0), None)
+        callback.on_step_end(None, SimpleNamespace(global_step=1), None, optimizer=plain)
+        assert not callback._checked
+
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
         with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
-            model.pseudo_speculative_generate(input_ids, steps=2)
+            callback.on_step_end(None, SimpleNamespace(global_step=2), None, optimizer=plain)
 
-        # Under the autocast the flag needs, the same call goes through.
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
-        assert draft_tokens.shape[0] == 1
+    def test_an_fp32_model_is_plain_adamw(self):
+        """No master copy where there is no precision to recover, and identical arithmetic."""
+        torch.manual_seed(3)
+        a = torch.nn.Linear(16, 16, bias=False)
+        torch.manual_seed(3)
+        b = torch.nn.Linear(16, 16, bias=False)
+        master_opt = MasterWeightAdamW(a.parameters(), lr=1e-2)
+        plain_opt = torch.optim.AdamW(b.parameters(), lr=1e-2)
+        for step in range(4):
+            x = torch.randn(4, 16, generator=torch.Generator().manual_seed(step))
+            a(x).pow(2).mean().backward()
+            b(x).pow(2).mean().backward()
+            master_opt.step()
+            plain_opt.step()
+            a.weight.grad = b.weight.grad = None
+        assert torch.equal(a.weight, b.weight)
+        assert "master" not in next(iter(master_opt.state.values()))
 
-    def test_the_guard_is_silent_when_the_flag_is_off(self):
-        """An unpromoted draft matches the base dtype, so nothing needs reconciling."""
-        model = _converted(fp32_master_weights=False)
-        model.eval()
-        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
-        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
-        assert draft_tokens.shape[0] == 1
+    def test_the_callback_refuses_a_loop_that_forgot_the_optimizer(self):
+        """Wiring the optimizer is the caller's job, so a missed wiring has to be loud."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        state = SimpleNamespace(global_step=1)
+
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            VerifyMasterWeightsCallback().on_step_end(None, state, None, optimizer=plain)
+
+        model.zero_grad(set_to_none=True)
+        correct = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        correct.step()
+        VerifyMasterWeightsCallback().on_step_end(None, state, None, optimizer=correct)
+
+    def test_the_callback_still_checks_after_a_resume(self):
+        """A resume restores ``global_step``, so an exact step number never matches again.
+
+        That would leave the check dead on the one path where the fp32 state can be lost
+        without anything else noticing -- a restore that does not go through
+        ``MasterWeightAdamW.load_state_dict`` comes back at the parameter's dtype.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=4210), None)
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            callback.on_step_end(None, SimpleNamespace(global_step=4211), None, optimizer=plain)
+
+    def test_the_callback_checks_once_and_then_stays_out_of_the_way(self):
+        """It runs per ``train()`` call, not per step -- the state cannot change mid-run."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        correct = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        correct.step()
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=0), None)
+        callback.on_step_end(None, SimpleNamespace(global_step=1), None, optimizer=correct)
+        assert callback._checked
+        # a second step must not re-check, so a bf16 optimizer handed over later is ignored
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model.zero_grad(set_to_none=True)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        callback.on_step_end(None, SimpleNamespace(global_step=2), None, optimizer=plain)
 
 
 class TestDFlashDraftActivationCheckpointing:

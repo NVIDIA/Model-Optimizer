@@ -102,6 +102,32 @@ def test_iq2_xs_dequantizes_pinned_scale_factor():
     assert torch.equal(decoded, torch.full((1, 256), 43 * 31 / 8, dtype=torch.float32))
 
 
+@pytest.mark.parametrize("sign_index", [0b0000001, 0b0000011, 0b0000111, 0b1010101, 0b1111111])
+def test_iq2_xs_dequantizes_the_implied_eighth_sign_bit(sign_index):
+    """The eighth sign is not stored; it is the parity of the seven that are.
+
+    The pinned-scale test above only covers sign_index 0, where every value is positive
+    whether or not the implied bit is derived correctly. These indices vary which payload
+    bits are set so the parity actually has to be computed.
+    """
+    codes = 511 | (sign_index << 9)  # entry 511 holds eight 43s
+    packed = torch.zeros((1, 1, 74), dtype=torch.uint8)
+    packed[0, 0, :2] = torch.tensor([1.0], dtype=torch.float16).view(torch.uint8)
+    packed[0, 0, 2:66:2] = codes & 0xFF
+    packed[0, 0, 3:66:2] = codes >> 8
+    packed[0, 0, 66:] = 0xFF  # local code 15 in both nibbles
+
+    decoded = dequantize_iq2_xs(packed, torch.tensor([1, 256]), dtype=torch.float32)
+
+    payload_bits = [(sign_index >> bit) & 1 for bit in range(7)]
+    magnitude = 43 * 31 / 8  # entry value 43, local code 15 -> (2 * 15 + 1) / 8
+    expected_group = torch.tensor(
+        [-magnitude if bit else magnitude for bit in (*payload_bits, sum(payload_bits) % 2)],
+        dtype=torch.float32,
+    )
+    assert torch.equal(decoded.reshape(32, 8), expected_group.expand(32, 8))
+
+
 def test_iq2_xs_requires_complete_last_dimension_blocks():
     with pytest.raises(ValueError, match="last weight dimension"):
         quantize_iq2_xs(torch.ones(2, 257))

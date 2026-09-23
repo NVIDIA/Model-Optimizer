@@ -49,6 +49,7 @@
 # BF16 before quantizers are inserted, so the scales below are calibrated against BF16
 # weights rather than against the shipped FP8.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   nvfp4: configs/numerics/nvfp4
@@ -57,7 +58,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     qwen3_5_moe_text: NVFP4 (MSE static weights, dynamic inputs) on the routed experts + FP8 (W8A8)
     on all self-attention AND all linear-attention projections; everything else BF16; FP8 KV cache

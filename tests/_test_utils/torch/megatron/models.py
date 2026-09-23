@@ -25,6 +25,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec,
     get_gpt_mtp_block_spec,
 )
+from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec as te_hybrid_stack_spec
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_rank,
@@ -37,7 +38,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import MLATransformerConfig, TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
-from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
+from modelopt.torch.utils.plugins.megatron_layer_specs import te_hybrid_stack_spec_sequential_mlp
 
 try:
     from megatron.core.extensions.transformer_engine import TENorm
@@ -444,11 +445,11 @@ def get_mcore_hybrid_model(
         "share_embeddings_and_output_weights": False,
         "position_embedding_type": "none",
     }
-    spec = (
-        get_te_hybrid_stack_spec(moe_grouped_gemm)
-        if transformer_impl == "transformer_engine"
-        else get_hybrid_stack_modelopt_spec(remap_te_layernorm=True)
-    )
+    if transformer_impl == "transformer_engine":
+        # The upstream TE hybrid stack spec hardcodes TEGroupedMLP for MoE.
+        spec = te_hybrid_stack_spec if moe_grouped_gemm else te_hybrid_stack_spec_sequential_mlp()
+    else:
+        spec = get_hybrid_stack_modelopt_spec(remap_te_layernorm=True)
     model = HybridModel(
         hybrid_stack_spec=spec, hybrid_layer_pattern=hybrid_layer_pattern, **common_kwargs
     )

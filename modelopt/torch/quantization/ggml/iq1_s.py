@@ -61,8 +61,14 @@ IQ1_S_EFFECTIVE_BITS = IQ1_S_BLOCK_BYTES * 8 / IQ1_S_BLOCK_SIZE
 _IQ1_S_DELTA = 0.125
 _IQ1_S_NATIVE_MAX = 16.875
 _IQ1_S_SCALE_ANCHOR = 0.61
-# At 1024 blocks, each largest IQ1_S search temporary is about 16 MiB in FP32.
+# Bounds the torch encode fallback, whose codebook search holds the large temporaries: at
+# 1024 blocks each is about 16 MiB in FP32. The CUDA encoder ignores this entirely.
 _DEFAULT_BLOCK_CHUNK_SIZE = 1024
+# The decode's temporaries are far smaller, so it is launch-bound rather than memory-bound
+# and wants a bigger chunk -- and unlike packing it is not cached, so it runs on every
+# forward. Measured decoding a 2048x5632 weight: 66.5 ms at 256 blocks, 4.2 ms at 4096,
+# where the transient peak is +42 MiB.
+_DEFAULT_DECODE_CHUNK_SIZE = 4096
 
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
@@ -198,7 +204,7 @@ def dequantize_iq1_s(
     weight_shape: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    block_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
 ) -> torch.Tensor:
     """Decode GGML-compatible IQ1_S payload bytes."""
     shape = validate_packed_weights(
@@ -234,6 +240,7 @@ def iq1_s_fake_quant(
     quantizer,
     *,
     block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
 ) -> torch.Tensor:
     """IQ1_S weight backend for TensorQuantizer, with pass-through backward."""
     if getattr(quantizer, "num_bits", None) != "iq1_s":
@@ -243,6 +250,7 @@ def iq1_s_fake_quant(
         quantizer,
         format_name="iq1_s",
         block_chunk_size=block_chunk_size,
+        decode_chunk_size=decode_chunk_size,
         quantize=quantize_iq1_s,
         dequantize=dequantize_iq1_s,
     )

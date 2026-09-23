@@ -65,8 +65,10 @@ benchmarks:
     solver:
       service: model
       timeout_strategy: max          # canonical TB2.1; "task" = leaderboard-comparable
+      run_timeout: 14400             # ModelOpt 4h agent budget; same for baseline/candidate
       agent_kwargs: {llm_kwargs: {timeout: 3600}}
     sandbox:
+      max_task_lifetime_sec: 21600   # ModelOpt 6h: agent budget plus setup/verification
       region: us-east-1              # MUST match the region in ${HARBOR_ECR_REPOSITORY} (SWE-bench: us-east-2 + ${HARBOR_SWEBENCH_ECR_REPOSITORY})
       ecr_repository: ${HARBOR_ECR_REPOSITORY}      # from modelopttools:eval-config
       concurrency: 50
@@ -77,7 +79,7 @@ cluster:
   hostname: ???                      # login FQDN
   username: ${oc.env:USER}
   account: ???
-  walltime: "04:00:00"               # auto_resume chains across windows
+  walltime: "08:00:00"               # partition must allow; leave room for model startup + 4h trials
   shards: 1                          # N = N nodes (each redeploys vLLM)
   eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (0.5.0.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
   sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"nel-next agentic eval"}}'
