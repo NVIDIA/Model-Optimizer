@@ -630,7 +630,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""
         Gradient computation where fake quantization is pass through is called
         'Straight-Through Estimator (STE)'. STE does not require saving of the input tensor for
-        performing backward pass and hence consumes less memory.
+        performing backward pass and hence requires less memory.
 
         If set to False, we will use STE with zeroed outlier gradients. This setting may
         yield better QAT accuracy depending on the quantization format. However, this setting
@@ -773,14 +773,15 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
-    calib_mutates_weights: bool = ModeloptField(
-        default=True,
-        title="Whether layerwise calibration mutates layer weights.",
+    calib_mutates_weights: bool | None = ModeloptField(
+        default=None,
+        title="Whether layerwise calibration writes layer weights back.",
         description=(
-            "Set to False only for algorithms that update solely "
-            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
-            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
-            "silently lose updates on resume."
+            "Leave unset (the default): the right value is a property of the algorithm, not a "
+            "preference, and is derived from what the algorithm declares it writes. Writing "
+            "back is always safe and merely costs I/O; skipping it silently discards in-place "
+            "weight updates, so ``False`` is rejected for a weight-mutating algorithm "
+            "(GPTQ, AWQ, SmoothQuant)."
         ),
     )
 
@@ -798,11 +799,6 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
-
-    # Whether this algorithm mutates ``layer.weight`` during calibration. Amax-only
-    # algorithms (max/mse/local_hessian) set this False; it gates whether
-    # ``layerwise.calib_mutates_weights=False`` is allowed.
-    _mutates_weights: ClassVar[bool] = True
 
     method: Literal[None] = ModeloptField(
         None,
@@ -841,13 +837,24 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
-        """Enforce the ``calib_mutates_weights=False`` whitelist."""
-        if not self.layerwise.calib_mutates_weights and self._mutates_weights:
-            raise ValueError(
-                f"Algorithm '{self.method}' mutates layer weights in-place; "
-                "calib_mutates_weights=False would lose those updates on resume. "
-                "Only max/mse/local_hessian (amax-only) support this flag."
-            )
+        """Reject ``calib_mutates_weights=False`` for an algorithm that writes weights.
+
+        The fact is sourced from the algorithm's declared capabilities rather than mirrored
+        into a flag here, so there is one statement of it. The import is function-local
+        because this module is imported *by* the capability model; only an explicit ``False``
+        -- never the derived default -- reaches the lookup, so it cannot fire while that
+        module is still loading.
+        """
+        if self.layerwise.calib_mutates_weights is False:
+            from .algo_cfg import WEIGHT, capabilities_for
+
+            caps = capabilities_for(self.method)
+            if caps is not None and WEIGHT in caps.may_write:
+                raise ValueError(
+                    f"Algorithm '{self.method}' mutates layer weights in-place; "
+                    "calib_mutates_weights=False would lose those updates on resume. "
+                    "Leave it unset to derive the right value from the algorithm."
+                )
         return self
 
 
@@ -908,8 +915,6 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
-    _mutates_weights: ClassVar[bool] = False
-
     method: Literal["max"] = ModeloptField("max")
 
     distributed_sync: bool | None = ModeloptField(
@@ -957,8 +962,6 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
 
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
-
-    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -1011,8 +1014,6 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
-
-    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
@@ -1262,8 +1263,6 @@ class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
     See :class:`NVFP4ActHeadroomCalibrator
     <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
     """
-
-    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
 

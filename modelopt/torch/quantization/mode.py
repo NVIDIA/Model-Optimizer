@@ -17,6 +17,8 @@
 
 from abc import abstractmethod
 from collections.abc import Callable
+from dataclasses import replace
+from typing import Any, cast
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ModelLikeModule
@@ -25,12 +27,23 @@ from modelopt.torch.opt.mode import (
     ConvertReturnType,
     ModeConfigList,
     ModeDescriptor,
+    ModeType,
     RestoreEntrypoint,
     UpdateEntrypoint,
     _ModeRegistryCls,
 )
 from modelopt.torch.opt.searcher import ForwardLoop
 
+from .algo_cfg import (
+    ACTS,
+    INPUT_AMAX,
+    PRE_QUANT_SCALE,
+    WEIGHT,
+    WEIGHT_AMAX,
+    WRITABLE_TOKENS,
+    AlgoCapabilities,
+    capabilities_for,
+)
 from .compress import compress_convert, compress_restore, update_compress_metadata
 from .config import (
     AWQClipCalibConfig,
@@ -212,6 +225,17 @@ class AutoQuantizeModeDescriptor(QuantizeModeDescriptor):
         return "auto_quantize"
 
 
+def _writes_weights(method: str | None, cfg: dict) -> bool:
+    """Does ``method``, configured this way, update layer weights in place?
+
+    One derivation, read off the algorithm's declared ``may_write``. An unrecognized method
+    is assumed to write weights, matching the conservative default the capability model uses
+    everywhere else: over-declaring costs a weight write-back, under-declaring loses results.
+    """
+    caps = capabilities_for(method, cfg)
+    return caps is None or WEIGHT in caps.may_write
+
+
 def wrapped_calib_func(
     model: ModelLikeModule,
     config: QuantizeAlgorithmConfig,
@@ -233,7 +257,18 @@ def wrapped_calib_func(
     export_dir = layerwise_cfg.get("export_dir")
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", True)
     save_every = layerwise_cfg.get("save_every", 1)
-    calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
+    # Derived from capabilities unless the caller insisted: writing back is always safe and
+    # merely costs I/O, while skipping it silently discards in-place weight updates.
+    mutates_weights = _writes_weights(method, kwargs)
+    calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights")
+    if calib_mutates_weights is None:
+        calib_mutates_weights = mutates_weights
+    elif not calib_mutates_weights and mutates_weights:
+        raise ValueError(
+            f"Calibration algorithm '{method}' mutates layer weights in place, so "
+            "layerwise.calib_mutates_weights=False would lose those updates on resume. "
+            "Leave it unset to derive the right value from the algorithm."
+        )
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -306,6 +341,45 @@ class BaseCalibrateModeDescriptor(ModeDescriptor):
     # Override to False when the algorithm requires full-model context and
     # cannot run per decoder layer (e.g. needs ModeloptStateManager on the root).
     _supports_layerwise: bool = True
+
+    # For `algo_cfg` plan validation. Deliberately pessimistic so a user-registered algorithm
+    # is over-constrained rather than silently exempt from every check. Override to be accurate.
+    _capabilities: AlgoCapabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="both",
+        may_write=WRITABLE_TOKENS,
+        scopable=False,
+    )
+
+    @classmethod
+    def capabilities_for_cfg(cls, cfg: dict) -> AlgoCapabilities:
+        """Capabilities given this algorithm's own kwargs.
+
+        Static for almost everything; override when a config field genuinely changes what the
+        algorithm reads or writes (see :class:`LSQModeDescriptor`).
+        """
+        return cls._capabilities
+
+    @classmethod
+    def _with_sub_algorithm(
+        cls, caps: AlgoCapabilities, sub: Any, own_writes: frozenset[str]
+    ) -> AlgoCapabilities:
+        """Fold a delegated weight-scale algorithm's capabilities into ``caps``.
+
+        `lsq` and `nvfp4_act_headroom` both run a configurable algorithm before their own work,
+        so what they read and write is theirs plus that algorithm's, and both fields travel.
+        """
+        if isinstance(sub, ModeloptBaseConfig):
+            sub = sub.model_dump(exclude_unset=True)
+        sub_cfg = sub if isinstance(sub, dict) else {"method": sub}
+        sub_caps = capabilities_for(sub_cfg.get("method"), sub_cfg)
+        if sub_caps is None:
+            return replace(caps, may_write=own_writes | WRITABLE_TOKENS)
+        return replace(
+            caps,
+            may_write=own_writes | sub_caps.may_write,
+            requires=caps.requires | sub_caps.requires,
+        )
 
     def __init__(self, *args, **kwargs):
         """Initialize Base calibrate mode descriptor."""
@@ -405,6 +479,16 @@ class _CalibrateModeRegistryCls(_ModeRegistryCls):
         )
         return super().register_mode(cls_descriptor)
 
+    # `register_mode` guarantees this, but the base getters are typed to the wider
+    # `ModeDescriptor`; narrowing here states the invariant once instead of at each call site.
+    def get(self, mode: ModeType) -> "BaseCalibrateModeDescriptor | None":
+        """Get the calibration mode descriptor by value, or ``None`` if unregistered."""
+        return cast("BaseCalibrateModeDescriptor | None", super().get(mode))
+
+    def __getitem__(self, mode: ModeType) -> "BaseCalibrateModeDescriptor":
+        """Get the calibration mode descriptor by value, or throw an error."""
+        return cast("BaseCalibrateModeDescriptor", super().__getitem__(mode))
+
 
 CalibrateModeRegistry = _CalibrateModeRegistryCls("calibrate_algos")
 
@@ -432,6 +516,12 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = max_calibrate
 
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=False,
+        refines="both",
+        may_write=frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+    )
+
 
 @CalibrateModeRegistry.register_mode
 class NVFP4ActHeadroomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
@@ -449,6 +539,24 @@ class NVFP4ActHeadroomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = nvfp4_act_headroom_calibrate
 
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=False,
+        refines="input",
+        requires=frozenset({ACTS}),
+        # Headroom-aware for NVFP4 activations, plain max elsewhere -- hence `weight_amax`.
+        may_write=frozenset({INPUT_AMAX, WEIGHT_AMAX}),
+        scopable=False,
+    )
+
+    @classmethod
+    def capabilities_for_cfg(cls, cfg: dict) -> AlgoCapabilities:
+        """Fold the configured ``weight_scale_algorithm``'s capabilities into this one's own."""
+        return cls._with_sub_algorithm(
+            cls._capabilities,
+            cfg.get("weight_scale_algorithm") or {"method": "max"},
+            frozenset({INPUT_AMAX, WEIGHT_AMAX}),
+        )
+
 
 @CalibrateModeRegistry.register_mode
 class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
@@ -460,6 +568,14 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+
+    # Runs `max_calibrate` first unless told to skip, so it seeds `input_amax` too.
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=False,
+        refines="weight",
+        requires=frozenset({WEIGHT, WEIGHT_AMAX}),
+        may_write=frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+    )
 
 
 @CalibrateModeRegistry.register_mode
@@ -477,6 +593,13 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = local_hessian_calibrate
 
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="weight",
+        requires=frozenset({WEIGHT, WEIGHT_AMAX, ACTS}),
+        may_write=frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+    )
+
 
 @CalibrateModeRegistry.register_mode
 class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
@@ -488,6 +611,16 @@ class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
         return SmoothQuantCalibConfig
 
     _calib_func = smoothquant
+
+    # Smoothers fold a per-channel scale into the weight and keep its inverse on the activation
+    # side. None can follow another: `apply_pre_quant_scale_and_smooth` requires a clean slate.
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="both",
+        requires=frozenset({ACTS}),
+        may_write=frozenset({PRE_QUANT_SCALE, INPUT_AMAX, WEIGHT, WEIGHT_AMAX}),
+        invalid_if_present=frozenset({PRE_QUANT_SCALE}),
+    )
 
 
 @CalibrateModeRegistry.register_mode
@@ -501,6 +634,14 @@ class AWQLiteModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = awq
 
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="both",
+        requires=frozenset({ACTS, WEIGHT}),
+        may_write=frozenset({PRE_QUANT_SCALE, WEIGHT_AMAX, INPUT_AMAX, WEIGHT}),
+        invalid_if_present=frozenset({PRE_QUANT_SCALE}),
+    )
+
 
 @CalibrateModeRegistry.register_mode
 class AWQClipModeDescriptor(BaseCalibrateModeDescriptor):
@@ -512,6 +653,14 @@ class AWQClipModeDescriptor(BaseCalibrateModeDescriptor):
         return AWQClipCalibConfig
 
     _calib_func = awq
+
+    # Clipping only moves `weight_quantizer.amax`; it folds nothing into the weight.
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="weight",
+        requires=frozenset({ACTS, WEIGHT, WEIGHT_AMAX}),
+        may_write=frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+    )
 
 
 @CalibrateModeRegistry.register_mode
@@ -525,6 +674,14 @@ class AWQFullModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = awq
 
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="both",
+        requires=frozenset({ACTS, WEIGHT}),
+        may_write=frozenset({PRE_QUANT_SCALE, WEIGHT_AMAX, INPUT_AMAX, WEIGHT}),
+        invalid_if_present=frozenset({PRE_QUANT_SCALE}),
+    )
+
 
 @CalibrateModeRegistry.register_mode
 class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
@@ -536,6 +693,15 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
         return SVDQuantConfig
 
     _calib_func = svdquant
+
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="both",
+        requires=frozenset({ACTS, WEIGHT}),
+        may_write=frozenset({PRE_QUANT_SCALE, WEIGHT, WEIGHT_AMAX, INPUT_AMAX}),
+        invalid_if_present=frozenset({PRE_QUANT_SCALE}),
+        scopable=False,
+    )
     # create_and_replace_svdquant_linear_on_the_fly reads ModeloptStateManager from the
     # root model, which is not present when layerwise_calibrate dispatches per decoder layer.
     _supports_layerwise = False
@@ -557,6 +723,15 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
 
     _calib_func = gptq
 
+    # GPTQ rounds against an existing grid, so a preceding range search feeds it. It seeds an
+    # amax itself when nothing produced one, hence `weight_amax` may go unsatisfied.
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=True,
+        refines="weight",
+        requires=frozenset({WEIGHT, ACTS, WEIGHT_AMAX}),
+        may_write=frozenset({WEIGHT, WEIGHT_AMAX, INPUT_AMAX}),
+    )
+
 
 @CalibrateModeRegistry.register_mode
 class LSQModeDescriptor(BaseCalibrateModeDescriptor):
@@ -568,3 +743,23 @@ class LSQModeDescriptor(BaseCalibrateModeDescriptor):
         return LSQConfig
 
     _calib_func = lsq
+
+    # `lsq` runs a configurable `scale_algorithm` first, then makes amax learnable, so what it
+    # reads and writes is its own plus that sub-algorithm's. The declaration below is lsq's own
+    # share; the hook adds the rest once the plan says which sub-algorithm is configured.
+    _capabilities = AlgoCapabilities(
+        writes_whole_module=False,
+        refines="weight",
+        requires=frozenset({WEIGHT, WEIGHT_AMAX}),
+        may_write=frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+        scopable=False,
+    )
+
+    @classmethod
+    def capabilities_for_cfg(cls, cfg: dict) -> AlgoCapabilities:
+        """Fold the configured ``scale_algorithm``'s capabilities into lsq's own."""
+        return cls._with_sub_algorithm(
+            cls._capabilities,
+            cfg.get("scale_algorithm") or {"method": "mse"},
+            frozenset({WEIGHT_AMAX, INPUT_AMAX}),
+        )
