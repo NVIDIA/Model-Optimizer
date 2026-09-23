@@ -79,6 +79,13 @@ try:
 except ImportError:
     HAS_TE = False
 
+try:
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
+
+    HAS_DSA = True
+except ImportError:
+    HAS_DSA = False
+
 
 __all__ = []
 
@@ -1013,14 +1020,15 @@ if HAS_TE:
             self.linear_fc1._parallel_state = self.parallel_state
             self.linear_fc2._parallel_state = self.parallel_state
 
-    @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
-    class _QuantTEDotProductAttention(QuantModule):
-        """Quantized version of TEDotProductAttention for Megatron models with KV cache quantization.
+    _core_attention_classes: dict[type, str] = {TEDotProductAttention: "TEDotProductAttention"}
+    if HAS_DSA:
+        _core_attention_classes[DSAttention] = "megatron_DSAttention"
 
-        This class adds KV cache quantization support to Transformer Engine's TEDotProductAttention
-        module used in Megatron-Core models. It introduces three quantizers (q_bmm_quantizer,
-        k_bmm_quantizer, v_bmm_quantizer) that quantize the query, key, and value tensors after
-        RoPE has been applied.
+    @QuantModuleRegistry.register(_core_attention_classes)
+    class _QuantCoreAttention(QuantModule):
+        """Core attention (TEDotProductAttention, DSAttention) with KV cache quantization.
+
+        Adds q/k/v_bmm_quantizers that quantize the post-RoPE query, key and value tensors.
         """
 
         def _setup(self):
@@ -1044,7 +1052,9 @@ if HAS_TE:
             # Quantize Q, K, V
             query = self.q_bmm_quantizer(query)
             key = self.k_bmm_quantizer(key)
-            value = self.v_bmm_quantizer(value)
+            # DSAttention's absorbed-MLA path passes value=None (key is then the shared KV latent)
+            if value is not None:
+                value = self.v_bmm_quantizer(value)
             return super().forward(query, key, value, *args, **kwargs)
 
         def modelopt_post_restore(self, name=""):
@@ -1062,7 +1072,7 @@ if HAS_TE:
             self.to(device=self.device, dtype=self.dtype)
 
         def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-            # Currently we do not need sharded_state_dict for TEDotProductAttention since the amax are scalar values.
+            # Currently we do not need sharded_state_dict for core attention since the amax are scalar values.
             # However we would need this in future to support non-scalar states such as
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)

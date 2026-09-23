@@ -29,10 +29,10 @@
 # so only 3 of the 45 layers have a plain MLP -- 9 modules in total (`mlp.gate_proj`,
 # `mlp.up_proj`, `mlp.down_proj` each). The other 42 layers carry `mlp.experts.<i>.*`.
 #
-# The one rule that is not obvious is the trailing `*visual*` disable, and it is load-bearing.
+# The one rule that is not obvious is the `*visual*` disable, and it is load-bearing.
 # The vision tower reuses the same leaf names -- `model.visual.blocks.<N>.mlp.gate_proj` and
 # friends, across 24 blocks -- so the dense-MLP patterns match 144 modules inside it. Entries
-# apply in order, so the disable has to come LAST or the vision tower is quantized by accident.
+# apply in order, so the disable has to come AFTER them or the vision tower is quantized by accident.
 # (`*.experts.*` matches nothing under `model.visual.*`, so only the dense-MLP patterns reach it.)
 #
 # Two model-specific notes:
@@ -41,10 +41,12 @@
 #   layers nest under `model.language_model.layers` and layerwise_calibrate cannot find
 #   them.
 #
-# * The MTP (next-token-prediction) head is not quantized because it is not built. The config
-#   declares `num_hidden_layers: 45` (with `num_nextn_predict_layers: 1`), so the HF model class
-#   instantiates decoder layers 0-44 only and does not construct the MTP layer -- it is therefore
-#   neither quantized nor carried into the exported checkpoint.
+# * The MTP (next-token-prediction) head stays BF16. The HF model class does not build it
+#   (decoder layers 0-44 only); Megatron-Bridge does, so the trailing `*mtp*` disable keeps it off.
+#
+# The same recipe also drives Megatron-Bridge `quantize.py`, where the dense MLP is
+# `mlp.linear_fc1` / `mlp.linear_fc2`. Those patterns need a literal `mlp.linear_fc`, so they
+# skip `mlp.shared_experts.linear_fc*` and `mlp.experts.local_experts.<i>.linear_fc*`.
 #
 # The shared `default_disabled_quantizers` unit is deliberately not imported.
 # Of its patterns only `*visual*` changes anything here; every other one either matches no
@@ -63,8 +65,8 @@ metadata:
   description: >-
     GLM-5.3-Flash: NVFP4 (W4A4) on the routed experts and on the dense MLP of layers 0-2,
     plus an FP8 KV cache in cast mode using constant amax; max calibration. Shared experts,
-    router gate, KDA and MLA attention, vision tower, embeddings and lm_head stay BF16. The
-    MTP layer is not built at num_hidden_layers=45, so it is neither quantized nor exported.
+    router gate, KDA and MLA attention, vision tower, MTP layer, embeddings and lm_head
+    stay BF16. Works for both HF (hf_ptq.py) and Megatron-Bridge (quantize.py) module names.
 quantize:
   algorithm:
     method: max
@@ -100,6 +102,21 @@ quantize:
     - quantizer_name: '*mlp.down_proj*input_quantizer'
       cfg:
         $import: nvfp4
+    # Dense MLP, Megatron-Bridge names (fc1 = fused gate_proj + up_proj).
+    - quantizer_name: '*mlp.linear_fc1*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp.linear_fc1*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp.linear_fc2*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp.linear_fc2*input_quantizer'
+      cfg:
+        $import: nvfp4
     - $import: kv_fp8_cast
-    # MUST stay last: keeps the vision tower BF16 after the dense-MLP patterns matched it.
+    # MUST follow the dense-MLP patterns: keeps the vision tower BF16 after they matched it.
     - {quantizer_name: '*visual*', enable: false}
+    # Megatron-Bridge builds the MTP layer (HF does not); keep it BF16 like the HF export.
+    - {quantizer_name: '*mtp*', enable: false}

@@ -26,6 +26,7 @@ Changelog
 
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
 - Add ``--mlflow <tracking-uri>`` to ``examples/megatron_bridge/quantize.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too), so a Megatron-Bridge PTQ run records the invocation, every argument as a searchable param, the resolved recipe, the master rank's log and the quantizer summary, and writes ``.experiment.json`` into ``--export_megatron_path``. The experiment defaults to ``$USER/megatron_bridge_quantize/<model basename>-<recipe name or --quant_cfg>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
+- Add GLM-5.3-Flash (``glm5_next``) support to ``examples/megatron_bridge`` PTQ and unified HF export with the ``models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`` recipe, matching ``nvidia/GLM-5.3-Flash-NVFP4``. Requires a Megatron-Bridge and Megatron-Core with GLM-5.3-Flash support. DSA sparse-attention models also gain FP8 KV-cache quantization on Megatron.
 
 *Misc*
 

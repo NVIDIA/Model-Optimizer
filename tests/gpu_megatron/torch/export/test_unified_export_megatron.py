@@ -287,6 +287,59 @@ def test_megatron_gated_delta_net_slicing_exports_iq_payloads(qformat):
     )
 
 
+def test_megatron_kda_slicing_splits_fused_qkv_and_conv1d():
+    weight = torch.randn(7, 4).bfloat16()
+    conv = torch.randn(7, 1, 4).bfloat16()
+    module = SimpleNamespace(
+        in_proj=object(),
+        in_proj_split_names=("query", "key", "value"),
+        in_proj_split_sections=(2, 2, 3),
+        conv1d=SimpleNamespace(weight=conv),
+    )
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, None, None)
+
+    exporter._kda_slicing(module, "model.layers.0.self_attn.")
+
+    for name, rows in (("q", slice(0, 2)), ("k", slice(2, 4)), ("v", slice(4, 7))):
+        torch.testing.assert_close(
+            exporter._state_dict[f"model.layers.0.self_attn.{name}_proj.weight"], weight[rows]
+        )
+        torch.testing.assert_close(
+            exporter._state_dict[f"model.layers.0.self_attn.{name}_conv1d.weight"], conv[rows]
+        )
+    assert exporter.exclude_modules == [
+        f"model.layers.0.self_attn.{name}_proj" for name in ("q", "k", "v")
+    ]
+
+
+@pytest.mark.parametrize(("self_attention", "kind"), [(object(), "attn"), (None, "ffn")])
+def test_megatron_hyper_connection_exports_hf_hc_tensors(self_attention, kind):
+    hc = SimpleNamespace(
+        mapping_proj=SimpleNamespace(weight=torch.randn(24, 64)),
+        bias=torch.randn(24),
+        alpha_pre=torch.tensor([0.1]),
+        alpha_post=torch.tensor([0.2]),
+        alpha_res=torch.tensor([0.3]),
+    )
+    layer = SimpleNamespace(
+        hyper_connection=hc, inner_layer=SimpleNamespace(self_attention=self_attention)
+    )
+    exporter = _make_iq_exporter()
+    exporter.rules = exporter._populate_rule_book()["Glm5NextForConditionalGeneration"]
+
+    exporter._get_hyper_connection_state_dict(layer, 2)
+
+    prefix = f"model.language_model.layers.2.hc_{kind}_"
+    assert sorted(exporter._state_dict) == [prefix + n for n in ("base", "fn", "scale")]
+    assert exporter._state_dict[prefix + "fn"].dtype == torch.bfloat16
+    # The released checkpoint keeps the mHC bias and alpha scales in FP32.
+    assert exporter._state_dict[prefix + "base"].dtype == torch.float32
+    torch.testing.assert_close(
+        exporter._state_dict[prefix + "scale"], torch.tensor([0.1, 0.2, 0.3])
+    )
+
+
 @pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
 def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
