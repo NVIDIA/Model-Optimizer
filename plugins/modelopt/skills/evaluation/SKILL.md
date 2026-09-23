@@ -76,7 +76,7 @@ for an "AA" request. If the user asks for MRCR:
 5. Long-context deploy: for **1M**, `--max-model-len 1100000` +
    `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; for **128K**, `--max-model-len` at the
    checkpoint's trained context (room for the answer above 131,072) and no
-   override. Both: `gpu_memory_utilization: 0.95`, multi-instance fan-out;
+   override. 1M also needs `gpu_memory_utilization: 0.95`. Both: multi-instance fan-out;
    **never cap output tokens**; report the needle-count strata alongside
    `pass@1/accuracy`.
 6. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gym.sh"`; it

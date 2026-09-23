@@ -89,6 +89,7 @@ def test_deployment_command_keeps_all_flags_under_shell_parsing():
     assert tokens == shlex.split(folded)  # no `#` turning the tail into a shell comment
     for flag in (
         "--max-model-len",
+        "--gpu-memory-utilization",  # replacing `command:` drops the launcher's default flag
         "--kv-cache-dtype",
         "--reasoning-parser",
         "--enable-prefix-caching",

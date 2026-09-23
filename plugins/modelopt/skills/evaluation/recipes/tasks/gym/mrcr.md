@@ -88,11 +88,16 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
   `max_position_embeddings`.
 - `gpu_memory_utilization: 0.95` (vs the usual 0.85) — driven by **sequence
   length**, not prefix caching: a ~1M-token context needs a far larger KV
-  allocation, and prefix-cache blocks come out of the same pool.
+  allocation, and prefix-cache blocks come out of the same pool. The template's
+  `command:` must pass `--gpu-memory-utilization ${deployment.gpu_memory_utilization}`:
+  replacing `command:` drops the launcher's default flag, and vLLM falls back to 0.9.
 - **128K instead:** set `--max-model-len` to the checkpoint's trained context — it must
   exceed 131,072 with room for the uncapped answer — and drop
   `VLLM_ALLOW_LONG_MAX_MODEL_LEN`. Leaving `1100000` in place can stop a replica from
-  starting even though it could serve every 128K request.
+  starting even though it could serve every 128K request. The 0.95 memory bump is for 1M's
+  KV; 128K can keep the model's usual value. Upstream 128K runs `parallelism: 256`, tags
+  MLflow `benchmark: nemo_gym.mrcr_128k` (1M: `nemo_gym.mrcr`), and a full run is
+  **1470** rollouts.
 - `--enable-prefix-caching`, `--enable-chunked-prefill`,
   `--max-num-batched-tokens 131072`.
 - **KV dtype: follow the checkpoint, not this template.** Read
@@ -110,7 +115,7 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
   not copy: pick TP for the model, fill the node with DP, then choose instances for
   the replica count you want. The golden ran 4 nodes × (TP2 × DP2) on 4-GPU nodes =
   8 replicas; the same 8 replicas on 8-GPU nodes is 2 × (TP2 × DP4).
-- **`parallelism: 512` deliberately exceeds server capacity** so requests queue at the
+- **`parallelism: 512` (1M; 128K: 256) deliberately exceeds server capacity** so requests queue at the
   endpoint — don't derive `--max-num-seqs` from it (golden: 8 replicas × 32 = 256 in flight).
 - **`--max-num-seqs` is a ceiling, not a target.** MRCR is the most KV-bound task
   in the skill — ~1M input tokens per request against AA-LCR's ~120K — so AA-LCR's
@@ -214,6 +219,6 @@ at `--max-model-len 1100000`).
 Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
 needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /
 4 instances. Use it to sanity-check shape, not as a bar for another model — a
-rollout count well below 2363 (full runs only — a `++limit` canary is expected
+rollout count well below 2363 (1470 for 128K; full runs only — a `++limit` canary is expected
 to be short) means tasks were lost (e.g. a walltime resume) and
 the score covers fewer tasks than the reference.

@@ -83,7 +83,10 @@ deployment:
   hf_model_handle:
   served_model_name: ???
   image: vllm/vllm-openai:v0.26.0   # bump to the EXACT model's recipes.vllm.ai minimum (SKILL Step 3)
-  gpu_memory_utilization: 0.95      # golden raises this from 0.85 to fit the 1M KV cache
+  # 1M: golden raises this from 0.85 to fit the 1M KV cache; 128K: the model's usual value.
+  # Reaches vLLM only through the flag in `command:` below — replacing `command:` drops the
+  # launcher's default --gpu-memory-utilization.
+  gpu_memory_utilization: 0.95
   # Golden serves in REASONING mode (thinking forced on via chat_template_kwargs
   # below), so set the model's --reasoning-parser.
   # After sizing num_nodes / num_instances / TP / DP above, append `--max-num-seqs N`,
@@ -109,6 +112,7 @@ deployment:
     --tensor-parallel-size 1
     --data-parallel-size 1
     --max-model-len 1100000
+    --gpu-memory-utilization ${deployment.gpu_memory_utilization}
     --kv-cache-dtype fp8
     --reasoning-parser <PARSER>
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
@@ -135,7 +139,7 @@ evaluation:
         temperature: 1.0
         top_p: 0.95
         # Gym client concurrency, TOTAL across instances — not a per-server cap;
-        # canonical 512 keeps requests queued at the endpoint.
+        # canonical 512 (1M) keeps requests queued at the endpoint; upstream 128K uses 256.
         parallelism: 512
         request_timeout: 36000      # 1M-token prefills are slow
         max_retries: 10
@@ -322,6 +326,6 @@ export:
     tags:
       framework: vllm
       model: CHANGEME-served-model-name
-      benchmark: nemo_gym.mrcr_n3_1m   # CHANGEME with the variant (see VARIANT SELECTOR)
+      benchmark: nemo_gym.mrcr_n3_1m   # CHANGEME with the variant; upstream: nemo_gym.mrcr (1M) / nemo_gym.mrcr_128k
       temperature: '1.0'
       top_p: '0.95'
