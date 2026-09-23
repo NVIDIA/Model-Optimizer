@@ -175,8 +175,15 @@ class TestFakeBaseRopeTheta:
     complaint and only misbehaves at serve time.
     """
 
-    def test_reads_the_transformers_5_rope_parameters_dict(self):
-        """Transformers 5 moves rope_theta into rope_parameters and drops the flat field."""
+    def test_reads_a_real_config_whichever_layout_it_uses(self):
+        """A real config resolves on every supported transformers version.
+
+        Where the value lives moved underneath us: transformers 5.12 keeps it only in
+        ``rope_parameters``, while the minimum supported version (4.57) has only the flat
+        field and no dict at all. So this asserts the outcome and not the layout; the two
+        layouts are pinned individually by the tests below, which build them explicitly
+        rather than depending on what the installed version happens to produce.
+        """
         config = transformers.Qwen3Config(
             hidden_size=32,
             num_hidden_layers=2,
@@ -186,7 +193,23 @@ class TestFakeBaseRopeTheta:
             vocab_size=64,
             rope_theta=1000000.0,
         )
-        assert not hasattr(config, "rope_theta"), "fixture no longer reproduces the v5 layout"
+        assert _base_rope_theta(config) == 1000000.0
+
+    def test_reads_the_rope_parameters_dict(self):
+        """The transformers 5.12+ layout: the value lives only in the dict."""
+        config = transformers.PretrainedConfig(rope_parameters={"rope_theta": 1000000.0})
+        assert _base_rope_theta(config) == 1000000.0
+
+    def test_prefers_the_dict_over_a_disagreeing_flat_field(self):
+        """Both present and disagreeing: the dict wins.
+
+        A config can carry both, and they can disagree. Reading the flat field first would
+        give the draft a RoPE base the target does not use -- which trains and exports
+        without complaint, and only misbehaves at serve time.
+        """
+        config = transformers.PretrainedConfig(
+            rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0}
+        )
         assert _base_rope_theta(config) == 1000000.0
 
     def test_falls_back_to_a_flat_attribute(self):
