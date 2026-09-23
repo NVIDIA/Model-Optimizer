@@ -69,6 +69,10 @@ class AlgoCapabilities:
     #: Can be restricted to a scope, i.e. threads the ``should_process`` write-mask through
     #: everything it writes. ``False`` forces whole-model scope; the compiler rejects the rest.
     scopable: bool = True
+    #: NVFP4 weight block scales this algorithm needs: ``"static"`` (stored per-block amax it
+    #: can search) or ``"dynamic"`` (derived in-kernel). ``None`` = works on either. Dynamic
+    #: upgrades to static as a prep step; static never downgrades, since that discards a search.
+    requires_weight_scales: Literal["static", "dynamic"] | None = None
 
 
 WEIGHT_AMAX = "weight_amax"
@@ -431,6 +435,47 @@ def _reject_role_mismatch(model: nn.Module, plan: CalibrationPlan, sink: list[st
             )
 
 
+def _reject_wrong_weight_scales(model: nn.Module, plan: CalibrationPlan, sink: list[str]) -> None:
+    """A stage needing a dynamic weight grid runs after that grid has gone static.
+
+    Walks the plan in order rather than checking the model once: a stage needing static
+    upgrades its targets through ``prepare``, so what a later stage sees is the initial
+    layout plus every upgrade before it.
+    """
+    static_now = {
+        name
+        for name, module in model.named_modules()
+        if is_weight_quantizer(name) and getattr(module, "is_nvfp4_static", False)
+    }
+    upgraded_by: dict[str, AlgoStage] = {}
+
+    for stage in plan:
+        caps = stage.capabilities
+        if caps is None:
+            continue
+        weights = role_quantizers(model, stage)["weight"]
+        if caps.requires_weight_scales == "dynamic":
+            clash = sorted(weights & static_now)
+            if clash:
+                culprit = upgraded_by.get(clash[0])
+                cause = (
+                    f"{culprit.algo!r} upgraded them"
+                    if culprit is not None
+                    else "they are `type: static` in quant_cfg"
+                )
+                _report(
+                    f"{stage.algo!r} needs a dynamic NVFP4 weight grid but {len(clash)} "
+                    f"target(s) are static (e.g. {clash[0]!r}) because {cause}, and static "
+                    "never downgrades. Move it before the stage that needs static, or "
+                    "declare `type: dynamic` in quant_cfg.",
+                    sink=sink,
+                )
+        elif caps.requires_weight_scales == "static":
+            for name in weights - static_now:
+                upgraded_by[name] = stage
+            static_now |= weights
+
+
 def _reject_split_fused_siblings(model: nn.Module, plan: CalibrationPlan, sink: list[str]) -> None:
     pipeline_of: dict[str, tuple[str | None, ...]] = {}
     for stage in plan:
@@ -515,6 +560,7 @@ _MODEL_RULES = (
     _reject_unscopable_with_scope,
     _reject_partial_module_scope,
     _reject_role_mismatch,
+    _reject_wrong_weight_scales,
     _reject_split_fused_siblings,
     _reject_noncomposable_repeat,
     _reject_dead_stage,
