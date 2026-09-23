@@ -81,8 +81,60 @@ split. Never choose approximation degrees or training hyperparameters on test da
 A short matched study can screen numerical sensitivity. It does not establish
 broad downstream-task quality, long-context equivalence, or native serving speed.
 
-Approximate inverse is a subsequent delivery. Decode recipes are documented in
-[the decode guide](../../../docs/linear_attention_decode.md).
+## Approximate-solve pilot
+
+The initial plain Neumann screen rejected all four degrees. See the
+[qualification result](../../../docs/linear_attention_solve_study.md); these
+configs are experimental and no degree is recommended for the pinned model.
+
+The [study plan](solve_study_plan.json) fixes a degree-screening protocol before
+examining test results: degree 3, 7, 15, or 31; 32 validation blocks; and a 0.02-NLL
+margin against exact matmul. Use `--train-steps 0` for that initial sensitivity
+screen. Choose the smallest listed degree whose paired block-bootstrap upper
+bound meets the margin; retain exact if none qualifies.
+
+Then run the fixed degree, exact control, FP8 control, and combined FP8/degree
+candidate with 32 training steps and 64 held-out test blocks. Each trial starts
+from the same original checkpoint and uses the same training blocks. This is a
+short 4,096-training-token pilot, not a recovery claim. Test results do not change
+the selected degree, learning rate, or token budget.
+
+```bash
+python examples/llm_qat/linear_attention/compare_quality.py \
+  --control exact.json --candidate candidate.json --margin 0.02 \
+  --output comparison.json
+```
+
+The comparison rejects mismatched model/data/token hashes, source files, package
+versions, and training settings. It reports per-block deltas and a descriptive
+95% paired block-bootstrap interval. Adjacent text blocks can remain correlated;
+the interval is not a broad downstream-quality guarantee. Compare a combined
+FP8/approximation candidate against its FP8 control to isolate the approximation.
+
+## Explicit prefix and decode training
+
+See [the decode contract](../../../docs/linear_attention_decode.md). The
+`kda_decode_*.json` configurations independently expose token state QDQ, rounded
+log retention, and replay factors/anchors. Pass `--prefill-tokens 64` to
+`quality_study.py` for explicit phase metadata and suffix-only loss; the context
+also spans activation-checkpoint recomputation. `decode_study_plan.json` fixes
+validation selection before held-out test access. These configurations keep the
+exact prefill solve.
+
+Measure complete prefix/suffix forward, backward, and peak allocated memory:
+
+```bash
+python examples/llm_qat/linear_attention/benchmark_decode.py \
+  --attention kda --length 257 --prefill 64 --dim 128 --output decode-cost.json
+```
+
+The benchmark first checks outputs, final states, and all input gradients against
+the same Torch numerical policy, then runs interleaved measurements after warmup.
+Its speedup compares training implementations of the same emulation; it is not
+an inference kernel or compressed-cache benchmark.
+
+The fixed validation selection, held-out pilot results, and measured training
+costs are recorded in [the decode study](../../../docs/linear_attention_decode_study.md).
 
 ## Decode and state-only serving
 

@@ -11,7 +11,7 @@ at `13c7e2456f2e9d079c9ef822742eeaa634353802` onto ModelOpt
 `051d6adb204f10cd3e78d0f824f31a5a01d54831`. It provides the shared state-QDQ foundation of the linear-attention design. [Additional prefill operand sites](linear_attention_prefill.md) have an explicit matmul backend.
 [KDA prefill training](linear_attention_kda.md) uses the same policy interface. [Decode-aware training](linear_attention_decode.md) adds token-state quantization,
 decay approximation, and SSM replay. Delivery is ordered decode, prefill operand QDQ,
-then approximate inverse.
+then [approximate inverse](linear_attention_solve.md).
 
 ## Requirements and scope
 
@@ -163,3 +163,5 @@ Both direct-forward and older split-forward Megatron layouts are handled by the 
 the runtime qualification above uses the direct-forward layout in 0.19.1.
 
 No model-quality, QAT recovery, or throughput result is claimed.
+
+Approximate solve is described in [the Neumann policy guide](linear_attention_solve.md).

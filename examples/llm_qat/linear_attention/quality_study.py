@@ -219,6 +219,7 @@ def main():
     ]
     sources.extend(
         [
+            root / "modelopt/torch/kernels/quantization/linear_attention/neumann.py",
             root / "modelopt/torch/kernels/quantization/linear_attention/decode.py",
             root / "modelopt/torch/kernels/quantization/linear_attention/int8.py",
             root / "modelopt/torch/quantization/plugins/kda.py",
