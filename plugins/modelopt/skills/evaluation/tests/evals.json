@@ -1,48 +1,50 @@
 [
   {
-    "name": "standalone-launching-evals-small-truncation",
+    "name": "standalone-kimi-scicode-model-output-fault",
     "skills": ["launching-evals"],
-    "query": "Analyze this completed Qwen GPQA invocation in a fresh repository session, without an evaluator role or prior evaluation skill context: all 3168 expected responses scored, score 90.5619 versus reference 89.2, 13 finish_reason=length at max_new_tokens=131072. All other validity checks pass; the output budget matches the reference and prompt plus output fits deployed context=262144. Is the run valid, or should I uncap reasoning output and rerun? Do not launch jobs.",
+    "query": "Analyze Kimi SciCode attempt 15 in a fresh repository session, without an evaluator role or prior evaluation skill context. Coverage is complete: 65/65 samples and 338/338 selected, evaluated, and scored trajectories. Provenance verifies 337 unique successful HTTP model responses as the response denominator. One preserved response is both finish_reason=length and empty-final after reasoning consumed its token budget; it was retained and scored incorrect. There are zero HTTP, infrastructure, parser, scorer, sandbox, or harness failures. The measured score is 53.25443786982248. Is this run valid, or should it be rerun? Do not launch jobs.",
     "files": [],
     "expected_behavior": [
-      "Follows AGENTS.md (also exposed via CLAUDE.md) to read evaluation/references/run-validation.md before reporting scores, without preloading the evaluation skill",
-      "Reports 13/3168 = approximately 0.4104% as a visible warning, retaining the score and affected responses",
-      "Does not invalidate or retry solely for this truncation, uncap reasoning output, or replace the protocol-matched token/context limits with vendored fixed limits",
-      "Does not infer negligible score impact from the low rate or validity from beating the reference",
-      "Reports complete sample/scoring coverage and the independent validity and token-budget checks"
+      "Follows AGENTS.md (also exposed via CLAUDE.md) to read evaluation/references/run-validation.md before reporting the score, without preloading the evaluation skill",
+      "Reports complete 65/65 sample and 338/338 selected/evaluated/scored trajectory coverage plus 337 verified unique successful responses",
+      "Reports length-capped=1 and empty-final=1 but a deduplicated union of 1/337 = approximately 0.2967%",
+      "Declares the run valid with a visible model-output-fault warning, retains score 53.25443786982248, and does not rerun",
+      "Does not infer negligible score impact from the low rate or tune/remove token limits"
     ]
   },
   {
-    "name": "truncation-boundary-and-denominator",
+    "name": "model-output-fault-overlap-and-two-percent-boundary",
     "skills": ["evaluation", "launching-evals"],
-    "query": "Three independent tasks each have 10000 unique evaluated-model responses with complete sample and scoring coverage and all other checks passing. A has 99 length-capped responses, B has 100, C has 101. Logs also contain 5000 duplicate cache records, 100 transport retry attempts, and 10000 judge responses per task. Classify each for the parent; do not launch jobs.",
+    "query": "Classify two independent runs with complete expected/selected/evaluated/scored coverage and 10000 verified unique successful raw model responses each. In A, preserved responses 1-120 are length-capped, 81-170 have empty finals, and 151-200 have malformed unusable finals; every affected response is retained and scored incorrect. In B, 201 distinct preserved responses have malformed finals and are retained and scored incorrect. Each log also repeats 5000 cache records and includes 100 failed transport attempts that were retried successfully plus 10000 judge responses. All independent gates pass. Report category and union accounting; do not launch jobs.",
     "files": [],
     "expected_behavior": [
-      "Uses 10000 as each denominator, excluding duplicates, transport retry attempts, and judge calls; does not pool tasks",
-      "Reports A 99/10000 = 0.99% and B 100/10000 = 1.0% as warnings without automatic invalidation or retry",
-      "Reports C 101/10000 = 1.01% as above tolerance even if rounded to 1.0%; returns findings and a recommendation without automatic resubmission or a success verdict"
+      "Uses 10000 as each denominator, excluding duplicate records, retry attempts, and judge calls; does not pool runs",
+      "Reports A's category counts as length-capped=120, empty-final=90, malformed-final=50 and deduplicates overlaps to response IDs 1-200, a union of 200/10000 = exactly 2.0%",
+      "Treats A as valid with a visible warning because the inclusive unrounded boundary passes",
+      "Reports B's union as 201/10000 = 2.01%, above tolerance; returns findings and a recommendation without automatic retry or a success verdict"
     ]
   },
   {
-    "name": "small-truncation-does-not-waive-failures",
+    "name": "model-output-tolerance-does-not-waive-independent-failures",
     "skills": ["evaluation", "launching-evals"],
-    "query": "Review separate runs with 1/1000 length-capped responses each. A scored only 999/1000 expected samples; B has an exhausted request failure; C contains an empty output; D has a parser failure with a fallback score; E uses the wrong benchmark version. All scores exceed the reference. Can the parent accept them under the truncation tolerance?",
+    "query": "Review five separate runs whose apparent model-output-fault rate is below 2%. A selected 1000 responses but evaluated and scored only 999. B exhausted an HTTP/server request and has no successful raw response for one item. C raised a parser exception and assigned a fallback score without retaining the malformed answer as an explicit incorrect result; its harness also failed. D used the wrong benchmark version, model, and config. E has an authentication/secret failure and no verifiable response denominator. All reported scores exceed the reference. Can the parent accept any under the tolerance?",
     "files": [],
     "expected_behavior": [
-      "Reports 1/1000 = 0.1% but does not waive any run's independent failure",
-      "Separately identifies incomplete scoring coverage, request failure, empty output, parsing failure, and benchmark configuration mismatch",
-      "Returns findings and recommendations to the parent without automatically resubmitting; exceeding the reference is not proof of validity"
+      "Marks every run invalid rather than using the model-output tolerance",
+      "Separately identifies missing/unscored coverage, exhausted HTTP/server request, parser fallback and harness failure, wrong protocol identity, authentication/secret failure, and unverified denominator",
+      "Does not reclassify C as a model-output fault because no preserved successful raw malformed answer was deterministically retained and scored incorrect",
+      "Returns findings and recommendations without automatically retrying; exceeding the reference is not proof of validity"
     ]
   },
   {
-    "name": "truncation-unverified-and-token-budget",
+    "name": "model-output-fault-unverified-and-token-budget",
     "skills": ["evaluation", "launching-evals"],
-    "query": "A run has no reliable response denominator or finish reasons. Another has 5/1000 length-capped responses, max_new_tokens=131072, deployed context=131072, and 4096-token prompts; its reference protocol uses a 65536 output budget. Should I remove the output cap or keep increasing it until the reference score passes?",
+    "query": "A run has no reliable unique-successful-response denominator. Another has 5/1000 preserved length-capped responses retained and scored incorrect, max_new_tokens=131072, deployed context=131072, and 4096-token prompts; its reference protocol uses a 65536 output budget. Should I remove the output cap or keep increasing it until the reference score passes?",
     "files": [],
     "expected_behavior": [
-      "Marks the first run's truncation unverified, not 0% or within tolerance",
-      "Reports the second run's 5/1000 = 0.5% but flags reference-budget mismatch and insufficient context for prompt plus configured output",
-      "Does not uncap or increase limits to pass the target; returns a protocol-justified recommendation for approval without automatically resubmitting"
+      "Marks the first run's model-output-fault rate unverified, not 0% or within tolerance",
+      "Reports the second run's union as 5/1000 = 0.5% but flags reference-budget mismatch and insufficient context for prompt plus configured output",
+      "Does not uncap or tune limits to pass the target; returns a protocol-justified recommendation for approval without automatically resubmitting"
     ]
   },
   {
@@ -119,120 +121,17 @@
     ]
   },
   {
-    "name": "mlflow-pre-submit-safeguard",
-    "skills": ["evaluation"],
-    "query": "Launch using my existing NEL 0.2.6 config with MLflow auto-export enabled. Generated configs and logs cannot be checked before the CPU exporter uploads them.",
-    "files": [],
-    "expected_behavior": [
-      "Applies the common Step 8 pre-submit safeguard despite skipping config generation; the same gate applies to shortcut-generated configs",
-      "Sets execution.auto_export.destinations to [] before both canary and full submission, retaining MLflow export settings",
-      "Plans checked, sanitized manual delivery from existing results rather than relying on a post-upload scan"
-    ]
-  },
-  {
-    "name": "mlflow-auto-export-verification",
-    "skills": ["evaluation"],
-    "query": "My full evaluation succeeded. The CPU auto-export is still running and MLflow has a same-named canary run. Finish the handoff once export completes.",
-    "files": [],
-    "expected_behavior": [
-      "Checks the separate export job and does not start a competing manual export while it is active",
-      "Finds each full-run MLflow run by invocation and task identity rather than accepting the same-named canary",
-      "Verifies canonical score, evaluated configuration, coverage, and required diagnostic artifact contents against existing results",
-      "Returns verified task-to-run URLs and invocation IDs with separate evaluation and export outcomes, without exporting again"
-    ]
-  },
-  {
-    "name": "mlflow-manual-export-recovery",
-    "skills": ["evaluation"],
-    "query": "Evaluation completed, but the CPU export job failed importing python:3.12.7-slim. One task has a partial MLflow run missing config and diagnostics; another has no run. Recover their exports without rerunning evaluation.",
-    "files": [],
-    "expected_behavior": [
-      "Checks export job state and existing runs by invocation/task identity, rechecking before recovery to avoid duplicates",
-      "Inspects the installed launcher version and CLI help before choosing supported export, image/config, and artifact options",
-      "Repairs or manually exports existing results only; never runs or resumes evaluation to repair export",
-      "Determines whether partial-run repair is supported instead of assuming export idempotency; records any unavoidable replacement run",
-      "Secret-scans and redacts uploaded configs/logs without removing non-secret evaluation provenance",
-      "Verifies scores, configs, and diagnostics in MLflow after recovery; returns actual URLs and invocation IDs with export marked manually verified"
-    ]
-  },
-  {
-    "name": "mlflow-export-blocked-before-cleanup",
-    "skills": ["evaluation"],
-    "query": "Four tasks completed, but all auto-exports failed. Manual export is also blocked by MLflow authentication. Cleanup of the cluster results is due. Report the outcome.",
-    "files": [],
-    "expected_behavior": [
-      "Reports evaluation outcomes separately from blocked or unverified MLflow delivery for all four tasks",
-      "Names the authentication blocker and does not fabricate URLs, infer absent runs from access failure, or claim export success",
-      "Preserves small sanitized results/config/coverage/diagnostic and export-failure evidence with invocation/task IDs in an approved durable location before cleanup",
-      "Reports absolute evidence paths, launcher version and sanitized recovery attempt; flags inability to preserve evidence before destructive cleanup",
-      "Does not upload secrets, copy bulk caches as backup, or rerun evaluation"
-    ]
-  },
-  {
-    "name": "nel-next-explicit-push-verification",
-    "skills": ["evaluation"],
-    "query": "My nel-next SLURM evaluation completed. The merged bundles are safe to upload, but the wrapper stages only eval-*.json; logs remain on the cluster. Deliver verified MLflow results.",
-    "files": [],
-    "expected_behavior": [
-      "Preserves the explicit nel-next.sh mlflow-push -r <run_id> -c <cfg> workflow rather than expecting SLURM auto-export or substituting legacy export syntax",
-      "Checks outgoing bundles and export metadata before pushing and follows the verification gate directly from the nel-next run flow, without relying on excluded Steps 1-9",
-      "Verifies each pushed run by run/bundle job identity, scores, configuration, and required diagnostics before returning actual URLs",
-      "Attaches missing sanitized diagnostic evidence to the identified runs and rechecks contents; does not assume copy_logs=true uploads unstaged logs",
-      "Reports incomplete or blocked delivery if required evidence cannot be delivered, without rerunning evaluation"
-    ]
-  },
-  {
     "name": "scicode-eight-run-average",
     "skills": ["evaluation"],
     "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",
     "files": [],
     "expected_behavior": [
-      "Applies Step 8's pre-upload safeguard on the AA shortcut path, disabling auto-export before canary and full submission if generated artifacts cannot be checked before upload",
       "Keeps num_repeats at 1 and plans at least 8 independent SciCode submissions instead",
       "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
       "Reports the SciCode score as the mean of the pooled runs with standard error and run count",
       "Confirms cache replay from run provenance rather than equal scores before excluding a run",
       "Re-submits replacements until at least 8 valid independent runs exist before reporting a mean",
       "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
-    ]
-  },
-  {
-    "name": "delegated-gpqa-stop-after-terminal-report",
-    "skills": ["evaluation"],
-    "files": ["AGENTS.md", "plugins/modelopt/agents/modelopt-model-evaluator.md"],
-    "query": "As the delegated evaluator, full GPQA invocation gpqa-1 has terminated. Its score passes the agreed numeric threshold, but some responses were length-capped. You recommend increasing the token cap. Report to the parent. First the parent is silent; later it says accept with warnings and STOP. What do you do?",
-    "expected_behavior": [
-      "Reports ID, full scope, terminal status, score or null, expected/completed/scored coverage and repeats, truncation/error counts, config deviations, and recommended next action; unknown counts are not zero",
-      "Reports validation before scores; distinguishes numeric acceptance from output-health acceptance under the evaluation skill",
-      "Submits nothing while awaiting a reply, and nothing after STOP; never speculatively launches then cancels a retry",
-      "Accepts with warnings only if validation passes and the agreed policy allows it; otherwise records incomplete/invalid with null score and stops without claiming success",
-      "Preserves gpqa-1 and the parent's decision in the ledger"
-    ]
-  },
-  {
-    "name": "delegated-one-submission-per-authorization",
-    "skills": ["evaluation"],
-    "files": ["AGENTS.md", "plugins/modelopt/agents/modelopt-model-evaluator.md"],
-    "query": "A delegated canary passed. The plan says canary then full then retry if needed. As parent, review its terminal report with budget for one full run and authorize it explicitly. That full run fails. The evaluator receives no further reply. Describe both roles' actions, including when the harness cannot keep a subagent waiting.",
-    "expected_behavior": [
-      "Parent applies the agreed score/health policy and remaining budget, records its decision, and authorizes exactly one full submission with task, configuration changes, and budget",
-      "Evaluator does not treat the original plan or canary success as authorization",
-      "Evaluator reports the failed full invocation with all terminal-report fields and null score, preserves it in the ledger, and submits no retry without fresh authorization",
-      "Uses the existing handoff/reply mechanism or returns for parent re-delegation; adds no orchestration machinery"
-    ]
-  },
-  {
-    "name": "delegated-cancellation-and-resume-accounting",
-    "skills": ["evaluation"],
-    "files": ["AGENTS.md", "plugins/modelopt/agents/modelopt-model-evaluator.md"],
-    "query": "Invocation eval-1 timed out in job 101 and its existing NEL dependency job 102 resumed it. A separately authorized attempt eval-2 has a live remote launcher after its local wrapper exited, and jobs 201 and 202. The parent orders cancellation. Another job appears during cleanup. Later you propose manually resubmitting eval-1's run.sub. Explain the cleanup, ledger, and permission requirements.",
-    "expected_behavior": [
-      "Treats jobs 101 and 102 as one invocation, not independent attempts; timeout with a live resume chain is not terminal invocation failure",
-      "Identifies and stops the actual remote submission process and submit-capable descendants; wrapper exit is not cancellation proof",
-      "Cancels affected running/queued jobs and resume dependencies, discovers jobs created during cleanup, and verifies submitter exit and terminal job states",
-      "Reports unresolved verification rather than claiming cancellation if the process or scheduler cannot be checked",
-      "Preserves eval-1 and canceled eval-2 separately, including all job IDs and cleanup evidence; reports terminal handoff fields even without a score",
-      "Waits for explicit authorization for the manual resume and links its job to eval-1 rather than inventing a new invocation"
     ]
   }
 ]
