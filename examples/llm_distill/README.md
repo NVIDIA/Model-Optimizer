@@ -88,12 +88,18 @@ class KDSFTTrainer(KDTrainer, SFTTrainer):
 
 ### Distill during training
 
-Since `KDTrainer` overrides `compute_loss()` to run the teacher forward pass and combine the KD loss, training is
-just the normal HuggingFace `Trainer` loop — no manual loss combination is required:
+Since `KDTrainer` overrides `compute_loss()` to run the teacher forward pass and compute the KD loss, training is
+just the normal HuggingFace `Trainer` loop — no manual loss computation is required:
 
 ```python
 trainer.train()
 ```
+
+> [!NOTE]
+> `compute_loss()` returns the KD loss on its own; it does not combine it with the original student
+> cross-entropy loss. Weighted combination of CE and KD losses is not yet supported by `KDTrainer` but is
+> coming soon. During evaluation, the CE loss is still computed and reported separately as the `eval_ce_loss`
+> metric.
 
 > [!NOTE]
 > `KDTrainer` requires FSDP2 when FSDP is enabled; FSDP1 is not supported. Note that HuggingFace Trainer uses
