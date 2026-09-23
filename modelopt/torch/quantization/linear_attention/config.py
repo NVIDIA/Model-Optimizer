@@ -24,9 +24,48 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 __all__ = [
     "LinearAttentionConfig",
     "LinearAttentionDecodeConfig",
+    "LinearAttentionMatmulConfig",
     "LinearAttentionPolicyEntry",
     "LinearAttentionReplayConfig",
+    "LinearAttentionSolveConfig",
 ]
+
+_PrefillSite = Literal[
+    "key_interaction",
+    "wy_value",
+    "wy_key",
+    "state_read",
+    "state_update",
+    "output_state",
+    "output_score",
+    "output_value",
+]
+_ElementwiseSite = Literal[
+    "gate_prefix",
+    "gate_exp",
+    "value_residual",
+    "state_decay",
+    "state_add",
+    "output_add",
+]
+_ArithmeticDtype = Literal["float32", "float16", "bfloat16"]
+
+
+class LinearAttentionMatmulConfig(ModeloptBaseConfig):
+    """Round an accumulator after each left-to-right reduction block.
+
+    Partial products use the baseline working dtype. This specifies an emulation
+    schedule, not the internal accumulation order of a hardware MMA instruction.
+    """
+
+    accumulator_dtype: _ArithmeticDtype | None = ModeloptField(default=None)
+    reduction_block: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _require_complete_schedule(self):
+        if (self.accumulator_dtype is None) != (self.reduction_block is None):
+            raise ValueError("accumulator_dtype and reduction_block must be specified together")
+        return self
 
 
 class _StateConfig(ModeloptBaseConfig):
@@ -35,7 +74,9 @@ class _StateConfig(ModeloptBaseConfig):
     quantize_initial: Literal[True] = ModeloptField(default=True)
 
 
-class _SolveConfig(ModeloptBaseConfig):
+class LinearAttentionSolveConfig(ModeloptBaseConfig):
+    """Exact solve; inverse approximation is a later delivery."""
+
     method: Literal["exact"] = ModeloptField(default="exact")
 
 
@@ -73,11 +114,11 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
 
 
 class LinearAttentionConfig(ModeloptBaseConfig):
-    """GDN chunk-64 policy; unsupported numerical modes fail config validation.
+    """GDN/KDA chunk-64 policy; unsupported numerical modes fail config validation.
 
     ``state.block_v`` defines one dynamic scale per ``[Dk, block_v]`` tile of each
     sequence/head. The initial state and every chunk's final state are rounded when
-    ``gdn_state_quantizer`` is enabled. Outputs use the incoming rounded state.
+    the module's state quantizer is enabled. Outputs use the incoming rounded state.
     Decode's ``int8_hadamard32`` codec instead fixes scales to one key channel and
     32 values; ``state.block_v`` remains the execution tile width.
     """
@@ -86,13 +127,20 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     backend: Literal["fla", "matmul"] = ModeloptField(default="fla")
     chunk_size: Literal[64] = ModeloptField(default=64)
     state: _StateConfig = ModeloptField(default=_StateConfig())
-    solve: _SolveConfig = ModeloptField(default=_SolveConfig())
+    solve: LinearAttentionSolveConfig = ModeloptField(default=LinearAttentionSolveConfig())
     decode: LinearAttentionDecodeConfig | None = ModeloptField(default=None)
+    matmul: dict[_PrefillSite, LinearAttentionMatmulConfig] = ModeloptField(default={})
+    elementwise: dict[_ElementwiseSite, _ArithmeticDtype] = ModeloptField(default={})
 
     @model_validator(mode="after")
-    def _validate_decode_backend(self):
-        if (self.backend == "matmul") != (self.decode is not None):
-            raise ValueError("The exact-prefix matmul backend requires an explicit decode policy")
+    def _validate_arithmetic_backend(self):
+        if self.backend == "fla" and (
+            self.matmul
+            or self.elementwise
+            or self.solve.method != "exact"
+            or self.decode is not None
+        ):
+            raise ValueError("Prefill arithmetic policies require backend='matmul'")
         if self.decode is not None and self.decode.state_codec == "int8_hadamard32":
             if self.state.block_v < 32:
                 raise ValueError("int8_hadamard32 requires block_v >= 32")

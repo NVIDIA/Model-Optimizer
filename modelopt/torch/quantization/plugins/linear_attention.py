@@ -17,6 +17,7 @@
 
 from ..config import QuantizerAttributeConfig
 from ..linear_attention.config import LinearAttentionConfig
+from ..linear_attention.matmul import LinearAttentionMatmulSites, _validate_operand_quantizer
 from ..linear_attention.utils import validate_gdn_quantizer
 from ..nn import QuantModule, TensorQuantizer
 
@@ -33,6 +34,7 @@ class _LinearAttentionQuantMixin(QuantModule):
             )
         self._register_temp_attribute("linear_attention_config", LinearAttentionConfig())
         self._register_temp_attribute("_linear_attention_prefill_lengths", None)
+        self._register_temp_attribute("linear_attn_sites", LinearAttentionMatmulSites())
 
     @property
     def _linear_attn_state(self):
@@ -52,6 +54,9 @@ class _LinearAttentionQuantMixin(QuantModule):
         return (
             self._linear_attn_state.is_enabled
             or self._linear_attn_w.is_enabled
+            or self.linear_attn_sites.is_enabled
+            or bool(self.linear_attention_config.matmul or self.linear_attention_config.elementwise)
+            or self.linear_attention_config.solve.method != "exact"
             or self.linear_attention_config.decode is not None
         )
 
@@ -72,12 +77,17 @@ class _LinearAttentionQuantMixin(QuantModule):
             if decode is not None and decode.state_codec == "int8_hadamard32":
                 if self._linear_attn_state_format != "int8":
                     raise ValueError("int8_hadamard32 requires INT8 state quantization")
-        if self._linear_attn_w.is_enabled:
+        if self.linear_attention_config.backend == "matmul":
+            _validate_operand_quantizer(
+                self._linear_attn_w, self.linear_attention_quantizer_names[1]
+            )
+        elif self._linear_attn_w.is_enabled:
             validate_gdn_quantizer(
                 self._linear_attn_w, name=self.linear_attention_quantizer_names[1]
             )
-            if self.linear_attention_config.decode is not None:
-                raise ValueError("Decode's exact prefix does not support WY operand QDQ")
+        self.linear_attn_sites.validate()
+        if self.linear_attn_sites.is_enabled and self.linear_attention_config.backend != "matmul":
+            raise ValueError("Additional linear-attention operand sites require backend='matmul'")
 
     def modelopt_post_restore(self, prefix=""):
         """Validate the restored numerical policy and quantizers."""

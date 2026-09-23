@@ -13,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
-
-from .config import *
-from .decode import *
-from .decode_prefill import *
-from .kda import *
-from .matmul import *
-from .prefill import *
-from .solve import *
+# Dynamic block-16 NVFP4 operand QDQ at all eight GDN prefill matmuls.
+# Requires linear_attention backend="matmul" on matching GDN modules.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*linear_attn_sites.*'
+    cfg:
+      num_bits: [2, 1]
+      type: dynamic
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: [4, 3]
+  - quantizer_name: '*gdn_w_quantizer'
+    cfg:
+      num_bits: [2, 1]
+      type: dynamic
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: [4, 3]

@@ -92,7 +92,9 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         if self.linear_attention_config.backend == "matmul":
             return matmul_gdn(
                 *args,
+                sites=self.linear_attn_sites,
                 policy=self.linear_attention_config,
+                w_quantizer=self.gdn_w_quantizer,
                 state_qdq=quantize_state,
                 state_format=self._linear_attn_state_format,
                 chunk_size=chunk_size,

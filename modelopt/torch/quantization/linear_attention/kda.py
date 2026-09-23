@@ -18,7 +18,8 @@
 import torch
 import torch.nn.functional as F
 
-from .decode_prefill import _decode_prefill
+from .matmul import _validate_operand_quantizer
+from .prefill import _dispatch_prefill
 
 __all__ = ["matmul_kda"]
 
@@ -30,7 +31,9 @@ def matmul_kda(
     g,
     beta,
     *,
+    sites,
     policy,
+    w_quantizer,
     state_qdq=False,
     state_format="fp8_e4m3",
     scale=None,
@@ -53,9 +56,11 @@ def matmul_kda(
     return_intermediate_states=False,
     prefill_lengths=None,
 ):
-    """Normalize KDA inputs and run exact prefix plus configured suffix recurrence.
+    """Run KDA chunk prefill with actual-operand QDQ and differentiable state carry.
 
-    Gates use the loaded FLA model's activation formula and per-key log retention.
+    Gates are per-key-channel natural log retentions. Causal interactions form
+    exp(prefix[i] - prefix[j]) directly, avoiding an overflowing inverse decay.
+    Raw-gate activation, when requested, follows the selected FLA gate formula.
     """
     if policy.backend != "matmul" or chunk_size != policy.chunk_size:
         raise ValueError("matmul_kda requires backend='matmul' and its configured chunk size")
@@ -69,6 +74,8 @@ def matmul_kda(
         raise ValueError("safe_gate requires a lower_bound in [-5, 0)")
     if lower_bound is not None and lower_bound >= 0:
         raise ValueError("lower_bound must be negative")
+    sites.validate()
+    _validate_operand_quantizer(w_quantizer, "kda_w_quantizer")
     output_dtype = q.dtype
     dtype = torch.float64 if output_dtype == torch.float64 else torch.float32
     q, k, v, g, beta = (x.to(dtype) for x in (q, k, v, g, beta))
@@ -85,23 +92,24 @@ def matmul_kda(
         g = -rate * F.softplus(g) if lower_bound is None else lower_bound * (rate * g).sigmoid()
     if use_beta_sigmoid_in_kernel:
         beta = beta.sigmoid() * (2.0 if allow_neg_eigval else 1.0)
-    if policy.decode is not None:
-        return _decode_prefill(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            policy=policy,
-            state_qdq=state_qdq,
-            state_format=state_format,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-            state_v_first=state_v_first,
-            output_dtype=output_dtype,
-            prefill_lengths=prefill_lengths,
-        )
-    raise ValueError("An explicit decode policy is required")
+    return _dispatch_prefill(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        sites=sites,
+        policy=policy,
+        w_quantizer=w_quantizer,
+        state_qdq=state_qdq,
+        state_format=state_format,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
+        output_dtype=output_dtype,
+        prefill_lengths=prefill_lengths,
+    )

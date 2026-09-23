@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from modelopt.recipe import load_recipe
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import QuantizeConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
     LinearAttentionDecodeConfig,
@@ -29,6 +29,8 @@ from modelopt.torch.quantization.linear_attention import (
     recurrent_decode_reference,
 )
 from modelopt.torch.quantization.linear_attention.decode import _encode, _hadamard32
+from modelopt.torch.quantization.linear_attention.matmul import LinearAttentionMatmulSites
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def _rotate(value):
@@ -188,7 +190,9 @@ def test_hadamard_exact_prefill_handoff_and_state_layout(kda, prefix, project_ro
     policy.decode.implementation = "torch"
     actual = function(
         *(x.unsqueeze(0) for x in args),
+        sites=LinearAttentionMatmulSites(),
         policy=policy,
+        w_quantizer=TensorQuantizer(QuantizerAttributeConfig(enable=False)),
         prefill_lengths=[prefix],
         state_qdq=True,
         state_format="int8",
