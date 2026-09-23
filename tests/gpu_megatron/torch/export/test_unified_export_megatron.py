@@ -92,7 +92,7 @@ def _verify_model_quant_config(
 
 # Every IQ format the exporter accepts. Only the list of formats comes from the export
 # tables; each test resolves what it expects from the codec module itself, so a wrong entry
-# in IQ_PACKERS or IQ_BLOCK_METADATA cannot make both sides of an assertion agree.
+# in IQ_FORMAT_REGISTRY cannot make both sides of an assertion agree.
 IQ_FORMAT_NAMES = sorted(IQ_FORMATS)
 
 

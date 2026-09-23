@@ -15,10 +15,22 @@
 
 import pytest
 
+import modelopt.torch.export.quant_format as quant_format
 import modelopt.torch.quantization.ggml as ggml
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.quant_format import IQ_BLOCK_METADATA, IQ_FORMATS
+from modelopt.torch.export.quant_format import IQ_FORMATS
 from modelopt.torch.export.unified_export_hf import _revert_hf_quant_config_names
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+
+
+def _geometry(fmt):
+    """Block geometry from the codec's own constants, independent of the registry under test."""
+    upper = fmt.upper()
+    return (
+        getattr(ggml, f"{upper}_BLOCK_SIZE"),
+        getattr(ggml, f"{upper}_BLOCK_BYTES"),
+        getattr(ggml, f"{upper}_EFFECTIVE_BITS"),
+    )
 
 
 def test_convert_mixed_kv_cache_config_preserves_layer_map():
@@ -121,7 +133,7 @@ def test_iq_config_carries_block_metadata(fmt):
     A consumer reads group_size and block_payload_bytes to walk the payload, so a format
     that falls through to the generic branch produces a checkpoint that cannot be decoded.
     """
-    block_size, payload_bytes, effective_bits = IQ_BLOCK_METADATA[fmt]
+    block_size, payload_bytes, effective_bits = _geometry(fmt)
     converted = convert_hf_quant_config_format(
         {
             "producer": {"name": "modelopt", "version": "test"},
@@ -141,7 +153,7 @@ def test_iq_config_carries_block_metadata(fmt):
 @pytest.mark.parametrize("fmt", sorted(IQ_FORMATS))
 def test_iq_config_rejects_mismatched_group_size(fmt):
     """A caller's group size is rejected rather than silently rewritten to the block size."""
-    block_size, _, _ = IQ_BLOCK_METADATA[fmt]
+    block_size, _, _ = _geometry(fmt)
     with pytest.raises(ValueError, match=f"requires group size {block_size}"):
         convert_hf_quant_config_format(
             {
@@ -151,15 +163,11 @@ def test_iq_config_rejects_mismatched_group_size(fmt):
         )
 
 
-@pytest.mark.parametrize("fmt", sorted(IQ_FORMATS))
-def test_iq_block_metadata_matches_the_codec(fmt):
-    """The exported geometry is the codec's own, so a checkpoint cannot claim a wrong layout."""
-    block_size, payload_bytes, effective_bits = IQ_BLOCK_METADATA[fmt]
-    upper = fmt.upper()
-    assert block_size == getattr(ggml, f"{upper}_BLOCK_SIZE")
-    assert payload_bytes == getattr(ggml, f"{upper}_BLOCK_BYTES")
-    assert effective_bits == pytest.approx(getattr(ggml, f"{upper}_EFFECTIVE_BITS"))
-    assert effective_bits == pytest.approx(payload_bytes * 8 / block_size)
+def test_export_formats_are_the_registered_formats():
+    """Export and backend dispatch agree on which IQ formats exist, name constants included."""
+    assert frozenset(IQ_FORMAT_REGISTRY) == IQ_FORMATS
+    constants = {v for k, v in vars(quant_format).items() if k.startswith("QUANTIZATION_IQ")}
+    assert constants == IQ_FORMATS
 
 
 @pytest.mark.parametrize("fmt", sorted(IQ_FORMATS))
@@ -169,7 +177,7 @@ def test_iq_mixed_precision_config_group_carries_block_metadata(fmt):
     Mixed exports route each distinct layer config through the same helper, so a format
     missing there loses its geometry for exactly the layers that use it.
     """
-    block_size, payload_bytes, effective_bits = IQ_BLOCK_METADATA[fmt]
+    block_size, payload_bytes, effective_bits = _geometry(fmt)
     converted = convert_hf_quant_config_format(
         {
             "producer": {"name": "modelopt", "version": "test"},
@@ -197,7 +205,7 @@ def test_iq_mixed_precision_config_group_carries_block_metadata(fmt):
 @pytest.mark.parametrize("fmt", sorted(IQ_FORMATS))
 def test_iq_mixed_precision_rejects_bad_per_layer_group_size(fmt):
     """A per-layer group size is validated, not silently rewritten to the block size."""
-    block_size, _, _ = IQ_BLOCK_METADATA[fmt]
+    block_size, _, _ = _geometry(fmt)
     with pytest.raises(ValueError, match=f"requires group size {block_size}"):
         convert_hf_quant_config_format(
             {

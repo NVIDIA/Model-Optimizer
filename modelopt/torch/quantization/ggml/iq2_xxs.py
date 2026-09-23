@@ -41,7 +41,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq2_xxs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    fake_quantize_with_cache,
+    IQFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -265,22 +265,16 @@ def dequantize_iq2_xxs(
     return decoded.reshape(shape)
 
 
-def iq2_xxs_fake_quant(
-    inputs: torch.Tensor,
-    quantizer,
-    *,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
-    decode_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
-) -> torch.Tensor:
-    """IQ2_XXS weight backend for TensorQuantizer, with pass-through backward."""
-    if getattr(quantizer, "num_bits", None) != "iq2_xxs":
-        raise ValueError("The ggml IQ2_XXS backend requires num_bits='iq2_xxs'")
-    return fake_quantize_with_cache(
-        inputs,
-        quantizer,
-        format_name="iq2_xxs",
-        block_chunk_size=block_chunk_size,
-        decode_chunk_size=decode_chunk_size,
-        quantize=quantize_iq2_xxs,
-        dequantize=dequantize_iq2_xxs,
-    )
+IQ2_XXS_FORMAT = IQFormat(
+    name="iq2_xxs",
+    block_size=IQ2_XXS_BLOCK_SIZE,
+    block_bytes=IQ2_XXS_BLOCK_BYTES,
+    quantize=quantize_iq2_xxs,
+    dequantize=dequantize_iq2_xxs,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+)
+
+# Kept for callers of the per-format entry point. Dispatch goes through IQ_FORMAT_REGISTRY, so
+# that is the one place to substitute a format's encoder or decoder.
+iq2_xxs_fake_quant = IQ2_XXS_FORMAT.fake_quant

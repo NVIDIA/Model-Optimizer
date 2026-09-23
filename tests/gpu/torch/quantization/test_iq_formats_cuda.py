@@ -31,6 +31,7 @@ from modelopt.torch.quantization.ggml import (
     IQ1_S_BLOCK_BYTES,
     IQ2_XS_BLOCK_BYTES,
     IQ2_XXS_BLOCK_BYTES,
+    IQ_FORMAT_REGISTRY,
 )
 
 # module, packer name, per-block payload size, whether the packer takes precomputed scales
@@ -177,3 +178,8 @@ def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
     monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = getattr(module, f"quantize_{name}")(weight)
     assert torch.equal(reference, packed)
+
+
+def test_every_registered_format_is_covered():
+    """A format registered for dispatch must also be listed here, or it escapes this contract."""
+    assert sorted(IQ_FORMAT_REGISTRY) == sorted(FORMATS)

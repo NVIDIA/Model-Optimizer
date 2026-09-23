@@ -121,6 +121,59 @@ def fake_quantize_with_cache(
     return inputs + (reconstructed - inputs).detach()
 
 
+@dataclass(frozen=True)
+class IQFormat:
+    """Everything backend dispatch and export need to know about one IQ format.
+
+    Each format module declares one of these beside its encoder and decoder, and
+    :data:`~modelopt.torch.quantization.ggml.registry.IQ_FORMAT_REGISTRY` lists them. The
+    per-format pieces -- codebook, search, payload layout -- stay in the format's module; what
+    lives here is the part every format does the same way.
+    """
+
+    name: str
+    block_size: int
+    block_bytes: int
+    quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]]
+    dequantize: Callable[..., torch.Tensor]
+    # Encode and decode are chunked separately: packing runs once per weight and is bounded by
+    # its search temporaries, decoding runs every forward and is bounded by kernel launches.
+    block_chunk_size: int
+    decode_chunk_size: int
+
+    @property
+    def effective_bits(self) -> float:
+        """Packed storage cost per weight."""
+        return self.block_bytes * 8 / self.block_size
+
+    def fake_quant(
+        self,
+        inputs: torch.Tensor,
+        quantizer,
+        *,
+        block_chunk_size: int | None = None,
+        decode_chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        """TensorQuantizer backend for this format, with pass-through backward."""
+        if getattr(quantizer, "num_bits", None) != self.name:
+            raise ValueError(
+                f"The ggml {self.name.upper()} backend requires num_bits={self.name!r}"
+            )
+        return fake_quantize_with_cache(
+            inputs,
+            quantizer,
+            format_name=self.name,
+            block_chunk_size=(
+                self.block_chunk_size if block_chunk_size is None else block_chunk_size
+            ),
+            decode_chunk_size=(
+                self.decode_chunk_size if decode_chunk_size is None else decode_chunk_size
+            ),
+            quantize=self.quantize,
+            dequantize=self.dequantize,
+        )
+
+
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
     """Narrow ``blocks`` to float32 the way the CUDA ``load_float`` helper does.
 

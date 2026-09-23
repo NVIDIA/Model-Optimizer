@@ -23,9 +23,12 @@ from .iq2_xs import *
 from .iq2_xs import __all__ as _iq2_xs_all
 from .iq2_xxs import *
 from .iq2_xxs import __all__ as _iq2_xxs_all
+from .registry import IQ_FORMAT_REGISTRY, IQFormat
 
 __all__ = [  # noqa: PLE0604
     *_iq1_s_all,
     *_iq2_xs_all,
     *_iq2_xxs_all,
+    "IQ_FORMAT_REGISTRY",
+    "IQFormat",
 ]

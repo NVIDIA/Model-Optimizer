@@ -19,7 +19,9 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
-from .quant_format import IQ_BLOCK_METADATA, IQ_FORMATS
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+
+from .quant_format import IQ_FORMATS
 
 
 def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
@@ -121,7 +123,9 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
     elif quant_algo.lower() in IQ_FORMATS:
-        block_size, payload_bytes, effective_bits = IQ_BLOCK_METADATA[quant_algo.lower()]
+        iq_format = IQ_FORMAT_REGISTRY[quant_algo.lower()]
+        block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
+        effective_bits = iq_format.effective_bits
         if group_size not in (None, block_size):
             raise ValueError(f"{quant_algo} requires group size {block_size}, got {group_size}")
         # IQ payloads are self-contained blocks, not compressed-tensors integer groups.

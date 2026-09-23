@@ -35,6 +35,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -57,7 +58,6 @@ from .plugins.mcore_custom import (
 from .plugins.megatron_importer import GPTModelImporter, _get_mamba_conv1d
 from .quant_format import (
     IQ_FORMATS,
-    IQ_PACKERS,
     KV_CACHE_FP8,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
@@ -1185,7 +1185,7 @@ class GPTModelExporter:
     @staticmethod
     def _pack_iq_weight(weight: torch.Tensor, qformat: str) -> torch.Tensor:
         """Pack one ``[out, in]`` weight and return its CPU payload."""
-        quantize_iq = IQ_PACKERS[qformat]
+        quantize_iq = IQ_FORMAT_REGISTRY[qformat].quantize
         packed_weight, _ = quantize_iq(weight)
         return packed_weight.detach().cpu()
 

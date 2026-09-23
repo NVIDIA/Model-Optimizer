@@ -27,6 +27,7 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -51,7 +52,6 @@ from modelopt.torch.utils import clear_cuda_cache
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
-    IQ_BLOCK_METADATA,
     IQ_FORMATS,
     KV_CACHE_FP8,
     KV_CACHE_FP8_K_NVFP4_V,
@@ -773,7 +773,9 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v in IQ_FORMATS:
-            block_size, payload_bytes, effective_bits = IQ_BLOCK_METADATA[v]
+            iq_format = IQ_FORMAT_REGISTRY[v]
+            block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
+            effective_bits = iq_format.effective_bits
             if block_size_value != block_size:
                 raise ValueError(
                     f"{v.upper()} requires block size {block_size}, got {block_size_value}"

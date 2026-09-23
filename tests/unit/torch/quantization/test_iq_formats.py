@@ -33,6 +33,7 @@ import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # name -> (module, packed bytes per block, codebook entries, bits per weight)
@@ -272,3 +273,8 @@ def test_error_decreases_with_bit_width():
         errors.append(float((quantizer(weight) - weight).square().mean()))
 
     assert errors == sorted(errors, reverse=True), dict(zip(sorted(NAMES), errors))
+
+
+def test_every_registered_format_is_covered():
+    """A format registered for dispatch must also be listed here, or it escapes this contract."""
+    assert sorted(IQ_FORMAT_REGISTRY) == sorted(FORMATS)
