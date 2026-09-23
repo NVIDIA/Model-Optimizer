@@ -1,0 +1,12 @@
+metadata:
+  recipe_type: ptq
+  description: GDN/KDA INT8 recurrent-state QDQ before native vLLM prefill and decode.
+quantize:
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*gdn_state_quantizer'
+      cfg: {num_bits: 8, type: dynamic, axis: [0, 1], unsigned: false, narrow_range: true}
+    - quantizer_name: '*kda_state_quantizer'
+      cfg: {num_bits: 8, type: dynamic, axis: [0, 1], unsigned: false, narrow_range: true}
+  algorithm:
