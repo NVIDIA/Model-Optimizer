@@ -97,9 +97,9 @@ trainer.train()
 
 > [!NOTE]
 > `compute_loss()` returns the KD loss on its own; it does not combine it with the original student
-> cross-entropy loss. Weighted combination of CE and KD losses is not yet supported by `KDTrainer` but is
-> coming soon. During evaluation, the CE loss is still computed and reported separately as the `eval_ce_loss`
-> metric.
+> cross-entropy loss. Weighted combination of CE and KD losses is not yet supported by `KDTrainer`, though it
+> is a planned feature. During evaluation, the CE loss is still computed and reported separately as the
+> `eval_ce_loss` metric.
 
 > [!NOTE]
 > `KDTrainer` requires FSDP2 when FSDP is enabled; FSDP1 is not supported. Note that HuggingFace Trainer uses
