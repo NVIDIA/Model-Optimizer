@@ -121,7 +121,9 @@ def _test_logits_kl_loss(rank, size):
 
     # Compute distillation loss
     loss = distillation_model.compute_kd_loss(
-        student_loss=student_loss, loss_reduction_fn=lambda x: x[0].mean()
+        # Reduce the per-token LM loss to a scalar, as Megatron's loss function does in training.
+        student_loss=student_loss.mean(),
+        loss_reduction_fn=lambda x: x[0].mean(),
     )
     assert isinstance(loss, dict), "Loss should be a dictionary"
     assert "kd_loss" in loss, "Should contain kd_loss key"
@@ -212,7 +214,9 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
 
     # Compute distillation loss
     loss = distillation_model.compute_kd_loss(
-        student_loss=student_loss, loss_reduction_fn=lambda x: x[0].mean()
+        # Reduce the per-token LM loss to a scalar, as Megatron's loss function does in training.
+        student_loss=student_loss.mean(),
+        loss_reduction_fn=lambda x: x[0].mean(),
     )
     assert isinstance(loss, dict), "Loss should be a dictionary"
     assert "kd_loss" in loss, "Should contain kd_loss key"
