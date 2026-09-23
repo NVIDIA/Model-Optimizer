@@ -11,6 +11,11 @@ The `configs/kda_decode_state_int8.json` and
 state or replay anchors. Replay factors retain their separate FP8 setting.
 Existing FP8 recipes remain available. No INT8 quality result is claimed.
 
+`configs/kda_decode_replay_int8_hadamard.json` selects value-axis Hadamard rotation
+with per-key-channel, per-32-value INT8 scales stored in FP16. It disables replay
+factor QDQ to isolate state quantization. The value dimension must be divisible
+by 32. Model-quality evaluation remains pending.
+
 `benchmark_decode.py` measures matched-policy training overhead.
 `compare_quality.py` compares completed paired receipts with confidence bounds.
 See [the decode guide](../../../docs/linear_attention_decode.md) for the numerical

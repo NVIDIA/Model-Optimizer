@@ -30,9 +30,9 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 KimiDeltaAttention = pytest.importorskip("fla.layers.kda").KimiDeltaAttention
 
 
-def _layer():
+def _layer(head_dim=16):
     return (
-        KimiDeltaAttention(hidden_size=32, head_dim=16, num_heads=2, use_short_conv=True)
+        KimiDeltaAttention(hidden_size=32, head_dim=head_dim, num_heads=2, use_short_conv=True)
         .cuda()
         .train()
     )
@@ -51,12 +51,20 @@ def _forward(model, hidden):
 
 @pytest.mark.parametrize(
     "mode",
-    ["decode_token", "decode_replay", "decode_decay", "decode_token_int8", "decode_replay_int8"],
+    [
+        "decode_token",
+        "decode_replay",
+        "decode_decay",
+        "decode_token_int8",
+        "decode_replay_int8",
+        "decode_replay_hadamard_int8",
+    ],
 )
 @pytest.mark.timeout(180)
 def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
     torch.manual_seed(73)
-    model = _layer()
+    head_dim = 32 if "hadamard" in mode else 16
+    model = _layer(head_dim)
     hidden = torch.randn(1, 73, 32, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         baseline = _forward(model, hidden)
@@ -81,6 +89,9 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
             policy_cfg["decode"]["replay"] = {"window": 5}
         if mode == "decode_decay":
             policy_cfg["decode"]["decay_log_step"] = 1 / 256
+        if "hadamard" in mode:
+            policy_cfg["state"]["block_v"] = 32
+            policy_cfg["decode"]["state_codec"] = "int8_hadamard32"
     mtq.quantize(model, cfg)
     output = _forward(model, hidden)
     assert torch.isfinite(output).all()
@@ -96,7 +107,7 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
     model.linear_attention_config = policy
     checkpoint = tmp_path / "model.pth"
     mto.save(model, checkpoint)
-    restored = mto.restore(_layer(), checkpoint)
+    restored = mto.restore(_layer(head_dim), checkpoint)
     actual = _forward(restored, hidden)
     torch.testing.assert_close(actual, output, rtol=0, atol=0)
     assert restored.linear_attention_config == policy
@@ -127,17 +138,38 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
             _forward(restored, hidden[:, :1])
 
 
-def test_decode_phase_spans_activation_checkpoint_backward():
-    model = _layer()
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_decode_phase_spans_activation_checkpoint_backward(hadamard):
+    model = _layer(32 if hadamard else 16)
+    quant_cfg = [{"quantizer_name": "*", "enable": False}]
+    if hadamard:
+        quant_cfg.append(
+            {
+                "quantizer_name": "*kda_state_quantizer",
+                "cfg": {
+                    "num_bits": 8,
+                    "type": "dynamic",
+                    "axis": (0, 1),
+                    "unsigned": False,
+                    "narrow_range": True,
+                },
+            }
+        )
     mtq.quantize(
         model,
         {
-            "quant_cfg": [{"quantizer_name": "*", "enable": False}],
+            "quant_cfg": quant_cfg,
             "algorithm": None,
             "linear_attention": [
                 {
                     "module_name": "*",
-                    "cfg": {"backend": "matmul", "decode": {"implementation": "triton"}},
+                    "cfg": {
+                        "backend": "matmul",
+                        "decode": {
+                            "implementation": "triton",
+                            "state_codec": "int8_hadamard32" if hadamard else "tile",
+                        },
+                    },
                 }
             ],
         },

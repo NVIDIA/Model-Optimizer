@@ -59,6 +59,10 @@ class _LinearAttentionQuantMixin(QuantModule):
             validate_gdn_quantizer(
                 self._linear_attn_state, state=True, name=self.linear_attention_quantizer_names[0]
             )
+            decode = self.linear_attention_config.decode
+            if decode is not None and decode.state_codec == "int8_hadamard32":
+                if self._linear_attn_state_format != "int8":
+                    raise ValueError("int8_hadamard32 requires INT8 state quantization")
         if self._linear_attn_w.is_enabled:
             validate_gdn_quantizer(
                 self._linear_attn_w, state=False, name=self.linear_attention_quantizer_names[1]

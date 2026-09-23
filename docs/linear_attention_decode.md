@@ -54,6 +54,57 @@ The public numerical APIs `recurrent_decode_reference` and `recurrent_decode` ac
 
 The Torch reference can explicitly re-encode stored entries using `encoding="reencode"`. It re-encodes the already stored values and does not regenerate factors from a teacher trajectory. The fused implementation supports encode-once replay. Carrying its reconstructed state incrementally applies the same ordered transitions as replaying the fixed entries; it does not measure serving-time reconstruction cost.
 
+## INT8 state with Hadamard rotation
+
+Set `decode.state_codec="int8_hadamard32"` with an INT8 state quantizer to enable
+32-point orthonormal Sylvester Hadamard transforms along the **value** dimension.
+This codec supports both token writes and replay anchors. The default `"tile"`
+codec retains the existing FP8/INT8 behavior above.
+
+```python
+# Execution policy; pair with the INT8 quantizer attributes in the example above.
+policy = {
+    "backend": "matmul",
+    "state": {"block_v": 64},
+    "decode": {
+        "mode": "replay",
+        "implementation": "triton",
+        "state_codec": "int8_hadamard32",
+        "readout": "working",
+        "replay": {"window": 8, "factor_qdq": False, "encoding": "once"},
+    },
+}
+```
+
+For key-first state `S`, the internal state is `S @ H`, with a block-diagonal
+Hadamard matrix `H`. Inputs `v` and replay update vectors use the same basis;
+queries, keys, and scalar/channel decay gates keep their original coordinates.
+Outputs are transformed back. The first nonempty decode call transforms the
+incoming state once; continuation retains the rotated anchor and updates without
+another rotation or initial-state quantization. `carry.value_basis` records the
+basis. `carry.reconstruct()` returns the **original** basis; passing
+`original_basis=False` exposes the internal basis.
+
+The state codec uses one scale per **key channel and 32 contiguous values**, even
+when the execution tile `state.block_v` is 64 or 128. For each group, compute
+`scale=max(amax/127, 6e-8)` in FP32, divide by that scale, round half ties away from
+zero, and saturate codes to `[-127,127]`. Store the scale in FP16 and reconstruct
+with that FP16 scale. Scale metadata has shape `[H,Dk,Dv/32]`. Rounding has
+identity STE and scales are detached. Basis transforms use their actual linear
+derivatives. Replay factor QDQ remains independently configurable; the example
+disables it to isolate state/anchor quantization.
+
+The Hadamard basis and INT8 scale/rounding conventions follow
+[quantized-replayssm at 29c35508](https://github.com/mxinO/quantized-replayssm/blob/29c355086070d2c7973550d3670171af53433533/vllm/model_executor/layers/fla/ops/fused_recurrent_replayssm.py).
+Model-quality evaluation of this ModelOpt implementation remains pending.
+
+`Dv` must be divisible by 32, and `state.block_v` must be 32, 64, or 128. Prefix
+computation remains in the original basis with the exact solve; this codec starts
+at decode handoff and rejects `prefill_state_qdq=True`. An all-prefix or empty
+sequence does not create a decode quantization event. The policy is saved and
+restored with the model. A complete example is
+`examples/llm_qat/linear_attention/configs/kda_decode_replay_int8_hadamard.json`.
+
 ## Training implementation and limits
 
 The CUDA Triton implementation supports FP32 working inputs, key dimensions up to 128, scalar/channel gates, and value blocks 16/32/64/128 with masked tails. It saves a state every eight tokens and recomputes intermediate states in backward. This internal checkpoint interval does not change write cadence. Its custom backward supports first-order gradients; use the Torch reference for higher-order differentiation.
