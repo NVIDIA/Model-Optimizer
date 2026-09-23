@@ -111,26 +111,63 @@ def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, pdim: int = 2):
     return out[:num_tokens]
 
 
+def _group_holds_hidden_state(group_spec) -> bool:
+    """Whether a kv-cache group's spec covers the hidden-state capture layer.
+
+    Two shapes, because vLLM only sometimes gives the capture layer a group of its own.
+    ``get_kv_cache_groups`` splits hidden-state layers out -- "they use their own block
+    table and must not be absorbed into a compatible attention bucket" -- only AFTER two
+    early returns for uniform specs, and ``HiddenStateCacheSpec`` subclasses
+    ``FullAttentionSpec``. So on a model whose attention layers are all one type (Qwen3,
+    Llama, most dense models) ``UniformTypeKVCacheSpecs.from_specs`` accepts the capture
+    layer as just another full-attention layer and returns a SINGLE merged group before
+    the split is reached. A model with mixed attention -- some sliding-window layers, say
+    -- is not uniform, falls through, and does get the separate group.
+
+    Merged is still usable: the group keeps a per-layer spec dict and one block table that
+    indexes every layer in it, so a request's block ids address the capture layer
+    correctly. Only the lookup has to know about both shapes.
+    """
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+    if isinstance(group_spec, HiddenStateCacheSpec):
+        return True
+    per_layer = getattr(group_spec, "kv_cache_specs", None)
+    if isinstance(per_layer, dict):
+        return any(isinstance(spec, HiddenStateCacheSpec) for spec in per_layer.values())
+    return False
+
+
 def _hidden_state_group_index(kv_cache_config) -> int:
     """Index of the kv-cache group holding the capture layer.
 
     ``build_connector_meta`` runs in the SCHEDULER process, which never calls
     ``register_kv_caches`` and has no worker forward-context to look layers up in, so the
-    group is identified from the static spec instead. ``prefer_cross_layer_blocks`` puts
-    the capture layer in a group of its own, and a request's ``block_ids`` is one list per
-    group -- picking the wrong one addresses the attention KV instead of the hidden states.
+    group is identified from the static spec instead. A request's ``block_ids`` is one
+    list per group -- picking the wrong one addresses the attention KV instead of the
+    hidden states, which is not an error, just wrong data.
     """
-    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
-
     groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
-    matches = [i for i, g in enumerate(groups) if isinstance(g.kv_cache_spec, HiddenStateCacheSpec)]
-    if len(matches) != 1:
-        raise RuntimeError(
-            "RdmaHiddenStatesConnector: expected exactly one HiddenStateCacheSpec group in "
-            f"the kv-cache config, found {len(matches)} of {len(groups)}. Without it the "
-            "per-request block ids cannot be resolved."
-        )
-    return matches[0]
+    matches = [i for i, g in enumerate(groups) if _group_holds_hidden_state(g.kv_cache_spec)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and len(groups) == 1:
+        # The merged case again, seen from the scheduler. The worker's copy of the config
+        # carries the real UniformTypeKVCacheSpecs, whose per-layer dict the test above can
+        # inspect; the copy the scheduler holds has been flattened to a representative
+        # FullAttentionSpec by the time it crosses the process boundary, so that test finds
+        # nothing even though the capture layer IS in this group. With exactly one group
+        # there is exactly one block table and it necessarily indexes every layer, capture
+        # included. If capture were genuinely absent, register_kv_caches on the worker
+        # fails first and louder: it cannot find a view whose plane count matches the
+        # configured capture ids.
+        return 0
+    raise RuntimeError(
+        "RdmaHiddenStatesConnector: expected exactly one kv-cache group holding a "
+        f"HiddenStateCacheSpec, found {len(matches)} of {len(groups)}. Without it the "
+        "per-request block ids cannot be resolved. Groups: "
+        f"{[(type(g.kv_cache_spec).__name__, len(g.layer_names)) for g in groups]}"
+    )
 
 
 @dataclass
