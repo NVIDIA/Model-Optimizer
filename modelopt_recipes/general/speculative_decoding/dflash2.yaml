@@ -79,6 +79,11 @@ dflash:
   # Weight of the candidate-selector cross-entropy term (0 disables it and trains
   # the backbone + convolutions only).
   dflash_selector_loss_alpha: 1.0
+  # Anneal the block objective from cross-entropy toward acceptance as acceptance
+  # rises; see dflash_lk_loss_type. Requires dflash_self_logit_distillation: false.
+  dflash_lk_loss_type: lambda
+  dflash_lk_ce_scale: 1.0
+  dflash_lk_ce_decay: 1.0
   dflash_architecture_config:
     num_hidden_layers: 5
     # Draft attention/MLP dims — set explicitly (the draft is an independent

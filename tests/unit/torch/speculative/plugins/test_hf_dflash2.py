@@ -383,6 +383,62 @@ class TestCandidateSelectorAlignment:
             torch.nn.init.normal_(selector.successor_codebook, std=0.5)
         return selector
 
+    def _selector_terms(self, selector, target_ids, candidate_ids):
+        """Drive HFDFlash2Model._selector_loss with a hand-built candidate set."""
+        b, length, k = candidate_ids.shape
+        model = HFDFlash2Model.__new__(HFDFlash2Model)
+        model.dflash_module = type("_M", (), {"candidate_selector": selector})()
+        logits = torch.zeros(b, length, 32, dtype=torch.double)
+        # Put the chosen candidates on top so logits.topk reproduces candidate_ids.
+        for slot in range(k):
+            logits.scatter_(-1, candidate_ids[..., slot : slot + 1], float(k - slot))
+        return HFDFlash2Model._selector_loss(
+            model,
+            logits,
+            target_ids,
+            torch.randn(b, length, 8, dtype=torch.double),
+            torch.zeros(b, length, dtype=torch.long),
+            torch.ones(b, length, dtype=torch.double),
+        )
+
+    def test_a_miss_carries_no_selector_gradient(self):
+        """A gold token outside the backbone's top-k is excluded, not substituted in.
+
+        Serving only ever shows the strict top-k, so supervising a set with the gold
+        forced into it would teach the selector to override the unary ranking on a
+        candidate set it will never see. Contrasted against a covered set below, which
+        must still train -- masking everything would pass a one-sided assertion.
+        """
+        selector = self._selector(vocab=32, top_k=2)
+        candidates = torch.tensor([[[5, 6], [5, 6], [5, 6]]] * 2)
+
+        _, _, covered = self._selector_terms(
+            selector, torch.full((2, 3), 5, dtype=torch.long), candidates
+        )
+        assert float(covered) == 1.0
+
+        loss, _, coverage = self._selector_terms(
+            selector, torch.full((2, 3), 9, dtype=torch.long), candidates
+        )
+        assert float(coverage) == 0.0
+        assert float(loss.detach()) == 0.0
+        selector.zero_grad()
+        loss.backward()
+        assert selector.successor_codebook.grad.abs().sum() == 0.0
+
+    def test_a_covered_position_does_train_the_selector(self):
+        """The mask must not be so aggressive that nothing trains."""
+        selector = self._selector(vocab=32, top_k=2)
+        candidates = torch.tensor([[[5, 6], [5, 6], [5, 6]]] * 2)
+        loss, _, coverage = self._selector_terms(
+            selector, torch.full((2, 3), 5, dtype=torch.long), candidates
+        )
+        assert float(coverage) == 1.0
+        assert float(loss.detach()) > 0.0
+        selector.zero_grad()
+        loss.backward()
+        assert selector.successor_codebook.grad.abs().sum() > 0.0
+
     def test_greedy_path_position_zero_is_seeded_by_the_anchor(self):
         """``greedy_path`` position 0 scores against the anchor, i.e. block offset 1.
 
@@ -426,6 +482,59 @@ class TestCandidateSelectorAlignment:
             ).argmax(dim=-1, keepdim=True),
         )[:, 0]
         assert torch.equal(path[:, 1], expected_second)
+
+
+class TestDFlash2BlockObjective:
+    """The cross-entropy/acceptance blend selected by ``dflash_lk_loss_type``."""
+
+    def _loss(self, **overrides):
+        torch.manual_seed(0)
+        config = _get_dflash2_config()
+        config.update(overrides)
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.train()
+        torch.manual_seed(1)
+        input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
+        out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        return float(out.loss.detach())
+
+    def test_zero_decay_and_unit_scale_is_exactly_cross_entropy(self):
+        """A constant CE share of 1 must leave the objective bit-identical to 'ce'.
+
+        This is the degenerate case that catches a blend wired up backwards: a wrong
+        sign or a swapped term still produces a finite decreasing loss.
+        """
+        assert self._loss(
+            dflash_lk_loss_type="lambda", dflash_lk_ce_scale=1.0, dflash_lk_ce_decay=0.0
+        ) == self._loss(dflash_lk_loss_type="ce")
+
+    def test_zero_scale_is_exactly_the_acceptance_term(self):
+        """A CE share of 0 must leave the objective bit-identical to 'tv'."""
+        assert self._loss(dflash_lk_loss_type="lambda", dflash_lk_ce_scale=0.0) == self._loss(
+            dflash_lk_loss_type="tv"
+        )
+
+    def test_blend_lies_between_its_two_terms(self):
+        ce = self._loss(dflash_lk_loss_type="ce")
+        tv = self._loss(dflash_lk_loss_type="tv")
+        blended = self._loss(dflash_lk_loss_type="lambda")
+        assert min(ce, tv) <= blended <= max(ce, tv)
+
+    def test_acceptance_term_is_a_probability(self):
+        """1 - q(gold) is a weighted mean of probabilities, so it cannot leave [0, 1]."""
+        loss = self._loss(dflash_lk_loss_type="tv", dflash_selector_loss_alpha=0.0)
+        assert 0.0 <= loss <= 1.0
+
+    @pytest.mark.parametrize("loss_type", ["tv", "lambda"])
+    def test_distillation_conflict_is_rejected(self, loss_type):
+        """Both terms read q(gold), which the KD path never forms."""
+        config = _get_dflash2_config()
+        config["dflash_lk_loss_type"] = loss_type
+        config["dflash_self_logit_distillation"] = True
+        model = get_tiny_llama(num_hidden_layers=4)
+        with pytest.raises(ValueError, match="dflash_self_logit_distillation"):
+            mtsp.convert(model, [("dflash", config)])
 
 
 class TestDFlash2Export:

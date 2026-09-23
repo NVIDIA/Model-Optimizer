@@ -73,7 +73,7 @@ Draft model components:
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -198,6 +198,21 @@ def _dpace_position_weights(
         inclusive = torch.cumsum(cum_conf, dim=-1)
         weights = inclusive[..., -1:] - inclusive + cum_conf
         return weights.to(dtype=confidences.dtype)
+
+
+class _DFlashLossTerms(NamedTuple):
+    """The unreduced pieces behind the block loss, for variants that re-derive it.
+
+    ``ce_per_token`` is ``None`` on the KD path, which never forms a per-position
+    cross-entropy. ``weights`` carries the position weighting (decay or D-PACE) and
+    normalizes by ``weight_sum``; ``supervised_mask`` is the unweighted mask the
+    reported accuracy uses.
+    """
+
+    ce_per_token: torch.Tensor | None
+    weights: torch.Tensor
+    weight_sum: torch.Tensor
+    supervised_mask: torch.Tensor
 
 
 @DFlashDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -915,6 +930,7 @@ class HFDFlashModel(DFlashModel):
         base_logits=None,
         draft_hidden=None,
         base_outputs=None,
+        return_terms=False,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
@@ -927,6 +943,11 @@ class HFDFlashModel(DFlashModel):
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
             draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
                 Unused here; passed for variants whose head consumes them.
+            return_terms: Also return the unreduced pieces behind the loss, so a variant
+                can recompose the block objective from a different divergence without
+                rebuilding the target alignment and position weighting.
+                TODO: promote this into a shared divergence seam when the DFlash-family
+                loss code is refactored; DFlash2 is the only consumer today.
 
         Returns:
             (loss, accuracy) tuple.
@@ -1021,6 +1042,14 @@ class HFDFlashModel(DFlashModel):
             loss = flat_logits.sum() * 0.0
             accuracy = 0.0
 
+        if return_terms:
+            terms = _DFlashLossTerms(
+                ce_per_token=loss_per_token,
+                weights=flat_weights,
+                weight_sum=valid_count,
+                supervised_mask=binary_eval_mask,
+            )
+            return loss, accuracy, terms
         return loss, accuracy
 
     def forward(

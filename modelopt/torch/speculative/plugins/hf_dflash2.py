@@ -73,6 +73,16 @@ class HFDFlash2Model(HFDFlashModel):
             )
         super().modify(config)
         self.dflash_selector_loss_alpha = getattr(config, "dflash_selector_loss_alpha", 1.0)
+        self.dflash_lk_loss_type = getattr(config, "dflash_lk_loss_type", "ce")
+        self.dflash_lk_ce_scale = getattr(config, "dflash_lk_ce_scale", 1.0)
+        self.dflash_lk_ce_decay = getattr(config, "dflash_lk_ce_decay", 1.0)
+        if self.dflash_lk_loss_type != "ce" and self.dflash_self_logit_distillation:
+            raise ValueError(
+                f"dflash_lk_loss_type={self.dflash_lk_loss_type!r} needs the draft's "
+                "probability of the gold token, which the KD path never forms -- it "
+                "optimizes a soft target instead. Set dflash_self_logit_distillation=false, "
+                "or dflash_lk_loss_type='ce' to keep distillation."
+            )
         self._selector_metrics = None
 
     def forward(self, *args, **kwargs):
@@ -116,23 +126,21 @@ class HFDFlash2Model(HFDFlashModel):
 
         unary_logits, candidate_ids = logits.topk(top_k, dim=-1)
 
-        # Where the gold token is absent from the top-k, overwrite the last (lowest
-        # scoring) slot with it, so every supervised position has a correct class.
-        gold_in_topk = (candidate_ids == target_ids.unsqueeze(-1)).any(dim=-1)
-        gold_slot = torch.where(
-            gold_in_topk,
-            (candidate_ids == target_ids.unsqueeze(-1)).float().argmax(dim=-1),
-            torch.full_like(target_ids, top_k - 1),
-        )
-        gold_unary = logits.gather(-1, target_ids.unsqueeze(-1))
-        candidate_ids = candidate_ids.scatter(-1, gold_slot.unsqueeze(-1), target_ids.unsqueeze(-1))
-        unary_logits = unary_logits.scatter(-1, gold_slot.unsqueeze(-1), gold_unary)
+        # Train on the strict top-k, the candidate set serving actually builds. A gold
+        # token the backbone did not propose is a backbone recall failure, not a
+        # selector classification example: substituting it in would teach the selector
+        # to override the unary ranking on a set it will never be shown. Those
+        # positions carry no selector gradient and leave the denominator instead.
+        gold_matches = candidate_ids == target_ids.unsqueeze(-1)
+        gold_in_topk = gold_matches.any(dim=-1)
+        gold_slot = gold_matches.long().argmax(dim=-1)
 
         selector_logits = selector.score_candidates(
             candidate_ids, unary_logits, hidden, predecessor_ids
         )
 
-        flat_weights = weight_mask.reshape(-1)
+        covered = weight_mask * gold_in_topk.to(weight_mask.dtype)
+        flat_weights = covered.reshape(-1)
         denominator = flat_weights.sum() + 1e-6
         per_token = F.cross_entropy(
             selector_logits.float().reshape(-1, top_k),
@@ -146,10 +154,49 @@ class HFDFlash2Model(HFDFlashModel):
             accuracy = (
                 (chosen == gold_slot.reshape(-1)).float() * flat_weights
             ).sum() / denominator
-            coverage = (gold_in_topk.reshape(-1).float() * flat_weights).sum() / denominator
+            # Coverage keeps the full supervised mask as its denominator: it measures
+            # how often the selector was given a solvable problem at all.
+            # clamp, not an epsilon: a fully covered batch must read exactly 1.0.
+            supervised = weight_mask.reshape(-1).sum()
+            coverage = flat_weights.sum() / supervised.clamp(min=1.0)
         # Detached tensors, not Python scalars: .item() would force a CPU-GPU sync on
         # every training step. The trainer converts them at the logging boundary.
         return loss, accuracy.detach(), coverage.detach()
+
+    def _lk_loss(self, terms):
+        """Re-weight the block objective between cross-entropy and acceptance.
+
+        Both terms are read off the same per-position cross-entropy the backbone loss
+        already produced, so the target alignment and position weighting are shared::
+
+            q     = exp(-ce)                 draft probability of the gold token
+            L_ce  = <ce>_w                   today's objective
+            L_tv  = <1 - q>_w                total variation to the one-hot target,
+                                             i.e. the per-position acceptance loss
+            a     = <q>_mask                 mean acceptance over supervised positions
+            L     = s*exp(-d*a) * L_ce + (1 - s*exp(-d*a)) * L_tv
+
+        ``<.>_w`` averages under the position weighting, ``<.>_mask`` under the
+        unweighted supervised mask, matching how the reported accuracy is normalized.
+        The blend weight is detached, so it reshapes the objective without adding a
+        gradient path of its own.
+        """
+        ce, weights, weight_sum = terms.ce_per_token, terms.weights, terms.weight_sum
+        assert ce is not None, (
+            "the KD path produced no per-position cross-entropy, so q(gold) is "
+            "unavailable and the blend would silently fall back to it; modify() is "
+            "supposed to have rejected this combination at convert time"
+        )
+        gold_probability = torch.exp(-ce)
+        tv_loss = ((1.0 - gold_probability) * weights).sum() / weight_sum
+        if self.dflash_lk_loss_type == "tv":
+            return tv_loss
+
+        ce_loss = (ce * weights).sum() / weight_sum
+        mask = terms.supervised_mask
+        acceptance = (gold_probability.detach() * mask).sum() / (mask.sum() + 1e-6)
+        ce_share = self.dflash_lk_ce_scale * torch.exp(-self.dflash_lk_ce_decay * acceptance)
+        return ce_share * ce_loss + (1.0 - ce_share) * tv_loss
 
     def _compute_loss(
         self,
@@ -169,7 +216,7 @@ class HFDFlash2Model(HFDFlashModel):
         stays the backbone's top-1, so DFlash and DFlash2 runs remain comparable;
         the selector's own accuracy is logged separately.
         """
-        loss, accuracy = super()._compute_loss(
+        loss, accuracy, terms = super()._compute_loss(
             logits,
             input_ids,
             anchor_positions,
@@ -178,7 +225,10 @@ class HFDFlash2Model(HFDFlashModel):
             base_logits,
             draft_hidden=draft_hidden,
             base_outputs=base_outputs,
+            return_terms=True,
         )
+        if self.dflash_lk_loss_type != "ce":
+            loss = self._lk_loss(terms)
         if self.dflash_selector_loss_alpha <= 0 or draft_hidden is None:
             return loss, accuracy
 
