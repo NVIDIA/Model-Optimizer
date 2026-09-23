@@ -59,13 +59,19 @@ class _LinearAttentionQuantMixin(QuantModule):
         """Validate quantizer contracts shared by GDN and KDA."""
         if self._linear_attn_state.is_enabled:
             validate_gdn_quantizer(
-                self._linear_attn_state, name=self.linear_attention_quantizer_names[0], num_bits=((4, 3), 8)
+                self._linear_attn_state,
+                name=self.linear_attention_quantizer_names[0],
+                num_bits=((4, 3), 8),
             )
             if self._linear_attn_state.axis != (0, 1):
                 raise ValueError(
                     f"{self.linear_attention_quantizer_names[0]} supports only axis=(0, 1) "
                     "with state.block_v tiling"
                 )
+            decode = self.linear_attention_config.decode
+            if decode is not None and decode.state_codec == "int8_hadamard32":
+                if self._linear_attn_state_format != "int8":
+                    raise ValueError("int8_hadamard32 requires INT8 state quantization")
         if self._linear_attn_w.is_enabled:
             validate_gdn_quantizer(
                 self._linear_attn_w, name=self.linear_attention_quantizer_names[1]

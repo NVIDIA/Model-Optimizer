@@ -17,10 +17,13 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.quantization.linear_attention_reference import state_qdq_reference
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from _test_utils.torch.quantization.linear_attention_reference import (state_qdq_reference)
-from modelopt.torch.quantization.linear_attention import (LinearAttentionDecodeConfig, recurrent_decode_reference)
+from modelopt.torch.quantization.linear_attention import (
+    LinearAttentionDecodeConfig,
+    recurrent_decode_reference,
+)
 from modelopt.torch.quantization.linear_attention.decode import _encode
 from modelopt.torch.quantization.nn import TensorQuantizer
 

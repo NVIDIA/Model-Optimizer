@@ -18,6 +18,7 @@ import itertools
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.quantization.linear_attention_reference import recurrent_delta_rule_reference
 
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
@@ -26,7 +27,6 @@ from modelopt.torch.quantization.linear_attention import (
 )
 from modelopt.torch.quantization.linear_attention.config import LinearAttentionDecodeConfig
 from modelopt.torch.quantization.linear_attention.decode import recurrent_decode_reference
-from _test_utils.torch.quantization.linear_attention_reference import (recurrent_delta_rule_reference)
 
 
 def _inputs(kda=True, length=73):

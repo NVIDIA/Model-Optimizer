@@ -15,11 +15,15 @@
 
 """Shared helpers for linear-attention quantization."""
 
+from __future__ import annotations
+
 from itertools import pairwise
+from typing import TYPE_CHECKING
 
 import torch
 
-from ..nn import TensorQuantizer
+if TYPE_CHECKING:
+    from ..nn import TensorQuantizer
 
 __all__ = []
 
@@ -31,6 +35,9 @@ def validate_gdn_quantizer(
     num_bits: tuple[int | tuple[int, int], ...] = ((4, 3),),
 ) -> None:
     """Check supported formats and the custom backward's identity STE."""
+    # Numerical helpers load while QuantizeConfig initializes; defer the quantizer import.
+    from ..nn import TensorQuantizer
+
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
     if not (
@@ -90,6 +97,7 @@ def _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first):
         state,
         sequences,
     )
+
 
 def _state_qdq(state: torch.Tensor, block_v: int = 64, state_format: str = "fp8_e4m3"):
     """Dynamic state-tile QDQ with detached scales and identity STE."""

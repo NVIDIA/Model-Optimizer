@@ -77,10 +77,25 @@ def _advance(
         update, update_scale = _fp8_qdq(update)
     working = decayed + key[:, None] * update[None, :]
     stored = working
-    state_scale = 1.0
+    if STATE_QDQ == 3:
+        state_scale = tl.full((working.shape[0], working.shape[1] // 32), 1.0, tl.float16)
+    else:
+        state_scale = 1.0
     if STATE_QDQ:
         if write_state:
-            if STATE_QDQ == 2:
+            if STATE_QDQ == 3:
+                groups = tl.reshape(working, (working.shape[0], working.shape[1] // 32, 32))
+                scale = tl.maximum(tl.max(tl.abs(groups), 2) * (1.0 / 127.0), 6e-8)
+                normalized = tl.div_rn(groups, scale[:, :, None])
+                codes = tl.floor(tl.abs(normalized) + 0.5)
+                codes = tl.where(normalized < 0, -codes, codes)
+                state_scale = scale.to(tl.float16)
+                stored = tl.reshape(
+                    tl.minimum(tl.maximum(codes, -127.0), 127.0)
+                    * state_scale.to(tl.float32)[:, :, None],
+                    working.shape,
+                )
+            elif STATE_QDQ == 2:
                 amax = tl.max(tl.abs(working))
                 # Match Torch scalar division: FP32 multiply by the rounded reciprocal.
                 state_scale = tl.where(amax > 0, amax * (1.0 / 127.0), 1.0)
@@ -130,7 +145,13 @@ def _decode_fwd(
     mask = (keys[:, None] < DK) & (values[None, :] < DV)
     state = tl.load(Initial + offsets, mask, 0)
     tl.store(Anchor + offsets, state, mask)
-    tl.store(AnchorScale + h * NV + tile, 1.0)
+    if STATE_QDQ == 3:
+        groups = tile * (BV // 32) + tl.arange(0, BV // 32)
+        scale_offsets = (h * DK + keys[:, None]) * (DV // 32) + groups[None, :]
+        scale_mask = (keys[:, None] < DK) & (groups[None, :] < DV // 32)
+        tl.store(AnchorScale + scale_offsets, 1.0, scale_mask)
+    else:
+        tl.store(AnchorScale + h * NV + tile, 1.0)
     for t in range(T):
         if t % INTERVAL == 0:
             tl.store(Checkpoints + (t // INTERVAL) * H * DK * DV + offsets, state, mask)
@@ -161,7 +182,10 @@ def _decode_fwd(
         tl.store(UpdateScale + (t * H + h) * NV + tile, update_scale)
         if write_state:
             tl.store(Anchor + offsets, state, mask)
-            tl.store(AnchorScale + h * NV + tile, state_scale)
+            if STATE_QDQ == 3:
+                tl.store(AnchorScale + scale_offsets, state_scale, scale_mask)
+            else:
+                tl.store(AnchorScale + h * NV + tile, state_scale)
     tl.store(Final + offsets, state, mask)
 
 
@@ -309,7 +333,10 @@ class _FusedRecurrence(torch.autograd.Function):
         )
         output, updates = torch.empty_like(v), torch.empty_like(v)
         final, anchor = torch.empty_like(initial), torch.empty_like(initial)
-        anchor_scales = torch.empty((heads, tiles), device=q.device, dtype=q.dtype)
+        scale_shape = (heads, keys, values // 32) if state_qdq == 3 else (heads, tiles)
+        anchor_scales = torch.empty(
+            scale_shape, device=q.device, dtype=torch.float16 if state_qdq == 3 else q.dtype
+        )
         update_scales = torch.empty((length, heads, tiles), device=q.device, dtype=q.dtype)
         kwargs = {
             "T": length,
@@ -399,6 +426,7 @@ def fused_recurrence(
     *,
     state_qdq=False,
     state_format="fp8_e4m3",
+    state_codec="tile",
     block_v=16,
     replay=False,
     factor_qdq=False,
@@ -425,7 +453,13 @@ def fused_recurrence(
         raise ValueError("Invalid replay cursor/window or recomputation interval")
     if state_format not in ("fp8_e4m3", "int8"):
         raise ValueError("State format must be fp8_e4m3 or int8")
-    state_qdq = (2 if state_format == "int8" else 1) if state_qdq else 0
+    if state_codec not in ("tile", "int8_hadamard32"):
+        raise ValueError("State codec must be tile or int8_hadamard32")
+    if state_codec == "int8_hadamard32":
+        if (state_qdq and state_format != "int8") or v.shape[-1] % 32 or block_v < 32:
+            raise ValueError("Hadamard codec requires INT8, Dv divisible by 32 and block_v >= 32")
+    state_mode = 3 if state_codec == "int8_hadamard32" else (2 if state_format == "int8" else 1)
+    state_qdq = state_mode if state_qdq else 0
     scale = keys**-0.5 if scale is None else scale
     return _FusedRecurrence.apply(
         *(x.contiguous() for x in (q, k, v, g, beta, initial)),

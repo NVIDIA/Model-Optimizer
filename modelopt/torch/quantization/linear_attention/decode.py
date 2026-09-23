@@ -58,14 +58,15 @@ class LinearAttentionCarry:
     position: int
     started: bool
     signature: str
+    value_basis: str = "identity"
 
     @property
     def cursor(self):
         """Number of encoded updates since the last anchor refresh."""
         return len(self.entries)
 
-    def reconstruct(self):
-        """Replay stored entries in order, preserving all anchor/update gradients."""
+    def reconstruct(self, *, original_basis=True):
+        """Replay entries, returning the original value basis unless explicitly disabled."""
         state = self.anchor.values
         for entry in self.entries:
             gate = entry.log_retention
@@ -75,7 +76,19 @@ class LinearAttentionCarry:
             state = state * decay + entry.key.values.unsqueeze(-1) * entry.update.values.unsqueeze(
                 -2
             )
+        if original_basis and self.value_basis == "hadamard32":
+            state = _hadamard32(state)
         return state
+
+
+def _hadamard32(value):
+    """Apply the orthonormal Sylvester transform to contiguous 32-value groups."""
+    shape = value.shape
+    for width in (1, 2, 4, 8, 16):
+        pairs = value.reshape(*shape[:-1], -1, 2, width)
+        left, right = pairs.unbind(-2)
+        value = torch.stack((left + right, left - right), dim=-2).reshape(shape)
+    return value * (32**-0.5)
 
 
 class _IdentityGradient(torch.autograd.Function):
@@ -88,9 +101,20 @@ class _IdentityGradient(torch.autograd.Function):
         return gradient, None
 
 
-def _encode(value, enabled, block_v, *, state=False, state_format="fp8_e4m3"):
+def _encode(value, enabled, block_v, *, state=False, state_format="fp8_e4m3", state_codec="tile"):
     if not enabled:
         return EncodedLinearAttentionTensor(value, None, "identity", None)
+    if state and state_codec == "int8_hadamard32":
+        with torch.no_grad():
+            groups = value.float().reshape(*value.shape[:-1], -1, 32)
+            scales = (groups.abs().amax(-1) / 127).clamp_min(6e-8)
+            normalized = groups / scales.unsqueeze(-1)
+            codes = normalized.sign() * (normalized.abs() + 0.5).floor()
+            metadata = scales.to(torch.float16)
+            decoded = (codes.clamp(-127, 127) * metadata.float().unsqueeze(-1)).reshape_as(value)
+        return EncodedLinearAttentionTensor(
+            _IdentityGradient.apply(value, decoded.to(value.dtype)), metadata, "int8", 32
+        )
     rounded, scales = [], []
     with torch.no_grad():
         for part in value.float().split(block_v, dim=-1):
@@ -148,6 +172,12 @@ def _prepare_carry(
         raise ValueError("block_v must be 16, 32, 64, or 128")
     if state_format not in ("fp8_e4m3", "int8"):
         raise ValueError("State format must be fp8_e4m3 or int8")
+    hadamard = config.state_codec == "int8_hadamard32"
+    if hadamard:
+        if state_qdq and state_format != "int8":
+            raise ValueError("int8_hadamard32 requires INT8 state quantization")
+        if v.shape[-1] % 32 or block_v < 32:
+            raise ValueError("int8_hadamard32 requires Dv divisible by 32 and block_v >= 32")
     signature = _signature(config, state_qdq, block_v, state_format)
     if carry is not None and initial_state is not None:
         raise ValueError("Supply either carry or initial_state")
@@ -168,14 +198,18 @@ def _prepare_carry(
     if config.replay is not None and carry.cursor >= config.replay.window:
         raise ValueError("Replay cursor must be below the refresh window")
     if len(q) and not carry.started:
+        initial = _hadamard32(carry.anchor.values) if hadamard else carry.anchor.values
         anchor = _encode(
-            carry.anchor.values,
+            initial,
             state_qdq and config.quantize_initial,
             block_v,
             state=True,
             state_format=state_format,
+            state_codec=config.state_codec,
         )
-        carry = LinearAttentionCarry(anchor, (), carry.position, True, signature)
+        carry = LinearAttentionCarry(
+            anchor, (), carry.position, True, signature, "hadamard32" if hadamard else "identity"
+        )
     return carry, signature
 
 
@@ -209,6 +243,8 @@ def recurrent_decode_reference(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         output = v + zero
         return output, carry
+    if config.state_codec == "int8_hadamard32":
+        v = _hadamard32(v)
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     outputs = []
     with torch.autocast(device_type=q.device.type, enabled=False):
@@ -223,8 +259,10 @@ def recurrent_decode_reference(
                     )
                     for e in entries
                 )
-                carry = LinearAttentionCarry(carry.anchor, entries, carry.position, True, signature)
-            state = carry.reconstruct()
+                carry = LinearAttentionCarry(
+                    carry.anchor, entries, carry.position, True, signature, carry.value_basis
+                )
+            state = carry.reconstruct(original_basis=False)
             gate = _round_log_gate(g[t], config.decay_log_step)
             decay = gate.exp().unsqueeze(-1)
             if gate.ndim == 1:
@@ -238,30 +276,33 @@ def recurrent_decode_reference(
                 block_v,
             )
             working = decayed + key.values.unsqueeze(-1) * update.values.unsqueeze(-2)
-            if config.mode == "token":
-                anchor = _encode(working, state_qdq, block_v, state=True, state_format=state_format)
-                next_carry = LinearAttentionCarry(anchor, (), carry.position + 1, True, signature)
+            if config.replay is not None:
+                entries = (*entries, ReplayEntry(key, update, gate))
+            refresh = config.replay is None or len(entries) == config.replay.window
+            if refresh:
+                anchor = _encode(
+                    working,
+                    state_qdq,
+                    block_v,
+                    state=True,
+                    state_format=state_format,
+                    state_codec=config.state_codec,
+                )
+                entries = ()
                 stored = anchor.values
             else:
-                assert config.replay is not None
-                entries = (*entries, ReplayEntry(key, update, gate))
-                if len(entries) == config.replay.window:
-                    anchor = _encode(
-                        working, state_qdq, block_v, state=True, state_format=state_format
-                    )
-                    next_carry = LinearAttentionCarry(
-                        anchor, (), carry.position + 1, True, signature
-                    )
-                    stored = anchor.values
-                else:
-                    next_carry = LinearAttentionCarry(
-                        carry.anchor, entries, carry.position + 1, True, signature
-                    )
-                    stored = working
+                anchor = carry.anchor
+                stored = working
+            next_carry = LinearAttentionCarry(
+                anchor, entries, carry.position + 1, True, signature, carry.value_basis
+            )
             read = working if config.readout == "working" else stored
             outputs.append(_sum_keys(q[t].unsqueeze(-1) * read) * scale)
             carry = next_carry
-    return torch.stack(outputs), carry
+    output = torch.stack(outputs)
+    if config.state_codec == "int8_hadamard32":
+        output = _hadamard32(output)
+    return output, carry
 
 
 def recurrent_decode(
@@ -312,6 +353,8 @@ def recurrent_decode(
     # Keep the CPU reference importable without the optional CUDA/Triton backend.
     from modelopt.torch.kernels.quantization.linear_attention.decode import fused_recurrence
 
+    if config.state_codec == "int8_hadamard32":
+        v = _hadamard32(v)
     replay = config.replay is not None
     factor_qdq = config.replay is not None and config.replay.factor_qdq
     key = _encode(k, factor_qdq, k.shape[-1])
@@ -323,9 +366,10 @@ def recurrent_decode(
         v,
         gate,
         beta,
-        carry.reconstruct(),
+        carry.reconstruct(original_basis=False),
         state_qdq=state_qdq,
         state_format=state_format,
+        state_codec=config.state_codec,
         block_v=block_v,
         replay=replay,
         factor_qdq=factor_qdq,
@@ -336,21 +380,26 @@ def recurrent_decode(
         checkpoint_interval=checkpoint_interval,
     )
     output, final, updates, last_anchor, anchor_scales, update_scales = result
+    if config.state_codec == "int8_hadamard32":
+        output = _hadamard32(output)
     state_format = state_format if state_qdq else "identity"
+    state_block_v = 32 if config.state_codec == "int8_hadamard32" else block_v
     if not replay:
         anchor = EncodedLinearAttentionTensor(
             final,
             anchor_scales if state_qdq else None,
             state_format,
-            block_v if state_qdq else None,
+            state_block_v if state_qdq else None,
         )
-        return output, LinearAttentionCarry(anchor, (), carry.position + len(q), True, signature)
+        return output, LinearAttentionCarry(
+            anchor, (), carry.position + len(q), True, signature, carry.value_basis
+        )
     if carry.cursor + len(q) >= window:
         anchor = EncodedLinearAttentionTensor(
             last_anchor,
             anchor_scales if state_qdq else None,
             state_format,
-            block_v if state_qdq else None,
+            state_block_v if state_qdq else None,
         )
         start = ((carry.cursor + len(q)) // window) * window - carry.cursor
         entries = ()
@@ -372,5 +421,5 @@ def recurrent_decode(
         )
         additions.append(ReplayEntry(encoded_key, encoded_update, gate[t]))
     return output, LinearAttentionCarry(
-        anchor, (*entries, *additions), carry.position + len(q), True, signature
+        anchor, (*entries, *additions), carry.position + len(q), True, signature, carry.value_basis
     )

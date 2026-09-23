@@ -55,6 +55,7 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
     readout: Literal["working", "stored"] = ModeloptField(default="stored")
     quantize_initial: bool = ModeloptField(default=True)
     prefill_state_qdq: bool = ModeloptField(default=False)
+    state_codec: Literal["tile", "int8_hadamard32"] = ModeloptField(default="tile")
     decay_log_step: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     replay: LinearAttentionReplayConfig | None = ModeloptField(default=None)
 
@@ -64,6 +65,10 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
             raise ValueError("replay settings must be supplied exactly when mode='replay'")
         if self.implementation == "triton" and self.replay and self.replay.encoding != "once":
             raise ValueError("The Triton replay candidate implements encode-once only")
+        if self.state_codec == "int8_hadamard32" and self.prefill_state_qdq:
+            raise ValueError(
+                "Hadamard state QDQ starts at decode handoff; disable prefill_state_qdq"
+            )
         return self
 
 
@@ -73,6 +78,8 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     ``state.block_v`` defines one dynamic scale per ``[Dk, block_v]`` tile of each
     sequence/head. The initial state and every chunk's final state are rounded when
     ``gdn_state_quantizer`` is enabled. Outputs use the incoming rounded state.
+    Decode's ``int8_hadamard32`` codec instead fixes scales to one key channel and
+    32 values; ``state.block_v`` remains the execution tile width.
     """
 
     schema_version: Literal[1] = ModeloptField(default=1)
@@ -86,6 +93,9 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     def _validate_decode_backend(self):
         if (self.backend == "matmul") != (self.decode is not None):
             raise ValueError("The exact-prefix matmul backend requires an explicit decode policy")
+        if self.decode is not None and self.decode.state_codec == "int8_hadamard32":
+            if self.state.block_v < 32:
+                raise ValueError("int8_hadamard32 requires block_v >= 32")
         return self
 
 
