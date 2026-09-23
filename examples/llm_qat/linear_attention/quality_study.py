@@ -210,6 +210,8 @@ def main():
             "config.py",
             "kda.py",
             "prefill.py",
+            "matmul.py",
+            "solve.py",
             "decode.py",
             "decode_prefill.py",
             "reference.py",

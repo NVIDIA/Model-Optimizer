@@ -8,10 +8,10 @@ this feature does not provide compressed inference state or native FP8 matmul ac
 
 The implementation adapts [PR #2455](https://github.com/NVIDIA/Model-Optimizer/pull/2455)
 at `13c7e2456f2e9d079c9ef822742eeaa634353802` onto ModelOpt
-`051d6adb204f10cd3e78d0f824f31a5a01d54831`. It provides the shared state-QDQ foundation.
-[Decode-aware training](linear_attention_decode.md) adds GDN/KDA token-state quantization,
-decay approximation, and SSM replay with an exact-prefix handoff. Prefill operand QDQ
-and approximate inverse are subsequent deliveries; neither is required by this branch.
+`051d6adb204f10cd3e78d0f824f31a5a01d54831`. It provides the shared state-QDQ foundation of the linear-attention design. [Additional prefill operand sites](linear_attention_prefill.md) have an explicit matmul backend.
+[KDA prefill training](linear_attention_kda.md) uses the same policy interface. [Decode-aware training](linear_attention_decode.md) adds token-state quantization,
+decay approximation, and SSM replay. Delivery is ordered decode, prefill operand QDQ,
+then approximate inverse.
 
 ## Requirements and scope
 

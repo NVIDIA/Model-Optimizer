@@ -70,7 +70,9 @@ def _decode_prefill(
     g,
     beta,
     *,
+    sites,
     policy,
+    w_quantizer,
     state_qdq,
     state_format,
     scale,
@@ -82,7 +84,8 @@ def _decode_prefill(
     output_dtype,
     prefill_lengths,
 ):
-    from .reference import chunk_gdn_reference, chunk_kda_reference
+    # Prefill dispatch imports this wrapper; defer its shared core to avoid a cycle.
+    from .prefill import _matmul_prefill
 
     if prefill_lengths is None:
         raise ValueError("Decode-aware training requires explicit per-sequence prefill lengths")
@@ -138,19 +141,22 @@ def _decode_prefill(
         offsets = [0]
         for n in active:
             offsets.append(offsets[-1] + prefixes[n])
-        prefix_fn = chunk_kda_reference if g.ndim == 4 else chunk_gdn_reference
-        with torch.autocast(device_type=q.device.type, enabled=False):
-            output, final = prefix_fn(
-                *packed,
-                state_qdq=state_qdq and policy.decode.prefill_state_qdq,
-                state_format=state_format,
-                scale=scale,
-                initial_state=states[active],
-                cu_seqlens=torch.tensor(offsets),
-                state_v_first=False,
-                chunk_size=policy.chunk_size,
-                state_qdq_block_v=policy.state.block_v,
-            )
+        output, final = _matmul_prefill(
+            *packed,
+            sites=sites,
+            policy=policy,
+            w_quantizer=w_quantizer,
+            state_qdq=state_qdq and policy.decode.prefill_state_qdq,
+            state_format=state_format,
+            scale=scale,
+            initial_state=states[active],
+            output_final_state=True,
+            cu_seqlens=None,
+            cu_seqlens_cpu=torch.tensor(offsets),
+            state_v_first=False,
+            chunk_size=policy.chunk_size,
+            output_dtype=q.dtype,
+        )
         for index, n in enumerate(active):
             prefix_outputs[n] = output[0, offsets[index] : offsets[index + 1]]
             prefix_states[n] = final[index]

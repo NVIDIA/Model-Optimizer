@@ -17,6 +17,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
     LinearAttentionDecodeConfig,
@@ -25,6 +26,8 @@ from modelopt.torch.quantization.linear_attention import (
     recurrent_decode_reference,
 )
 from modelopt.torch.quantization.linear_attention.decode import _encode, _hadamard32
+from modelopt.torch.quantization.linear_attention.matmul import LinearAttentionMatmulSites
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def _rotate(value):
@@ -170,7 +173,9 @@ def test_hadamard_exact_prefill_handoff_and_state_layout(kda, prefix):
     policy = LinearAttentionConfig(backend="matmul", decode={"state_codec": "int8_hadamard32"})
     actual = function(
         *(x.unsqueeze(0) for x in args),
+        sites=LinearAttentionMatmulSites(),
         policy=policy,
+        w_quantizer=TensorQuantizer(QuantizerAttributeConfig(enable=False)),
         prefill_lengths=[prefix],
         state_qdq=True,
         state_format="int8",

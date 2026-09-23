@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from contextlib import nullcontext
 
 import pytest
@@ -52,11 +53,17 @@ def _forward(model, hidden):
 @pytest.mark.parametrize(
     "mode",
     [
+        "state",
+        "state_int8",
+        "w",
+        "prefill_fp8",
+        "prefill_nvfp4",
+        "arithmetic",
         "decode_token",
         "decode_replay",
-        "decode_decay",
         "decode_token_int8",
         "decode_replay_int8",
+        "decode_decay",
         "decode_replay_hadamard_int8",
     ],
 )
@@ -69,14 +76,28 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
     with torch.no_grad():
         baseline = _forward(model, hidden)
     attributes = {"num_bits": (4, 3), "type": "dynamic", "axis": (0, 1, 2)}
+    if mode == "prefill_nvfp4":
+        attributes = {
+            "num_bits": (2, 1),
+            "type": "dynamic",
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        }
     cfg = {
         "quant_cfg": [{"quantizer_name": "*", "enable": False}],
         "algorithm": None,
         "linear_attention": [{"module_name": "*", "cfg": {"backend": "matmul"}}],
     }
+    if mode in ("w", "prefill_fp8", "prefill_nvfp4"):
+        cfg["quant_cfg"].append({"quantizer_name": "*kda_w_quantizer", "cfg": attributes})
+    if mode.startswith("prefill"):
+        cfg["quant_cfg"].append({"quantizer_name": "*linear_attn_sites.*", "cfg": attributes})
     state_attributes = {**attributes, "axis": (0, 1)}
     if mode.endswith("int8"):
         state_attributes.update(num_bits=8, unsigned=False, narrow_range=True)
+    if mode.startswith("state"):
+        cfg["quant_cfg"].append({"quantizer_name": "*kda_state_quantizer", "cfg": state_attributes})
+    if mode == "arithmetic":
+        cfg["linear_attention"][0]["cfg"]["elementwise"] = {"value_residual": "bfloat16"}
     if mode.startswith("decode"):
         cfg["quant_cfg"].append({"quantizer_name": "*kda_state_quantizer", "cfg": state_attributes})
         policy_cfg = cfg["linear_attention"][0]["cfg"]
@@ -116,6 +137,14 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
     for parameter in restored.parameters():
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()
+    if mode == "prefill_fp8":
+        copied = copy.deepcopy(restored)
+        calls = []
+        hook = copied.kda_w_quantizer.register_forward_hook(lambda *args: calls.append(True))
+        with torch.no_grad():
+            torch.testing.assert_close(_forward(copied, hidden), actual, rtol=0, atol=0)
+        hook.remove()
+        assert calls, "a copied layer must use its own quantizer handles"
     before = restored.q_proj.weight.detach().clone()
     torch.optim.SGD(restored.parameters(), lr=0.1).step()
     assert not torch.equal(before, restored.q_proj.weight)
