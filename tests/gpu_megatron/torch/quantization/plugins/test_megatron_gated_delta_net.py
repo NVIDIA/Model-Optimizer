@@ -93,6 +93,8 @@ def _gdn_config(sites):
 
 def _config_for_mode(mode):
     sites = ("state", "w") if mode == "both" else ((mode,) if mode in ("state", "w") else ())
+    if mode in ("prefill_fp8", "prefill_nvfp4"):
+        sites = ("w",)
     if mode.startswith("decode"):
         sites = ("state",)
     if mode == "state_int8":
@@ -105,6 +107,24 @@ def _config_for_mode(mode):
         policy.update(backend="matmul", decode={"implementation": "triton"})
         if mode.startswith("decode_replay"):
             policy["decode"].update(mode="replay", replay={"window": 8})
+    if mode.startswith("prefill"):
+        policy = cfg["linear_attention"][0]["cfg"]
+        policy["backend"] = "matmul"
+        if mode == "prefill_arithmetic":
+            policy["matmul"] = {
+                "output_value": {"accumulator_dtype": "float16", "reduction_block": 16}
+            }
+            policy["elementwise"] = {"value_residual": "bfloat16"}
+        else:
+            attributes = {"num_bits": (4, 3), "axis": (0, 1, 2), "type": "dynamic"}
+            if mode == "prefill_nvfp4":
+                attributes = {
+                    "num_bits": (2, 1),
+                    "type": "dynamic",
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                }
+            cfg["quant_cfg"].append({"quantizer_name": "*linear_attn_sites.*", "cfg": attributes})
+            cfg["quant_cfg"].append({"quantizer_name": "*gdn_w_quantizer", "cfg": attributes})
     return cfg, sites
 
 
@@ -184,6 +204,7 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     assert len(restored_gdn) == len(gdn_modules)
     for module, original in zip(restored_gdn, gdn_modules):
         assert module.linear_attention_config == original.linear_attention_config
+        assert module.linear_attn_sites.is_enabled == original.linear_attn_sites.is_enabled
         assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
         assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
         assert module._linear_attn_state_format == original._linear_attn_state_format
@@ -207,6 +228,9 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
         "state",
         "w",
         "both",
+        "prefill_fp8",
+        "prefill_nvfp4",
+        "prefill_arithmetic",
         "decode_token",
         "decode_replay",
         "state_int8",
@@ -234,6 +258,8 @@ def _test_gdn_context_parallel_helper(rank, size, mode):
     [
         "state",
         "w",
+        "prefill_fp8",
+        "prefill_arithmetic",
         "decode_token",
         "decode_replay",
         "state_int8",

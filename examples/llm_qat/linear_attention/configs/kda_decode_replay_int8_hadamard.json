@@ -1,0 +1,44 @@
+{
+  "quant_cfg": [
+    {
+      "quantizer_name": "*",
+      "enable": false
+    },
+    {
+      "quantizer_name": "*kda_state_quantizer",
+      "cfg": {
+        "num_bits": 8,
+        "type": "dynamic",
+        "axis": [
+          0,
+          1
+        ],
+        "unsigned": false,
+        "narrow_range": true
+      }
+    }
+  ],
+  "algorithm": null,
+  "linear_attention": [
+    {
+      "module_name": "*",
+      "cfg": {
+        "backend": "matmul",
+        "decode": {
+          "implementation": "triton",
+          "mode": "replay",
+          "replay": {
+            "window": 8,
+            "factor_qdq": false,
+            "encoding": "once"
+          },
+          "state_codec": "int8_hadamard32",
+          "readout": "working"
+        },
+        "state": {
+          "block_v": 64
+        }
+      }
+    }
+  ]
+}

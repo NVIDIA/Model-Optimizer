@@ -112,6 +112,7 @@ def test_dynamic_export_removes_linear_attention_attributes():
         "gdn_w_quantizer",
         "linear_attention_config",
         "_linear_attention_prefill_lengths",
+        "linear_attn_sites",
     ):
         assert not hasattr(model, name)
 
@@ -294,6 +295,66 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
+
+
+@pytest.mark.parametrize("arithmetic_only", [False, True])
+def test_prefill_policy_executes_and_survives_restore(tmp_path, arithmetic_only):
+    cfg = {
+        "quant_cfg": [{"quantizer_name": "*", "enable": False}],
+        "algorithm": None,
+        "linear_attention": [{"module_name": "", "cfg": {"backend": "matmul"}}],
+    }
+    if arithmetic_only:
+        cfg["linear_attention"][0]["cfg"]["elementwise"] = {"output_add": "float16"}
+    else:
+        cfg["quant_cfg"].append(
+            {
+                "quantizer_name": "linear_attn_sites.output_score.lhs_quantizer",
+                "cfg": GDN_W_FP8_DYNAMIC,
+            }
+        )
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    x = torch.randn(2, 8, 3, 4) * 0.1
+    expected = model(x)
+    expected.square().sum().backward()
+    assert torch.isfinite(model.proj.weight.grad).all()
+    path = tmp_path / "prefill.pth"
+    mto.save(model, path)
+    restored = mto.restore(TinyGatedDeltaNet(), path)
+    torch.testing.assert_close(restored(x), expected)
+    assert restored.linear_attention_config == model.linear_attention_config
+    assert restored.linear_attention_is_enabled
+
+
+def test_restore_m1_checkpoint_without_prefill_handles():
+    model = mtq.quantize(TinyGatedDeltaNet(), quant_cfg(state=False, w=True))
+    state = mto.modelopt_state(model)
+    for _, mode_state in state["modelopt_state_dict"]:
+        quantizers = mode_state["metadata"]["quantizer_state"]
+        for key in list(quantizers):
+            if key.startswith("linear_attn_sites."):
+                del quantizers[key]
+    restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), state)
+    assert restored.gdn_w_quantizer.is_enabled
+    assert not restored.linear_attn_sites.is_enabled
+    assert restored.linear_attention_config.backend == "fla"
+
+
+def test_prefill_sites_require_explicit_backend():
+    with pytest.raises(ValueError, match="require backend='matmul'"):
+        mtq.quantize(
+            TinyGatedDeltaNet(),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {
+                        "quantizer_name": "linear_attn_sites.output_score.lhs_quantizer",
+                        "cfg": GDN_W_FP8_DYNAMIC,
+                    },
+                ],
+                "algorithm": None,
+            },
+        )
 
 
 def test_int8_state_conversion_and_checkpoint(tmp_path):

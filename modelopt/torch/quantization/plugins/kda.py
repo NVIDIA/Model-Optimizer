@@ -71,7 +71,9 @@ class _QuantKimiDeltaAttention(_LinearAttentionQuantMixin):
     def _quantized_chunk(self, *args, **kwargs):
         return matmul_kda(
             *args,
+            sites=self.linear_attn_sites,
             policy=self.linear_attention_config,
+            w_quantizer=self.kda_w_quantizer,
             state_qdq=self.kda_state_quantizer.is_enabled and self.kda_state_quantizer._if_quant,
             state_format=self._linear_attn_state_format,
             prefill_lengths=self._linear_attention_prefill_lengths,
