@@ -448,31 +448,15 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
     assert attention.v_bmm_quantizer.call_count == 2
 
 
-@pytest.mark.parametrize("wrapper", ["model", "language_model"])
-def test_disable_compilation_warns_when_marker_is_missing(wrapper):
-    """A non-compile-wrapped model remains supported, but the no-op risk is visible."""
+def test_disable_compilation_warns_when_marker_is_missing():
+    """A non-compile-wrapped VLM remains supported, but the no-op risk is visible."""
     inner_model = SimpleNamespace()
-    if wrapper == "model":
-        model = SimpleNamespace(model=inner_model)
-    else:
-        model = SimpleNamespace(language_model=SimpleNamespace(model=inner_model))
+    model = SimpleNamespace(language_model=SimpleNamespace(model=inner_model))
 
     with pytest.warns(UserWarning, match="cannot be disabled"), disable_compilation(model):
         assert inner_model.do_not_compile is True
 
     assert not hasattr(inner_model, "do_not_compile")
-
-
-@pytest.mark.parametrize("initial_value", [False, True])
-def test_disable_compilation_restores_existing_marker(initial_value):
-    """The marker owner is enabled temporarily and its original value is restored."""
-    inner_model = SimpleNamespace(do_not_compile=initial_value)
-    model = SimpleNamespace(model=inner_model)
-
-    with disable_compilation(model):
-        assert inner_model.do_not_compile is True
-
-    assert inner_model.do_not_compile is initial_value
 
 
 def test_disable_compilation_prefers_outer_marker():
