@@ -73,16 +73,17 @@ for an "AA" request. If the user asks for MRCR:
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
    exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
    NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
-5. Long-context deploy (`--max-model-len 1100000` +
-   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
-   multi-instance fan-out); **never cap output tokens**; report the needle-count
-   strata alongside `pass@1/accuracy`.
+5. Long-context deploy: for **1M**, `--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; for **128K**, `--max-model-len` at the
+   checkpoint's trained context (room for the answer above 131,072) and no
+   override. Both: `gpu_memory_utilization: 0.95`, multi-instance fan-out;
+   **never cap output tokens**; report the needle-count strata alongside
+   `pass@1/accuracy`.
 6. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gym.sh"`; it
    enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
    and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
-   **`limit_samples` is inert on the gym path** — canary with the gym's own
-   `++limit=N` (see the recipe's Canary section), remembering the prepare pass
-   still runs in full.
+   Canary with `limit_samples` — the MRCR template forwards it as `++limit`
+   (see the recipe's Canary section); the prepare pass still runs in full.
 
 ---
 

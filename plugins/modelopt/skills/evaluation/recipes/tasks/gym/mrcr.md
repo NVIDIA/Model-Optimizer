@@ -62,7 +62,8 @@ Sets the context cap, the dataset, **and the metric prefix**. The golden uses 1M
 **Pick the largest variant within the checkpoint's trained context**
 (`max_position_embeddings`, under `text_config` on multimodal configs). The template's 1M
 follows the golden; on a 262K model, 1M (via `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`) measures
-extrapolation, not long-context quality — use 128K.
+extrapolation, not long-context quality — use 128K, and change the serving envelope with it
+(below).
 
 The n3 variants drop over-long samples, so all three are different datasets and
 **not comparable to each other**. Pick one, keep it fixed across baseline and
@@ -80,7 +81,7 @@ and the runner decides. The template therefore pins `++num_repeats=1` in
 `common_params`, so **report `pass@1` regardless of variant** unless you raise it
 deliberately. **Do not change repeat counts when aligning to a golden.**
 
-### Serving envelope (1M)
+### Serving envelope (1M; 128K delta below)
 
 - `--max-model-len 1100000` **+** `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` in
   `deployment.env_vars` — vLLM otherwise refuses a len above the checkpoint's
@@ -88,6 +89,10 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
 - `gpu_memory_utilization: 0.95` (vs the usual 0.85) — driven by **sequence
   length**, not prefix caching: a ~1M-token context needs a far larger KV
   allocation, and prefix-cache blocks come out of the same pool.
+- **128K instead:** set `--max-model-len` to the checkpoint's trained context — it must
+  exceed 131,072 with room for the uncapped answer — and drop
+  `VLLM_ALLOW_LONG_MAX_MODEL_LEN`. Leaving `1100000` in place can stop a replica from
+  starting even though it could serve every 128K request.
 - `--enable-prefix-caching`, `--enable-chunked-prefill`,
   `--max-num-batched-tokens 131072`.
 - **KV dtype: follow the checkpoint, not this template.** Read

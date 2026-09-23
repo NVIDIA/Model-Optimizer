@@ -105,7 +105,7 @@ deployment:
     --port ${deployment.port}
     --tensor-parallel-size 1
     --data-parallel-size 1
-    --max-model-len 1100000
+    --max-model-len 1100000          # 1M only; 128K: trained context, drop VLLM_ALLOW_LONG_MAX_MODEL_LEN
     --kv-cache-dtype fp8
     --reasoning-parser <PARSER>
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
