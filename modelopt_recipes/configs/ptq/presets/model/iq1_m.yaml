@@ -13,25 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GGML-compatible block quantization formats."""
+# QuantizeConfig preset for IQ1_M weight-only quantization.
 
-# Importing the backend installs its TensorQuantizer dispatch entry.
-from . import backend as _backend
-from .iq1_m import *
-from .iq1_m import __all__ as _iq1_m_all
-from .iq1_s import *
-from .iq1_s import __all__ as _iq1_s_all
-from .iq2_s import *
-from .iq2_s import __all__ as _iq2_s_all
-from .iq2_xs import *
-from .iq2_xs import __all__ as _iq2_xs_all
-from .iq2_xxs import *
-from .iq2_xxs import __all__ as _iq2_xxs_all
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  iq1_m: configs/numerics/iq1_m
 
-__all__ = [  # noqa: PLE0604
-    *_iq1_m_all,
-    *_iq1_s_all,
-    *_iq2_s_all,
-    *_iq2_xs_all,
-    *_iq2_xxs_all,
-]
+algorithm:
+quant_cfg:
+  - $import: base_disable_all
+  - quantizer_name: '*weight_quantizer'
+    cfg:
+      $import: iq1_m
+  - quantizer_name: '*input_quantizer'
+    enable: false
+  - $import: default_disabled_quantizers

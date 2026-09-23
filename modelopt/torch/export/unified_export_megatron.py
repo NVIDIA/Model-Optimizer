@@ -35,7 +35,13 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
-from modelopt.torch.quantization.ggml import quantize_iq1_s, quantize_iq2_xs
+from modelopt.torch.quantization.ggml import (
+    quantize_iq1_m,
+    quantize_iq1_s,
+    quantize_iq2_s,
+    quantize_iq2_xs,
+    quantize_iq2_xxs,
+)
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
@@ -57,13 +63,17 @@ from .plugins.mcore_custom import (
 )
 from .plugins.megatron_importer import GPTModelImporter, _get_mamba_conv1d
 from .quant_format import (
+    IQ_FORMATS,
     KV_CACHE_FP8,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PB_WO,
+    QUANTIZATION_IQ1_M,
     QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_S,
     QUANTIZATION_IQ2_XS,
+    QUANTIZATION_IQ2_XXS,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A16_NVFP4,
@@ -84,6 +94,16 @@ from .quant_utils import (
 with import_plugin("transformers", verbose=False):
     import transformers
     from transformers import AutoProcessor
+
+# One packer per GGML IQ format, mirroring the HF exporter's table.
+_IQ_PACKERS = {
+    QUANTIZATION_IQ1_S: quantize_iq1_s,
+    QUANTIZATION_IQ1_M: quantize_iq1_m,
+    QUANTIZATION_IQ2_XXS: quantize_iq2_xxs,
+    QUANTIZATION_IQ2_XS: quantize_iq2_xs,
+    QUANTIZATION_IQ2_S: quantize_iq2_s,
+}
+
 
 has_mcore = False
 with import_plugin("megatron"):
@@ -351,7 +371,7 @@ class GPTModelExporter:
             quantization = "NVFP4"
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
-        elif quantization_format in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        elif quantization_format in IQ_FORMATS:
             quantization = quantization_format.upper()
 
         if is_last_stage_main_rank:
@@ -1115,7 +1135,7 @@ class GPTModelExporter:
             self._record_excluded_module(prefix)
         block_size = get_weight_block_size(module)
 
-        is_iq = qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
+        is_iq = qformat in IQ_FORMATS
         name_to_value = self._get_weight_bias(
             module, dtype, name_to_value, keep_weight_device=is_iq
         )
@@ -1185,7 +1205,7 @@ class GPTModelExporter:
     @staticmethod
     def _pack_iq_weight(weight: torch.Tensor, qformat: str) -> torch.Tensor:
         """Pack one ``[out, in]`` weight and return its CPU payload."""
-        quantize_iq = quantize_iq1_s if qformat == QUANTIZATION_IQ1_S else quantize_iq2_xs
+        quantize_iq = _IQ_PACKERS[qformat]
         packed_weight, _ = quantize_iq(weight)
         return packed_weight.detach().cpu()
 
@@ -1210,7 +1230,7 @@ class GPTModelExporter:
         The one gap left is a rank holding no local expert at all, which needs expert-parallel
         size to exceed the expert count. Worth revisiting if that becomes a supported topology.
         """
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if qformat in IQ_FORMATS:
             raise NotImplementedError(
                 "Fused-MoE IQ export requires a deployment loader that supports "
                 "[num_experts, out_features, in_features // 256, payload_bytes]"
@@ -1280,7 +1300,7 @@ class GPTModelExporter:
             weight = weight + 1.0
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if qformat in IQ_FORMATS:
             self._state_dict.update(self._get_iq_weight_state(prefix + "weight", weight, qformat))
         elif weight_scale is None:
             self._state_dict[prefix + "weight"] = weight
@@ -1327,7 +1347,7 @@ class GPTModelExporter:
         gate_proj_weight = weight[:ffn_hidden_size, :]
         up_proj_weight = weight[ffn_hidden_size:, :]
 
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if qformat in IQ_FORMATS:
             self._state_dict.update(
                 self._get_iq_weight_state(gate_proj_prefix + "weight", gate_proj_weight, qformat)
             )
@@ -1501,7 +1521,7 @@ class GPTModelExporter:
                 seen_qformat, seen_block_size = qformat, block_size
 
                 weight = state_dict[weight_key].to(self.dtype)
-                if qformat not in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+                if qformat not in IQ_FORMATS:
                     weight = weight.cpu()
                 weight_scale_cpu = (
                     weight_scale.detach().cpu().clone() if weight_scale is not None else None
@@ -1533,7 +1553,7 @@ class GPTModelExporter:
                     ]
 
                 for shard_prefix, shard_weight, shard_scale in shards:
-                    if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+                    if qformat in IQ_FORMATS:
                         local_expert_state.update(
                             self._get_iq_weight_state(
                                 shard_prefix + "weight", shard_weight, qformat
@@ -1702,7 +1722,7 @@ class GPTModelExporter:
         proj_weights = [_take(weight, s, hidden_size, g) for s, g in zip(slices, gated)]
         proj_keys = [p + "weight" for p in prefixes]
 
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if qformat in IQ_FORMATS:
             for key, weight in zip(proj_keys, proj_weights):
                 self._state_dict.update(self._get_iq_weight_state(key, weight, qformat))
         elif weight_scale is None:
@@ -1820,7 +1840,7 @@ class GPTModelExporter:
         proj_keys = [p + "weight" for p in proj_prefixes]
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
-        if qformat in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if qformat in IQ_FORMATS:
             for proj_prefix, proj_weight in zip(proj_prefixes, proj_weights):
                 if proj_prefix in keep_bf16:
                     self._state_dict[proj_prefix + "weight"] = proj_weight.cpu()

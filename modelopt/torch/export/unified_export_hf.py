@@ -67,7 +67,13 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.ggml import quantize_iq1_s, quantize_iq2_xs
+from modelopt.torch.quantization.ggml import (
+    quantize_iq1_m,
+    quantize_iq1_s,
+    quantize_iq2_s,
+    quantize_iq2_xs,
+    quantize_iq2_xxs,
+)
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
@@ -101,11 +107,15 @@ from .quant_aware_conversion import (
 )
 from .quant_format import (
     FUSION_FREE_FORMATS,
+    IQ_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
+    QUANTIZATION_IQ1_M,
     QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_S,
     QUANTIZATION_IQ2_XS,
+    QUANTIZATION_IQ2_XXS,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
@@ -133,6 +143,16 @@ from .quant_utils import (
     to_quantized_weight,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
+
+# One packer per GGML IQ format; the checkpoint stores the packed blocks directly.
+_IQ_PACKERS = {
+    QUANTIZATION_IQ1_S: quantize_iq1_s,
+    QUANTIZATION_IQ1_M: quantize_iq1_m,
+    QUANTIZATION_IQ2_XXS: quantize_iq2_xxs,
+    QUANTIZATION_IQ2_XS: quantize_iq2_xs,
+    QUANTIZATION_IQ2_S: quantize_iq2_s,
+}
+
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
@@ -630,15 +650,13 @@ def _export_quantized_weight(
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
 
-    if quantization_format in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+    if quantization_format in IQ_FORMATS:
         if weight_name != "weight":
             raise NotImplementedError(
                 "IQ unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
-        quantize_iq = (
-            quantize_iq1_s if quantization_format == QUANTIZATION_IQ1_S else quantize_iq2_xs
-        )
+        quantize_iq = _IQ_PACKERS[quantization_format]
         packed_weight, _ = quantize_iq(weight.to(dtype))
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
         maybe_clear_cuda_cache()

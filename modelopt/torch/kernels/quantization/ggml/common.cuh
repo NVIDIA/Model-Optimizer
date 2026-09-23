@@ -49,6 +49,8 @@ constexpr int kScaleBytes = 2;
 // them cannot drift apart.
 constexpr int kIq1sEntries = 2048;
 constexpr int kIq2xsEntries = 512;
+constexpr int kIq2xxsEntries = 256;
+constexpr int kIq2sEntries = 1024;
 
 // One CUDA block encodes one GGML block. The reductions below fold over exactly this many warps,
 // and each kernel static_asserts that its codebook divides evenly among the threads.

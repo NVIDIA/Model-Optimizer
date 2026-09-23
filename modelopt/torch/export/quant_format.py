@@ -37,16 +37,30 @@ QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
 QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
 QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
 QUANTIZATION_IQ1_S = "iq1_s"
+QUANTIZATION_IQ1_M = "iq1_m"
+QUANTIZATION_IQ2_XXS = "iq2_xxs"
 QUANTIZATION_IQ2_XS = "iq2_xs"
+QUANTIZATION_IQ2_S = "iq2_s"
+
+# Every GGML IQ format. They share the weight-only, 256-value-block, per-module-scale
+# shape, so export treats them as one family; adding a format means adding it here
+# rather than extending a tuple at each use site.
+IQ_FORMATS = frozenset(
+    {
+        QUANTIZATION_IQ1_S,
+        QUANTIZATION_IQ1_M,
+        QUANTIZATION_IQ2_XXS,
+        QUANTIZATION_IQ2_XS,
+        QUANTIZATION_IQ2_S,
+    }
+)
 
 # Formats whose scales are purely per-module, so export never merges them across the q/k/v
 # and gate/up groups that share an input. Every other format unifies input_amax (and, for
 # NVFP4, weight_scale_2) across such a group, which only a whole-model forward can discover.
-FUSION_FREE_FORMATS = frozenset(
+FUSION_FREE_FORMATS = IQ_FORMATS | frozenset(
     {
         QUANTIZATION_FP8,
-        QUANTIZATION_IQ1_S,
-        QUANTIZATION_IQ2_XS,
         QUANTIZATION_NONE,
         QUANTIZATION_FP8_PB_REAL,
     }

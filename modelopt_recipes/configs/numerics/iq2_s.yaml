@@ -13,25 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GGML-compatible block quantization formats."""
+# IQ2_S weight quantizer using the built-in fixed-scale codebook search.
 
-# Importing the backend installs its TensorQuantizer dispatch entry.
-from . import backend as _backend
-from .iq1_m import *
-from .iq1_m import __all__ as _iq1_m_all
-from .iq1_s import *
-from .iq1_s import __all__ as _iq1_s_all
-from .iq2_s import *
-from .iq2_s import __all__ as _iq2_s_all
-from .iq2_xs import *
-from .iq2_xs import __all__ as _iq2_xs_all
-from .iq2_xxs import *
-from .iq2_xxs import __all__ as _iq2_xxs_all
-
-__all__ = [  # noqa: PLE0604
-    *_iq1_m_all,
-    *_iq1_s_all,
-    *_iq2_s_all,
-    *_iq2_xs_all,
-    *_iq2_xxs_all,
-]
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
+num_bits: iq2_s
+# Cost metadata for AutoQuantize's compression estimate only; it drives no packing or
+# numerics. num_bits is the string "iq2_s", so the generic estimator cannot derive the
+# storage cost: 82 packed bytes * 8 / 256 weights. Keep in sync with IQ2_S_BLOCK_BYTES.
+effective_bits: 2.5625
+block_sizes:
+  -1: 256
+backend: ggml

@@ -82,7 +82,8 @@ def test_ggml_backend_forwards_chunk_sizes(monkeypatch, extra_args):
         received.update(kwargs)
         return inputs
 
-    monkeypatch.setattr(backend_module, "iq1_s_fake_quant", fake_quant)
+    # The dispatcher resolves through its registry, so that is the seam to patch.
+    monkeypatch.setitem(backend_module._FAKE_QUANTS, "iq1_s", fake_quant)
     inputs = torch.ones(1, 256)
     quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args=extra_args)
 

@@ -28,12 +28,21 @@ import torch.nn as nn
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
 from modelopt.torch.quantization.ggml import (
+    IQ1_M_BLOCK_BYTES,
+    IQ1_M_BLOCK_SIZE,
+    IQ1_M_EFFECTIVE_BITS,
     IQ1_S_BLOCK_BYTES,
     IQ1_S_BLOCK_SIZE,
     IQ1_S_EFFECTIVE_BITS,
+    IQ2_S_BLOCK_BYTES,
+    IQ2_S_BLOCK_SIZE,
+    IQ2_S_EFFECTIVE_BITS,
     IQ2_XS_BLOCK_BYTES,
     IQ2_XS_BLOCK_SIZE,
     IQ2_XS_EFFECTIVE_BITS,
+    IQ2_XXS_BLOCK_BYTES,
+    IQ2_XXS_BLOCK_SIZE,
+    IQ2_XXS_EFFECTIVE_BITS,
 )
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
@@ -59,6 +68,7 @@ from modelopt.torch.utils import clear_cuda_cache
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
+    IQ_FORMATS,
     KV_CACHE_FP8,
     KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_INT8,
@@ -71,8 +81,11 @@ from .quant_format import (
     QUANTIZATION_INT4_AWQ,
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
+    QUANTIZATION_IQ1_M,
     QUANTIZATION_IQ1_S,
+    QUANTIZATION_IQ2_S,
     QUANTIZATION_IQ2_XS,
+    QUANTIZATION_IQ2_XXS,
     QUANTIZATION_MXFP4,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -86,6 +99,16 @@ from .quant_format import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Block geometry per GGML IQ format, used to describe the packed payload in the checkpoint.
+_IQ_BLOCK_METADATA = {
+    QUANTIZATION_IQ1_S: (IQ1_S_BLOCK_SIZE, IQ1_S_BLOCK_BYTES, IQ1_S_EFFECTIVE_BITS),
+    QUANTIZATION_IQ1_M: (IQ1_M_BLOCK_SIZE, IQ1_M_BLOCK_BYTES, IQ1_M_EFFECTIVE_BITS),
+    QUANTIZATION_IQ2_XXS: (IQ2_XXS_BLOCK_SIZE, IQ2_XXS_BLOCK_BYTES, IQ2_XXS_EFFECTIVE_BITS),
+    QUANTIZATION_IQ2_XS: (IQ2_XS_BLOCK_SIZE, IQ2_XS_BLOCK_BYTES, IQ2_XS_EFFECTIVE_BITS),
+    QUANTIZATION_IQ2_S: (IQ2_S_BLOCK_SIZE, IQ2_S_BLOCK_BYTES, IQ2_S_EFFECTIVE_BITS),
+}
 
 
 def _has_large_fp8_scale(value: torch.Tensor) -> bool:
@@ -474,8 +497,7 @@ def uses_iq_quantization(module) -> bool:
         if (
             weight_quantizer is not None
             and weight_quantizer.is_enabled
-            and getattr(weight_quantizer, "num_bits", None)
-            in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS)
+            and getattr(weight_quantizer, "num_bits", None) in IQ_FORMATS
         ):
             return True
     return any(uses_iq_quantization(child) for _, child in module.named_children())
@@ -515,7 +537,7 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
-        if weight_quantizer.num_bits in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
+        if weight_quantizer.num_bits in IQ_FORMATS:
             if weight_quantizer.backend != "ggml":
                 raise ValueError("IQ formats require the built-in 'ggml' quantization backend")
             # Both exporters return before collecting input_scale and before the pre_quant_scale
@@ -781,15 +803,8 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
-        elif v in (QUANTIZATION_IQ1_S, QUANTIZATION_IQ2_XS):
-            if v == QUANTIZATION_IQ1_S:
-                block_size = IQ1_S_BLOCK_SIZE
-                payload_bytes = IQ1_S_BLOCK_BYTES
-                effective_bits = IQ1_S_EFFECTIVE_BITS
-            else:
-                block_size = IQ2_XS_BLOCK_SIZE
-                payload_bytes = IQ2_XS_BLOCK_BYTES
-                effective_bits = IQ2_XS_EFFECTIVE_BITS
+        elif v in IQ_FORMATS:
+            block_size, payload_bytes, effective_bits = _IQ_BLOCK_METADATA[v]
             if block_size_value != block_size:
                 raise ValueError(
                     f"{v.upper()} requires block size {block_size}, got {block_size_value}"

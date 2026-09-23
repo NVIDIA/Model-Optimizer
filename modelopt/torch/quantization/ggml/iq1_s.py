@@ -87,6 +87,18 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
     return _GRID_CACHE[resolved_device]
 
 
+def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """Predict one FP16 super-block scale for each flattened block.
+
+    The fixed-scale search favors a compressed super-block scale, so this empirical anchor
+    puts d below the full-range value. The CUDA encoder computes the same quantity in its
+    own scale kernel; this is the reference the torch path uses.
+    """
+    x = narrow_to_float32(blocks)
+    amax = x.abs().amax(dim=1)
+    return ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+
+
 def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     """Encode a moderate-size batch of flattened 256-value blocks."""
     x = narrow_to_float32(blocks)
@@ -95,10 +107,7 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
     xnorm = vectors.square().sum(dim=-1)
     xsum = vectors.sum(dim=-1)
 
-    amax = x.abs().amax(dim=1)
-    # The fixed-scale search favors a compressed super-block scale. This
-    # empirical anchor initializes d below the full-range value.
-    d = ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+    d = _predict_iq1_s_scales(x)
     d_float = d.float()
 
     best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
