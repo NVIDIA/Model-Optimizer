@@ -15,6 +15,7 @@
 
 import dataclasses
 import importlib
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -79,7 +80,9 @@ def test_ggml_backend_via_quantize(num_bits):
 
 
 def test_ggml_backend_rejects_unknown_format():
-    with pytest.raises(ValueError, match="requires num_bits"):
+    # Match the dispatcher's own wording: a bare "requires num_bits" would also accept the
+    # per-format guard's message and so could pass on the wrong error.
+    with pytest.raises(ValueError, match="requires num_bits in"):
         ggml_fake_quant(torch.ones(1, 256), SimpleNamespace(num_bits="unknown"))
 
 
@@ -246,3 +249,17 @@ def test_registry_record_is_wired_to_its_own_codec(num_bits, module):
 def test_public_fake_quant_is_the_registered_record(num_bits, module):
     """The per-format entry point and backend dispatch run the same code path."""
     assert getattr(module, f"{num_bits}_fake_quant").__self__ is IQ_FORMAT_REGISTRY[num_bits]
+
+
+@pytest.mark.parametrize("num_bits", FORMAT_NAMES)
+def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
+    """Calling one format's fake quant with a quantizer configured for another is refused.
+
+    Dispatch picks the record by num_bits, so it never reaches this guard; it protects direct
+    callers of a record or of a per-format ``<fmt>_fake_quant`` alias.
+    """
+    other = next(name for name in FORMAT_NAMES if name != num_bits)
+    expected = f"The ggml {num_bits.upper()} backend requires num_bits={num_bits!r}"
+
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        IQ_FORMAT_REGISTRY[num_bits].fake_quant(torch.ones(1, 256), SimpleNamespace(num_bits=other))

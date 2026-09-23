@@ -46,6 +46,10 @@ QUANTIZATION_IQ2_XS = "iq2_xs"
 # export and dispatch cannot disagree about which formats exist. They share the weight-only,
 # 256-value-block, per-module-scale shape, so export treats them as one family. A format's block
 # geometry and packer are read from IQ_FORMAT_REGISTRY directly.
+#
+# Registering a format therefore declares it exportable, and that is intended rather than a side
+# effect: fake quant is dequantize(quantize(w)), so a format cannot be dispatched without the
+# packer and block geometry that are all export reads.
 IQ_FORMATS = frozenset(IQ_FORMAT_REGISTRY)
 
 

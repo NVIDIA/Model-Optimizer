@@ -245,6 +245,7 @@ IQ1_S_FORMAT = IQFormat(
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
 )
 
-# Kept for callers of the per-format entry point. Dispatch goes through IQ_FORMAT_REGISTRY, so
-# that is the one place to substitute a format's encoder or decoder.
+# Kept for callers of the per-format entry point. The record captured quantize_iq1_s and
+# dequantize_iq1_s when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
 iq1_s_fake_quant = IQ1_S_FORMAT.fake_quant
