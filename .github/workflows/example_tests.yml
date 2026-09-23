@@ -61,7 +61,7 @@ jobs:
               - tests/examples/conftest.py
               - "!**/*.{md,rst,png,ipynb}"
             torch:
-              - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding}/**"
+              - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding,vllm_serve}/**"
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
               - "!**/*.{md,rst,png,ipynb}"
@@ -112,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding]
+        example: [llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding, vllm_serve]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read

@@ -141,6 +141,14 @@ def _quantized_sdpa(self, *args, **kwargs):
     q_quantized_scale = self.q_bmm_quantizer._get_amax(query)
     k_quantized_scale = self.k_bmm_quantizer._get_amax(key)
     v_quantized_scale = self.v_bmm_quantizer._get_amax(value)
+    disable_fp8_mha = not all(
+        quantizer.is_enabled and quantizer.is_fp8
+        for quantizer in (
+            self.q_bmm_quantizer,
+            self.k_bmm_quantizer,
+            self.v_bmm_quantizer,
+        )
+    )
 
     # We don't need to calibrate the output of softmax
     return self.bmm2_output_quantizer(
@@ -155,7 +163,7 @@ def _quantized_sdpa(self, *args, **kwargs):
             self.q_bmm_quantizer.trt_high_precision_dtype
             if hasattr(self.q_bmm_quantizer, "trt_high_precision_dtype")
             else "Half",
-            self._disable_fp8_mha if hasattr(self, "_disable_fp8_mha") else True,
+            disable_fp8_mha,
         )
     )
 

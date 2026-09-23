@@ -29,8 +29,8 @@
 # does not.
 #
 # Override fields via an OmegaConf dotlist.
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
 metadata:
-  recipe_type: speculative_dflash
   description: >-
     LiLiCorr + grouped sublayer convolutions (DFlash backbone + candidate-lattice
     reranker + DFlash2 sublayer convolutions).

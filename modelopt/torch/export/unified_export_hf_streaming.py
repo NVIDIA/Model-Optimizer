@@ -52,7 +52,6 @@ from .quant_utils import (
 )
 from .registry import ExportContext
 from .unified_export_hf import (
-    _add_mtp_exclusions,
     _dispatch_export_handler,
     _prepare_model_for_export,
     _prepare_moe_inputs,
@@ -371,8 +370,6 @@ def _export_transformers_checkpoint_streaming(
     requantize_resmooth_fused_llm_layers(model)
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
-
-    _add_mtp_exclusions(model, quant_config)
 
     _warn_on_unsynced_moe_gate_up(model)
 

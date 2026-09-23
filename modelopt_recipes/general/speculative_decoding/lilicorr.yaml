@@ -17,8 +17,8 @@
 # the composition of the cross-entropy weight — see the two-line override below.
 # Override fields via an OmegaConf dotlist.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptDFlashRecipe
 metadata:
-  recipe_type: speculative_dflash
   description: LiLiCorr training recipe (DFlash backbone + candidate-lattice reranker).
 
 # maps to ModelArguments (main.py)
