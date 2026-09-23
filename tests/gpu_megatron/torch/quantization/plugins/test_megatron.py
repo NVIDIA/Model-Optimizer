@@ -1326,7 +1326,10 @@ def test_te_grouped_sharded_state_dict_reshard(
     )
 
 
-def test_te_grouped_sharded_state_dict_combined_tp_ep(dist_workers_size_4, tmp_path):
+@pytest.mark.parametrize("override_modelopt_tp_group", [False, True])
+def test_te_grouped_sharded_state_dict_combined_tp_ep(
+    dist_workers_size_4, tmp_path, override_modelopt_tp_group
+):
     """Round-trip grouped expert quantizer state with TP and EP both greater than one."""
     dist_workers_size_4.run(
         partial(
@@ -1340,9 +1343,9 @@ def test_te_grouped_sharded_state_dict_combined_tp_ep(dist_workers_size_4, tmp_p
             tmp_path,
             save_etp_size=1,
             load_etp_size=1,
-            # Simulate child conversion without the parent MLP setup: checkpoint groups must still
-            # come from the grouped linear's MCore process-group collection.
-            override_modelopt_tp_group=True,
+            # The True case simulates child conversion without the parent MLP setup: checkpoint
+            # groups must still come from the grouped linear's MCore process-group collection.
+            override_modelopt_tp_group=override_modelopt_tp_group,
         )
     )
 
