@@ -449,14 +449,15 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
 
 
 @pytest.mark.parametrize("wrapper", ["model", "language_model"])
-def test_disable_compilation_handles_missing_marker(wrapper):
+def test_disable_compilation_warns_when_marker_is_missing(wrapper):
+    """A non-compile-wrapped model remains supported, but the no-op risk is visible."""
     inner_model = SimpleNamespace()
     if wrapper == "model":
         model = SimpleNamespace(model=inner_model)
     else:
         model = SimpleNamespace(language_model=SimpleNamespace(model=inner_model))
 
-    with disable_compilation(model):
+    with pytest.warns(UserWarning, match="cannot be disabled"), disable_compilation(model):
         assert inner_model.do_not_compile is True
 
     assert not hasattr(inner_model, "do_not_compile")
@@ -464,6 +465,7 @@ def test_disable_compilation_handles_missing_marker(wrapper):
 
 @pytest.mark.parametrize("initial_value", [False, True])
 def test_disable_compilation_restores_existing_marker(initial_value):
+    """The marker owner is enabled temporarily and its original value is restored."""
     inner_model = SimpleNamespace(do_not_compile=initial_value)
     model = SimpleNamespace(model=inner_model)
 
@@ -471,6 +473,35 @@ def test_disable_compilation_restores_existing_marker(initial_value):
         assert inner_model.do_not_compile is True
 
     assert inner_model.do_not_compile is initial_value
+
+
+def test_disable_compilation_prefers_outer_marker():
+    """An outer compile wrapper takes precedence over an unmarked inner model."""
+    inner_model = SimpleNamespace()
+    model = SimpleNamespace(do_not_compile=False, model=inner_model)
+
+    with disable_compilation(model):
+        assert model.do_not_compile is True
+        assert not hasattr(inner_model, "do_not_compile")
+
+    assert model.do_not_compile is False
+
+
+def test_disable_compilation_restores_class_marker_after_error():
+    """Cleanup restores a class marker without masking an error from the context body."""
+
+    class CompileWrappedModel:
+        do_not_compile = False
+
+    inner_model = CompileWrappedModel()
+    model = SimpleNamespace(model=inner_model)
+
+    with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
+        assert inner_model.do_not_compile is True
+        raise RuntimeError("quantization failed")
+
+    assert inner_model.do_not_compile is False
+    assert "do_not_compile" not in vars(inner_model)
 
 
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
