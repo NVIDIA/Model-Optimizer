@@ -37,6 +37,15 @@ These instructions apply to AI-assisted work in this repository.
   "ship", or equivalent before running `git push`, `gh pr create`, or any
   push-option flags like `-o merge_request.create`.
 
+## Updating skills
+
+- **Keep skill edits concise.** Skills are loaded into agent context, so every
+  line costs tokens on each use. Add only what changes agent behavior, and
+  prefer tightening existing text over appending new text.
+- **Compress before opening the PR.** Make a final pass over the skill diff:
+  cut redundancy, merge overlapping guidance, and drop examples the agent
+  doesn't need.
+
 ## Sizing and splitting PRs
 
 - **Keep each PR that goes up for review under ~500 changed lines of source.**
