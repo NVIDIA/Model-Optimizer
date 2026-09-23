@@ -17,9 +17,10 @@
 
 The chunked gated-delta-rule kernel keeps each head's ``[K, V]`` recurrent state in fp32 inside
 one Triton launch and carries it from chunk to chunk. To emulate a deployment that stores that
-state in FP8, ModelOpt runs an adapted copy of the kernel
+state in FP8 or INT8, ModelOpt runs an adapted copy of the kernel
 (:mod:`modelopt.torch.kernels.quantization.linear_attention`) that fake-quantizes the state to
-E4M3 at the end of every chunk, with a scale computed inside the kernel from the state itself.
+E4M3 or signed narrow-range INT8 at the end of every chunk, with a scale computed inside the
+kernel from the state itself.
 The backward pass recomputes the same quantized states and passes the state gradient straight
 through the quantization, so QAT and QAD train against the quantized recurrence. A second
 quantizer covers ``w``, the WY-transformed keys that multiply the state; ``w`` is a regular tensor,
@@ -31,9 +32,8 @@ from typing import Any
 
 import torch
 
-from ..config import QuantizerAttributeConfig
-from ..linear_attention.utils import validate_gdn_quantizer
-from ..nn import QuantModule, TensorQuantizer
+from ..linear_attention.prefill import matmul_gdn
+from .linear_attention import _LinearAttentionQuantMixin
 
 __all__ = ["GatedDeltaNetStateQuantMixin"]
 
@@ -55,39 +55,22 @@ def _state_qdq_chunk_gated_delta_rule() -> GatedDeltaRuleFn:
     return chunk_gated_delta_rule
 
 
-class GatedDeltaNetStateQuantMixin(QuantModule):
+class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
     """Adds ``gdn_state_quantizer`` and ``gdn_w_quantizer`` to a GatedDeltaNet module.
 
     Subclasses route the module's chunked gated-delta-rule call through
     :meth:`_state_quantized_chunk_gated_delta_rule`. Both quantizers start disabled; enable them
     with ``quant_cfg`` entries on ``*gdn_state_quantizer`` / ``*gdn_w_quantizer`` such as the
     ``configs/ptq/units/gdn_state_fp8_dynamic`` and ``gdn_w_fp8_dynamic`` recipe units. The state
-    quantizer carries the fused QDQ configuration. Both sites currently require dynamic
-    E4M3 and identity STE. State QDQ uses fixed 64-column value tiles and 64-token chunks.
+    quantizer carries the fused QDQ configuration. State supports dynamic E4M3 or signed
+    narrow-range INT8; W supports dynamic E4M3.
+    Both sites require identity STE. The execution policy is saved in ModelOpt metadata.
     """
 
-    def _setup(self):
-        for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
-            self._register_temp_attribute(
-                name, TensorQuantizer(QuantizerAttributeConfig(enable=False))
-            )
-
-    def validate_linear_attention(self) -> None:
-        """Reject numerical settings that the fused training path cannot implement."""
-        for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
-            quantizer = getattr(self, name)
-            if quantizer.is_enabled:
-                validate_gdn_quantizer(quantizer, name=name)
-        # The state handle configures fused QDQ; W's grouping is executed by TensorQuantizer.
-        if self.gdn_state_quantizer.is_enabled and self.gdn_state_quantizer.axis != (0, 1):
-            raise ValueError(
-                "gdn_state_quantizer supports only axis=(0, 1) with 64-column value tiling"
-            )
-
-    def modelopt_post_restore(self, prefix: str = ""):
-        """Validate restored quantizers against the fused training kernel requirements."""
-        super().modelopt_post_restore(prefix)
-        self.validate_linear_attention()
+    @property
+    def gdn_state_qdq_block_v(self) -> int:
+        """Value-column scale grouping from the saved execution policy."""
+        return self.linear_attention_config.state.block_v
 
     def _state_quantized_chunk_gated_delta_rule(
         self, gated_delta_rule: GatedDeltaRuleFn, *args: Any, **kwargs: Any
@@ -96,21 +79,33 @@ class GatedDeltaNetStateQuantMixin(QuantModule):
         self.validate_linear_attention()
         quantize_state = self.gdn_state_quantizer.is_enabled and self.gdn_state_quantizer._if_quant
         quantize_w = self.gdn_w_quantizer.is_enabled
-        if not (quantize_state or quantize_w):
+        if not self.linear_attention_is_enabled:
             return gated_delta_rule(*args, **kwargs)
         if getattr(gated_delta_rule, "__name__", None) != "chunk_gated_delta_rule":
             raise NotImplementedError(
                 "GatedDeltaNet quantizers require the fla chunked kernel; the deterministic torch "
                 f"kernel ({gated_delta_rule!r}) is not supported."
             )
-        chunk_size = kwargs.pop("chunk_size", 64)
-        if chunk_size != 64:
+        chunk_size = kwargs.pop("chunk_size", self.linear_attention_config.chunk_size)
+        if chunk_size != self.linear_attention_config.chunk_size:
             raise ValueError("GDN fake quantization supports only chunk_size=64")
+        if self.linear_attention_config.backend == "matmul":
+            return matmul_gdn(
+                *args,
+                policy=self.linear_attention_config,
+                state_qdq=quantize_state,
+                state_format=self._linear_attn_state_format,
+                chunk_size=chunk_size,
+                prefill_lengths=self._linear_attention_prefill_lengths,
+                **kwargs,
+            )
         return _state_qdq_chunk_gated_delta_rule()(
             *args,
             chunk_size=chunk_size,
-            state_qdq=int(quantize_state),
-            state_qdq_block_v=64,
+            state_qdq=(2 if self._linear_attn_state_format == "int8" else 1)
+            if quantize_state
+            else 0,
+            state_qdq_block_v=self.gdn_state_qdq_block_v,
             w_quantizer=self.gdn_w_quantizer if quantize_w else None,
             **kwargs,
         )

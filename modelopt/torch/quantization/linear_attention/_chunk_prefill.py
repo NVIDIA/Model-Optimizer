@@ -13,140 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Small differentiable oracles, independent of FLA and Triton.
-
-These references prioritize explicit arithmetic and gradients over speed. Gates are
-natural logarithms; inputs are already normalized/activated. Packed sequence boundaries
-are read on the CPU. Accumulation follows the input dtype (use float64 for algebra tests).
-"""
+"""Exact chunked prefix computation for decode-aware training."""
 
 from collections.abc import Callable
-from itertools import pairwise
 
 import torch
 
-__all__ = [
-    "chunk_gdn_reference",
-    "chunk_kda_reference",
-    "recurrent_delta_rule_reference",
-    "state_fp8_qdq_reference",
-    "state_qdq_reference",
-]
+from .utils import _prepare, _state_qdq
+
+__all__ = []
 
 
-def state_fp8_qdq_reference(state: torch.Tensor, block_v: int = 64) -> torch.Tensor:
-    """Dynamic E4M3 QDQ with identity STE and one scale per ``[Dk, block_v]`` tile.
-
-    ``state`` is in key-first layout ``[..., Dk, Dv]``. Scales and rounding do not
-    contribute derivatives. The zero tile uses scale one; partial value tiles are valid.
-    """
-    return state_qdq_reference(state, block_v)
-
-
-def state_qdq_reference(state: torch.Tensor, block_v: int = 64, state_format: str = "fp8_e4m3"):
-    """Dynamic state-tile QDQ with detached scales and identity STE."""
-    if state_format not in ("fp8_e4m3", "int8"):
-        raise ValueError("State format must be fp8_e4m3 or int8")
-    if block_v not in (16, 32, 64, 128):
-        raise ValueError("block_v must be 16, 32, 64, or 128")
-    with torch.no_grad():
-        rounded = []
-        for tile in state.float().split(block_v, dim=-1):
-            amax = tile.abs().amax(dim=(-2, -1), keepdim=True)
-            limit = 127.0 if state_format == "int8" else 448.0
-            scale = torch.where(amax > 0, amax / limit, torch.ones_like(amax))
-            normalized = (tile / scale).clamp(-limit, limit)
-            codes = (
-                normalized.round()
-                if state_format == "int8"
-                else normalized.to(torch.float8_e4m3fn).float()
-            )
-            rounded.append(codes * scale)
-        quantized = torch.cat(rounded, dim=-1).to(state.dtype)
-    return state + (quantized - state).detach()
-
-
-def _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first):
-    if q.ndim != 4 or k.shape != q.shape or v.shape[:2] != q.shape[:2]:
-        raise ValueError("q/k must have shape [B,T,Hk,Dk] and v shape [B,T,Hv,Dv]")
-    batch, length, heads, keys = q.shape
-    value_heads, values = v.shape[2:]
-    if length == 0 or value_heads % heads:
-        raise ValueError("nonempty sequences and Hv divisible by Hk are required")
-    if beta.shape != (batch, length, value_heads) or g.shape not in (
-        beta.shape,
-        (*beta.shape, keys),
-    ):
-        raise ValueError("beta must be [B,T,Hv]; g must be [B,T,Hv] or [B,T,Hv,Dk]")
-    if cu_seqlens is None:
-        sequences = [(b, 0, length) for b in range(batch)]
-    else:
-        boundaries = cu_seqlens.tolist()
-        if (
-            batch != 1
-            or len(boundaries) < 2
-            or boundaries[0] != 0
-            or boundaries[-1] != length
-            or any(a >= b for a, b in pairwise(boundaries))
-        ):
-            raise ValueError("cu_seqlens must partition a packed batch of size one")
-        sequences = [(0, a, b) for a, b in pairwise(boundaries)]
-    if initial_state is None:
-        state = q.new_zeros(len(sequences), value_heads, keys, values)
-    else:
-        state = initial_state.transpose(-1, -2) if state_v_first else initial_state
-        if state.shape != (len(sequences), value_heads, keys, values):
-            raise ValueError("initial_state shape does not match sequence/head dimensions")
-    return (
-        q.repeat_interleave(value_heads // heads, dim=2),
-        k.repeat_interleave(value_heads // heads, dim=2),
-        state,
-        sequences,
-    )
-
-
-def recurrent_delta_rule_reference(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    *,
-    scale: float | None = None,
-    initial_state: torch.Tensor | None = None,
-    cu_seqlens: torch.Tensor | None = None,
-    state_v_first: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """GDN (scalar decay) or KDA (per-key decay) exact token recurrence.
-
-    Inputs have shapes ``q,k:[B,T,Hk,Dk]``, ``v:[B,T,Hv,Dv]``,
-    ``beta:[B,T,Hv]``, and ``g:[B,T,Hv]`` (GDN) or ``[B,T,Hv,Dk]`` (KDA).
-    State is ``[N,Hv,Dk,Dv]``, or ``[N,Hv,Dv,Dk]`` with ``state_v_first``.
-    Returns output and final state, preserving gradients through the initial state.
-    """
-    q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
-    scale = q.shape[-1] ** -0.5 if scale is None else scale
-    outputs, finals = [], []
-    for n, (b, start, end) in enumerate(sequences):
-        state = states[n]
-        sequence_output = []
-        for t in range(start, end):
-            decay = g[b, t].exp()
-            if g.ndim == 3:
-                decay = decay.unsqueeze(-1)
-            decayed = state * decay.unsqueeze(-1)
-            residual = v[b, t] - (k[b, t].unsqueeze(-1) * decayed).sum(-2)
-            update = beta[b, t].unsqueeze(-1) * residual
-            state = decayed + k[b, t].unsqueeze(-1) * update.unsqueeze(-2)
-            sequence_output.append((q[b, t].unsqueeze(-1) * state).sum(-2) * scale)
-        outputs.append(torch.stack(sequence_output))
-        finals.append(state)
-    output = torch.stack(outputs) if cu_seqlens is None else torch.cat(outputs).unsqueeze(0)
-    final = torch.stack(finals)
-    return output, final.transpose(-1, -2) if state_v_first else final
-
-
-def chunk_gdn_reference(
+def chunk_gdn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -175,7 +53,7 @@ def chunk_gdn_reference(
     Matmul callbacks receive conventional ``lhs @ rhs`` shapes, without padding.
     """
     if g.ndim != 3 or chunk_size <= 0:
-        raise ValueError("chunk_gdn_reference requires scalar GDN gates and positive chunk_size")
+        raise ValueError("chunk_gdn requires scalar GDN gates and positive chunk_size")
     q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     mm = matmul if matmul is not None else lambda name, lhs, rhs: lhs @ rhs
@@ -226,7 +104,7 @@ def chunk_gdn_reference(
         if n != previous_n:
             state = states[n]
             if state_qdq:
-                state = state_qdq_reference(state, state_qdq_block_v, state_format)
+                state = _state_qdq(state, state_qdq_block_v, state_format)
             previous_n = n
         length = qc.shape[1]
         wc = w[offset : offset + length].transpose(0, 1)
@@ -246,7 +124,7 @@ def chunk_gdn_reference(
             "state_add", state + mm("state_update", weighted_keys.transpose(-1, -2), updated_values)
         )
         if state_qdq:
-            state = state_qdq_reference(state, state_qdq_block_v, state_format)
+            state = _state_qdq(state, state_qdq_block_v, state_format)
         if len(finals) <= n:
             finals.append(state)
         else:
@@ -256,7 +134,7 @@ def chunk_gdn_reference(
     return output, final.transpose(-1, -2) if state_v_first else final
 
 
-def chunk_kda_reference(
+def chunk_kda(
     q,
     k,
     v,
@@ -275,14 +153,14 @@ def chunk_kda_reference(
     matmul=None,
     inverse_fn=None,
 ):
-    """KDA chunk oracle with causal per-channel decays and optional operand QDQ.
+    """KDA chunk computation with causal per-channel decays and optional operand QDQ.
 
     The eight-site callback receives conventional three-dimensional matmul
     operands. Interaction sites are invoked one query row at a time with decay
     already applied to the right-hand keys. This avoids inverse-prefix factors.
     """
     if g.ndim != 4 or chunk_size <= 0:
-        raise ValueError("chunk_kda_reference requires per-key gates and positive chunk_size")
+        raise ValueError("chunk_kda requires per-key gates and positive chunk_size")
     q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     mm = matmul if matmul is not None else lambda name, lhs, rhs: lhs @ rhs
@@ -290,7 +168,7 @@ def chunk_kda_reference(
     for n, (b, start, end) in enumerate(sequences):
         state = states[n]
         if state_qdq:
-            state = state_qdq_reference(state, state_qdq_block_v, state_format)
+            state = _state_qdq(state, state_qdq_block_v, state_format)
         pieces = []
         for lo in range(start, end, chunk_size):
             hi = min(lo + chunk_size, end)
@@ -338,9 +216,10 @@ def chunk_kda_reference(
                 "state_update", weighted_keys.transpose(-1, -2), updated
             )
             if state_qdq:
-                state = state_qdq_reference(state, state_qdq_block_v, state_format)
+                state = _state_qdq(state, state_qdq_block_v, state_format)
         outputs.append(torch.cat(pieces))
         finals.append(state)
     output = torch.stack(outputs) if cu_seqlens is None else torch.cat(outputs).unsqueeze(0)
     final = torch.stack(finals)
     return output, final.transpose(-1, -2) if state_v_first else final
+

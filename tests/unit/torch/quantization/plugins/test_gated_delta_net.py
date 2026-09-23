@@ -21,9 +21,18 @@ import torch.nn as nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gated_delta_net
 from modelopt.torch.quantization.plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
+
+GDN_STATE_INT8_DYNAMIC = {
+    "num_bits": 8,
+    "unsigned": False,
+    "narrow_range": True,
+    "type": "dynamic",
+    "axis": (0, 1),
+}
 
 GDN_STATE_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1), "type": "dynamic"}
 
@@ -98,7 +107,12 @@ def test_dynamic_export_removes_linear_attention_attributes():
     model = _QuantTinyGatedDeltaNet.convert(TinyGatedDeltaNet())
     model.export()
     assert type(model) is TinyGatedDeltaNet
-    for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
+    for name in (
+        "gdn_state_quantizer",
+        "gdn_w_quantizer",
+        "linear_attention_config",
+        "_linear_attention_prefill_lengths",
+    ):
         assert not hasattr(model, name)
 
 
@@ -116,7 +130,8 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch):
+@pytest.mark.parametrize("state_format", ["fp8_e4m3", "int8"])
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, state_format):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -128,12 +143,15 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch):
     )
     model = TinyGatedDeltaNet()
     x = torch.randn(2, 8, 3, 4)
-    mtq.quantize(model, quant_cfg(), lambda m: m(x))
+    cfg = quant_cfg()
+    if state_format == "int8":
+        cfg["quant_cfg"][1]["cfg"] = GDN_STATE_INT8_DYNAMIC
+    mtq.quantize(model, cfg, lambda m: m(x))
 
     model(x)
     assert calls and calls[-1] == {
         "chunk_size": 64,
-        "state_qdq": 1,
+        "state_qdq": 2 if state_format == "int8" else 1,
         "state_qdq_block_v": 64,
         "w_quantizer": None,
     }
@@ -201,7 +219,13 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
     model = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
     cfg = quant_cfg(state=state, w=w)
     cfg["algorithm"] = None
+    cfg["linear_attention"] = [
+        {"module_name": "*", "cfg": {"state": {"block_v": 128}}},
+        {"module_name": "0", "cfg": {"state": {"block_v": 32}}},
+    ]
     mtq.quantize(model, cfg)
+    assert model[0].gdn_state_qdq_block_v == 32
+    model[0].linear_attention_config.state.block_v = 16
     if w:
         # Save the actual quantizer settings, including edits after conversion.
         model[0].gdn_w_quantizer.axis = None
@@ -209,6 +233,8 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
     mto.save(model, path)
     restored = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
     mto.restore(restored, path)
+    assert restored[0].linear_attention_config == model[0].linear_attention_config
+    assert restored[0].gdn_state_qdq_block_v == 16
     for name, enabled in (("gdn_state_quantizer", state), ("gdn_w_quantizer", w)):
         original = getattr(model[0], name)
         quantizer = getattr(restored[0], name)
@@ -228,7 +254,12 @@ def test_quant_cfg_refinement_updates_and_validates_existing_quantized_module():
 
     cfg = quant_cfg(state=False, w=True)
     cfg["algorithm"] = None
+    cfg["linear_attention"] = [{"module_name": "", "cfg": {"state": {"block_v": 32}}}]
     mtq.quantize(model, cfg)
+    assert model.gdn_state_qdq_block_v == 32
+    cfg["linear_attention"].append({"module_name": "", "cfg": {}})
+    mtq.quantize(model, cfg)
+    assert model.gdn_state_qdq_block_v == 64
     assert not model.gdn_state_quantizer.is_enabled
     assert model.gdn_w_quantizer.is_enabled
 
@@ -243,7 +274,9 @@ def test_restore_legacy_gdn_without_new_quantizer_handles():
     model = mtq.quantize(TinyGatedDeltaNet(), config)
     state = mto.modelopt_state(model)
     for _, mode_state in state["modelopt_state_dict"]:
+        mode_state["config"].pop("linear_attention", None)
         metadata = mode_state["metadata"]
+        metadata.pop("linear_attention", None)
         for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
             metadata["quantizer_state"].pop(name, None)
     restored = TinyGatedDeltaNet()
@@ -261,3 +294,36 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
+
+
+def test_int8_state_conversion_and_checkpoint(tmp_path):
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*gdn_state_quantizer", "cfg": GDN_STATE_INT8_DYNAMIC},
+        ],
+        "algorithm": None,
+    }
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    assert model._linear_attn_state_format == "int8"
+    path = tmp_path / "int8.pt"
+    mto.save(model, path)
+    restored = mto.restore(TinyGatedDeltaNet(), path)
+    assert restored._linear_attn_state_format == "int8"
+    assert restored.gdn_state_quantizer.narrow_range
+    assert not restored.gdn_state_quantizer.unsigned
+    assert not restored.gdn_w_quantizer.is_enabled
+
+
+def test_policy_rejects_unmatched_and_unimplemented_modes():
+    with pytest.raises(ValueError, match="matches no supported"):
+        mtq.quantize(
+            nn.Linear(4, 4), {"linear_attention": [{"module_name": "*"}], "algorithm": None}
+        )
+    for policy in (
+        {"chunk_size": 32},
+        {"solve": {"method": "neumann"}},
+        {"state": {"mode": "token"}},
+    ):
+        with pytest.raises(ValueError):
+            QuantizeConfig(linear_attention=[{"module_name": "*", "cfg": policy}])

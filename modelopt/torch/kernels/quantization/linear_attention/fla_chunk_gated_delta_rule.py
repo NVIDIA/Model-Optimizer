@@ -59,6 +59,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 
 from .fla_chunk_delta_h import (
     STATE_QDQ_FP8_DYNAMIC,
+    STATE_QDQ_INT8_DYNAMIC,
     STATE_QDQ_OFF,
     chunk_gated_delta_rule_bwd_dhu,
     chunk_gated_delta_rule_fwd_h,
@@ -636,17 +637,20 @@ def chunk_gated_delta_rule(
         raise ValueError("ModelOpt GDN supports only chunk_size=64; FLA WY backward assumes 64.")
 
     # [ModelOpt] state_qdq: 0 keeps fla's numerics; 1 fake-quantizes the state carried between
-    # chunks to FP8 E4M3 with a dynamic scale per [K, state_qdq_block_v] tile of each head.
+    # chunks to FP8 E4M3; 2 uses signed narrow-range INT8. Both use a dynamic scale per
+    # [K, state_qdq_block_v] tile of each head.
     state_qdq = kwargs.pop("state_qdq", STATE_QDQ_OFF)
     state_qdq_block_v = kwargs.pop("state_qdq_block_v", None)
     # w_quantizer: dynamic FP8 TensorQuantizer applied to the WY tensor
     # ``w`` of shape [B, T, HV, K] before it multiplies the state, emulating an FP8 x FP8 matmul.
     w_quantizer = kwargs.pop("w_quantizer", None)
-    if state_qdq not in (STATE_QDQ_OFF, STATE_QDQ_FP8_DYNAMIC):
-        raise ValueError(f"`state_qdq` must be 0 or 1, got {state_qdq}.")
+    if state_qdq not in (STATE_QDQ_OFF, STATE_QDQ_FP8_DYNAMIC, STATE_QDQ_INT8_DYNAMIC):
+        raise ValueError(f"`state_qdq` must be 0, 1, or 2, got {state_qdq}.")
     if w_quantizer is not None:
         validate_gdn_quantizer(w_quantizer, name="gdn_w_quantizer")
-    if state_qdq and (not q.is_cuda or torch.cuda.get_device_capability(q.device) < (8, 9)):
+    if state_qdq == STATE_QDQ_FP8_DYNAMIC and (
+        not q.is_cuda or torch.cuda.get_device_capability(q.device) < (8, 9)
+    ):
         raise RuntimeError("GDN state QDQ requires native E4M3 conversion on CUDA SM89 or newer.")
     if (state_qdq != STATE_QDQ_OFF or w_quantizer is not None) and cp_context is not None:
         raise ValueError("State or w quantization is not supported together with `cp_context`.")

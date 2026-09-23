@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+
 import pytest
 import torch
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
@@ -23,6 +25,11 @@ from _test_utils.torch.megatron.utils import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.linear_attention import (
+    LinearAttentionConfig,
+    linear_attention_training_phase,
+)
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet and the state QDQ kernel need fla
 GatedDeltaNet = pytest.importorskip("megatron.core.ssm.gated_delta_net").GatedDeltaNet
@@ -78,7 +85,27 @@ def _gdn_config(sites):
             for site in sites
         ],
         "algorithm": None,
+        "linear_attention": [
+            {"module_name": "decoder.layers.*.self_attention", "cfg": {"state": {"block_v": 16}}}
+        ],
     }
+
+
+def _config_for_mode(mode):
+    sites = ("state", "w") if mode == "both" else ((mode,) if mode in ("state", "w") else ())
+    if mode.startswith("decode"):
+        sites = ("state",)
+    if mode == "state_int8":
+        sites = ("state",)
+    cfg = _gdn_config(sites)
+    if mode.endswith("int8"):
+        cfg["quant_cfg"][1]["cfg"].update(num_bits=8, unsigned=False, narrow_range=True)
+    if mode.startswith("decode"):
+        policy = cfg["linear_attention"][0]["cfg"]
+        policy.update(backend="matmul", decode={"implementation": "triton"})
+        if mode.startswith("decode_replay"):
+            policy["decode"].update(mode="replay", replay={"window": 8})
+    return cfg, sites
 
 
 def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
@@ -86,7 +113,16 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
     model = _make_model(size)
-    forward = get_forward(model)
+    original_forward = get_forward(model)
+
+    def forward(m):
+        enabled = any(
+            getattr(getattr(layer, "linear_attention_config", None), "decode", None) is not None
+            for layer in m.modules()
+        )
+        with linear_attention_training_phase(m, [64, 64]) if enabled else nullcontext():
+            return original_forward(m)
+
     outputs = []
     handles = [
         module.register_forward_hook(
@@ -100,13 +136,18 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     gdn_ref = outputs.copy()
     outputs.clear()
 
-    sites = ("state", "w") if mode == "both" else (mode,)
-    mtq.quantize(model, _gdn_config(sites))
+    cfg, sites = _config_for_mode(mode)
+    mtq.quantize(model, cfg)
     gdn_modules = [m for m in model.modules() if isinstance(m, _QuantGatedDeltaNet)]
     assert gdn_modules, "no GatedDeltaNet layer was wrapped"
     for module in gdn_modules:
+        assert module.gdn_state_qdq_block_v == 16
         assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
         assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
+        # Checkpointing must save the resolved policy, including edits after conversion.
+        module.linear_attention_config = LinearAttentionConfig(
+            **{**module.linear_attention_config.model_dump(), "state": {"block_v": 32}}
+        )
 
     with torch.no_grad():
         loss_quant = forward(model)
@@ -119,20 +160,34 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     for handle in handles:
         handle.remove()
 
-    for site in sites:
-        mtq.disable_quantizer(model, f"*gdn_{site}_quantizer")
+    enabled = [
+        q
+        for m in gdn_modules
+        for q in m.modules()
+        if isinstance(q, TensorQuantizer) and q.is_enabled
+    ]
+    policies = [m.linear_attention_config for m in gdn_modules]
+    for q in enabled:
+        q.disable()
+    for module in gdn_modules:
+        module.linear_attention_config = LinearAttentionConfig()
     with torch.no_grad():
         torch.testing.assert_close(forward(model), loss_ref, rtol=1e-4, atol=1e-4)
-    for site in sites:
-        mtq.enable_quantizer(model, f"*gdn_{site}_quantizer")
+    for q in enabled:
+        q.enable()
+    for module, policy in zip(gdn_modules, policies):
+        module.linear_attention_config = policy
 
     restored = _make_model(size)
     sharded_state_dict_test_helper(checkpoint_path, model, restored, forward)
     restored_gdn = [m for m in restored.modules() if isinstance(m, _QuantGatedDeltaNet)]
     assert len(restored_gdn) == len(gdn_modules)
-    for module in restored_gdn:
+    for module, original in zip(restored_gdn, gdn_modules):
+        assert module.linear_attention_config == original.linear_attention_config
         assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
         assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
+        assert module._linear_attn_state_format == original._linear_attn_state_format
+        assert module.gdn_state_qdq_block_v == 32
         assert module.in_proj.weight.grad is not None
         assert torch.isfinite(module.in_proj.weight.grad).all()
 
@@ -146,10 +201,22 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
 # Cold FLA/TileLang compilation plus a two-rank checkpoint exceeds the lane's 120s default.
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("tp_size", [1, 2])
-@pytest.mark.parametrize("mode", ["state", "w", "both"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "state",
+        "w",
+        "both",
+        "decode_token",
+        "decode_replay",
+        "state_int8",
+        "decode_token_int8",
+        "decode_replay_int8",
+    ],
+)
 def test_gdn_qat_and_sharded_restore(request, tmp_path, tp_size, mode):
     """Train through state/W QDQ after a Megatron distributed-checkpoint round trip."""
-    if mode != "w" and torch.cuda.get_device_capability() < (8, 9):
+    if mode in ("state", "both") and torch.cuda.get_device_capability() < (8, 9):
         pytest.skip("State QDQ needs native E4M3 conversion (SM89+)")
     workers = request.getfixturevalue(f"dist_workers_size_{tp_size}")
     workers.run(_test_gdn_qat_helper, mode, tmp_path)
@@ -159,10 +226,21 @@ def _test_gdn_context_parallel_helper(rank, size, mode):
     initialize_for_megatron(context_parallel_size=size, seed=SEED)
     model = _make_model(1, context_parallel_size=size)
     with pytest.raises(NotImplementedError, match="context parallelism"):
-        mtq.quantize(model, _gdn_config((mode,)))
+        mtq.quantize(model, _config_for_mode(mode)[0])
 
 
-@pytest.mark.parametrize("mode", ["state", "w"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "state",
+        "w",
+        "decode_token",
+        "decode_replay",
+        "state_int8",
+        "decode_token_int8",
+        "decode_replay_int8",
+    ],
+)
 def test_gdn_context_parallel_rejected(dist_workers_size_2, mode):
     """Reject unqualified Megatron CP even when it does not pass an FLA CP context."""
     dist_workers_size_2.run(_test_gdn_context_parallel_helper, mode)

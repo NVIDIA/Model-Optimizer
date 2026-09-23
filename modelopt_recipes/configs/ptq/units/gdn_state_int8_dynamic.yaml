@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
-
-from .config import *
-from .decode import *
-from .decode_prefill import *
-from .kda import *
-from .prefill import *
+# Signed symmetric INT8 recurrent-state fake QDQ with dynamic per-head [K, block_v]
+# scale groups and identity STE. Configure block_v in the saved linear-attention policy.
+# Applies at chunk/token writes or replay-anchor refreshes; replay factors are independent.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      axis: [0, 1]
+      type: dynamic
+      pass_through_bwd: true
