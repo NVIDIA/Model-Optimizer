@@ -313,6 +313,7 @@ def test_fp8_export_rejects_unsupported_dtype_conversion(
         (torch.float32, "fp16", ("fp4", "int4"), ["onnxconverter"]),
         (torch.float32, "fp16", ("fp4", "int8"), ["onnxconverter"]),
         (torch.float32, "fp16", ("fp4", "mxfp8"), ["onnxconverter"]),
+        (torch.float32, "fp16", (), ["autocast"]),
     ],
     ids=[
         "fp32-to-fp16",
@@ -325,6 +326,7 @@ def test_fp8_export_rejects_unsupported_dtype_conversion(
         "fp4-int4-legacy",
         "fp4-int8-legacy",
         "fp4-mxfp8-legacy",
+        "unquantized-autocast",
     ],
 )
 def test_quantized_export_selects_precision_converter(
@@ -338,6 +340,7 @@ def test_quantized_export_selects_precision_converter(
 
     def record_autocast(model, **kwargs):
         calls.append("autocast")
+        assert kwargs["defer_nvfp4_trt_inference"] == ("fp4" in quantizers)
         return model
 
     for quantizer in ("fp4", "fp8", "int4", "int8", "mxfp8"):

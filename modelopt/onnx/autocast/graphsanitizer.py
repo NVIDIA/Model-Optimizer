@@ -67,13 +67,16 @@ class GraphSanitizer:
         self.onnx_path = os.path.abspath(onnx_path) if onnx_path is not None else None
         self.external_data_dir = os.path.dirname(self.onnx_path) if self.onnx_path else ""
 
-    def sanitize(self) -> None:
+    def sanitize(self, *, defer_nvfp4_trt_inference: bool = False) -> None:
         """Sanitize the model graph.
 
         Currently, this finds decomposed LayerNorm patterns and replaces them with a single LayerNormalization operator.
         Additional functionality may be added in the future.
+
+        Args:
+            defer_nvfp4_trt_inference: Forward NVFP4 inference deferral to custom-node discovery.
         """
-        self.find_custom_nodes()
+        self.find_custom_nodes(defer_nvfp4_trt_inference=defer_nvfp4_trt_inference)
         self.remove_disconnected_outputs()
         self.convert_opset()
         self.replace_layernorm_pattern()
@@ -119,11 +122,15 @@ class GraphSanitizer:
             ]
             logger.info("Ensured custom ops precision")
 
-    def find_custom_nodes(self) -> None:
+    def find_custom_nodes(self, *, defer_nvfp4_trt_inference: bool = False) -> None:
         """Find custom nodes in the model.
 
         Scans through all nodes in the graph and logs any nodes that use custom operators
         that are not part of the standard ONNX operator set.
+
+        Args:
+            defer_nvfp4_trt_inference: Defer inference only for NVFP4 plugins with declared
+                FP4/FP8 output types; the caller must validate after precision conversion.
         """
         self.custom_ops = {
             node.op_type for node in self.model.graph.node if node.op_type not in self.standard_ops
@@ -149,9 +156,9 @@ class GraphSanitizer:
                 output_types == [onnx.TensorProto.FLOAT4E2M1, onnx.TensorProto.FLOAT8E4M3FN]
                 for output_types in custom_output_types
             )
-            # NVFP4 export declares its FP4 data and FP8 scale outputs before dtype conversion.
-            # Avoid parsing that graph in TensorRT until its compute dtypes are normalized.
-            if not has_nvfp4_types:
+            # NVFP4 export explicitly defers parsing until its compute dtypes are normalized.
+            # Other callers retain TensorRT inference, even with the same plugin annotations.
+            if not (defer_nvfp4_trt_inference and has_nvfp4_types):
                 # Infer types and shapes in the graph for ORT compatibility
                 _, all_tensor_info = get_custom_layers(
                     self.onnx_path or self.model, self.trt_plugins

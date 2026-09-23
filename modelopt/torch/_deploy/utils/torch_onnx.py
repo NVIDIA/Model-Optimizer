@@ -704,6 +704,7 @@ def get_onnx_bytes_and_metadata(
                 onnx_opt_graph,
                 low_precision_type=weights_dtype,
                 keep_io_types=False,
+                defer_nvfp4_trt_inference=supports_nvfp4_conversion,
             )
 
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)

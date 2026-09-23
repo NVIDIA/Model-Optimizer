@@ -733,29 +733,33 @@ def test_bf16_conversion_accepts_fp16_initializer(use_standalone_type_inference)
     model.ir_version = LATEST_IR_VERSION_SUPPORTED_BY_ORT
     onnx.checker.check_model(model)
 
-    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(
-        model, use_standalone_type_inference
-    )
-    converter = PrecisionConverter(
+    converted_model = convert_to_f16(
         model,
-        value_info_map,
-        initializer_map,
-        node_to_init_map,
         low_precision_type="bf16",
+        keep_io_types=False,
         use_standalone_type_inference=use_standalone_type_inference,
     )
-
-    converted_model = converter.convert(high_precision_nodes=[], low_precision_nodes=["add"])
+    onnx.checker.check_model(converted_model, full_check=True)
+    assert [value.name for value in converted_model.graph.input] == ["X"]
+    assert [value.name for value in converted_model.graph.output] == ["Y"]
+    for value in [*converted_model.graph.input, *converted_model.graph.output]:
+        assert value.type.tensor_type.elem_type == TensorProto.BFLOAT16
+        assert [dimension.dim_value for dimension in value.type.tensor_type.shape.dim] == [2]
 
     converted_weight = next(
         init for init in converted_model.graph.initializer if init.name == "weight"
     )
     assert converted_weight.data_type == TensorProto.BFLOAT16
-    assert converted_model.graph.output[0].type.tensor_type.elem_type == TensorProto.BFLOAT16
+    assert list(converted_weight.dims) == [2]
     np.testing.assert_allclose(
         onnx_utils.read_f16_tensor_as_fp32(converted_weight),
         np.array([1.0, 2.0], dtype=np.float32),
     )
+    add_node = next(node for node in converted_model.graph.node if node.op_type == "Add")
+    cast_nodes = [node for node in converted_model.graph.node if node.op_type == "Cast"]
+    assert not cast_nodes
+    assert list(add_node.input) == ["X", "weight"]
+    assert list(add_node.output) == ["Y"]
 
 
 ####################################################################################################
@@ -2332,7 +2336,8 @@ def test_convert_to_f16_combines_op_and_node_exclusions(simple_model):
 
 
 def test_convert_to_f16_refreshes_gathernd_pre_cast_declaration(monkeypatch):
-    def discover_test_plugins_without_trt(self):
+    def discover_test_plugins_without_trt(self, *, defer_nvfp4_trt_inference=False):
+        assert not defer_nvfp4_trt_inference
         self.custom_ops = {
             node.op_type for node in self.model.graph.node if node.domain == "test.plugins"
         }

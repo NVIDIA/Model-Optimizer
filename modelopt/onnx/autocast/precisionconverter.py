@@ -100,6 +100,8 @@ class PrecisionConverter:
         use_standalone_type_inference: bool = False,
         original_network_io_metadata: dict[str, list[onnx.ValueInfoProto]] | None = None,
         sanitize_model: bool = True,
+        *,
+        defer_nvfp4_trt_inference: bool = False,
     ) -> None:
         """Initialize PrecisionConverter.
 
@@ -120,9 +122,11 @@ class PrecisionConverter:
             use_standalone_type_inference: Use standalone type inference instead of ONNX's infer_shapes.
             original_network_io_metadata: Original public input/output metadata captured at the API boundary.
             sanitize_model: Whether to sanitize the model before precision conversion.
+            defer_nvfp4_trt_inference: Defer annotated NVFP4 plugin inference during sanitization.
         """
         self.model = deepcopy(model)
         self.sanitize_model = sanitize_model
+        self.defer_nvfp4_trt_inference = defer_nvfp4_trt_inference
         if sanitize_model:
             self.value_info_map = value_info_map
             self.initializer_map = initializer_map
@@ -1852,7 +1856,7 @@ class PrecisionConverter:
             trt_plugins=self.trt_plugins,
             max_ir_version=self.max_ir_version,
         )
-        graph_sanitizer.sanitize()
+        graph_sanitizer.sanitize(defer_nvfp4_trt_inference=self.defer_nvfp4_trt_inference)
         self.model = graph_sanitizer.model
 
         # Update value_info_map and initializer_map after sanitizing model

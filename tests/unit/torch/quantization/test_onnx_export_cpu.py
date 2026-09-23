@@ -119,15 +119,18 @@ class _NVFP4LinearWithExplicitBias(torch.nn.Module):
 
 
 class _NVFP4MixedPrecisionLinear(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, return_boundaries=False):
         super().__init__()
         self.fp32_linear = torch.nn.Linear(16, 16, dtype=torch.float32)
         self.bf16_linear = torch.nn.Linear(16, 16, dtype=torch.bfloat16)
+        self.return_boundaries = return_boundaries
 
     def forward(self, inputs):
         fp32_output = self.fp32_linear(inputs)
-        bf16_output = self.bf16_linear(inputs.to(torch.bfloat16)).float()
-        return fp32_output + bf16_output
+        bf16_output = self.bf16_linear(inputs.to(torch.bfloat16))
+        bf16_output_as_fp32 = bf16_output.float()
+        output = fp32_output + bf16_output_as_fp32
+        return (output, bf16_output, bf16_output_as_fp32) if self.return_boundaries else output
 
 
 def _make_cpu_nvfp4_model(
@@ -332,6 +335,36 @@ def test_nvfp4_deploy_export_preserves_mixed_precision_boundaries(
         assert quantize_nodes
         for node in quantize_nodes:
             assert tensor_types[node.input[1]] == expected_dtype
+
+
+def test_nvfp4_deploy_export_preserves_bf16_graph_outputs(monkeypatch):
+    model = _NVFP4MixedPrecisionLinear(return_boundaries=True).eval()
+    sample_input = torch.ones(1, 16)
+    with torch.no_grad():
+        source_outputs = model(sample_input)
+    assert [output.dtype for output in source_outputs] == [
+        torch.float32,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    model = _make_cpu_nvfp4_model(monkeypatch, model, sample_input)
+    exported_model, _ = _export_deploy_onnx_with_types(model, sample_input, "fp32")
+    assert [value.type.tensor_type.elem_type for value in exported_model.graph.output] == [
+        TensorProto.FLOAT,
+        TensorProto.BFLOAT16,
+        TensorProto.FLOAT,
+    ]
+
+    producers = {output: node for node in exported_model.graph.node for output in node.output}
+    native_output = exported_model.graph.output[1].name
+    cast_output = exported_model.graph.output[2].name
+    assert producers[native_output].op_type in {"Gemm", "MatMul"}
+    cast_node = producers[cast_output]
+    assert cast_node.op_type == "Cast"
+    assert list(cast_node.input) == [native_output]
+    assert helper.get_attribute_value(next(a for a in cast_node.attribute if a.name == "to")) == (
+        TensorProto.FLOAT
+    )
 
 
 @pytest.mark.parametrize(
