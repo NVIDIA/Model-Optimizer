@@ -1,0 +1,43 @@
+{
+  "model": "arcee-ai/AFM-4.5B-Base-KDA-Only",
+  "model_revision": "01ad2e06ee4f1214193c17b69e09105a9b257e80",
+  "dataset": "Salesforce/wikitext",
+  "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+  "length": 128,
+  "seed": 2026,
+  "learning_rate": 1e-05,
+  "screening": {
+    "split": "validation",
+    "eval_blocks": 32,
+    "train_steps": 0,
+    "degrees": [
+      3,
+      7,
+      15,
+      31
+    ],
+    "control": "kda_exact_matmul.json",
+    "selection": "smallest listed degree whose before-NLL paired block bootstrap upper bound is at most 0.02 above exact; retain exact if none pass",
+    "nll_margin": 0.02
+  },
+  "heldout": {
+    "split": "test",
+    "eval_blocks": 64,
+    "train_steps": 32,
+    "train_predicted_tokens": 4096,
+    "trials": [
+      "exact_matmul",
+      "fp8",
+      "selected_neumann",
+      "selected_neumann_fp8"
+    ],
+    "comparisons": [
+      "selected_neumann vs exact_matmul",
+      "selected_neumann_fp8 vs fp8",
+      "fp8 vs exact_matmul"
+    ],
+    "nll_margin": 0.02,
+    "adapt_after_test": false
+  },
+  "scope": "short teacher-forced numerical sensitivity pilot, not broad quality recovery or long-context qualification"
+}

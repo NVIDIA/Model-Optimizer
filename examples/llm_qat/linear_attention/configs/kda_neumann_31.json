@@ -1,0 +1,22 @@
+{
+  "quant_cfg": [
+    {
+      "quantizer_name": "*",
+      "enable": false
+    }
+  ],
+  "algorithm": null,
+  "linear_attention": [
+    {
+      "module_name": "model.layers.*.self_attn",
+      "cfg": {
+        "backend": "matmul",
+        "solve": {
+          "method": "neumann",
+          "degree": 31,
+          "implementation": "triton"
+        }
+      }
+    }
+  ]
+}

@@ -404,6 +404,7 @@ def test_packed_quantized_prefix_and_replay_composition(kda, state_format):
         policy = LinearAttentionConfig(
             backend="matmul",
             state={"block_v": 16},
+            solve={"method": "neumann", "degree": 3},
             elementwise={"value_residual": "bfloat16"},
             decode={
                 "mode": "replay",

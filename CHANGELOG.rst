@@ -15,6 +15,8 @@ Changelog
 
 - Add experimental FP8/INT8 recurrent-state fake quantization before native vLLM GDN/KDA prefill and decode. Use the state-only recipe with the documented vLLM 0.15.x eager runtime.
 
+- Added opt-in differentiable Neumann solve approximation for GDN/KDA QAT, with an explicit saved degree and a CUDA FP32 candidate. Exact solve remains the default.
+
 - Add experimental GDN/KDA decode-aware QAT with FP8 or INT8 recurrent states, optional INT8 value-axis Hadamard encoding, KDA decay rounding, and encoded-update replay. Supply explicit prefix lengths through the training phase context; prefix solves remain exact.
 
 - Add experimental KDA prefill QAT for FLA 0.5.1 layers with stable per-channel decay and independent operand/state fake quantization. Enable the explicit ``matmul`` backend; numerical policies and quantizers persist through ModelOpt save/restore.

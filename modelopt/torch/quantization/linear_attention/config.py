@@ -75,9 +75,20 @@ class _StateConfig(ModeloptBaseConfig):
 
 
 class LinearAttentionSolveConfig(ModeloptBaseConfig):
-    """Exact solve; inverse approximation is a later delivery."""
+    """Exact solve or an explicit Neumann polynomial, differentiated as computed."""
 
-    method: Literal["exact"] = ModeloptField(default="exact")
+    method: Literal["exact", "neumann"] = ModeloptField(default="exact")
+    degree: int | None = Field(default=None, ge=0, le=63, strict=True)
+    implementation: Literal["torch", "triton"] = ModeloptField(default="torch")
+
+    @model_validator(mode="after")
+    def _validate_method(self):
+        if self.method == "exact":
+            if self.degree is not None or self.implementation != "torch":
+                raise ValueError("Exact solve does not accept a degree or Triton implementation")
+        elif self.degree is None:
+            raise ValueError("Neumann solve requires an explicit polynomial degree")
+        return self
 
 
 class LinearAttentionReplayConfig(ModeloptBaseConfig):
