@@ -12,8 +12,9 @@ resumes from those caches if the first job times out, then queues another
 follow-on job so long-running evals can continue across walltime windows.
 
 Do not assume a timeout means the evaluation failed or produced invalid results.
-Treat timeouts as expected resume events until `nel status`/`nel info`,
-artifacts, and logs show a terminal failure or invalid run.
+Treat SLURM walltime timeouts as expected resume events until `nel status`/`nel
+info`, artifacts, and logs show a terminal failure or invalid run. Request or
+task/trial timeouts require separate accounting below, even when the job succeeds.
 
 ## Verify Completed Evaluation Run
 
@@ -28,12 +29,52 @@ single-model run:
 3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
 4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
 5. Confirm sample accounting: expected samples/repeats match completed, scored samples; no unexpected dropped/skipped/failed samples, `unknown_agent_error`, `failed_samples_policy` aborts, empty outputs, or partial result files.
-6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess output-limit termination such as `finish_reason: length` using the accounting below; it is not by itself a parsing failure. Check for parser errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+7. Complete the **Timeout and Output-Limit Accounting** below for every task,
+   including non-reasoning models and successful runs.
 
 Report the run-validation summary before any score: log scan status, sample
 accounting, reasoning/answer parsing status, and any errors or warnings found.
 If any validation item fails, either rerun/fix it or label the result as
 incomplete or invalid.
+
+## Timeout and Output-Limit Accounting
+
+For every benchmark/run, including successful and non-reasoning runs, inspect
+structured response/trial artifacts, logs, and resolved config. Report counts,
+percentages, explicit denominators, and artifact paths before the score:
+
+| Check | Required evidence |
+|---|---|
+| Coverage | Expected trials including repeats; completed/scored, failed/skipped/missing; score denominator and whether failures receive zero or are excluded. |
+| Timeouts | Timed-out / all request attempts; affected unique trials / expected trials; terminal-timeout trials / expected trials. Separate recovered retries and terminal failures by layer: client/proxy, agent/task, judge, sandbox/verifier. |
+| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length`; distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
+| Limits | Effective request/proxy, agent/task, judge/verifier, output-token and context limits, timeout strategy, overrides, concurrency, sharding, and serving setup. |
+
+Deduplicate resumed records by sample/trial/repeat ID; keep request attempts
+separate from trials. Categories overlap, so do not sum them as disjoint failures.
+Log matches and token counts near a cap are clues, not proof of affected samples.
+Missing termination metadata, sampled-only artifacts, or omitted failures make
+full-run rates **unknown**, not zero. Report coverage and what evidence is missing;
+do not extrapolate sampled rates.
+
+- **Valid with warnings:** small fractions of output-limit or benchmark-timeout
+  events can pass when sample/repeat/scoring coverage is complete, limits match
+  the protocol, and other checks pass. Apply explicit task/user tolerances,
+  retain failures per benchmark scoring, and report observed impact. A nonzero
+  rate alone must not trigger failure or automatic rerun; a low rate does not
+  prove negligible impact or excuse infrastructure failures.
+- **Provisional/inconclusive:** unknown accounting leaves validation incomplete.
+  Investigate infrastructure failures, unexpected exclusions, or mismatched
+  limits before a model-quality verdict. A valid run alone does not establish
+  quantization feasibility.
+- **Comparison:** matching wall-clock limits does not isolate model quality;
+  speed, queueing, concurrency, and verbosity affect work completed. Compare
+  both sides' limit-hit rates; unresolved timeout effects make attribution to
+  quantization inconclusive.
+- **Reruns:** never silently drop timed-out trials or increase only one model's
+  limits. Use matched settings, preserve original results, and label protocol
+  changes. Longer-timeout diagnostics are not automatically leaderboard-comparable.
 
 ## External Baseline Sanity Check
 
