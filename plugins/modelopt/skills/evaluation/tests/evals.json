@@ -1,5 +1,53 @@
 [
   {
+    "name": "standalone-kimi-scicode-model-output-fault",
+    "skills": ["launching-evals"],
+    "query": "Analyze Kimi SciCode attempt 15 in a fresh repository session, without an evaluator role or prior evaluation skill context. Coverage is complete: 65/65 samples and 338/338 selected, evaluated, and scored trajectories. Provenance verifies 337 unique successful HTTP model responses as the response denominator. One preserved response is both finish_reason=length and empty-final after reasoning consumed its token budget; it was retained and scored incorrect. There are zero HTTP, infrastructure, parser, scorer, sandbox, or harness failures. The measured score is 53.25443786982248. Is this run valid, or should it be rerun? Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Follows AGENTS.md (also exposed via CLAUDE.md) to read evaluation/references/run-validation.md before reporting the score, without preloading the evaluation skill",
+      "Reports complete 65/65 sample and 338/338 selected/evaluated/scored trajectory coverage plus 337 verified unique successful responses",
+      "Reports length-capped=1 and empty-final=1 but a deduplicated union of 1/337 = approximately 0.2967%",
+      "Declares the run valid with a visible model-output-fault warning, retains score 53.25443786982248, and does not rerun",
+      "Does not infer negligible score impact from the low rate or tune/remove token limits"
+    ]
+  },
+  {
+    "name": "model-output-fault-overlap-and-two-percent-boundary",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "Classify two independent runs with complete expected/selected/evaluated/scored coverage and 10000 verified unique successful raw model responses each. In A, preserved responses 1-120 are length-capped, 81-170 have empty finals, and 151-200 have malformed unusable finals; every affected response is retained and scored incorrect. In B, 201 distinct preserved responses have malformed finals and are retained and scored incorrect. Each log also repeats 5000 cache records and includes 100 failed transport attempts that were retried successfully plus 10000 judge responses. All independent gates pass. Report category and union accounting; do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "Uses 10000 as each denominator, excluding duplicate records, retry attempts, and judge calls; does not pool runs",
+      "Reports A's category counts as length-capped=120, empty-final=90, malformed-final=50 and deduplicates overlaps to response IDs 1-200, a union of 200/10000 = exactly 2.0%",
+      "Treats A as valid with a visible warning because the inclusive unrounded boundary passes",
+      "Reports B's union as 201/10000 = 2.01%, above tolerance; returns findings and a recommendation without automatic retry or a success verdict"
+    ]
+  },
+  {
+    "name": "model-output-tolerance-does-not-waive-independent-failures",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "Review five separate runs whose apparent model-output-fault rate is below 2%. A selected 1000 responses but evaluated and scored only 999. B exhausted an HTTP/server request and has no successful raw response for one item. C raised a parser exception and assigned a fallback score without retaining the malformed answer as an explicit incorrect result; its harness also failed. D used the wrong benchmark version, model, and config. E has an authentication/secret failure and no verifiable response denominator. All reported scores exceed the reference. Can the parent accept any under the tolerance?",
+    "files": [],
+    "expected_behavior": [
+      "Marks every run invalid rather than using the model-output tolerance",
+      "Separately identifies missing/unscored coverage, exhausted HTTP/server request, parser fallback and harness failure, wrong protocol identity, authentication/secret failure, and unverified denominator",
+      "Does not reclassify C as a model-output fault because no preserved successful raw malformed answer was deterministically retained and scored incorrect",
+      "Returns findings and recommendations without automatically retrying; exceeding the reference is not proof of validity"
+    ]
+  },
+  {
+    "name": "model-output-fault-unverified-and-token-budget",
+    "skills": ["evaluation", "launching-evals"],
+    "query": "A run has no reliable unique-successful-response denominator. Another has 5/1000 preserved length-capped responses retained and scored incorrect, max_new_tokens=131072, deployed context=131072, and 4096-token prompts; its reference protocol uses a 65536 output budget. Should I remove the output cap or keep increasing it until the reference score passes?",
+    "files": [],
+    "expected_behavior": [
+      "Marks the first run's model-output-fault rate unverified, not 0% or within tolerance",
+      "Reports the second run's union as 5/1000 = 0.5% but flags reference-budget mismatch and insufficient context for prompt plus configured output",
+      "Does not uncap or tune limits to pass the target; returns a protocol-justified recommendation for approval without automatically resubmitting"
+    ]
+  },
+  {
     "name": "nemotron3-nano-bf16-reasoning",
     "skills": ["evaluation"],
     "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",

@@ -25,18 +25,71 @@ For each completed invocation/run directory, whether baseline, quantized, or a
 single-model run:
 
 1. Inspect client, server/deployment, SLURM, judge, and task-specific/code-execution logs as applicable. Search for `Traceback`, `Exception`, `ERROR`, `FAILED`, `OOM`, `Killed`, `timeout`, `rate limit`, `unauthorized`, `connection refused/reset`, `health check`, `sandbox`, `container`, `judge`, `parse`, `scoring`, and task-specific failure strings.
-2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, max-context truncation, quantization load error, or repeated 4xx/5xx responses.
+2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, input/context clipping, quantization load error, or repeated 4xx/5xx responses.
 3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
 4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
-5. Confirm sample accounting: expected samples/repeats match completed, scored samples; no unexpected dropped/skipped/failed samples, `unknown_agent_error`, `failed_samples_policy` aborts, empty outputs, or partial result files.
-6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess output-limit termination such as `finish_reason: length` using the accounting below; it is not by itself a parsing failure. Check for parser errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
+5. Confirm coverage separately at every available level: expected, selected, evaluated, and scored samples/repeats/trajectories must match. No response may be missing or unscored, and no unexpected dropped/skipped/failed sample, `unknown_agent_error`, `failed_samples_policy` abort, or partial result file is allowed.
+6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess unusable model outputs under the policy below. Check for parser or fallback errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 7. Complete the **Timeout and Output-Limit Accounting** below for every task,
    including non-reasoning models and successful runs.
 
-Report the run-validation summary before any score: log scan status, sample
-accounting, reasoning/answer parsing status, and any errors or warnings found.
-If any validation item fails, either rerun/fix it or label the result as
-incomplete or invalid.
+Report the run-validation summary before any score: log scan status, coverage,
+reasoning/answer parsing status, and any errors or warnings found. If an
+independent validation item fails, label the result incomplete or invalid and
+return findings and a recommendation to the parent (or user); do not
+automatically resubmit a completed run.
+
+### Aggregate Model-Output-Fault Policy (Parent and Evaluator)
+
+For each benchmark/run, report category counts, their deduplicated union, the
+verified denominator, and `rate = 100 × union / denominator`. Calculate with
+unrounded counts; round only the displayed percentage.
+
+The denominator is the deduplicated set of unique, successful raw evaluated-model
+responses selected for evaluation. Count a cached response reused by multiple
+trajectories once; exclude duplicate log/cache records, failed request attempts,
+judge calls, and unrelated runs. Verify the denominator from response identity
+and provenance rather than dataset size, especially for repeated or multi-turn
+tasks. An unknown or zero denominator leaves the rate unverified, not 0%.
+
+The numerator is the set union of denominator responses unusable because of
+model output behavior:
+
+- length or token-budget truncation, including reasoning that consumes the budget;
+- an empty final answer, including a nonempty reasoning trace with no final answer;
+- a malformed or otherwise unusable final output.
+
+Count a response in every applicable category for reporting, but once in the
+union. To qualify, the successful raw response must exist, remain preserved in
+the artifacts, and be deterministically retained and scored incorrect. A parser
+exception, parser fallback/default score, missing parsed record, or scorer/harness
+failure is not automatically a model-output fault; it remains invalid unless the
+preserved raw response's malformed answer is explicitly retained and scored
+incorrect under the benchmark protocol.
+
+- **0 < rate ≤ 2.0% (inclusive, before rounding):** valid with a visible warning
+  when expected/selected/evaluated/scored coverage is complete and all independent
+  gates pass. Retain the affected responses and their incorrect scores; do not
+  invalidate or retry solely for these faults. A low rate does **not** imply
+  negligible score impact.
+- **rate > 2.0%:** return category counts, union, rate, findings, and a
+  recommendation to the parent (or user); do not automatically retry or declare
+  success.
+- The tolerance never waives missing or unscored responses; exhausted request,
+  transport, server, or authentication failures; incomplete coverage; parser,
+  harness, sandbox, or scorer failures; wrong benchmark, model, configuration, or
+  version; secret issues; input/context clipping; benchmark-specific validity
+  rules; or an unverified denominator. A score above a reference does not establish
+  validity.
+- Check configured and effective output limits against the reference evaluation
+  protocol and deployed context capacity, including prompt/history plus output
+  space. Report mismatches or unavailable reference settings. Do not remove or
+  tune token limits merely to pass; propose protocol-justified changes for
+  parent/user approval instead.
+
+The parent must preserve the category and rate warning and apply the same policy
+to evaluator handoffs rather than treating any nonzero model-output fault as a
+failed run.
 
 ## Timeout and Output-Limit Accounting
 
@@ -58,12 +111,12 @@ Missing termination metadata, sampled-only artifacts, or omitted failures make
 full-run rates **unknown**, not zero. Report coverage and what evidence is missing;
 do not extrapolate sampled rates.
 
-- **Valid with warnings:** small fractions of output-limit or benchmark-timeout
-  events can pass when sample/repeat/scoring coverage is complete, limits match
-  the protocol, and other checks pass. Apply explicit task/user tolerances,
-  retain failures per benchmark scoring, and report observed impact. A nonzero
-  rate alone must not trigger failure or automatic rerun; a low rate does not
-  prove negligible impact or excuse infrastructure failures.
+- **Model-output faults:** apply the aggregate policy above. Output-limit stops
+  qualify only when the response is preserved and scored incorrect; terminal
+  request, task, judge, sandbox, or harness timeouts remain invalid.
+- **Recovered retries:** report them separately. They do not enter the fault
+  numerator or denominator as extra responses, and they do not excuse a terminal
+  failure or missing coverage.
 - **Provisional/inconclusive:** unknown accounting leaves validation incomplete.
   Investigate infrastructure failures, unexpected exclusions, or mismatched
   limits before a model-quality verdict. A valid run alone does not establish
