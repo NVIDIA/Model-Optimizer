@@ -16,6 +16,6 @@ Before acting, load these Model Optimizer instructions:
 - `accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
 - `common/workspace-management.md`
 
-Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
+Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run. Apply `evaluation/references/run-validation.md`'s Aggregate Model-Output-Fault Policy per benchmark/run: report category counts, their deduplicated union, the verified unique-successful-response denominator, and the unrounded rate. A rate ≤2.0% is a visible warning only when affected raw responses are preserved and scored incorrect, coverage is complete, and every independent gate passes. Above tolerance, return findings and a recommendation to the parent without automatically resubmitting. Never tune token limits merely to pass.
 
 Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Results`, `Validation`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.
