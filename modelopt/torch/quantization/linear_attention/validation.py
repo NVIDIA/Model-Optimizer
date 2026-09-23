@@ -20,14 +20,20 @@ from ..nn import TensorQuantizer
 __all__ = []
 
 
-def validate_gdn_quantizer(quantizer: TensorQuantizer, *, state: bool) -> None:
-    name = "gdn_state_quantizer" if state else "gdn_w_quantizer"
+def validate_gdn_quantizer(
+    quantizer: TensorQuantizer, *, state: bool, name: str | None = None
+) -> None:
+    name = name or ("gdn_state_quantizer" if state else "gdn_w_quantizer")
     axis = (0, 1) if state else (0, 1, 2)
     if not isinstance(quantizer, TensorQuantizer):
         raise ValueError(f"{name} requires a single TensorQuantizer")
+    integer_state = (
+        state and quantizer.num_bits == 8 and not quantizer.unsigned and quantizer.narrow_range
+    )
+    formats = "dynamic E4M3 or signed narrow-range INT8" if state else "dynamic E4M3"
     if not (
         quantizer._dynamic
-        and quantizer.num_bits == (4, 3)
+        and (quantizer.num_bits == (4, 3) or integer_state)
         and quantizer.axis == axis
         and quantizer.block_sizes is None
         and quantizer.fake_quant
@@ -39,7 +45,7 @@ def validate_gdn_quantizer(quantizer: TensorQuantizer, *, state: bool) -> None:
         and not quantizer._use_constant_amax
     ):
         raise ValueError(
-            f"{name} supports only dynamic E4M3 fake quantization with axis={axis}, "
+            f"{name} supports only {formats} fake quantization with axis={axis}, "
             "pass_through_bwd=True, no block_sizes, rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
         )

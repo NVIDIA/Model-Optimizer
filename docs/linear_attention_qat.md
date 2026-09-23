@@ -1,16 +1,17 @@
 # Linear-attention numerical emulation for training
 
-This experimental integration adds dynamic FP8 E4M3 fake quantization to Megatron
+This experimental integration adds dynamic FP8 E4M3 and signed INT8 state fake quantization to Megatron
 GatedDeltaNet's chunked training path. It rounds the recurrent state at chunk boundaries
-and the materialized WY activation `W` before the state-read matmul. Both sites use an
+and supports FP8 QDQ on the materialized WY activation `W` before the state-read matmul. Both sites use an
 identity straight-through estimator (STE). The underlying tensors remain floating point;
 this feature does not provide compressed inference state or native FP8 matmul acceleration.
 
 The implementation adapts [PR #2455](https://github.com/NVIDIA/Model-Optimizer/pull/2455)
 at `13c7e2456f2e9d079c9ef822742eeaa634353802` onto ModelOpt
-`051d6adb204f10cd3e78d0f824f31a5a01d54831`. It is the M0/M1 portion of the linear-attention
-design. Additional prefill operand sites, KDA training integration, approximate inverse,
-token-state quantization, decay approximation, and SSM replay remain later milestones.
+`051d6adb204f10cd3e78d0f824f31a5a01d54831`. It provides the shared state-QDQ foundation.
+[Decode-aware training](linear_attention_decode.md) adds GDN/KDA token-state quantization,
+decay approximation, and SSM replay with an exact-prefix handoff. Prefill operand QDQ
+and approximate inverse are subsequent deliveries; neither is required by this branch.
 
 ## Requirements and scope
 
@@ -21,9 +22,10 @@ token-state quantization, decay approximation, and SSM replay remain later miles
   before launch. The adapter expands grouped Q/K heads for that backend; autograd sums their
   gradients back to the original heads. This adds temporary Q/K activation storage.
 - The fused GDN implementation accepts **chunk size 64 only**, including backward.
-- State QDQ requires NVIDIA SM89 or newer for the native E4M3 conversion instruction.
-  W-only QDQ can run on the A6000/SM86 environment used for local validation.
-- The numerical recipe supports dynamic E4M3 and `pass_through_bwd=True`. Static scales,
+- Fused GDN FP8 state QDQ requires NVIDIA SM89 or newer for native E4M3 conversion.
+  INT8 state QDQ and W-only QDQ can run on SM86.
+- State supports dynamic E4M3 or signed narrow-range INT8; W supports dynamic E4M3.
+  Both require `pass_through_bwd=True`. Static scales,
   clipping-aware backward, real quantization, rotations, and custom format backends are rejected.
 - Context parallelism with either numerical site enabled is rejected. Distributed checkpoint
   save/restore is qualified at TP=1 and TP=2 with unchanged topology and PP=1. Pipeline
@@ -67,6 +69,17 @@ config = {
 model = mtq.quantize(model, config)
 ```
 
+To select INT8 state, replace only the state quantizer's `cfg` with:
+
+```python
+{"num_bits": 8, "unsigned": False, "narrow_range": True,
+ "type": "dynamic", "axis": (0, 1), "pass_through_bwd": True}
+```
+
+The reusable recipe unit is `configs/ptq/units/gdn_state_int8_dynamic`.
+For KDA, use the same attributes with `*kda_state_quantizer`. Existing FP8
+recipes and checkpoints retain their format.
+
 Dynamic scaling requires no calibration loop. Continue with the framework's normal
 forward, backward, and optimizer steps. Enable projection quantization through separate
 recipe entries if needed. The standard projection presets keep the GDN numerical handles
@@ -91,7 +104,9 @@ This costs one saved W activation when that site is enabled.
 The state handle specifies a fused operation rather than calling `TensorQuantizer` on a
 materialized state. Each sequence/head uses one dynamic scale per `[Dk, block_v]` tile;
 `block_v` can be 16, 32, 64, or 128. Partial value tiles are valid. The scale is
-`amax / 448`, with scale one for an all-zero tile. Rounding occurs on the initial state
+`amax / 448` for E4M3 or `amax / 127` for INT8, with scale one for an all-zero tile.
+INT8 uses signed codes in `[-127, 127]`, zero point zero, round-to-nearest-even,
+and saturation. Scales are detached FP32 values and QDQ returns floating values. Rounding occurs on the initial state
 and after each chunk's state update. The chunk's outputs use its incoming rounded state;
 they are computed before rounding the outgoing state. Initial/final state gradients
 propagate through these rounding events using identity STE.
@@ -108,6 +123,7 @@ The CPU-only reference package is `modelopt.torch.quantization.linear_attention`
 | `recurrent_delta_rule_reference` | Exact GDN scalar-decay or KDA per-key-decay recurrence |
 | `chunk_gdn_reference` | Exact GDN triangular solve and chunk algebra; optional state/W QDQ |
 | `state_fp8_qdq_reference` | Dynamic E4M3 state tiles with identity STE |
+| `state_qdq_reference` | E4M3 or INT8 state tiles selected by `state_format` |
 
 Use float64 for algebra/gradcheck and float32 for GPU comparison. References support
 grouped value heads, packed sequences, nonzero initial states, tails, and either state
@@ -130,7 +146,7 @@ The Megatron tests exercise state-only, W-only, and combined QAT after a distrib
 checkpoint round trip at TP=1 and TP=2, including an edited execution policy and an optimizer
 step. The `gpu` and `gpu_megatron` Nox sessions install pinned FLA and TileLang dependencies.
 
-Kernel validation covers two environments:
+Prior FP8 qualification covered these environments (the counts below predate INT8):
 
 - RTX A6000/SM86: Python 3.12.8, Torch 2.9.1, Triton 3.5.1, FLA 0.5.1. The suite passes
   17 cases; 11 native state-FP8 cases and the Hopper-only capability test are skipped.

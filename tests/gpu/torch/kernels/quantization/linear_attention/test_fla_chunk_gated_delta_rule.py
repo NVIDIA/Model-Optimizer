@@ -96,12 +96,13 @@ def test_disabled_matches_upstream_forward_and_backward(dtype):
 
 
 @pytest.mark.parametrize(
-    ("state_qdq", "quantize_w"), [(False, False), (False, True), (True, False), (True, True)]
+    ("state_qdq", "quantize_w"),
+    [(False, False), (False, True), (True, False), (True, True), (2, False), (2, True)],
 )
 @pytest.mark.parametrize(("packed", "state_v_first"), [(False, False), (True, True)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_numerical_surrogate_reference(state_qdq, quantize_w, packed, state_v_first, dtype):
-    if state_qdq:
+    if state_qdq == 1:
         require_state_qdq()
     args, state = make_inputs(dtype, packed=packed, state_v_first=state_v_first)
     quantizer = w_quantizer() if quantize_w else None
@@ -116,7 +117,13 @@ def test_numerical_surrogate_reference(state_qdq, quantize_w, packed, state_v_fi
     }
     reference_args = [x.detach().float().requires_grad_() for x in args]
     reference_state = state.detach().float().requires_grad_()
-    expected = values_and_grads(chunk_gdn_reference, reference_args, reference_state, **kwargs)
+    expected = values_and_grads(
+        chunk_gdn_reference,
+        reference_args,
+        reference_state,
+        state_format="int8" if state_qdq == 2 else "fp8_e4m3",
+        **kwargs,
+    )
     actual = values_and_grads(
         chunk_gated_delta_rule, args, state, output_final_state=True, **kwargs
     )
@@ -124,7 +131,8 @@ def test_numerical_surrogate_reference(state_qdq, quantize_w, packed, state_v_fi
     compare(actual[1], expected[1], 0.05 if dtype == torch.bfloat16 else 0.02)
 
 
-def test_w_qdq_saved_once_and_activation_checkpoint_parity():
+@pytest.mark.parametrize("state_qdq", [0, 2])
+def test_w_qdq_saved_once_and_activation_checkpoint_parity(state_qdq):
     args, state = make_inputs()
     quantizer = w_quantizer()
     calls = []
@@ -132,7 +140,11 @@ def test_w_qdq_saved_once_and_activation_checkpoint_parity():
 
     def fn(*x):
         return chunk_gated_delta_rule(
-            *x[:5], initial_state=x[5], output_final_state=True, w_quantizer=quantizer
+            *x[:5],
+            initial_state=x[5],
+            output_final_state=True,
+            w_quantizer=quantizer,
+            state_qdq=state_qdq,
         )
 
     output = fn(*args, state)
@@ -159,12 +171,20 @@ def test_zero_initial_state_and_output_only_training_loss():
 
 
 @pytest.mark.parametrize("block_v", [16, 64, 128])
-def test_state_scale_tile_forward_and_backward(block_v):
-    require_state_qdq()
+@pytest.mark.parametrize("state_qdq", [1, 2])
+def test_state_scale_tile_forward_and_backward(block_v, state_qdq):
+    if state_qdq == 1:
+        require_state_qdq()
     args, state = make_inputs()
-    kwargs = {"state_qdq": True, "state_qdq_block_v": block_v}
+    kwargs = {"state_qdq": state_qdq, "state_qdq_block_v": block_v}
     reference_args = [x.detach().float().requires_grad_() for x in args]
-    expected = values_and_grads(chunk_gdn_reference, reference_args, state, **kwargs)
+    expected = values_and_grads(
+        chunk_gdn_reference,
+        reference_args,
+        state,
+        state_format="int8" if state_qdq == 2 else "fp8_e4m3",
+        **kwargs,
+    )
     actual = values_and_grads(
         chunk_gated_delta_rule, args, state, output_final_state=True, **kwargs
     )

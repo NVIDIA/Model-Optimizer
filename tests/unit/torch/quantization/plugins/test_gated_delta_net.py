@@ -26,6 +26,14 @@ from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gated_delta_net
 from modelopt.torch.quantization.plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
 
+GDN_STATE_INT8_DYNAMIC = {
+    "num_bits": 8,
+    "unsigned": False,
+    "narrow_range": True,
+    "type": "dynamic",
+    "axis": (0, 1),
+}
+
 GDN_STATE_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1), "type": "dynamic"}
 
 
@@ -110,7 +118,8 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch):
+@pytest.mark.parametrize("state_format", ["fp8_e4m3", "int8"])
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, state_format):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -122,12 +131,15 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch):
     )
     model = TinyGatedDeltaNet()
     x = torch.randn(2, 8, 3, 4)
-    mtq.quantize(model, quant_cfg(), lambda m: m(x))
+    cfg = quant_cfg()
+    if state_format == "int8":
+        cfg["quant_cfg"][1]["cfg"] = GDN_STATE_INT8_DYNAMIC
+    mtq.quantize(model, cfg, lambda m: m(x))
 
     model(x)
     assert calls and calls[-1] == {
         "chunk_size": 64,
-        "state_qdq": 1,
+        "state_qdq": 2 if state_format == "int8" else 1,
         "state_qdq_block_v": 64,
         "w_quantizer": None,
     }
@@ -274,3 +286,22 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
+
+
+def test_int8_state_conversion_and_checkpoint(tmp_path):
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*gdn_state_quantizer", "cfg": GDN_STATE_INT8_DYNAMIC},
+        ],
+        "algorithm": None,
+    }
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    assert model._linear_attn_state_format == "int8"
+    path = tmp_path / "int8.pt"
+    mto.save(model, path)
+    restored = mto.restore(TinyGatedDeltaNet(), path)
+    assert restored._linear_attn_state_format == "int8"
+    assert restored.gdn_state_quantizer.narrow_range
+    assert not restored.gdn_state_quantizer.unsigned
+    assert not restored.gdn_w_quantizer.is_enabled
