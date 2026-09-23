@@ -83,6 +83,18 @@ class DistillArguments(ModelOptHFArguments):
             )
         },
     )
+    kd_loss_weight: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Weight for KD loss in the combined training loss. "
+                "The CE (cross-entropy) loss weight is (1 - kd_loss_weight). "
+                "Set to 1.0 (default) for pure KD loss. "
+                "Set to a value in (0, 1) to blend KD and CE losses, "
+                "e.g. 0.7 for 70% KD loss + 30% CE loss."
+            )
+        },
+    )
 
 
 class DistillArgsWithTeacherModel(DistillArguments):
@@ -145,6 +157,14 @@ class KDTrainer(ModelOptHFTrainer):
         self._teacher_prepared = False
         self._eval_ce_loss_totals = None
 
+        kd_loss_weight = distill_args.kd_loss_weight
+        if not 0.0 < kd_loss_weight <= 1.0:
+            raise ValueError(
+                f"`kd_loss_weight` must be in (0, 1]. Got {kd_loss_weight}. "
+                "Set to 1.0 for pure KD loss or a value in (0, 1) to blend KD and CE losses."
+            )
+        self._kd_loss_weight = kd_loss_weight
+
         if self.use_liger_kernel:
             self._liger_temperature = distill_args.temperature
             self._liger_jsd_beta = distill_args.liger_jsd_beta
@@ -188,7 +208,18 @@ class KDTrainer(ModelOptHFTrainer):
             yield
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """Train and evaluate on KD loss, with eval CE tracked as a metric."""
+        """Compute combined KD and CE training loss, with eval CE tracked as a secondary metric.
+
+        During training, the total loss is::
+
+            loss = kd_loss_weight * kd_loss + (1 - kd_loss_weight) * ce_loss
+
+        When ``kd_loss_weight=1.0`` (the default), this reduces to pure KD loss and the
+        student is forwarded without labels to skip CE computation.
+
+        During evaluation, the primary reported loss is always the KD loss; CE loss is
+        recorded separately as ``eval_ce_loss``.
+        """
         self._ensure_teacher_prepared()
         kd_inputs = {k: v for k, v in inputs.items() if k != "labels"}
         labels = inputs.get("labels")
@@ -197,14 +228,30 @@ class KDTrainer(ModelOptHFTrainer):
         if is_training:
             student_context = self._liger_identity_lm_head if self.use_liger_kernel else nullcontext
             with student_context():
-                outputs = model(**kd_inputs)
+                if self._kd_loss_weight < 1.0:
+                    # Use the fused CE path when Liger replaces lm_head with identity.
+                    outputs = model(**kd_inputs) if self.use_liger_kernel else model(**inputs)
+                else:
+                    # Pure KD: skip CE computation entirely.
+                    outputs = model(**kd_inputs)
         else:
             ce_loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
             batch_size = find_batch_size(inputs)
             self._record_eval_ce_loss(ce_loss, batch_size)
 
         kd_loss = self._compute_kd_loss(outputs, labels, kd_inputs, **kwargs)
-        return (kd_loss, outputs) if return_outputs else kd_loss
+
+        if is_training and self._kd_loss_weight < 1.0:
+            ce_loss = (
+                self._liger_loss_func(outputs, labels, **kwargs)
+                if self.use_liger_kernel
+                else outputs.loss
+            )
+            loss = self._kd_loss_weight * kd_loss + (1.0 - self._kd_loss_weight) * ce_loss
+        else:
+            loss = kd_loss
+
+        return (loss, outputs) if return_outputs else loss
 
     def _compute_kd_loss(self, outputs, labels, inputs, **kwargs):
         """Run teacher forward and compute KD loss.

@@ -32,7 +32,6 @@ docs/source/reference/generated
 workspaces/
 
 # Environments
-.env*
 .venv
 env/
 venv/
@@ -42,7 +41,6 @@ venv/
 **/.ruff_cache
 
 # Vscode
-.vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
 
@@ -79,3 +77,5 @@ AGENTS.override.md
 
 # Claude Code runtime lock (ephemeral process state — never commit)
 .claude/scheduled_tasks.lock
+config.bat
+node_modules
