@@ -223,3 +223,9 @@ has no prefill GEMM QDQ or approximate inverse. FLA KDA requires `use_cache=Fals
 serving cache objects are rejected. ModelOpt saves execution policies, while
 per-batch prefix lengths must be supplied again during training. Distributed
 decode training and model-quality recovery require separate qualification.
+
+## State-only serving with vLLM
+
+See the [vLLM example](../../vllm_serve/README.md#linear-attention-state-quantization)
+for incoming-state QDQ before native prefill/decode. Its invocation boundaries
+differ from the token-write and ReplaySSM policies used during training.

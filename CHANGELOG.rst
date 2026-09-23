@@ -13,6 +13,8 @@ Changelog
 
 *Quantization*
 
+- Add experimental FP8/INT8 recurrent-state fake quantization before native vLLM GDN/KDA prefill and decode. Use the state-only recipe with the documented vLLM 0.15.x eager runtime.
+
 - Add experimental GDN/KDA decode-aware QAT with FP8 or INT8 recurrent states, optional INT8 value-axis Hadamard encoding, KDA decay rounding, and encoded-update replay. Supply explicit prefix lengths through the training phase context; prefix solves remain exact.
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
