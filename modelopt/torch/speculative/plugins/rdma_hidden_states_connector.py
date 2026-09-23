@@ -63,10 +63,74 @@ from .hf_streaming_dataset import nixl_backends_from_env
 logger = init_logger(__name__)
 
 
-def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens):
-    """Gather the first ``num_tokens`` rows of ``kv_cache`` addressed by ``slot_mapping``."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+def planes_dim(kv_cache, n_planes: int) -> int:
+    """Which axis of a per-layer KV cache view holds the captured planes.
+
+    vLLM changed the logical axis order of the per-layer view. Newer builds hand
+    out ``[B, H, N, C]`` unconditionally -- `create_kv_cache_views` documents
+    "one 4D [B, H, N, C] view per layer", and the KVCacheLayout only permutes
+    strides, not axes. Older builds used ``[B, N, H, C]`` (block, token, head,
+    content), which is what this connector was written against.
+
+    For the hidden-state pseudo-layer H is the number of captured planes and C is
+    hidden_size, so the two orders are distinguishable by looking for ``n_planes``.
+    Getting it wrong is not an error, just wrong data: on a new vLLM the old
+    reading returns ``feat=(N, C)``, the trainer sees ONE plane instead of six,
+    peels it off as the base hidden and hands the draft an empty aux tensor
+    ("mat1 and mat2 shapes cannot be multiplied (3072x0 and 40960x8192)").
+    """
+    if kv_cache.ndim != 4:
+        raise RuntimeError(
+            f"hidden-state cache view has {kv_cache.ndim} dims, expected 4; "
+            f"shape={tuple(kv_cache.shape)}"
+        )
+    if kv_cache.shape[1] == n_planes and kv_cache.shape[2] != n_planes:
+        return 1
+    if kv_cache.shape[2] == n_planes and kv_cache.shape[1] != n_planes:
+        return 2
+    raise RuntimeError(
+        f"cannot tell which axis of the hidden-state cache view {tuple(kv_cache.shape)} "
+        f"holds the {n_planes} captured planes; both or neither of dims 1 and 2 match. "
+        "Set a block size that differs from the capture count to disambiguate."
+    )
+
+
+def extract_from_kv_cache(kv_cache, slot_mapping, num_tokens, pdim: int = 2):
+    """Gather the first ``num_tokens`` tokens of ``kv_cache`` addressed by ``slot_mapping``.
+
+    Returns ``[num_tokens, n_planes, hidden]``. ``pdim`` is :func:`planes_dim`.
+    """
+    if pdim == 1:  # [B, H, N, C]
+        block_size = kv_cache.shape[2]
+        # Advanced indices separated by a slice, so the gathered dim comes first:
+        # result is [n, H, C].
+        out = kv_cache[slot_mapping // block_size, :, slot_mapping % block_size, :]
+    else:  # [B, N, H, C]
+        block_size = kv_cache.shape[1]
+        out = kv_cache[slot_mapping // block_size, slot_mapping % block_size]
+    return out[:num_tokens]
+
+
+def _hidden_state_group_index(kv_cache_config) -> int:
+    """Index of the kv-cache group holding the capture layer.
+
+    ``build_connector_meta`` runs in the SCHEDULER process, which never calls
+    ``register_kv_caches`` and has no worker forward-context to look layers up in, so the
+    group is identified from the static spec instead. ``prefer_cross_layer_blocks`` puts
+    the capture layer in a group of its own, and a request's ``block_ids`` is one list per
+    group -- picking the wrong one addresses the attention KV instead of the hidden states.
+    """
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+    groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
+    matches = [i for i, g in enumerate(groups) if isinstance(g.kv_cache_spec, HiddenStateCacheSpec)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            "RdmaHiddenStatesConnector: expected exactly one HiddenStateCacheSpec group in "
+            f"the kv-cache config, found {len(matches)} of {len(groups)}. Without it the "
+            "per-request block ids cannot be resolved."
+        )
+    return matches[0]
 
 
 @dataclass
@@ -76,11 +140,20 @@ class ReqMeta:
     req_id: str
     token_ids: torch.Tensor
     slot: int
+    # The request's OWN blocks in the hidden-state cache. Its slots are derived from
+    # these rather than from a positional window into the batch's slot_mapping -- see
+    # save_kv_layer.
+    block_ids: tuple = ()
 
     @staticmethod
-    def make(req_id, token_ids, slot):
+    def make(req_id, token_ids, slot, block_ids=()):
         """Build a :class:`ReqMeta`, tensorizing ``token_ids``."""
-        return ReqMeta(req_id=req_id, token_ids=torch.tensor(token_ids), slot=slot)
+        return ReqMeta(
+            req_id=req_id,
+            token_ids=torch.tensor(token_ids),
+            slot=slot,
+            block_ids=tuple(block_ids),
+        )
 
 
 @dataclass
@@ -89,9 +162,9 @@ class RdmaConnMeta(KVConnectorMetadata):
 
     requests: list = field(default_factory=list)
 
-    def add(self, req_id, token_ids, slot):
+    def add(self, req_id, token_ids, slot, block_ids=()):
         """Append one request's capture metadata."""
-        self.requests.append(ReqMeta.make(req_id, token_ids, slot))
+        self.requests.append(ReqMeta.make(req_id, token_ids, slot, block_ids))
 
 
 class _Sidecar(BaseHTTPRequestHandler):
@@ -162,6 +235,9 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         """Read pool/sidecar config from ``kv_connector_extra_config`` and init state."""
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self._role = role
+        self._kv_cache_config = kv_cache_config
+        self._hs_group = _hidden_state_group_index(kv_cache_config)
+        self._cache_block_size = 0
         ex = self._kv_transfer_config.get_from_extra_config
         self._sidecar_port = int(ex("sidecar_port", "18999"))
         self._pool_slots = int(ex("pool_slots", "64"))
@@ -184,6 +260,9 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._slot_gen: dict[int, int] = {}
         self._accum_finished: set[str] = set()
         self._oversize_warned = False  # one-shot guard against log spam on oversized prompts
+        self._num_blocks = 0
+        self._firstcap_dumped = False
+        self._slotcheck_left = 8  # bounded deep validation; the cheap bound check is always on
         self._lock = threading.Lock()
         # scheduler state
         self._slot_ctr = 0
@@ -229,9 +308,50 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
         kv = kv_caches[self.cache_layers[0]]
-        # per-token feature = everything past [num_blocks, block_size]
-        self._per_token_elems = int(prod(kv.shape[2:]))
-        self._feat_shape = tuple(kv.shape[2:])
+        # per-token feature = (n_captured_planes, hidden). Which axes those are
+        # depends on the vLLM build; see planes_dim().
+        spec_cfg = self._vllm_config.speculative_config
+        n_planes = len(
+            getattr(spec_cfg.draft_model_config.hf_config, "eagle_aux_hidden_state_layer_ids", [])
+        )
+        if not n_planes:
+            raise RuntimeError(
+                "RdmaHiddenStatesConnector: eagle_aux_hidden_state_layer_ids is empty; "
+                "cannot interpret the hidden-state cache layout."
+            )
+        self._planes_dim = planes_dim(kv, n_planes)
+        self._cache_block_size = kv.shape[2] if self._planes_dim == 1 else kv.shape[1]
+        self._num_blocks = kv.shape[0]
+        # The block ids we address with come from the scheduler, per kv-cache group. If the
+        # group we picked is not this cache's, its ids index a different (usually much
+        # larger) pool -- and because every group starts allocating from low ids, the first
+        # requests can look fine and only later requests run off the end. Dump what we
+        # resolved so that mismatch is visible at startup rather than as an assert later.
+        for i, g in enumerate(getattr(self._kv_cache_config, "kv_cache_groups", None) or []):
+            spec = g.kv_cache_spec
+            print(
+                f"[HSCONN] kv-cache group {i}: spec={type(spec).__name__} "
+                f"layers={len(g.layer_names)} spec_block_size={getattr(spec, 'block_size', '?')}"
+                f"{'  <-- capturing from this one' if i == self._hs_group else ''}",
+                flush=True,
+            )
+        print(
+            f"[HSCONN] capture cache view {tuple(kv.shape)} planes_dim={self._planes_dim} "
+            f"blocks={self._num_blocks} block_size={self._cache_block_size}",
+            flush=True,
+        )
+        self._feat_shape = (
+            (kv.shape[1], kv.shape[3]) if self._planes_dim == 1 else tuple(kv.shape[2:])
+        )
+        self._per_token_elems = int(prod(self._feat_shape))
+        logger.info(
+            "RdmaHiddenStatesConnector: hidden-state cache view %s -> %d planes x %d "
+            "hidden (planes on dim %d)",
+            tuple(kv.shape),
+            self._feat_shape[0],
+            self._feat_shape[1],
+            self._planes_dim,
+        )
         self._dtype = kv.dtype
         self._slot_elems = self._max_tokens * self._per_token_elems
 
@@ -309,15 +429,24 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         ready = torch.cuda.Event()
         ready.record()
         cs.wait_event(ready)
+        # Each request's slots come from ITS OWN blocks, not from a positional window
+        # into the batch's slot_mapping.
+        #
+        # The previous version walked slot_mapping with a running offset, assuming the
+        # newly scheduled (prefill) requests sat contiguously at its front. vLLM appends
+        # new requests to the persistent batch, so any request already decoding occupies
+        # earlier positions and shifts that window: every capture then read a DIFFERENT
+        # request's hidden states. Nothing downstream could catch it -- the shapes are
+        # right, the pool slot is right, the recorded token_ids are the request's own, and
+        # the reconstructed distribution is a real, sharp one. It simply belongs to another
+        # prompt, which merely makes the drafter train on noise.
+        #
+        # Measured: with the serve capped at max_num_seqs=1 (so a batch can never hold a
+        # second request) the per-sequence hidden/token match is 0.96-1.00; with concurrency
+        # it is 0.00-0.02, and the drafter plateaus at bigram-level accuracy.
         slot_mapping = get_forward_context().slot_mapping[layer_name]
-        # Assumes new-request tokens sit contiguously at the front of slot_mapping; bound
-        # the offset walk so an unexpected layout fails loud instead of short-slicing.
-        n_capture = sum(req.token_ids.shape[0] for req in md.requests)
-        assert n_capture <= slot_mapping.shape[0], (
-            f"RdmaHiddenStatesConnector: capturing {n_capture} tokens but slot_mapping has "
-            f"only {slot_mapping.shape[0]}; unexpected batch layout (chunked prefill?)."
-        )
-        offset = 0
+        block_size = self._cache_block_size
+        device = slot_mapping.device
         for req in md.requests:
             n = req.token_ids.shape[0]
             nelems = n * self._per_token_elems
@@ -337,12 +466,49 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                         self._max_tokens,
                     )
                     self._oversize_warned = True
-                offset += n
                 continue
+            need = (n + block_size - 1) // block_size
+            if len(req.block_ids) < need:
+                raise RuntimeError(
+                    f"RdmaHiddenStatesConnector: request {req.req_id} has "
+                    f"{len(req.block_ids)} blocks in the hidden-state cache group but needs "
+                    f"{need} for {n} tokens at block_size {block_size}. Capturing from the "
+                    f"batch's slot_mapping by position instead would silently read another "
+                    f"request's hidden states."
+                )
+            hi = max(req.block_ids)
+            if hi >= self._num_blocks:
+                raise RuntimeError(
+                    f"RdmaHiddenStatesConnector: request {req.req_id} references block {hi} "
+                    f"but the capture cache only has {self._num_blocks} blocks "
+                    f"(group {self._hs_group}, block_size {block_size}, n={n}). The block "
+                    f"ids being handed out are not this cache's."
+                )
             with torch.cuda.stream(cs):
-                rsm = slot_mapping[offset : offset + n]
-                offset += n
-                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n)  # [n, *feat]
+                # Built HERE, on the stream that consumes them. Built on the default stream
+                # instead they are a cross-stream hazard: nothing orders cs against the
+                # allocation, so the caching allocator can hand their memory to someone else
+                # while cs is still reading, and the resulting garbage indices surface as an
+                # out-of-bounds assert inside whatever kernel happens to run next -- minutes
+                # into a run, not reproducibly, and never pointing at this line. The code
+                # this replaced was safe only incidentally: it sliced vLLM's long-lived
+                # slot_mapping rather than allocating anything.
+                blocks = torch.as_tensor(req.block_ids, dtype=torch.long, device=device)
+                pos = torch.arange(n, device=device)
+                rsm = blocks[pos // block_size] * block_size + (pos % block_size)
+                if self._slotcheck_left > 0:
+                    # Bounded deep check: every derived slot must be one this step actually
+                    # writes. torch.isin over the batch is not free, so only the first few.
+                    self._slotcheck_left -= 1
+                    if not bool(torch.isin(rsm, slot_mapping).all()):
+                        raise RuntimeError(
+                            f"RdmaHiddenStatesConnector: block-derived slots for "
+                            f"{req.req_id} are not in this step's slot_mapping (n={n}, "
+                            f"block_size={block_size}, blocks={len(req.block_ids)}). The "
+                            f"hidden-state cache group or its slot encoding is not what "
+                            f"this connector assumes."
+                        )
+                hs_gpu = extract_from_kv_cache(kv_layer, rsm, n, self._planes_dim)  # [n, *feat]
                 # copy into the pre-registered pool slot (flattened)
                 self._pool[slot, :nelems].copy_(hs_gpu.reshape(-1), non_blocking=True)
             ev = torch.cuda.Event()
@@ -390,7 +556,12 @@ class RdmaHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             )
             slot = self._slot_ctr % self._pool_slots
             self._slot_ctr += 1
-            meta.add(nr.req_id, token_ids=prompt, slot=slot)
+            meta.add(
+                nr.req_id,
+                token_ids=prompt,
+                slot=slot,
+                block_ids=nr.block_ids[self._hs_group],
+            )
         return meta
 
     def request_finished(self, request, block_ids):
