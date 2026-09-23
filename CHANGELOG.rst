@@ -27,6 +27,7 @@ Changelog
 
 *Misc*
 
+- Add a ``kd_loss_weight`` option to HuggingFace ``KDTrainer`` to blend cross-entropy and knowledge distillation losses during training.
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
 
 **Backward Breaking Changes**
