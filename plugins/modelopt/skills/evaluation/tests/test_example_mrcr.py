@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -78,3 +79,20 @@ def test_limit_samples_jinja_render(limit_samples, expected):
         target={"api_endpoint": {"url": "http://x"}},
     )
     assert re.findall(r"\+\+limit=\S+", rendered) == expected
+
+
+def test_deployment_command_keeps_all_flags_under_shell_parsing():
+    header, block = _block("command")
+    assert header.strip() == "command: >-"  # the deployment serve command, a folded scalar
+    folded = " ".join(line.strip() for line in block.splitlines() if line.strip())
+    tokens = shlex.split(folded, comments=True)
+    assert tokens == shlex.split(folded)  # no `#` turning the tail into a shell comment
+    for flag in (
+        "--max-model-len",
+        "--kv-cache-dtype",
+        "--reasoning-parser",
+        "--enable-prefix-caching",
+        "--enable-chunked-prefill",
+        "--max-num-batched-tokens",
+    ):
+        assert flag in tokens

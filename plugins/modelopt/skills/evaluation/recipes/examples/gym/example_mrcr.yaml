@@ -98,6 +98,9 @@ deployment:
   # hf_quant_config.json (vLLM does NOT read it from config.json). fp8 here only
   # because this class of checkpoint declares FP8 KV; drop it for a checkpoint
   # that does not, rather than applying uncalibrated KV quantization.
+  # --max-model-len 1100000 is for the 1M variant only; for 128K use the checkpoint's
+  # trained context and drop VLLM_ALLOW_LONG_MAX_MODEL_LEN (recipes/tasks/gym/mrcr.md).
+  # No comments inside `command:` — it is a folded scalar, so `#` becomes shell text.
   command: >-
     vllm serve /checkpoint
     --served-model-name ${deployment.served_model_name}
@@ -105,7 +108,7 @@ deployment:
     --port ${deployment.port}
     --tensor-parallel-size 1
     --data-parallel-size 1
-    --max-model-len 1100000          # 1M only; 128K: trained context, drop VLLM_ALLOW_LONG_MAX_MODEL_LEN
+    --max-model-len 1100000
     --kv-cache-dtype fp8
     --reasoning-parser <PARSER>
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
