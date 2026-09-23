@@ -33,6 +33,12 @@ from modelopt.recipe import load_recipe, presets
 from modelopt.recipe.presets import RecipeSupersededAction
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
 from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizeConfig
+from modelopt.torch.quantization.ggml import (
+    IQ1_S_BLOCK_SIZE,
+    IQ1_S_EFFECTIVE_BITS,
+    IQ2_XS_BLOCK_SIZE,
+    IQ2_XS_EFFECTIVE_BITS,
+)
 
 
 def _yaml_basenames(subdir: str) -> set[str]:
@@ -123,6 +129,27 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
     recipe_cfg = load_recipe(recipe_name).quantize.model_dump(exclude_unset=True)
     mtq_cfg = QuantizeConfig(**getattr(mtq, cfg_name)).model_dump(exclude_unset=True)
     assert recipe_cfg == mtq_cfg
+
+
+@pytest.mark.parametrize(
+    ("qformat", "block_size", "effective_bits"),
+    [
+        ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
+    ],
+)
+def test_iq_recipe_matches_packing_contract(qformat, block_size, effective_bits):
+    recipe = load_recipe(f"general/ptq/{qformat}")
+    quant_cfg = recipe.quantize.model_dump(exclude_unset=True)["quant_cfg"]
+    weight_cfg = next(
+        entry["cfg"] for entry in quant_cfg if entry.get("quantizer_name") == "*weight_quantizer"
+    )
+
+    assert qformat in presets.QUANT_CFG_CHOICES
+    assert weight_cfg["backend"] == "ggml"
+    assert weight_cfg["num_bits"] == qformat
+    assert weight_cfg["block_sizes"][-1] == block_size
+    assert weight_cfg["effective_bits"] == effective_bits
 
 
 # --- RecipeSupersededAction: the flags --recipe replaces ----------------------------------------

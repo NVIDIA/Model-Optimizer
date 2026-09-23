@@ -22,8 +22,10 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml.backend as backend_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
 from modelopt.torch.quantization.ggml.common import narrow_to_float32
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 @pytest.mark.parametrize("num_bits", ["iq1_s", "iq2_xs"])
@@ -64,19 +66,28 @@ def test_ggml_codecs_are_exported_from_quantization_package():
     assert mtq.quantize_iq2_xs is iq2_xs_module.quantize_iq2_xs
 
 
-def test_ggml_backend_forwards_block_chunk_size(monkeypatch):
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {"block_chunk_size": 17},
+        {"decode_chunk_size": 19},
+        {"block_chunk_size": 17, "decode_chunk_size": 19},
+    ],
+)
+def test_ggml_backend_forwards_chunk_sizes(monkeypatch, extra_args):
+    """Both chunk knobs are per-quantizer tunable; they bound different loops."""
     received = {}
 
-    def fake_quant(inputs, _quantizer, *, block_chunk_size):
-        received["block_chunk_size"] = block_chunk_size
+    def fake_quant(inputs, _quantizer, **kwargs):
+        received.update(kwargs)
         return inputs
 
     monkeypatch.setattr(backend_module, "iq1_s_fake_quant", fake_quant)
     inputs = torch.ones(1, 256)
-    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args={"block_chunk_size": 17})
+    quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args=extra_args)
 
     assert ggml_fake_quant(inputs, quantizer) is inputs
-    assert received == {"block_chunk_size": 17}
+    assert received == extra_args
 
 
 def test_ggml_backend_rejects_unknown_extra_arg():
@@ -135,3 +146,79 @@ def test_narrow_to_float32_matches_the_cuda_load_float_policy():
     assert torch.equal(
         narrowed, torch.tensor([0.0, 0.0, 0.0, largest, -largest, 1.5], dtype=torch.float32)
     )
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_weight_is_packed_once_across_forwards(monkeypatch, num_bits, module):
+    """The packed weight is reused across forwards rather than re-encoded each time.
+
+    TensorQuantizer hands the backend a fresh view of the weight on every forward, so a cache
+    that checked tensor identity never hit: the codebook search reran on every forward, roughly
+    100x during a generate loop and over 90% of a PTQ run's wall clock.
+    """
+    packer = f"quantize_{num_bits}"
+    original = getattr(module, packer)
+    calls = []
+
+    def counting(weight, **kwargs):
+        calls.append(tuple(weight.shape))
+        return original(weight, **kwargs)
+
+    monkeypatch.setattr(module, packer, counting)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+    )
+    weight = torch.randn(4, 256)
+
+    with torch.inference_mode():  # what generate() runs under
+        for _ in range(5):
+            quantizer(weight)
+
+    assert calls == [(4, 256)], f"expected one pack, got {len(calls)}"
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_decode_chunk_is_sized_independently_of_the_encode_chunk(
+    monkeypatch, num_bits, module
+):
+    """The decode runs every forward; the encode runs once and holds the big temporaries.
+
+    Sharing one constant between them is what made IQ2_XS four times slower end to end than
+    IQ1_S, so pin that the decode gets its own, larger chunk.
+    """
+    seen = {}
+    original = getattr(module, f"dequantize_{num_bits}")
+
+    def recording(packed_weights, weight_shape, **kwargs):
+        seen["block_chunk_size"] = kwargs["block_chunk_size"]
+        return original(packed_weights, weight_shape, **kwargs)
+
+    monkeypatch.setattr(module, f"dequantize_{num_bits}", recording)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+    )
+    quantizer(torch.randn(4, 256))
+
+    assert seen["block_chunk_size"] == module._DEFAULT_DECODE_CHUNK_SIZE
+    assert module._DEFAULT_DECODE_CHUNK_SIZE > module._DEFAULT_BLOCK_CHUNK_SIZE
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "module"), [("iq1_s", iq1_s_module), ("iq2_xs", iq2_xs_module)]
+)
+def test_ggml_decode_is_invariant_to_chunk_size(num_bits, module):
+    """Chunking the decode is a memory bound, not a numerical choice."""
+    torch.manual_seed(0)
+    weight = torch.randn(3, 1024, dtype=torch.bfloat16)
+    packed, shape = getattr(module, f"quantize_{num_bits}")(weight)
+    dequantize = getattr(module, f"dequantize_{num_bits}")
+
+    reference = dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=1)
+    for chunk in (2, 7, 4096):
+        assert torch.equal(
+            dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=chunk), reference
+        )
