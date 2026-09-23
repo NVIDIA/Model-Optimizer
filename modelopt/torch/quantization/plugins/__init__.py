@@ -40,6 +40,7 @@ with import_plugin("apex"):
 from .attention import *
 from .custom import *
 from .gated_delta_net import *
+from .kda import *
 
 with import_plugin("diffusers"):
     from .diffusion.diffusers import *

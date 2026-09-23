@@ -150,7 +150,7 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     if "linear_attention" not in metadata:
         # Older checkpoints predate these disabled handles; preserve their baseline path.
         for name, module in _linear_attention_modules(model).items():
-            for handle in ("gdn_state_quantizer", "gdn_w_quantizer"):
+            for handle in module.linear_attention_quantizer_names:
                 key = f"{name}.{handle}" if name else handle
                 quantizer = getattr(module, handle)
                 if key not in quantizer_state_dict and not quantizer.is_enabled:
@@ -222,12 +222,12 @@ def update_quantize_metadata(
 
 def _linear_attention_modules(model):
     # Optional framework plugins import conversion; defer this import to avoid that cycle.
-    from .plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
+    from .plugins.linear_attention import _LinearAttentionQuantMixin
 
     return {
         get_unwrapped_name(name, model): module
         for name, module in model.named_modules()
-        if isinstance(module, GatedDeltaNetStateQuantMixin)
+        if isinstance(module, _LinearAttentionQuantMixin)
     }
 
 
