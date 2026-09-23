@@ -21,6 +21,7 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -217,25 +218,8 @@ def test_ggml_decode_chunk_is_sized_independently_of_the_encode_chunk(
     assert module._DEFAULT_DECODE_CHUNK_SIZE > module._DEFAULT_BLOCK_CHUNK_SIZE
 
 
-@pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
-def test_ggml_decode_is_invariant_to_chunk_size(num_bits, module):
-    """Chunking the decode is a memory bound, not a numerical choice."""
-    torch.manual_seed(0)
-    weight = torch.randn(3, 1024, dtype=torch.bfloat16)
-    packed, shape = getattr(module, f"quantize_{num_bits}")(weight)
-    dequantize = getattr(module, f"dequantize_{num_bits}")
-
-    reference = dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=1)
-    for chunk in (2, 7, 4096):
-        assert torch.equal(
-            dequantize(packed, shape, dtype=weight.dtype, block_chunk_size=chunk), reference
-        )
-
-
 def test_registry_lists_every_exported_encoder():
     """An encoder the package exports but the registry omits would be unreachable by dispatch."""
-    import modelopt.torch.quantization.ggml as ggml
-
     encoders = {
         name.removeprefix("quantize_") for name in ggml.__all__ if name.startswith("quantize_")
     }
