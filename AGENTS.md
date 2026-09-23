@@ -43,8 +43,8 @@ These instructions apply to AI-assisted work in this repository.
   line costs tokens on each use. Add only what changes agent behavior, and
   prefer tightening existing text over appending new text.
 - **Compress before opening the PR.** Make a final pass over the skill diff:
-  cut redundancy, merge overlapping guidance, and drop examples the agent
-  doesn't need.
+  drop unnecessary explanations and examples, cut redundancy, and merge
+  overlapping guidance.
 
 ## Sizing and splitting PRs
 
