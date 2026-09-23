@@ -72,6 +72,20 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
+def _base_rope_theta(base_cfg):
+    """Read the base model's RoPE base, whichever shape its config uses.
+
+    Transformers 5 moves rope_theta into a rope_parameters dict and drops the flat
+    attribute, so reading the flat field alone returns None for a Qwen3 target whose
+    real base is 1e6. The draft injects the target's KV, so a draft built that way
+    trains and exports without complaint against a RoPE base the target never used.
+    """
+    rope_parameters = getattr(base_cfg, "rope_parameters", None)
+    if isinstance(rope_parameters, dict) and rope_parameters.get("rope_theta") is not None:
+        return rope_parameters["rope_theta"]
+    return getattr(base_cfg, "rope_theta", None)
+
+
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -124,7 +138,12 @@ class FakeBaseConfig(PretrainedConfig):
         )
         self.intermediate_size = intermediate_size
         # For some drafter algo (e.g. DFlash) rope theta must match target model. Extract here.
+        # Published in both shapes: consumers built for Transformers 5 read the
+        # rope_parameters dict first, and a fake base that only carried the flat field
+        # would hand them nothing.
         self.rope_theta = rope_theta
+        if rope_theta is not None:
+            self.rope_parameters = {"rope_theta": rope_theta}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype
@@ -203,7 +222,7 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(base_cfg, "rope_theta", None),
+            rope_theta=_base_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

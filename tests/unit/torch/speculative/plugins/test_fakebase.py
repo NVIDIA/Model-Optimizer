@@ -24,7 +24,11 @@ import torch
 pytest.importorskip("transformers")
 import transformers
 
-from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+from modelopt.torch.speculative.plugins.modeling_fakebase import (
+    FakeBaseConfig,
+    FakeBaseModel,
+    _base_rope_theta,
+)
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
@@ -162,3 +166,44 @@ def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
     assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
     assert captured["args"] == ("qwen3-vl",)
     assert captured["kwargs"]["torch_dtype"] == "auto"
+
+
+class TestFakeBaseRopeTheta:
+    """The RoPE base has to survive the fake base, whichever shape the target stores it in.
+
+    The draft injects the target's KV, so a mismatched base trains and exports without
+    complaint and only misbehaves at serve time.
+    """
+
+    def test_reads_the_transformers_5_rope_parameters_dict(self):
+        """Transformers 5 moves rope_theta into rope_parameters and drops the flat field."""
+        config = transformers.Qwen3Config(
+            hidden_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+            vocab_size=64,
+            rope_theta=1000000.0,
+        )
+        assert not hasattr(config, "rope_theta"), "fixture no longer reproduces the v5 layout"
+        assert _base_rope_theta(config) == 1000000.0
+
+    def test_falls_back_to_a_flat_attribute(self):
+        """A config that only carries the flat field still resolves."""
+        assert _base_rope_theta(transformers.PretrainedConfig(rope_theta=12345.0)) == 12345.0
+
+    def test_missing_everywhere_is_none(self):
+        assert _base_rope_theta(transformers.PretrainedConfig()) is None
+
+    def test_config_publishes_both_shapes(self):
+        """Consumers that prefer the dict must find it on a fake base too."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=1000000.0)
+        assert config.rope_theta == 1000000.0
+        assert config.rope_parameters == {"rope_theta": 1000000.0}
+
+    def test_unknown_theta_publishes_no_dict(self):
+        """An absent base must stay absent rather than become a wrong default."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=None)
+        assert config.rope_theta is None
+        assert not getattr(config, "rope_parameters", None)
