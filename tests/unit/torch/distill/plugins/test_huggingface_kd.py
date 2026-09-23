@@ -86,7 +86,7 @@ def _make_batch():
     return default_data_collator([_ToyDataset()[0], _ToyDataset()[1]])
 
 
-def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False):
+def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False, kd_loss_weight=1.0):
     training_args = TrainingArguments(
         output_dir=str(tmp_path),
         per_device_eval_batch_size=2,
@@ -99,7 +99,7 @@ def _make_trainer(tmp_path, student, teacher, use_liger_kernel=False):
         args=training_args,
         eval_dataset=_ToyDataset(),
         data_collator=default_data_collator,
-        distill_args={"teacher_model": teacher},
+        distill_args={"teacher_model": teacher, "kd_loss_weight": kd_loss_weight},
     )
 
 
@@ -116,7 +116,8 @@ def _manual_kd_loss(student, teacher, batch):
     return (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
 
 
-def test_training_loss_is_kd_and_skips_ce(tmp_path):
+def test_training_loss_is_pure_kd_by_default(tmp_path):
+    """Default kd_loss_weight=1.0 produces pure KD loss; student is forwarded without labels."""
     events = []
     student, teacher = _make_models(events)
     batch = _make_batch()
@@ -129,6 +130,45 @@ def test_training_loss_is_kd_and_skips_ce(tmp_path):
 
     assert events == [("student", False), ("teacher", False)]
     assert loss.item() == pytest.approx(expected_kd_loss.item())
+
+
+def test_training_loss_combines_ce_and_kd_with_equal_weights(tmp_path):
+    """kd_loss_weight=0.5 blends CE and KD losses with equal weights."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
+    expected_ce_loss = student(**batch).loss.detach()
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.5)
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    expected = 0.5 * expected_kd_loss + 0.5 * expected_ce_loss
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_training_loss_combines_ce_and_kd_with_custom_weights(tmp_path):
+    """kd_loss_weight=0.7 blends 70% KD + 30% CE — the config from issue #2488."""
+    student, teacher = _make_models()
+    batch = _make_batch()
+    expected_kd_loss = _manual_kd_loss(student, teacher, batch)
+    expected_ce_loss = student(**batch).loss.detach()
+    trainer = _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.7)
+
+    trainer.model.train()
+    loss = trainer.compute_loss(trainer.model, batch.copy())
+
+    expected = 0.7 * expected_kd_loss + 0.3 * expected_ce_loss
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_invalid_kd_loss_weight_raises(tmp_path):
+    """kd_loss_weight outside (0, 1] should raise ValueError at construction time."""
+    student, teacher = _make_models()
+    with pytest.raises(ValueError, match="kd_loss_weight"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_weight=0.0)
+    with pytest.raises(ValueError, match="kd_loss_weight"):
+        _make_trainer(tmp_path, student, teacher, kd_loss_weight=1.5)
 
 
 def test_eval_loss_is_kd_and_ce_is_secondary_metric(tmp_path):
