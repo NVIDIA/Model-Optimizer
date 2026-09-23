@@ -50,6 +50,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_KD_LOSS_ALPHA = 0.9
+
+
 @dataclass
 class DistillationConfig:
     """Knowledge-Distillation config.
@@ -58,10 +61,11 @@ class DistillationConfig:
         intermediate_layer_pairs: List of tuples of intermediate layer names.
         logit_layers: Tuple of logit layer names.
         kd_loss_alpha: Weight of the distillation loss in the convex combination
-            ``(1 - alpha) * lm_loss + alpha * kd_loss``. Must be in [0, 1]. When ``1.0``, the standard
-            language model loss is skipped entirely (``skip_lm_loss`` is derived from this value).
+            ``(1 - alpha) * lm_loss + alpha * kd_loss``. Must be in [0, 1]. Default: ``0.9``. When ``1.0``,
+            the standard language model loss is skipped entirely (``skip_lm_loss`` is derived from it).
         skip_lm_loss: DEPRECATED. Derived from ``kd_loss_alpha`` (``True`` iff ``kd_loss_alpha == 1.0``).
-            An explicit ``True`` is translated to ``kd_loss_alpha = 1.0`` with a warning.
+            If passed without ``kd_loss_alpha``, it is translated (``True`` -> ``1.0``, ``False`` -> ``0.9``)
+            with a warning; if ``kd_loss_alpha`` is also set, it is ignored with a warning.
         kd_loss_scale: DEPRECATED and ignored. Use ``kd_loss_alpha`` instead.
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
         logit_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
@@ -73,7 +77,7 @@ class DistillationConfig:
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
     logit_layers: tuple[str, str] = ("output_layer", "output_layer")
-    kd_loss_alpha: float = 0.9
+    kd_loss_alpha: float | None = None  # resolved in __post_init__ (default 0.9)
     skip_lm_loss: bool | None = None  # deprecated, derived from kd_loss_alpha
     kd_loss_scale: float | None = None  # deprecated, ignored
     logit_kl_temperature: float = 1.0
@@ -88,7 +92,6 @@ class DistillationConfig:
         assert all(len(pair) in (2, 3) for pair in self.intermediate_layer_pairs), (
             f"{self.intermediate_layer_pairs=}"
         )
-        assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         if self.kd_loss_scale is not None:
             warnings.warn(
                 "DistillationConfig.kd_loss_scale is deprecated and ignored. The distillation loss "
@@ -98,28 +101,26 @@ class DistillationConfig:
                 stacklevel=2,
             )
         if self.skip_lm_loss is not None:
-            if self.skip_lm_loss and self.kd_loss_alpha != 1.0:
+            if self.kd_loss_alpha is None:
+                translated_alpha = 1.0 if self.skip_lm_loss else _DEFAULT_KD_LOSS_ALPHA
                 warnings.warn(
-                    "DistillationConfig.skip_lm_loss is deprecated; translating skip_lm_loss=True to "
-                    "kd_loss_alpha=1.0. Set `kd_loss_alpha` directly instead.",
+                    "DistillationConfig.skip_lm_loss is deprecated; translating "
+                    f"skip_lm_loss={self.skip_lm_loss} to kd_loss_alpha={translated_alpha}. "
+                    "Set `kd_loss_alpha` directly instead.",
                     FutureWarning,
                     stacklevel=2,
                 )
-                self.kd_loss_alpha = 1.0
-            elif not self.skip_lm_loss and self.kd_loss_alpha == 1.0:
-                warnings.warn(
-                    "DistillationConfig.skip_lm_loss is deprecated, and skip_lm_loss=False conflicts "
-                    "with kd_loss_alpha=1.0, which skips the LM loss. Set `kd_loss_alpha` < 1.0 instead.",
-                    FutureWarning,
-                    stacklevel=2,
-                )
+                self.kd_loss_alpha = translated_alpha
             else:
                 warnings.warn(
-                    "DistillationConfig.skip_lm_loss is deprecated and is now derived from "
-                    "`kd_loss_alpha` (skipped iff kd_loss_alpha == 1.0). Stop passing it.",
+                    "DistillationConfig.skip_lm_loss is deprecated and ignored when `kd_loss_alpha` "
+                    "is set (the LM loss is skipped iff kd_loss_alpha == 1.0). Stop passing it.",
                     FutureWarning,
                     stacklevel=2,
                 )
+        elif self.kd_loss_alpha is None:
+            self.kd_loss_alpha = _DEFAULT_KD_LOSS_ALPHA
+        assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         self.skip_lm_loss = self.kd_loss_alpha == 1.0
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
         if self.logit_kl_top_p is not None:
@@ -208,7 +209,7 @@ def setup_distillation_config(
 
     if cfg.loss_balancer is None:
         cfg.loss_balancer = LogitsAndIntermediatesLossBalancer(
-            kd_loss_alpha=cfg.kd_loss_alpha,
+            kd_loss_alpha=cfg.kd_loss_alpha,  # type: ignore[arg-type]  # resolved by __post_init__
             skip_original_loss=bool(cfg.skip_lm_loss),  # always set by __post_init__
         )
 
@@ -398,9 +399,9 @@ class LogitsKLLoss(BaseLoss):
         tp_group = parallel_state.get_tensor_model_parallel_group()
 
         # Subtract maximum value along vocab dimension across all GPUs (for stability)
-        logits_max = logits.amax(dim=-1, keepdim=True)
+        # Detached before the (non-autograd, in-place) collective: the max is only a stability shift.
+        logits_max = logits.amax(dim=-1, keepdim=True).detach()
         torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
-        logits_max = logits_max.detach()
 
         # Compute global softmax denominator.
         # We can't use standard all_reduce function here since the computation
@@ -585,13 +586,18 @@ class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
             if "Logits" in _key:  # class name
                 logits_key = _key  # should only be one
         logits_loss = loss_dict.pop(logits_key)
-        intermediate_loss = sum(loss_dict.values()) / max(len(loss_dict), 1)
-
-        if intermediate_loss > 0:
-            dynamic_scale = logits_loss.detach() / intermediate_loss.detach()
+        # Rescale intermediate losses to the logits-loss magnitude, without a host sync.
+        if loss_dict:
+            intermediate_loss = sum(loss_dict.values()) / len(loss_dict)
+            denom = intermediate_loss.detach()
+            dynamic_scale = torch.where(
+                denom > 0,
+                logits_loss.detach() / denom.clamp(min=torch.finfo(denom.dtype).tiny),
+                torch.zeros_like(denom),
+            )
             intermediate_loss_scaled = intermediate_loss * dynamic_scale
         else:
-            intermediate_loss = logits_loss.new_tensor(intermediate_loss)
+            intermediate_loss = logits_loss.new_zeros(())
             intermediate_loss_scaled = intermediate_loss
 
         kd_loss = logits_loss + intermediate_loss_scaled

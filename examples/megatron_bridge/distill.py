@@ -179,16 +179,16 @@ def get_args():
         "(skipped iff alpha == 1.0).",
     )
     parser.add_argument(
-        "--kd_loss_alpha",
-        type=float,
-        default=0.9,
-        help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
-    )
-    parser.add_argument(
         "--kd_loss_scale",
         type=float,
         default=None,
         help="DEPRECATED and ignored. Use --kd_loss_alpha.",
+    )
+    parser.add_argument(
+        "--kd_loss_alpha",
+        type=float,
+        default=0.9,
+        help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
     )
     parser.add_argument(
         "--no_async_save",
@@ -200,8 +200,8 @@ def get_args():
         "--logit_kl_topk",
         type=int,
         default=None,
-        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
-        "replacing the full-vocab temporaries with [seq, k] ones.",
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries plus a residual "
+        "bucket for the remaining probability mass (distributions are still normalized over the full vocab).",
     )
     parser.add_argument(
         "--logit_kl_top_p",
