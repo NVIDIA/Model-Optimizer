@@ -44,22 +44,38 @@ pipeline:
   #
   # Unlike the DFlash example there is no final layer (36) in the capture list: the
   # DFlash2 recipe trains against the hard target (dflash_self_logit_distillation: false,
-  # dflash_lk_loss_type: lambda), so no teacher distribution is formed and capturing the
-  # final layer would only move bytes the trainer never reads. Set
-  # dflash.dflash_lk_loss_type=ce and add 36 back to train with distillation instead.
+  # dflash_lk_loss_type: lambda), so no teacher distribution is formed and the base
+  # hidden is never read -- DFlashBaseModelOutput.from_offline_dict only touches
+  # base_model_hidden_states under need_logits. Dropping that plane therefore has to be
+  # paired with data.final_aux_is_base_hidden=true below, because the streaming dataset
+  # splits the captured planes unconditionally. To train with distillation instead, set
+  # dflash.dflash_lk_loss_type=ce, add 36 back, and drop final_aux_is_base_hidden.
   task_1:
     script: common/eagle3/train_eagle_streaming.sh
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash2.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
+      # The trainer never runs the base's transformer layers in streaming mode -- the
+      # serve produces the hidden states -- so load only the embeddings, final norm and
+      # lm_head instead of all 36 layers on every rank.
+      - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
+      # Keep all five captured planes as aux features. The streaming dataset otherwise
+      # peels the LAST plane off as base_model_hidden_states, which would hand the
+      # draft's fc 4x4096 where it wants 5x4096 ("mat1 and mat2 shapes cannot be
+      # multiplied"). See the capture-id note above for when to drop this instead.
+      - data.final_aux_is_base_hidden=true
       - training.output_dir=/scratchspace/dflash2
       - training.training_seq_len=4096
       - training.disable_tqdm=true
-      # Streaming corpus is prompt-only (the serve generates the response and we
-      # capture its hidden states), so there is no assistant span to mask -> train
-      # over the full sequence, same as the DFlash streaming example.
+      # The serve does NOT generate: the trainer POSTs the whole conversation as a
+      # prompt with max_tokens=1 and the connector captures the per-token hidden states
+      # of that prefill. The corpus therefore carries the assistant turn, but Qwen3-8B's
+      # stock chat template has no {% generation %} tags to locate it, so train over the
+      # full sequence. To mask to the assistant span instead, pass
+      # data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja with
+      # training.answer_only_loss=true, as the gpt-oss streaming example does.
       - training.answer_only_loss=false
       - training.num_train_epochs=1
       - training.max_steps=5000
