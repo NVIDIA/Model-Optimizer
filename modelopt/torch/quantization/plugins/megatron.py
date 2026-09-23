@@ -876,12 +876,13 @@ if HAS_TE:
                 quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
 
         def _expert_parallel_groups(self):
-            """Return the (ep, expt_dp) process groups used to place fused experts globally."""
+            """Return the process groups used to place fused experts globally."""
             pg_collection = getattr(self, "_pg_collection", None)
             if pg_collection is not None:
-                return pg_collection.ep, pg_collection.expt_dp
+                return pg_collection.ep, pg_collection.expt_tp, pg_collection.expt_dp
             return (
                 mcore_parallel.get_expert_model_parallel_group(),
+                mcore_parallel.get_expert_tensor_parallel_group(),
                 mcore_parallel.get_expert_data_parallel_group(),
             )
 
@@ -924,6 +925,7 @@ if HAS_TE:
             # Channel shard axes (per real key); _global_amax stays un-sharded along channels but
             # still rides with the expert identity below.
             shard_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+            ep_group, expt_tp_group, expt_dp_group = self._expert_parallel_groups()
 
             # Split per-expert weight_quantizer.{i}.* from shared (input/output) quantizer buffers.
             expert_re = re.compile(r"^weight_quantizer\.(\d+)\.(.+)$")
@@ -940,15 +942,16 @@ if HAS_TE:
             shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
             sharded_state_dict.update(
                 make_sharded_tensors_for_checkpoint(
-                    shared_state, prefix, shared_axis_dict, sharded_offsets
+                    shared_state,
+                    prefix,
+                    shared_axis_dict,
+                    sharded_offsets,
+                    tp_group=expt_tp_group,
+                    dp_cp_group=expt_dp_group,
                 )
             )
 
             # Per-expert amax: assign the same global expert identity the weights use.
-            ep_group, expt_dp_group = self._expert_parallel_groups()
-            parallel_state = self.parallel_state
-            assert parallel_state is not None
-            expt_tp_group = parallel_state.tensor_parallel_group.group
             num_global_experts = get_pg_size(ep_group) * self.num_gemms
             local_expert_indices_offset = get_pg_rank(ep_group) * self.num_gemms
             ep_axis = len(sharded_offsets)
