@@ -22,4 +22,6 @@ See [the decode guide](../../../docs/linear_attention_decode.md) for the numeric
 contract, phase context, checkpoint behavior, and current limitations.
 
 Delivery order is decode, prefill operand matmuls, then approximate inverse.
-This branch contains exact prefix support only; serving through vLLM is pending.
+This branch contains exact prefix support. See the
+[vLLM fakequant guide](../../../docs/linear_attention_vllm.md) for the separate
+state-only serving plugin and its invocation-boundary quantization semantics.

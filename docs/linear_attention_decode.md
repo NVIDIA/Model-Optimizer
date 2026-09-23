@@ -116,4 +116,6 @@ All encoded values remain floating tensors. This is training-time fake quantizat
 The previous stacked implementation
 [reported FP8 results](https://github.com/NVIDIA/Model-Optimizer/pull/2509).
 Those results predate this exact-prefix extraction and do not qualify INT8 quality.
-The vLLM cache adapter and multi-GPU serving validation remain separate D1 work.
+The [vLLM fakequant adapter](linear_attention_vllm.md) quantizes incoming recurrent
+state before native prefill/decode calls. Its invocation-boundary cadence differs
+from these training decode/replay policies.
