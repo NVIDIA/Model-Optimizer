@@ -63,12 +63,10 @@ the validated runs are comparable:
 6. Judge-backed or simulator-backed tasks use the same judge/user model,
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
-8. Timeout policies and effective limits match. Review the evaluation skill's
-   `references/run-validation.md` **Timeout and Output-Limit Accounting** for
-   both runs, including rates, denominators, telemetry coverage, and failure
-   scoring/exclusion policies. Matching limits alone does not rule out serving
-   speed or concurrency affecting scores; unresolved effects make a model-quality
-   verdict inconclusive, and unknown accounting cannot pass run validation.
+8. Timeout policies, effective limits, and failure scoring/exclusions match.
+   Apply **Timeout and Output-Limit Accounting** in the evaluation skill's
+   `references/run-validation.md` to both runs; matching limits alone cannot
+   rule out serving-speed effects on scores.
 9. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
    INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant

@@ -40,55 +40,41 @@ incomplete or invalid.
 
 ## Timeout and Output-Limit Accounting
 
-Before reporting a score, inspect structured per-response and per-trial artifacts,
-plus relevant logs and the resolved config. A successful job or MLflow export does
-not establish that every sample finished without hitting a limit.
-
-For each benchmark and each baseline/candidate run, report:
+For every benchmark/run, including successful and non-reasoning runs, inspect
+structured response/trial artifacts, logs, and resolved config. Report counts,
+percentages, explicit denominators, and artifact paths before the score:
 
 | Check | Required evidence |
 |---|---|
-| Coverage | Expected trials (including repeats), completed/scored trials, failed/skipped/missing trials, and the score denominator. State whether failures receive zero credit or are excluded. |
-| Timeouts | Timed-out request attempts / all request attempts; unique trials affected / expected trials; and trials ending in timeout / expected trials. Separate recovered retries from terminal failures and identify the layer: client/proxy, agent/task, judge, or sandbox/verifier. |
-| Output limits | Responses stopped by a generation limit / observed responses; unique affected trials / expected trials. Use explicit termination metadata such as `finish_reason: length`, and distinguish output-token caps from context exhaustion or agent step/total-token limits where evidence permits. |
-| Effective limits | Request/proxy and task/agent/judge/verifier timeouts, timeout strategy, output-token and context limits, and any task overrides. Record concurrency, sharding, and serving setup alongside these limits. |
+| Coverage | Expected trials including repeats; completed/scored, failed/skipped/missing; score denominator and whether failures receive zero or are excluded. |
+| Timeouts | Timed-out / all request attempts; affected unique trials / expected trials; terminal-timeout trials / expected trials. Separate recovered retries and terminal failures by layer: client/proxy, agent/task, judge, sandbox/verifier. |
+| Output limits | Limit-stopped / observed responses; affected unique trials / expected trials. Use termination metadata such as `finish_reason: length`; distinguish output caps, context exhaustion, and agent step/total-token limits where possible. |
+| Limits | Effective request/proxy, agent/task, judge/verifier, output-token and context limits, timeout strategy, overrides, concurrency, sharding, and serving setup. |
 
-Show counts and percentages with explicit denominators and artifact paths. Count
-unique sample/trial IDs including repeat IDs; deduplicate resumed artifacts and
-keep request retries separate from trials. Categories can overlap, so do not sum
-them as disjoint failures. Log keyword matches alone are not sample counts.
-Token usage near a configured cap is a diagnostic clue, not proof of truncation;
-inspect termination metadata and the effective per-request limit.
+Deduplicate resumed records by sample/trial/repeat ID; keep request attempts
+separate from trials. Categories overlap, so do not sum them as disjoint failures.
+Log matches and token counts near a cap are clues, not proof of affected samples.
+Missing termination metadata, sampled-only artifacts, or omitted failures make
+full-run rates **unknown**, not zero. Report coverage and what evidence is missing;
+do not extrapolate sampled rates.
 
-If artifacts omit termination reasons, cover only sampled responses, or exclude
-failed requests, report that coverage and mark the full-run rate **unknown**.
-Do not infer zero from missing telemetry or extrapolate a sampled rate to the
-whole run. Identify the missing artifacts or instrumentation needed to resolve it.
-
-Interpret the score under its actual protocol:
-
-- Benchmark-defined time/token limits can legitimately produce failures; retain
-  them in the official metric according to that protocol. Report the limit-hit
-  rates rather than automatically declaring every nonzero rate invalid.
-- A run may be **valid with warnings** when a small fraction of responses hit
-  output limits or trials hit benchmark-defined timeouts, provided sample/repeat
-  and scoring coverage are complete, limits match the intended protocol, and all
-  other validation checks pass. Report the affected counts and any observed score
-  impact; do not fail or automatically rerun solely because the rate is nonzero.
-  Apply any explicit task/user tolerance. A low rate alone is not proof of
-  negligible impact or a universal exemption for infrastructure failures, and
-  run validity alone does not establish a quantization-feasibility verdict.
-- Infrastructure failures, unexpected exclusions, or mismatched limits require
-  investigation before a model-quality verdict. Unknown accounting makes this
-  validation incomplete; a score may be shown as provisional, not validated.
-- Matching wall-clock limits alone does not isolate model quality: serving speed,
-  queueing, concurrency, and verbosity can change how much work fits in the limit.
-  Compare limit-hit rates on both sides before attributing a delta to quantization;
-  unresolved timeout effects make that attribution inconclusive.
-- Do not silently drop timed-out trials or increase limits for only one model.
-  If a controlled rerun is needed, use matched settings for both sides, preserve
-  the original results, and label changes to the benchmark protocol explicitly.
-  A longer-timeout diagnostic is not automatically a leaderboard-comparable score.
+- **Valid with warnings:** small fractions of output-limit or benchmark-timeout
+  events can pass when sample/repeat/scoring coverage is complete, limits match
+  the protocol, and other checks pass. Apply explicit task/user tolerances,
+  retain failures per benchmark scoring, and report observed impact. A nonzero
+  rate alone must not trigger failure or automatic rerun; a low rate does not
+  prove negligible impact or excuse infrastructure failures.
+- **Provisional/inconclusive:** unknown accounting leaves validation incomplete.
+  Investigate infrastructure failures, unexpected exclusions, or mismatched
+  limits before a model-quality verdict. A valid run alone does not establish
+  quantization feasibility.
+- **Comparison:** matching wall-clock limits does not isolate model quality;
+  speed, queueing, concurrency, and verbosity affect work completed. Compare
+  both sides' limit-hit rates; unresolved timeout effects make attribution to
+  quantization inconclusive.
+- **Reruns:** never silently drop timed-out trials or increase only one model's
+  limits. Use matched settings, preserve original results, and label protocol
+  changes. Longer-timeout diagnostics are not automatically leaderboard-comparable.
 
 ## External Baseline Sanity Check
 
