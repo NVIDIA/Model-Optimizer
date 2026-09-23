@@ -86,9 +86,9 @@ deployment:
   gpu_memory_utilization: 0.95      # golden raises this from 0.85 to fit the 1M KV cache
   # Golden serves in REASONING mode (thinking forced on via chat_template_kwargs
   # below), so set the model's --reasoning-parser.
-  # After sizing num_nodes / num_instances / TP / DP above, append
-  # `--max-num-seqs N` where N = ceil(parallelism / num_instances / DP) — the GYM
-  # rule, not the generic SKILL one. Golden: ceil(256/4/2) = 32.
+  # After sizing num_nodes / num_instances / TP / DP above, append `--max-num-seqs N`,
+  # sized from replica KV — NOT from `parallelism` (512 deliberately exceeds capacity).
+  # Golden: 32 per replica × 8 replicas.
   # Treat that as a CEILING, not a target. Like AA-LCR (recipes/tasks/aa/lcr.md)
   # this task is KV-bound, and far more so: ~1M input tokens per request vs LCR's
   # ~120K. Too high and vLLM preempts, and recomputing a 1M-token prefill makes the
@@ -131,10 +131,12 @@ evaluation:
       params:
         temperature: 1.0
         top_p: 0.95
-        # Gym client concurrency, TOTAL across instances — not a per-server cap.
-        parallelism: 256
+        # Gym client concurrency, TOTAL across instances — not a per-server cap;
+        # canonical 512 keeps requests queued at the endpoint.
+        parallelism: 512
         request_timeout: 36000      # 1M-token prefills are slow
         max_retries: 10
+        limit_samples:              # null = full run; N = canary (forwarded as ++limit)
         # Uncapped: answers reproduce a full earlier turn, and any cap truncates
         # it and craters SequenceMatcher.ratio (see max_output_tokens=null below).
         max_new_tokens:
@@ -292,9 +294,12 @@ evaluation:
                   ++reuse_existing_data_preparation=true
                   ++skip_venv_if_present=true
                   ++upload_rollouts_to_wandb=false
+                  ++observability_enabled=true
+                  ++model_call_capture_dir={{config.output_dir}}/model_calls
                   ++responses_create_params.temperature={{config.params.temperature}}
                   ++responses_create_params.top_p={{config.params.top_p}}
                   ++responses_create_params.max_output_tokens=null
+                  {% if config.params.limit_samples is not none %}++limit={{config.params.limit_samples}}{% endif %}
                 common_params: >-
                   ++num_repeats=1
                   ++policy_base_url={{target.api_endpoint.url}}
