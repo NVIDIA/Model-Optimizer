@@ -942,12 +942,7 @@ if HAS_TE:
             shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
             sharded_state_dict.update(
                 make_sharded_tensors_for_checkpoint(
-                    shared_state,
-                    prefix,
-                    shared_axis_dict,
-                    sharded_offsets,
-                    tp_group=expt_tp_group,
-                    dp_cp_group=expt_dp_group,
+                    shared_state, prefix, shared_axis_dict, sharded_offsets
                 )
             )
 

@@ -1151,6 +1151,7 @@ def _override_te_grouped_modelopt_tp_group(model, tp_group):
     ]
     assert grouped_linears, "no quantized TEGroupedLinear found"
     for linear in grouped_linears:
+        assert getattr(linear, "_pg_collection", None) is not None
         linear.parallel_state.tensor_parallel_group.group = tp_group
 
 
