@@ -47,6 +47,13 @@ import sys
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    mlflow_run,
+    record_exported_checkpoint,
+    resolve_mlflow_args,
+)
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -66,6 +73,7 @@ from modelopt.torch.utils import (
     print_rank_0,
     warn_rank_0,
 )
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
@@ -85,6 +93,37 @@ DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 
 # HF config field names that enable MTP
 _MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
+
+
+def _prune_variant(args: argparse.Namespace) -> str:
+    """What this pruning run was asked for. The targets can be combined, so the first one set
+    names the experiment and the params carry the rest."""
+    for flag in ("prune_target_params", "prune_target_active_params", "prune_target_memory_mb"):
+        value = getattr(args, flag, None)
+        if value is not None:
+            return f"{flag.removeprefix('prune_target_')}-{value}"
+    return "export_config"
+
+
+PRUNE = Tool(
+    name="megatron_bridge_prune",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command and the run log -- which "
+        "carries the pruning decisions and the score gate -- and writing .experiment.json "
+        "into the checkpoint it saves."
+    ),
+    variant_help="the pruning target, or export_config",
+    variant=_prune_variant,
+    model=lambda args: args.hf_model_name_or_path,
+    # Either, both or neither: a chain joins on the Megatron one, which is what a
+    # distillation or a quantization continues from.
+    checkpoint=lambda args: args.output_megatron_path or args.output_hf_path or None,
+    # Known only after the search, so main() stashes it on args.
+    metrics=lambda args: (
+        {} if getattr(args, "prune_score", None) is None else {"prune_score": args.prune_score}
+    ),
+    non_params=NON_PARAMS,
+)
 
 
 def _hf_config_has_mtp(hf_cfg) -> bool:
@@ -299,6 +338,8 @@ def get_args() -> argparse.Namespace:
         ),
     )
 
+    add_mlflow_args(parser, PRUNE)
+
     args = parser.parse_args()
 
     # Validate pruning target arguments
@@ -345,7 +386,13 @@ def get_args() -> argparse.Namespace:
     if args.inference_batch_size is None:
         args.inference_batch_size = args.calib_batch_size
 
-    print_args(args)
+    resolve_mlflow_args(args, parser, PRUNE)
+
+    print_args(masked_args(args))
+
+    # Flipped by main() once a checkpoint is on disk; a run that only scores candidates
+    # writes none, and then there is nothing for a provenance pointer to claim.
+    args.checkpoint_exported = False
 
     return args
 
@@ -578,6 +625,9 @@ def main(args: argparse.Namespace):
         dummy_input=None,
         config=pruning_config,
     )
+    # Stashed here rather than after the saves: a run that dies exporting still reports the
+    # number the GPU hours bought. Absent for --prune_export_config, which scores nothing.
+    args.prune_score = pruning_scores.get("best", {}).get("score")
     # Remove unnecessary modelopt_state since ckpt is homogeneous
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=language_model):
         mto.ModeloptStateManager.remove_state(language_model)
@@ -603,6 +653,7 @@ def main(args: argparse.Namespace):
             hf_tokenizer_path=args.hf_model_name_or_path,
             hf_tokenizer_kwargs=tokenizer_kwargs,
         )
+        args.checkpoint_exported = True
         print_rank_0(
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
         )
@@ -721,6 +772,11 @@ def main(args: argparse.Namespace):
             pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
         copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
+        args.checkpoint_exported = True
+        # The Tool names the Megatron checkpoint when there is one, since that is what a
+        # chain joins on, so the HF one needs its own pointer only then.
+        if args.output_megatron_path:
+            record_exported_checkpoint(args, args.output_hf_path, dist.is_master())
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     # Accuracy gate: exit non-zero if pruned model's score is below the bound
@@ -742,7 +798,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, PRUNE):
+            main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
