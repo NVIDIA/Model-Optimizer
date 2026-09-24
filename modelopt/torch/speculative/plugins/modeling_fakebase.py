@@ -72,20 +72,6 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
-def _base_rope_theta(base_cfg):
-    """Read the base model's RoPE base, whichever shape its config uses.
-
-    Transformers 5 moves rope_theta into a rope_parameters dict and drops the flat
-    attribute, so reading the flat field alone returns None for a Qwen3 target whose
-    real base is 1e6. The draft injects the target's KV, so a draft built that way
-    trains and exports without complaint against a RoPE base the target never used.
-    """
-    rope_parameters = getattr(base_cfg, "rope_parameters", None)
-    if isinstance(rope_parameters, dict) and rope_parameters.get("rope_theta") is not None:
-        return rope_parameters["rope_theta"]
-    return getattr(base_cfg, "rope_theta", None)
-
-
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -198,6 +184,8 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
+        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -222,7 +210,12 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=_base_rope_theta(base_cfg),
+            # Shared with the exporter deliberately: where a config keeps rope_theta
+            # depends on the transformers version, and a local getattr got that wrong
+            # here for two months while the exporter had it right. The draft injects
+            # the target's KV, so a wrong base trains and exports without complaint
+            # and only misbehaves at serve time.
+            rope_theta=_get_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

@@ -24,11 +24,7 @@ import torch
 pytest.importorskip("transformers")
 import transformers
 
-from modelopt.torch.speculative.plugins.modeling_fakebase import (
-    FakeBaseConfig,
-    FakeBaseModel,
-    _base_rope_theta,
-)
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseConfig, FakeBaseModel
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
@@ -175,49 +171,39 @@ class TestFakeBaseRopeTheta:
     complaint and only misbehaves at serve time.
     """
 
-    def test_reads_a_real_config_whichever_layout_it_uses(self):
-        """A real config resolves on every supported transformers version.
+    def test_from_source_carries_a_transformers_5_base_theta(self, tmp_path, monkeypatch):
+        """The seam, not the reader.
 
-        Where the value lives moved underneath us: transformers 5.12 keeps it only in
-        ``rope_parameters``, while the minimum supported version (4.57) has only the flat
-        field and no dict at all. So this asserts the outcome and not the layout; the two
-        layouts are pinned individually by the tests below, which build them explicitly
-        rather than depending on what the installed version happens to produce.
+        Reading rope_theta correctly is the exporter's ``_get_rope_theta`` and is tested
+        there. What is pinned here is that this call site uses it: a plain
+        ``getattr(base_cfg, "rope_theta")`` reads None from a transformers 5 config and
+        silently builds a draft with no RoPE base at all.
         """
-        config = transformers.Qwen3Config(
-            hidden_size=32,
+        base_cfg = transformers.PretrainedConfig(
+            model_type="llama",
+            hidden_size=_HIDDEN_SIZE,
+            vocab_size=_VOCAB_SIZE,
             num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            intermediate_size=64,
-            vocab_size=64,
-            rope_theta=1000000.0,
+            max_position_embeddings=128,
+            tie_word_embeddings=False,
+            rope_parameters={"rope_theta": 1000000.0},
         )
-        assert _base_rope_theta(config) == 1000000.0
-
-    def test_reads_the_rope_parameters_dict(self):
-        """The transformers 5.12+ layout: the value lives only in the dict."""
-        config = transformers.PretrainedConfig(rope_parameters={"rope_theta": 1000000.0})
-        assert _base_rope_theta(config) == 1000000.0
-
-    def test_prefers_the_dict_over_a_disagreeing_flat_field(self):
-        """Both present and disagreeing: the dict wins.
-
-        A config can carry both, and they can disagree. Reading the flat field first would
-        give the draft a RoPE base the target does not use -- which trains and exports
-        without complaint, and only misbehaves at serve time.
-        """
-        config = transformers.PretrainedConfig(
-            rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0}
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: base_cfg)
+        tensors = {
+            "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "norm.weight": torch.ones(_HIDDEN_SIZE),
+        }
+        shard = tmp_path / "model-00001-of-00001.safetensors"
+        safetensors.torch.save_file(tensors, shard)
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": dict.fromkeys(tensors, shard.name)})
         )
-        assert _base_rope_theta(config) == 1000000.0
 
-    def test_falls_back_to_a_flat_attribute(self):
-        """A config that only carries the flat field still resolves."""
-        assert _base_rope_theta(transformers.PretrainedConfig(rope_theta=12345.0)) == 12345.0
+        model = FakeBaseModel.from_source(str(tmp_path))
 
-    def test_missing_everywhere_is_none(self):
-        assert _base_rope_theta(transformers.PretrainedConfig()) is None
+        assert model.config.rope_theta == 1000000.0
+        assert model.config.rope_parameters == {"rope_theta": 1000000.0}
 
     def test_config_publishes_both_shapes(self):
         """Consumers that prefer the dict must find it on a fake base too."""
