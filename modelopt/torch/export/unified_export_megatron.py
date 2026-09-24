@@ -482,9 +482,13 @@ class GPTModelExporter:
                 json.dump(config_dict, f, indent=4)
         torch.distributed.barrier()
 
-        # save_safetensors(state_dict, save_directory)
+        # One writer per pipeline stage: other TP / DP / EP ranks hold the same layers (EP>1 ranks
+        # hold no gathered experts at all), and writing them too would race on the same files.
+        writes_layers = (
+            tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
+        )
         save_safetensors_by_layer_index(
-            layer_state_dicts=layer_state_dicts,
+            layer_state_dicts=layer_state_dicts if writes_layers else {},
             total_layers=self.model.config.num_layers,
             save_directory=save_directory,
             name_template="model-{:05d}-of-{:05d}",
@@ -1711,12 +1715,18 @@ class GPTModelExporter:
             torch.save(local_expert_state, _buf)
             local_bytes = _buf.getvalue()
             del _buf
-            gathered_bytes: list = [None] * ep_size
-            torch.distributed.all_gather_object(
-                gathered_bytes, local_bytes, group=get_expert_model_parallel_group()
+            # Gather to EP rank 0 only, which writes the shards: holding every expert on every EP
+            # rank multiplies host memory by EP (a full GLM-5.3-Flash export OOMs at EP4).
+            ep_group = get_expert_model_parallel_group()
+            gathered_bytes: list | None = [None] * ep_size if ep_rank == 0 else None
+            torch.distributed.gather_object(
+                local_bytes,
+                gathered_bytes,
+                dst=torch.distributed.get_global_rank(ep_group, 0),
+                group=ep_group,
             )
             del local_bytes
-            for b in gathered_bytes:
+            for b in gathered_bytes or ():
                 # weights_only=False: our own torch.save output from a sibling EP rank
                 # in this job's collective, not user-supplied.
                 s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
