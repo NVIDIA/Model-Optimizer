@@ -102,6 +102,29 @@ def _patch_vllm_imports(monkeypatch, modules):
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
 
+
+def test_get_unpadded_input_ids_handles_left_and_right_padding():
+    module = _load_example_module("vllm_ptq_utils")
+    batch = {
+        "input_ids": torch.tensor([[0, 0, 11, 12], [21, 22, 0, 0]]),
+        "attention_mask": torch.tensor([[0, 0, 1, 1], [1, 1, 0, 0]]),
+    }
+
+    assert module._get_unpadded_input_ids(batch) == [[11, 12], [21, 22]]
+
+
+def test_get_unpadded_input_ids_rejects_empty_sequence():
+    module = _load_example_module("vllm_ptq_utils")
+    batch = {
+        "input_ids": torch.tensor([[0, 0]]),
+        "attention_mask": torch.tensor([[0, 0]]),
+    }
+
+    with pytest.raises(ValueError, match="empty sequence"):
+        module._get_unpadded_input_ids(batch)
+
+
+
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
     """The current vLLM adapter must forward every warmup reservation argument."""
     module = _load_example_module("vllm_ptq_utils")
@@ -127,6 +150,42 @@ def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatc
         max_model_len=2048,
         max_encoder_len=0,
     )
+
+
+def test_get_calibration_block_count_reserves_one_kpool_tail_block(monkeypatch):
+    """Kpool's circular tail cache owns exactly one physical block per request."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class KpoolTailSpec:
+        pass
+
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, first_spec):
+            self.first_spec = first_spec
+
+    reserved_block_count = Mock(return_value=32)
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": SimpleNamespace(
+                _reserved_block_count=reserved_block_count
+            ),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                KpoolTailSpec=KpoolTailSpec,
+                UniformTypeKVCacheSpecs=UniformTypeKVCacheSpecs,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        max_model_len=1024,
+    )
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, KpoolTailSpec()) == 1
+    assert block_count(128, UniformTypeKVCacheSpecs(KpoolTailSpec())) == 1
+    reserved_block_count.assert_not_called()
 
 
 def test_get_calibration_block_count_uses_vllm_026_reservation_policy(monkeypatch):
@@ -453,7 +512,7 @@ def test_disable_compilation_warns_when_marker_is_missing():
     inner_model = SimpleNamespace()
     model = SimpleNamespace(language_model=SimpleNamespace(model=inner_model))
 
-    with pytest.warns(UserWarning, match="cannot be disabled"), disable_compilation(model):
+    with pytest.warns(UserWarning, match="rerun with --enforce-eager"), disable_compilation(model):
         assert inner_model.do_not_compile is True
 
     assert not hasattr(inner_model, "do_not_compile")
@@ -816,3 +875,4 @@ def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
         cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
     )
     assert float(reconfigured.v_bmm_quantizer._amax) == 96.0
+

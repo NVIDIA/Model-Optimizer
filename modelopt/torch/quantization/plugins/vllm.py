@@ -278,8 +278,12 @@ def disable_compilation(model):
         if target is None:
             raise ValueError("Model does not have a model or language_model.model attribute")
         warnings.warn(
-            f"{type(target).__name__} does not define 'do_not_compile'; vLLM compilation "
-            "cannot be disabled for this model. Proceeding without a functional guard.",
+            f"{type(target).__name__} does not expose vLLM's 'do_not_compile' marker, so "
+            "ModelOpt cannot dynamically disable torch.compile during calibration. This is "
+            "harmless when vLLM is already running in eager mode (for example, with "
+            "--enforce-eager or CompilationMode.NONE). Otherwise, calibration may enter a "
+            "compiled path; rerun with --enforce-eager or add vLLM compile-wrapper support "
+            "for this model.",
             stacklevel=2,
         )
 

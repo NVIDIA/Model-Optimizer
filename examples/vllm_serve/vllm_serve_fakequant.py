@@ -57,8 +57,15 @@ from pathlib import Path
 import uvloop
 import vllm
 from packaging import version
-from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser
+try:
+    from vllm.entrypoints.openai.api_server import run_server
+except ModuleNotFoundError:
+    from vllm.entrypoints.launchers.api_server.entry import run_server
+
+try:
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+except ModuleNotFoundError:
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 vllm_version = version.parse(vllm.__version__)
