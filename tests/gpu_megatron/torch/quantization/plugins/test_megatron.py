@@ -1813,6 +1813,77 @@ def test_kv_cache_quant(dist_workers_size_1, config):
     dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
 
 
+def _get_tiny_dsa_gpt_model():
+    """Tiny GPT with DSA sparse attention (AbsorbedMLASelfAttention + DSAttention + indexer)."""
+    from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+        get_transformer_block_with_experimental_attention_variant_spec,
+    )
+    from megatron.core.transformer.transformer_config import MLATransformerConfig
+
+    config = MLATransformerConfig(
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        ffn_hidden_size=128,
+        q_lora_rank=32,
+        kv_lora_rank=16,
+        qk_head_dim=16,
+        qk_pos_emb_head_dim=16,
+        v_head_dim=16,
+        experimental_attention_variant="dsa",
+        dsa_indexer_n_heads=2,
+        dsa_indexer_head_dim=32,
+        dsa_indexer_topk=8,
+        normalization="RMSNorm",
+        add_bias_linear=False,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+    )
+    spec = get_transformer_block_with_experimental_attention_variant_spec(config)
+    return GPTModel(
+        config=config,
+        transformer_layer_spec=spec,
+        vocab_size=64,
+        max_sequence_length=64,
+        position_embedding_type="rope",
+    ).cuda()
+
+
+def _test_dsa_kv_cache_quant_helper(rank, size):
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
+
+    initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
+    model = _get_tiny_dsa_gpt_model()
+    forward = get_forward(model)
+    # Calibrated (not constant-amax) FP8 KV cache: the case that needs a real V amax to export.
+    kv_fp8_calibrated = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, kv_fp8_calibrated, forward)
+
+    dsa_modules = [m for m in model.modules() if isinstance(m, DSAttention)]
+    assert dsa_modules, "DSAttention was not converted for KV-cache quantization"
+    for module in dsa_modules:
+        assert module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled
+        # Absorbed MLA passes value=None; V is calibrated on the shared KV latent like K, so a
+        # calibrated FP8 KV cache still exports a v_scale.
+        assert module.k_bmm_quantizer.amax is not None
+        assert torch.equal(module.v_bmm_quantizer.amax, module.k_bmm_quantizer.amax)
+
+    # Quantized forward (value=None through the absorbed path) still runs.
+    assert torch.isfinite(forward(model)).all()
+
+
+def test_dsa_kv_cache_quant(dist_workers_size_1):
+    """DSAttention (absorbed MLA, value=None) gets calibrated K and V KV-cache quantizers."""
+    pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")
+    dist_workers_size_1.run(_test_dsa_kv_cache_quant_helper)
+
+
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):
     """Helper function for testing KV cache quantizer amax sync across distributed world."""
     # Use rank in seed to produce different amax values across ranks

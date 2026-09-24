@@ -1051,10 +1051,13 @@ if HAS_TE:
             """Apply post-RoPE quantization to KV cache."""
             # Quantize Q, K, V
             query = self.q_bmm_quantizer(query)
-            key = self.k_bmm_quantizer(key)
-            # DSAttention's absorbed-MLA path passes value=None (key is then the shared KV latent)
-            if value is not None:
+            if value is None:
+                # Absorbed MLA (DSAttention) passes value=None: the key is the KV latent that both K
+                # and V are read from, so calibrate V on it too (output unused) to export a V scale.
+                self.v_bmm_quantizer(key)
+            else:
                 value = self.v_bmm_quantizer(value)
+            key = self.k_bmm_quantizer(key)
             return super().forward(query, key, value, *args, **kwargs)
 
         def modelopt_post_restore(self, name=""):

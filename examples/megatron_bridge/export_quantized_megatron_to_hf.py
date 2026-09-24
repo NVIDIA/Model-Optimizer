@@ -22,7 +22,8 @@ The process is as follows:
 
 The HuggingFace unified exporter does not gather tensor-parallel-sharded weights, so this script
 always loads the checkpoint at tensor_model_parallel_size=1 (re-sharding from whatever TP was used
-during quantization). Use --pp_size to shard a large model across GPUs for export.
+during quantization). Use --pp_size and/or --ep_size to shard a large model across GPUs for
+export; --ep_size needs grouped-GEMM experts (not --no_moe_grouped_gemm).
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
@@ -87,7 +88,7 @@ def get_args() -> argparse.Namespace:
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
     )
 
-    # Only Pipeline parallelism is supported for export
+    # Only pipeline and expert parallelism are supported for export
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument(
         "--ep_size",

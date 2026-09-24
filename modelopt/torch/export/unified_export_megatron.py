@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 import torch.distributed
-from huggingface_hub import get_safetensors_metadata, hf_hub_download
+from huggingface_hub import get_safetensors_metadata, hf_hub_download, snapshot_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -550,7 +550,11 @@ class GPTModelExporter:
         # Narrow on purpose: compare module prefixes, not tensor names, since a quantized source
         # carries extras with no export counterpart, and only inside decoder layers, whose naming
         # is stable. A dropped decoder module is the case that loads fine and produces garbage.
-        num_layers = self.model.config.num_layers
+        # HF decoder depth of this export: Megatron may build several physical layers per HF layer.
+        hf_depth = self._hf_text_config.num_hidden_layers
+        num_mtp = 0
+        if self.rules.get("mtp_in_decoder_layers", False):
+            num_mtp = getattr(self._hf_text_config, "num_nextn_predict_layers", 0) or 0
         # Ancestors too: an export may expand one source module into several (Qwen3.5 packs
         # routed experts; the quantized export writes them per expert). Expansion is not a drop.
         exported_modules = set()
@@ -562,12 +566,18 @@ class GPTModelExporter:
                     break
                 exported_modules.add(prefix)
         missing = set()
-        for key in source - exported:
+        for key in source:
             layer = re.search(r"\.layers\.(\d+)\.", key)
             if layer is None:
                 continue  # see the note above: decoder layers only
-            if int(layer.group(1)) >= num_layers:
-                continue  # depth-pruned model: the source has layers this export does not
+            if int(layer.group(1)) >= hf_depth:
+                mtp_id = int(layer.group(1)) - self._src_num_hidden_layers
+                if not 0 <= mtp_id < num_mtp:
+                    continue  # depth-pruned model: the source has layers this export does not
+                # An MTP stored as extra decoder layers follows the exported decoder layers.
+                key = f"{key[: layer.start(1)]}{hf_depth + mtp_id}{key[layer.end(1) :]}"
+            if key in exported:
+                continue
             if key.rsplit(".", 1)[0] in exported_modules:
                 continue  # module is exported; this name is a source-side quantization artifact
             if "rotary_emb" in key:
@@ -967,14 +977,19 @@ class GPTModelExporter:
         """
         num_mtp = getattr(self._hf_text_config, "num_nextn_predict_layers", 0) or 0
         source = self._hf_pretrained_model_name
-        if num_mtp == 0 or source is None or not os.path.isdir(source):
+        if num_mtp == 0 or source is None:
             return {}
         layers_prefix = self.all_mcore_mappings["input_layernorm"].target_name_or_prefix
         layers_prefix = layers_prefix.split("{}")[0]  # e.g. "model.layers."
+        src_prefixes = [
+            f"{layers_prefix}{self._src_num_hidden_layers + i}." for i in range(num_mtp)
+        ]
+        if not os.path.isdir(source):
+            source = self._download_hub_shards(str(source), tuple(src_prefixes))
         keys = _read_checkpoint_keys(source)
         mtp_state_dict = {}
         for i in range(num_mtp):
-            src = f"{layers_prefix}{self._src_num_hidden_layers + i}."
+            src = src_prefixes[i]
             dst = f"{layers_prefix}{self._hf_text_config.num_hidden_layers + i}."
             for key in sorted(
                 k for k in keys if k.startswith(src) and not k.endswith("_scale_inv")
@@ -986,6 +1001,20 @@ class GPTModelExporter:
         if mtp_state_dict:
             print(f"Copied {len(mtp_state_dict)} MTP tensors from {source}")
         return mtp_state_dict
+
+    @staticmethod
+    def _download_hub_shards(repo_id: str, key_prefixes: tuple[str, ...]) -> str:
+        """Download only the Hub shards holding tensors under ``key_prefixes``; return the local dir."""
+        try:
+            index_file = hf_hub_download(repo_id, "model.safetensors.index.json")
+        except EntryNotFoundError:  # unsharded checkpoint
+            return snapshot_download(repo_id, allow_patterns=["model.safetensors"])
+        with open(index_file) as f:
+            weight_map = json.load(f)["weight_map"]
+        shards = sorted(
+            {shard for key, shard in weight_map.items() if key.startswith(key_prefixes)}
+        )
+        return snapshot_download(repo_id, allow_patterns=["model.safetensors.index.json", *shards])
 
     def _get_gated_delta_net_state_dict(self, layer, layer_id, is_mtp=False):
         """Export a GatedDeltaNet (Qwen3.5 linear-attention) layer's ``self_attention``."""

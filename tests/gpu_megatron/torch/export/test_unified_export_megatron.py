@@ -1064,6 +1064,46 @@ def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
     assert exporter.exclude_modules == ["model.layers.1.*"]
 
 
+def test_mtp_state_dict_copies_decoder_mtp_layers_from_hub(tmp_path, monkeypatch):
+    """A Hub-ID source downloads only the shards holding the MTP layer, then copies it."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    shards = {
+        "model.layers.0.input_layernorm.weight": "model-00001-of-00002.safetensors",
+        "model.layers.1.enorm.weight": "model-00002-of-00002.safetensors",
+    }
+    save_file(
+        {"model.layers.0.input_layernorm.weight": torch.ones(8)},
+        str(hub / shards["model.layers.0.input_layernorm.weight"]),
+    )
+    save_file(
+        {"model.layers.1.enorm.weight": torch.full((8,), 3.0)},
+        str(hub / shards["model.layers.1.enorm.weight"]),
+    )
+    (hub / "model.safetensors.index.json").write_text(json.dumps({"weight_map": shards}))
+    requested = {}
+
+    def fake_snapshot_download(repo_id, allow_patterns):
+        requested[repo_id] = allow_patterns
+        return str(hub)
+
+    monkeypatch.setattr(uem, "hf_hub_download", lambda repo_id, filename: str(hub / filename))
+    monkeypatch.setattr(uem, "snapshot_download", fake_snapshot_download)
+    exporter = _make_exporter_for_mtp(Path("zai-org/GLM-5.2"))
+    exporter.rules = {"mtp_in_decoder_layers": True}
+    exporter.all_mcore_mappings = all_mcore_hf_export_mapping["GlmMoeDsaForCausalLM"]
+    exporter._src_num_hidden_layers = 1
+    exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
+
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert requested == {
+        "zai-org/GLM-5.2": ["model.safetensors.index.json", "model-00002-of-00002.safetensors"]
+    }
+    assert list(mtp_state_dict) == ["model.layers.1.enorm.weight"]
+    assert exporter.exclude_modules == ["model.layers.1.*"]
+
+
 class _FakeTEGroupedMLP:
     """Minimal TEGroupedMLP stand-in exposing num_gemms, weight{i}, and state_dict()."""
 
@@ -1272,10 +1312,37 @@ def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
     assert GPTModelExporter._is_sidecar_writer_rank(True) is False
 
 
-def _make_exporter_for_key_check(num_layers: int) -> GPTModelExporter:
+def _make_exporter_for_key_check(
+    num_layers: int, src_num_layers: int | None = None, num_mtp: int = 0
+) -> GPTModelExporter:
+    """``num_layers`` is the exported HF decoder depth; ``num_mtp`` MTP layers follow it."""
     exporter = object.__new__(GPTModelExporter)
-    exporter.model = SimpleNamespace(config=SimpleNamespace(num_layers=num_layers))
+    exporter._hf_text_config = SimpleNamespace(
+        num_hidden_layers=num_layers, num_nextn_predict_layers=num_mtp
+    )
+    exporter._src_num_hidden_layers = num_layers if src_num_layers is None else src_num_layers
+    exporter.rules = {"mtp_in_decoder_layers": num_mtp > 0}
     return exporter
+
+
+@pytest.mark.parametrize(("export_mtp", "raises"), [(True, False), (False, True)])
+def test_verify_exported_keys_depth_pruned_with_decoder_mtp(tmp_path, export_mtp, raises):
+    """Pruned 3 -> 2 layers: source layer 2 is not required, and its MTP (layer 3) must land at 2."""
+    source, export = tmp_path / "src", tmp_path / "exp"
+    _write_index(
+        source,
+        [f"model.layers.{i}.input_layernorm.weight" for i in range(3)]
+        + ["model.layers.3.eh_proj.weight"],
+    )
+    exported = [f"model.layers.{i}.input_layernorm.weight" for i in range(2)]
+    _write_index(export, exported + (["model.layers.2.eh_proj.weight"] if export_mtp else []))
+    exporter = _make_exporter_for_key_check(num_layers=2, src_num_layers=3, num_mtp=1)
+
+    if raises:
+        with pytest.raises(RuntimeError, match=r"model\.layers\.2\.eh_proj\.weight"):
+            exporter._verify_exported_keys(str(export), str(source))
+    else:
+        exporter._verify_exported_keys(str(export), str(source))
 
 
 def _write_index(dir_path: Path, keys) -> None:

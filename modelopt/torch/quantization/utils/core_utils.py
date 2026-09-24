@@ -256,7 +256,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
       ``<first_proj>`` + ``<first_proj>_weight_quantizers`` plural list).
     - TEGroupedLinear: ``weight0..N`` behind one ``GroupedQuantizer``, reported as ``weight``.
     """
-    from ..nn import GroupedQuantizer
+    from ..nn import GroupedQuantizer  # local: ..nn imports this utils package at module scope
 
     # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
     if getattr(module, "weight", None) is not None:
