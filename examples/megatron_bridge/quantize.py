@@ -60,10 +60,11 @@ See `README.md` in this directory for more details.
 import argparse
 import copy
 import gc
+from pathlib import Path
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-from mlflow_utils import add_mlflow_args, mlflow_run, resolve_mlflow_args
+from mlflow_utils import NON_PARAMS, mlflow_run
 from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
@@ -77,7 +78,13 @@ from modelopt.recipe.presets import (
 )
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.mlflow import masked_args
+from modelopt.torch.utils.mlflow import (
+    Tool,
+    add_mlflow_args,
+    masked_args,
+    resolve_mlflow_args,
+    resolved_recipe_texts,
+)
 from modelopt.torch.utils.plugins.mbridge import (
     get_language_model,
     load_mbridge_model_from_hf,
@@ -102,6 +109,27 @@ DEFAULT_VLM_CALIB_DATASET = "nemotron_vlm_dataset_v2"
 # TODO: Add AutoQuantize (mtq.auto_quantize) support to automatically search a per-layer mix of
 # quantization formats that meets a target compression / accuracy constraint, instead of applying a
 # single fixed --quant_cfg / --recipe to the whole model.
+
+
+QUANTIZE = Tool(
+    name="megatron_bridge_quantize",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command, the resolved recipe, the "
+        "run log and the quantizer summary, and writing .experiment.json into "
+        "--export_megatron_path."
+    ),
+    variant_help="recipe name, or --quant_cfg if no --recipe",
+    # ``or "none"``: neither flag is required, and a run without one fails in get_quant_config
+    # rather than while being named.
+    variant=lambda args: Path(args.recipe).stem if args.recipe else (args.quant_cfg or "none"),
+    model=lambda args: args.hf_model_name_or_path,
+    checkpoint=lambda args: args.export_megatron_path,
+    texts=lambda args: resolved_recipe_texts(args.recipe),
+    outputs=lambda args: {
+        "summary/quant_summary.txt": Path(args.export_megatron_path) / ".quant_summary.txt"
+    },
+    non_params=NON_PARAMS,
+)
 
 
 def get_args() -> argparse.Namespace:
@@ -224,10 +252,10 @@ def get_args() -> argparse.Namespace:
         help="Skip the post-quantization generation sanity check.",
     )
 
-    add_mlflow_args(parser)
+    add_mlflow_args(parser, QUANTIZE)
 
     args = parser.parse_args()
-    resolve_mlflow_args(args, parser)
+    resolve_mlflow_args(args, parser, QUANTIZE)
 
     print_args(masked_args(args))
 
@@ -475,7 +503,7 @@ if __name__ == "__main__":
     try:
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
-        with mlflow_run(args):
+        with mlflow_run(args, QUANTIZE):
             main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach

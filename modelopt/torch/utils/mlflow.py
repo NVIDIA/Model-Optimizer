@@ -37,6 +37,7 @@ import traceback
 import warnings
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -51,18 +52,21 @@ __all__ = [
     "EXPERIMENT_JSON",
     "TRACKING_URI_ENV",
     "MlflowRunLogger",
+    "Tool",
     "add_mlflow_args",
-    "checkpoint_run_tags",
     "command_text",
     "current_user",
     "default_experiment_name",
+    "default_run_name",
+    "describe_run",
     "drop_experiment_json",
     "mask_tracking_uri",
     "masked_args",
     "resolve_mlflow_args",
     "resolve_tracking_uri",
     "resolved_recipe_texts",
-    "track_run",
+    "run_tags",
+    "tracked_run",
     "validate_tracking_uri",
 ]
 
@@ -87,6 +91,23 @@ EXPERIMENT_JSON = ".experiment.json"
 # MLflow's own variable, so a shell that already exports it opts in without a flag. Public
 # because the vLLM example republishes the resolved URI under it for its worker processes.
 TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
+
+
+def _experiment_json(
+    tracking_uri: str, experiment_name: str, info: Any, run_name: str | None = None
+) -> dict[str, str]:
+    """The provenance record's fields, read off the run the server returned."""
+    uri = _redact(tracking_uri).rstrip("/")
+    experiment_id = str(info.experiment_id)
+    run_id = str(info.run_id)
+    return {
+        "tracking_uri": uri,
+        "experiment_name": experiment_name,
+        "experiment_id": experiment_id,
+        "run_id": run_id,
+        "run_name": getattr(info, "run_name", None) or run_name or "",
+        "run_url": f"{uri}/#/experiments/{experiment_id}/runs/{run_id}",
+    }
 
 
 def _stat_key(path: Path) -> tuple[int, int] | None:
@@ -169,6 +190,15 @@ def default_experiment_name(tool: str, model: str, variant: str, user: str | Non
     return name[:_MAX_NAME_LEN]
 
 
+def default_run_name() -> str:
+    """The UTC start time as ``YYYYmmdd-HHMMSS``, which is what the flags document.
+
+    Used by :class:`MlflowRunLogger` and by a caller handing the name to something else that
+    opens the run, so both honour the documented default rather than MLflow's random one.
+    """
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
 def current_user() -> str:
     """Return the current username, or ``"unknown"`` if the uid has no passwd entry."""
     try:
@@ -238,6 +268,31 @@ def command_text(argv: list[str] | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _ask(what: str, callback: Callable[[], Any], default: Any) -> Any:
+    """Read what a run reports about itself, never at the cost of the caller's exception."""
+    try:
+        return callback()
+    except Exception as e:
+        print(f"[mlflow] WARNING: could not read this run's {what}: {e}")
+        return default
+
+
+@contextmanager
+def _closing_run(finish: Callable[[str], None]) -> Iterator[None]:
+    """Run the block, then *finish* the run with the status the block earned."""
+    status = "FAILED"
+    try:
+        yield
+        status = "FINISHED"
+    except SystemExit as e:
+        # A script that ends by exiting -- Megatron-Bridge does, from inside its training
+        # loop -- finished if it exited cleanly.
+        status = "FINISHED" if e.code in (0, None) else "FAILED"
+        raise
+    finally:
+        finish(status)
+
+
 class MlflowRunLogger:
     """Record one script invocation as an MLflow run.
 
@@ -303,11 +358,7 @@ class MlflowRunLogger:
     @property
     def run_url(self) -> str:
         """Link to this run in the MLflow UI, or ``""`` before the run is open."""
-        if self._run is None:
-            return ""
-        info = self._run.info
-        uri = _redact(self.tracking_uri)
-        return f"{uri}/#/experiments/{info.experiment_id}/runs/{info.run_id}"
+        return self.run_info.get("run_url", "")
 
     @property
     def run_info(self) -> dict[str, str]:
@@ -320,15 +371,9 @@ class MlflowRunLogger:
         """
         if self._run is None:
             return {}
-        info = self._run.info
-        return {
-            "tracking_uri": _redact(self.tracking_uri),
-            "experiment_name": self.experiment_name,
-            "experiment_id": str(info.experiment_id),
-            "run_id": str(info.run_id),
-            "run_name": getattr(info, "run_name", None) or self.run_name or "",
-            "run_url": self.run_url,
-        }
+        return _experiment_json(
+            self.tracking_uri, self.experiment_name, self._run.info, self.run_name
+        )
 
     def start(
         self,
@@ -393,12 +438,8 @@ class MlflowRunLogger:
             ...     quantize_and_export()
         """
         self.start(params=params, tags=tags, texts=texts, files=files)
-        status = "FAILED"
-        try:
+        with _closing_run(lambda status: self.finish(status, files=files, metrics=metrics)):
             yield self
-            status = "FINISHED"
-        finally:
-            self.finish(status, files=files, metrics=metrics)
 
     def log_text(self, artifact_path: str, text: str) -> None:
         """Upload *text* as an artifact while the run is open, best-effort.
@@ -516,7 +557,7 @@ class MlflowRunLogger:
         mlflow.set_experiment(self.experiment_name)
         # Settled here rather than passed straight through, so run_info reports the name the
         # run actually carries.
-        self.run_name = self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        self.run_name = self.run_name or default_run_name()
         self._run = mlflow.start_run(run_name=self.run_name)
         print(f"[mlflow] experiment: {self.experiment_name}\n[mlflow] run: {self.run_url}")
 
@@ -633,6 +674,38 @@ class MlflowRunLogger:
 # The CLI surface below is shared by the example scripts that offer tracking, so a run is
 # configured the same way and named by the same convention whichever script opened it.
 
+
+@dataclass(frozen=True)
+class Tool:
+    """What distinguishes one script's tracking from another's.
+
+    A script declares one of these and the functions below do the rest. Each callable reads
+    the arguments naming this run's input, output and what it consumed -- *source* is what
+    the next run in a chain joins on, *variant* names what this run did. *settles_pointer* is
+    false when something other than :func:`tracked_run` writes the provenance pointer.
+    """
+
+    name: str
+    tracks: str
+    variant_help: str
+    variant: Callable[[argparse.Namespace], str]
+    model: Callable[[argparse.Namespace], str]
+    checkpoint: Callable[[argparse.Namespace], str | None] = field(default=lambda args: None)
+    source: Callable[[argparse.Namespace], str] | None = None
+    texts: Callable[[argparse.Namespace], dict[str, str]] = field(default=lambda args: {})
+    outputs: Callable[[argparse.Namespace], dict[str, Path]] = field(default=lambda args: {})
+    # Read on the way *out*, so it can report something the run computed -- a pruning score,
+    # say -- which the script stashes on its own namespace.
+    metrics: Callable[[argparse.Namespace], dict[str, float]] = field(default=lambda args: {})
+    non_params: frozenset[str] = frozenset()
+    settles_pointer: bool = True
+
+
+# The tracking settings describe the destination rather than the work, so they are never
+# params; a script adds its own bookkeeping through ``Tool.non_params``.
+_NEVER_PARAMS = frozenset({"mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"})
+
+
 _ENV_HELP = (
     f"MLflow's own ${TRACKING_URI_ENV} enables tracking without this flag, which overrides "
     "it. A URI taken from the environment is best-effort: if it is unusable the run warns and "
@@ -645,18 +718,12 @@ _TRACKS_HELP = (
 )
 
 
-def add_mlflow_args(
-    parser: argparse.ArgumentParser,
-    tool: str,
-    tracks: str = _TRACKS_HELP,
-    variant_help: str = "recipe name, or the quantization format",
-) -> None:
+def add_mlflow_args(parser: argparse.ArgumentParser, tool: Tool) -> None:
     """Add ``--mlflow``, ``--mlflow_experiment`` and ``--mlflow_run_name`` to *parser*.
 
-    *tool* names the script in the default experiment ``<user>/<tool>/<model>-<variant>`` (see
-    :func:`default_experiment_name`), *tracks* is the leading description of ``--mlflow`` --
-    what this particular script uploads -- and *variant_help* says what the script derives the
-    variant from. Pair with :func:`resolve_mlflow_args`.
+    The help text comes from *tool*: its ``tracks`` describes what this script uploads and its
+    ``variant_help`` says what the experiment name's variant is derived from. Pair with
+    :func:`resolve_mlflow_args`.
 
     The multi-word flags are registered under both the underscored and the dashed spelling:
     vLLM's ``FlexibleArgumentParser`` rewrites every ``--foo_bar`` on the command line to
@@ -664,12 +731,15 @@ def add_mlflow_args(
     reachable there at all, and a user moving between the example scripts should not have to
     remember which spelling each one took.
     """
-    parser.add_argument("--mlflow", default=None, help=f"{tracks} {_ENV_HELP}")
+    parser.add_argument("--mlflow", default=None, help=f"{tool.tracks} {_ENV_HELP}")
     parser.add_argument(
         "--mlflow_experiment",
         "--mlflow-experiment",
         default=None,
-        help=f"MLflow experiment name. Default: $USER/{tool}/<model basename>-<{variant_help}>.",
+        help=(
+            f"MLflow experiment name. Default: "
+            f"$USER/{tool.name}/<model basename>-<{tool.variant_help}>."
+        ),
     )
     parser.add_argument(
         "--mlflow_run_name",
@@ -724,22 +794,18 @@ def resolve_tracking_uri(
 
 
 def resolve_mlflow_args(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-    tool: str,
-    model: str,
-    variant: str,
+    args: argparse.Namespace, parser: argparse.ArgumentParser, tool: Tool
 ) -> None:
     """Settle where tracking is configured from, and name the experiment, in place.
 
     Sets ``args.mlflow`` to the validated URI or ``None``, ``args.mlflow_required`` to whether
-    the flag asked for it, and defaults ``args.mlflow_experiment`` from *tool*, *model* and
-    *variant*. Pair with :func:`add_mlflow_args`.
+    the flag asked for it, and defaults ``args.mlflow_experiment`` from *tool*. Pair with
+    :func:`add_mlflow_args`.
     """
     args.mlflow, args.mlflow_required = resolve_tracking_uri(args.mlflow, parser)
     if args.mlflow:
         args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
-            tool, model, variant
+            tool.name, tool.model(args), tool.variant(args)
         )
 
 
@@ -770,21 +836,6 @@ def masked_args(args: argparse.Namespace, attr: str = "mlflow") -> argparse.Name
     return argparse.Namespace(**{**vars(args), attr: mask_tracking_uri(getattr(args, attr, None))})
 
 
-def checkpoint_run_tags(source_model: str, checkpoint_dir: Path | str) -> dict[str, str]:
-    """Tags a quantization run and whatever is later done with the checkpoint it wrote.
-
-    Shared so the two can be found together on one tracking server. ``checkpoint_path`` is
-    the checkpoint the run *writes*, because that is what an export or an evaluation is later
-    pointed at (NEL takes ``deployment.checkpoint_path``); the input is kept separately. It is
-    resolved because a relative path is useless as a join key.
-    """
-    return {
-        "model": Path(source_model).name,
-        "checkpoint_path": str(Path(checkpoint_dir).resolve()),
-        "source_checkpoint_path": source_model,
-    }
-
-
 def resolved_recipe_texts(recipe: str | None) -> dict[str, str]:
     r"""``{artifact path: content}`` for *recipe*, or ``{}`` when the run used none.
 
@@ -801,40 +852,103 @@ def resolved_recipe_texts(recipe: str | None) -> dict[str, str]:
     return {"recipe/resolved_recipe.yaml": yaml.safe_dump(resolved, sort_keys=False)}
 
 
+def run_tags(args: argparse.Namespace, tool: Tool) -> dict[str, str]:
+    """This run's join keys, shared with whatever is later done with what it produced.
+
+    ``checkpoint_path`` is the checkpoint the run *writes*, because that is what an export or
+    an evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``), and
+    ``source_checkpoint_path`` is what it consumed, so a chain of runs joins on the pair: a
+    distillation's source is the checkpoint it continues from, not the model that was
+    quantized. Both are resolved, since a relative path is useless as a join key -- except a
+    source that names no directory, such as a Hub ``org/name`` id.
+    """
+    source = tool.source(args) if tool.source else tool.model(args)
+    checkpoint = tool.checkpoint(args)
+    tags = {
+        "model": Path(tool.model(args)).name,
+        "source_checkpoint_path": (
+            str(Path(source).resolve()) if os.path.exists(source) else str(source)
+        ),
+    }
+    # Omitted rather than empty when the run writes no checkpoint: a search for runs that
+    # produced one should not match it.
+    if checkpoint is not None:
+        tags["checkpoint_path"] = str(Path(checkpoint).resolve())
+    return tags
+
+
+def describe_run(args: argparse.Namespace, tool: Tool, world_size: int = 1) -> dict:
+    """The keyword arguments :meth:`MlflowRunLogger.track` takes, for this run.
+
+    Every command-line argument becomes a searchable param, so a flag added later is tracked
+    without touching this. *world_size* is recorded separately because the parallelism flags
+    say how a run was laid out but not how many processes it took.
+    """
+    skip = _NEVER_PARAMS | tool.non_params
+    params = {k: v for k, v in vars(args).items() if k not in skip}
+    params["world_size"] = world_size
+    return {
+        "params": params,
+        "tags": run_tags(args, tool),
+        "texts": tool.texts(args),
+        "files": tool.outputs(args),
+    }
+
+
 @contextmanager
-def track_run(
-    logger: MlflowRunLogger,
-    checkpoint_dir: Path | str,
+def tracked_run(
+    args: argparse.Namespace,
+    tool: Tool,
     is_main: bool,
     exported: Callable[[], bool],
-    describe: Callable[[], Mapping[str, Any]] | None = None,
+    world_size: int = 1,
 ) -> Iterator[MlflowRunLogger]:
-    """Track a checkpoint-producing run, keeping its provenance pointer honest either way.
+    """Track one invocation of *tool* for the duration of the block.
 
-    *logger* is inert unless tracking was configured *and* this is the rank that records it,
-    so the caller needs no branching. *checkpoint_dir* is where the run writes its checkpoint
-    and *is_main* gates writes every rank would otherwise race on. *exported* is read on the
-    way out, not on the way in: only a completed export may claim the checkpoint the pointer
-    sits next to, since the directory usually exists before the weights do.
-
-    *describe* returns the keyword arguments for :meth:`MlflowRunLogger.track` (``params``,
-    ``tags``, ``texts``, ``files``) and is called only when the run is tracked, so an
-    untracked run does not pay for gathering them -- re-reading a recipe, say.
+    Inert unless ``--mlflow`` settled a URI and this is the rank that records it, so the
+    caller needs no branching. *is_main* is that rank, and also gates the writes every rank
+    would otherwise race on; *exported* is read on the way out, once the run knows whether it
+    wrote the checkpoint its pointer would claim.
 
     Example:
-        >>> with track_run(logger, args.export_path, is_main, lambda: args.exported, describe):
+        >>> with tracked_run(args, HF_PTQ, is_main, lambda: args.exported, world_size):
         ...     quantize_and_export(args)
     """
-    path = Path(checkpoint_dir)
+    logger = MlflowRunLogger(
+        args.mlflow or "",
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and is_main,
+        required=args.mlflow_required,
+    )
+    # None when the run writes no checkpoint at all -- a pruning run that only scores, say,
+    # or a script that points each of several checkpoints at the run itself -- so there is
+    # nothing to point at and nothing that could inherit a stale pointer.
+    path = None
+    if tool.settles_pointer and (checkpoint := tool.checkpoint(args)) is not None:
+        path = Path(checkpoint)
     if not logger.enabled:
+        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
         try:
             yield logger
         finally:
-            if exported() and is_main:
+            if path is not None and is_main and _ask("exported flag", exported, False):
                 drop_experiment_json(path)
         return
-    with logger.track(**(describe() if describe is not None else {})):
-        try:
-            yield logger
-        finally:
-            logger.log_experiment_json(path if exported() else None)
+
+    described = describe_run(args, tool, world_size)
+    logger.start(**described)
+
+    def close(status: str) -> None:
+        # Only a completed export may claim the checkpoint the pointer sits next to: the
+        # directory usually exists before the weights do.
+        wrote_it = path is not None and _ask("exported flag", exported, False)
+        logger.log_experiment_json(path if wrote_it else None)
+        logger.finish(
+            status,
+            files=described["files"],
+            metrics=_ask("metrics", lambda: tool.metrics(args), {}),
+        )
+
+    with _closing_run(close):
+        yield logger
