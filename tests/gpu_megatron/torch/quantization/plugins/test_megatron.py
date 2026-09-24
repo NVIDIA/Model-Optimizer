@@ -1836,6 +1836,8 @@ def _get_tiny_dsa_gpt_model():
         dsa_indexer_topk=8,
         normalization="RMSNorm",
         add_bias_linear=False,
+        hidden_dropout=0.0,  # deterministic forward for the checkpoint round-trip comparison
+        attention_dropout=0.0,
         bf16=True,
         params_dtype=torch.bfloat16,
     )
@@ -1846,14 +1848,16 @@ def _get_tiny_dsa_gpt_model():
         vocab_size=64,
         max_sequence_length=64,
         position_embedding_type="rope",
+        # Tied so a checkpoint round-trip restores the output layer too.
+        share_embeddings_and_output_weights=True,
     ).cuda()
 
 
-def _test_dsa_kv_cache_quant_helper(rank, size):
+def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
     from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
 
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
-    model = _get_tiny_dsa_gpt_model()
+    model, model_test = _get_tiny_dsa_gpt_model(), _get_tiny_dsa_gpt_model()
     forward = get_forward(model)
     # Calibrated (not constant-amax) FP8 KV cache: the case that needs a real V amax to export.
     kv_fp8_calibrated = {
@@ -1874,14 +1878,19 @@ def _test_dsa_kv_cache_quant_helper(rank, size):
         assert module.k_bmm_quantizer.amax is not None
         assert torch.equal(module.v_bmm_quantizer.amax, module.k_bmm_quantizer.amax)
 
-    # Quantized forward (value=None through the absorbed path) still runs.
-    assert torch.isfinite(forward(model)).all()
+    # The KV quantizer state (incl. amax) survives a torch-dist round-trip alongside the indexer.
+    # DSA trains its indexer through a separate indexer loss, so the LM-loss backward in the helper
+    # gives it no gradient; exclude it from that check.
+    for name, param in model_test.named_parameters():
+        if ".indexer." in name:
+            param.requires_grad_(False)
+    sharded_state_dict_test_helper(tmp_path, model, model_test, forward)
 
 
-def test_dsa_kv_cache_quant(dist_workers_size_1):
-    """DSAttention (absorbed MLA, value=None) gets calibrated K and V KV-cache quantizers."""
+def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
+    """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
     pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")
-    dist_workers_size_1.run(_test_dsa_kv_cache_quant_helper)
+    dist_workers_size_1.run(partial(_test_dsa_kv_cache_quant_helper, tmp_path))
 
 
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):
