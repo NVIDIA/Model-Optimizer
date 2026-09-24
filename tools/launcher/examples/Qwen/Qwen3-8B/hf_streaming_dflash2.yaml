@@ -3,15 +3,49 @@
 # Same streaming transport as hf_streaming_dflash.yaml: a live `vllm serve` captures the
 # target model's hidden states and moves them to the trainer over NIXL RDMA (no disk
 # round-trip). DFlash2 trains the same block-diffusion backbone plus the grouped sublayer
-# convolutions and the candidate selector.
+# convolutions and the candidate selector. See common/eagle3/train_eagle_streaming.sh for
+# the dispatch and rendezvous.
+#
+# Two nodes, all four GPUs of each: node 0 is one vLLM replica at TP=4, node 1 is a
+# 4-rank DDP trainer.
+#
+# On a cluster with fewer GPUs per node, drop gpus_per_node and SERVE_TP together (1 and 1
+# still works, it just leaves the trainer waiting on a single-GPU prefill) and lower
+# per_device_train_batch_size to keep the global batch you want. To scale up instead,
+# raise `nodes` and SERVE_NODES together so the trainer fans out over several serve
+# replicas, as hf_streaming_dflash_multi_node.yaml does; keep per-serve in-flight
+# (trainer_ranks x STREAMING_NUM_WORKERS / serve_replicas) roughly constant and
+# HS_POOL_SLOTS a few times above it.
 #
 # 3-step pipeline:
 #   task_0: Build input conversations (jsonl)
-#   task_1: Streaming train — vllm serve + DFlash2 trainer; hidden states over NIXL RDMA
+#   task_1: Streaming train — 1 serve node (TP=4) + 1 trainer node (4-rank DDP)
 #   task_2: vLLM smoke test with the exported drafter
 #
-# task_1 uses nodes=2: node 0 runs vllm serve, node 1 the trainer. Tasks share
-# /scratchspace to pass artifacts.
+# Validated on a GB200 cluster (4 GPU/node, aarch64): 600 steps in 403 s (0.67 s/step,
+# global batch 16 x 4096 tokens), loss 17.0 -> 3.4, exported 81 tensors. That run fed a
+# pre-staged corpus instead of task_0 and used the overrides listed under "Cluster
+# overrides" below.
+#
+# Cluster overrides this file deliberately does NOT hardcode, because the right value is
+# site-specific:
+#   * container — vllm/vllm-openai:latest is x86; an aarch64 cluster needs an aarch64
+#     image. The image must ship nixl (recent vllm-openai images do); if it does not,
+#     the serve dies at connector init with ModuleNotFoundError.
+#   * slurm_config.time — some clusters have a DefaultTime of minutes, and a job that
+#     outlives it dies as a bare Slurm TIMEOUT with no traceback.
+#   * fabric — on an InfiniBand cluster, pin BOTH stacks to the working HCAs or each
+#     picks a dead one and wedges silently (UCX as NIXL_ERR_BACKEND on the first fetch,
+#     NCCL as a watchdog SIGABRT half an hour later):
+#       NIXL_BACKENDS: "UCX"
+#       UCX_TLS: "rc,ud,sm,self"          # host transports only
+#       UCX_NET_DEVICES: "<hca0>:1,<hca1>:1,..."
+#       NCCL_IB_DISABLE: "0"
+#       NCCL_IB_HCA: "<hca0>,<hca1>,..."
+#     On EFA use NIXL_BACKENDS=LIBFABRIC with FI_PROVIDER=efa instead.
+#   * caches — srun runs with --no-container-mount-home, so a $HOME cache path silently
+#     resolves inside the container overlay and is lost with the job. TRITON_CACHE_DIR
+#     must additionally be node-local: concurrent ranks race on a shared filesystem.
 #
 # Usage:
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml --yes
@@ -38,7 +72,7 @@ pipeline:
       gpus_per_node: 1
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
-  # Step 2: Streaming DFlash2 training — node 0 vllm serve, node 1 trainer.
+  # Step 2: Streaming DFlash2 training — node 0 vllm serve (TP=4), node 1 trainer.
   # DFlash2 extracts 5 target layers (build_target_layer_ids(36,5)=[1,9,17,25,33], the
   # draft's fc input); vLLM's capture ids are those +1 -> [2,10,18,26,34].
   #
@@ -55,28 +89,26 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash2.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      # The trainer never runs the base's transformer layers in streaming mode -- the
-      # serve produces the hidden states -- so load only the embeddings, final norm and
-      # lm_head instead of all 36 layers on every rank.
+      # Streaming never runs the base's transformer layers on the trainer; load only the
+      # embeddings, final norm and lm_head rather than all 36 layers on every rank.
       - model.use_fake_base_for_offline=true
       - data.mode=streaming
       - data.data_path=/scratchspace/data/train.jsonl
-      # Keep all five captured planes as aux features. The streaming dataset otherwise
-      # peels the LAST plane off as base_model_hidden_states, which would hand the
-      # draft's fc 4x4096 where it wants 5x4096 ("mat1 and mat2 shapes cannot be
-      # multiplied"). See the capture-id note above for when to drop this instead.
+      # All five captured planes are aux features; without this the streaming dataset
+      # peels the last one off as the (unused) KD target and the draft's fc gets
+      # 4x4096 where it wants 5x4096.
       - data.final_aux_is_base_hidden=true
       - training.output_dir=/scratchspace/dflash2
       - training.training_seq_len=4096
       - training.disable_tqdm=true
-      # The serve does NOT generate: the trainer POSTs the whole conversation as a
-      # prompt with max_tokens=1 and the connector captures the per-token hidden states
-      # of that prefill. The corpus therefore carries the assistant turn, but Qwen3-8B's
-      # stock chat template has no {% generation %} tags to locate it, so train over the
-      # full sequence. To mask to the assistant span instead, pass
+      # The serve does not generate — it prefills the corpus conversation — so the
+      # assistant turn is present, but Qwen3-8B's stock chat template has no
+      # {% generation %} tags to locate it. Pass
       # data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja with
-      # training.answer_only_loss=true, as the gpt-oss streaming example does.
+      # answer_only_loss=true to mask to the assistant span instead.
       - training.answer_only_loss=false
+      # 4 per device x 4 ranks = global batch 16 sequences = 65,536 tokens/step.
+      - training.per_device_train_batch_size=4
       - training.num_train_epochs=1
       - training.max_steps=5000
       # dflash2.yaml sets report_to=tensorboard, which hard-fails if tensorboard
@@ -86,14 +118,28 @@ pipeline:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
       # No spaces: nemo_run emits unquoted `export FOO=value`, so spaces would split.
       - EAGLE_CAPTURE_IDS: "[2,10,18,26,34]"
-      - SERVE_TP: "1"
+      # Serve replica nodes (Slurm nodes 0..SERVE_NODES-1); the rest are trainers.
+      - SERVE_NODES: "1"
+      - SERVE_TP: "4"
+      # training_seq_len plus headroom for the single decode step.
+      - SERVE_MAX_MODEL_LEN: "4608"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      # RDMA pool slot capacity in tokens. Must be >= training_seq_len or long prompts
+      # overflow the slot, the producer silently skips capture, and the fetch hangs
+      # (the trainer has a fail-loud guard for it). 32 slots x 4608 tok x 5 planes x
+      # 4096 x 2 B = 5.4 GiB of pinned host memory; peak in-flight here is
+      # 4 ranks x 4 workers = 16.
+      - HS_MAX_TOKENS: "4608"
+      - HS_POOL_SLOTS: "32"
+      - STREAMING_NUM_WORKERS: "4"
       # DFlash2 uses a custom modeling file; export must trust remote code.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 2
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 4
       container: vllm/vllm-openai:latest
 
   # Step 3: vLLM smoke test (uses the exported checkpoint from training).
