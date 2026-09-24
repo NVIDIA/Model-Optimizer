@@ -30,6 +30,15 @@ import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
+from megatron.core.extensions.transformer_engine import (
+    TEColumnParallelGroupedLinear,
+    TEColumnParallelLinear,
+    TEDotProductAttention,
+    TELayerNormColumnParallelLinear,
+    TELinear,
+    TERowParallelGroupedLinear,
+    TERowParallelLinear,
+)
 from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
@@ -61,23 +70,14 @@ from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
+from .transformer_engine import _QuantTEGroupedLinear, _QuantTELayerNormLinear, _QuantTELinear
 
 try:
-    from megatron.core.extensions.transformer_engine import (
-        TEColumnParallelGroupedLinear,
-        TEColumnParallelLinear,
-        TEDotProductAttention,
-        TELayerNormColumnParallelLinear,
-        TELinear,
-        TERowParallelGroupedLinear,
-        TERowParallelLinear,
-    )
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
 
-    from .transformer_engine import _QuantTEGroupedLinear, _QuantTELayerNormLinear, _QuantTELinear
-
-    HAS_TE = True
+    HAS_DSA = True
 except ImportError:
-    HAS_TE = False
+    HAS_DSA = False
 
 
 __all__ = []
@@ -827,246 +827,268 @@ class _MegatronSequentialMLP(DynamicModule):
         return sharded_state_dict
 
 
-if HAS_TE:
+@QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
+class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
+    pass
 
-    @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
-    class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
-        pass
 
-    @QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
-    class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
-        pass
+@QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
+class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
+    pass
 
-    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
-    class _QuantTEMCoreLinear(_QuantTELinear):
-        pass
 
-    @QuantModuleRegistry.register(
-        {TELayerNormColumnParallelLinear: "te_mcore_LayerNormColumnParallelLinear"}
-    )
-    class _QuantTELayerNormColumnParallelLinear(
-        _QuantTELayerNormLinear, _MegatronColumnParallelLinear
-    ):
-        pass
+@QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
+class _QuantTEMCoreLinear(_QuantTELinear):
+    pass
 
-    # Quantized subclasses to support TEGroupedLinear quantization
-    class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
-        def modelopt_post_load_extra_state(self):
-            _initialize_grouped_weight_quantizer_state(self)
 
-        def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
-            # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
-            # TE Fp8 checkpoint, we need to remove the _extra_state{gemm_idx} for gemm_idx:[1, num_gemms]
-            # for modelopt checkpoint restore
-            filtered_state_dict = {
-                k: v
-                for k, v in state_dict.items()
-                if not any(k.endswith(f"_extra_state{num}") for num in range(1, self.num_gemms))
-            }
-            return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
+@QuantModuleRegistry.register(
+    {TELayerNormColumnParallelLinear: "te_mcore_LayerNormColumnParallelLinear"}
+)
+class _QuantTELayerNormColumnParallelLinear(_QuantTELayerNormLinear, _MegatronColumnParallelLinear):
+    pass
 
-        def _process_quantizer_amax(self, k, v, quantizer_state_dict):
-            # Per-expert quantizers have independent checkpoint keys. Preserve their native
-            # scalar, channel, or block shape instead of flattening them through the legacy
-            # single-quantizer path.
-            if re.match(r"weight_quantizer\.\d+\..+_amax$", k):
+
+# Quantized subclasses to support TEGroupedLinear quantization
+class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
+    def modelopt_post_load_extra_state(self):
+        _initialize_grouped_weight_quantizer_state(self)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
+        # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
+        # TE Fp8 checkpoint, we need to remove the _extra_state{gemm_idx} for gemm_idx:[1, num_gemms]
+        # for modelopt checkpoint restore
+        filtered_state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if not any(k.endswith(f"_extra_state{num}") for num in range(1, self.num_gemms))
+        }
+        return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
+
+    def _process_quantizer_amax(self, k, v, quantizer_state_dict):
+        # Per-expert quantizers have independent checkpoint keys. Preserve their native
+        # scalar, channel, or block shape instead of flattening them through the legacy
+        # single-quantizer path.
+        if re.match(r"weight_quantizer\.\d+\..+_amax$", k):
+            quantizer_state_dict[k] = v
+        else:
+            quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
+
+    def _expert_parallel_groups(self):
+        """Return the (ep, expt_dp) process groups used to place fused experts globally."""
+        pg_collection = getattr(self, "_pg_collection", None)
+        if pg_collection is not None:
+            return pg_collection.ep, pg_collection.expt_dp
+        return (
+            mcore_parallel.get_expert_model_parallel_group(),
+            mcore_parallel.get_expert_data_parallel_group(),
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Emit per-expert quantizer amax with the same global expert identity as the weights.
+
+        The base linear emits ``weight_quantizer.{local_i}._amax`` with the local index and no
+        expert offset, so every EP rank writes identical keys and ``torch_dist`` dedup keeps only
+        one rank's experts. Here we mirror Megatron ``TEGroupedLinear._sharded_state_dict_grouped``:
+        each fused expert comes with its ``global_expert_idx`` (baked into the key prefix under
+        ``singleton_local_shards``, otherwise an EP sharded-offset) so all ``num_global_experts``
+        persist and reshard to any EP. Shared, whole-linear quantizer buffers (e.g.
+        ``input_quantizer``) keep the plain replicated path.
+        """
+        metadata = ensure_metadata_has_dp_cp_group(metadata)
+        singleton_local_shards = bool((metadata or {}).get("singleton_local_shards", False))
+
+        # Weights/bias/_extra_state come from the wrapped TE grouped linear, which already
+        # assigns each expert its global identity. Skip _MegatronParallelLinear's local-index
+        # amax emission by starting from the base MCore module's sharded_state_dict.
+        sharded_state_dict = super(_MegatronParallelLinear, self).sharded_state_dict(
+            prefix, sharded_offsets, metadata
+        )
+
+        # Collect the quantizer buffers exactly like _MegatronParallelLinear.sharded_state_dict.
+        quantizer_state_dict = {}
+        for k, v in self.state_dict(prefix="", keep_vars=True).items():
+            if "_quantizer" in k and "_amax" in k:
+                self._process_quantizer_amax(k, v, quantizer_state_dict)
+            elif k == "input_quantizer._pre_quant_scale":
+                self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
+            elif self._parameter_to_keep_in_quantizer_state_dict(k):
                 quantizer_state_dict[k] = v
+            elif "quantizer" in k:
+                warn_rank_0(
+                    f"Quantizer state {k} is not supported for sharded_state_dict. "
+                    "Please use regular state_dict."
+                )
+
+        # Channel shard axes (per real key); _global_amax stays un-sharded along channels but
+        # still rides with the expert identity below.
+        shard_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+
+        # Split per-expert weight_quantizer.{i}.* from shared (input/output) quantizer buffers.
+        expert_re = re.compile(r"^weight_quantizer\.(\d+)\.(.+)$")
+        per_expert_subs = [[] for _ in range(self.num_gemms)]
+        shared_state = {}
+        for k, v in quantizer_state_dict.items():
+            m = expert_re.match(k)
+            if m:
+                per_expert_subs[int(m.group(1))].append((m.group(2), v, shard_axis_dict.get(k)))
             else:
-                quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
+                shared_state[k] = v
 
-        def _expert_parallel_groups(self):
-            """Return the (ep, expt_dp) process groups used to place fused experts globally."""
-            pg_collection = getattr(self, "_pg_collection", None)
-            if pg_collection is not None:
-                return pg_collection.ep, pg_collection.expt_dp
-            return (
-                mcore_parallel.get_expert_model_parallel_group(),
+        # Shared quantizer buffers: replicated across experts, plain base offsets.
+        shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
+        sharded_state_dict.update(
+            make_sharded_tensors_for_checkpoint(
+                shared_state, prefix, shared_axis_dict, sharded_offsets
+            )
+        )
+
+        # Per-expert amax: assign the same global expert identity the weights use.
+        ep_group, expt_dp_group = self._expert_parallel_groups()
+        num_global_experts = get_pg_size(ep_group) * self.num_gemms
+        local_expert_indices_offset = get_pg_rank(ep_group) * self.num_gemms
+        edp_replica_id = get_pg_rank(expt_dp_group)
+        ep_axis = len(sharded_offsets)
+        for gemm_idx, subs in enumerate(per_expert_subs):
+            if not subs:
+                continue
+            global_expert_idx = local_expert_indices_offset + gemm_idx
+            if singleton_local_shards:
+                expert_prefix = f"{global_expert_idx}.{prefix}"
+                new_sharded_offsets = sharded_offsets
+            else:
+                expert_prefix = prefix
+                new_sharded_offsets = (
+                    *sharded_offsets,
+                    (ep_axis, global_expert_idx, num_global_experts),
+                )
+            expert_state = {f"{gemm_idx}.weight_quantizer.{sub}": v for sub, v, _ in subs}
+            expert_axis = {
+                f"{gemm_idx}.weight_quantizer.{sub}": axis
+                for sub, _, axis in subs
+                if axis is not None
+            }
+            sub_sd = make_sharded_tensors_for_checkpoint(
+                expert_state, "", expert_axis, new_sharded_offsets
+            )
+            # Rewrite each ShardedTensor.key to carry the global expert identity (dict keys,
+            # which map to the local buffers on restore, are left untouched).
+            replace_prefix_for_sharding(sub_sd, f"{gemm_idx}.", expert_prefix)
+            for sub, _, _ in subs:
+                sh_ten = sub_sd[f"{gemm_idx}.weight_quantizer.{sub}"]
+                replica_id = sh_ten.replica_id
+                if len(replica_id) == 3:
+                    sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
+                sharded_state_dict[f"{prefix}weight_quantizer.{gemm_idx}.{sub}"] = sh_ten
+        return sharded_state_dict
+
+
+@QuantModuleRegistry.register(
+    {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}
+)
+class _MegatronTEGroupedColumnParallelLinear(
+    _QuantMegatronTEGroupedLinear, _MegatronColumnParallelLinear
+):
+    pass
+
+
+@QuantModuleRegistry.register({TERowParallelGroupedLinear: "megatron_TERowParallelGroupedLinear"})
+class _MegatronTEGroupedRowParallelLinear(
+    _QuantMegatronTEGroupedLinear, _MegatronRowParallelLinear
+):
+    pass
+
+
+@QuantModuleRegistry.register({megatron_moe.TEGroupedMLP: "megatron_moe_TEGroupedMLP"})
+class _MegatronTEGroupedMLP(_MegatronMLP):
+    def _setup(self):
+        if not hasattr(self, "parallel_state") or self.parallel_state is None:
+            self.parallel_state = ParallelState(
                 mcore_parallel.get_expert_data_parallel_group(),
+                tensor_parallel_group=mcore_parallel.get_expert_tensor_parallel_group(),
+                expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
             )
+        # These child linears are still native MCore modules here. Seed `_parallel_state`
+        # directly so the later QuantModule conversion sees the intended parallel state.
+        self.linear_fc1._parallel_state = self.parallel_state
+        self.linear_fc2._parallel_state = self.parallel_state
 
-        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-            """Emit per-expert quantizer amax with the same global expert identity as the weights.
 
-            The base linear emits ``weight_quantizer.{local_i}._amax`` with the local index and no
-            expert offset, so every EP rank writes identical keys and ``torch_dist`` dedup keeps only
-            one rank's experts. Here we mirror Megatron ``TEGroupedLinear._sharded_state_dict_grouped``:
-            each fused expert comes with its ``global_expert_idx`` (baked into the key prefix under
-            ``singleton_local_shards``, otherwise an EP sharded-offset) so all ``num_global_experts``
-            persist and reshard to any EP. Shared, whole-linear quantizer buffers (e.g.
-            ``input_quantizer``) keep the plain replicated path.
-            """
-            metadata = ensure_metadata_has_dp_cp_group(metadata)
-            singleton_local_shards = bool((metadata or {}).get("singleton_local_shards", False))
+@QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
+class _QuantCoreAttention(QuantModule):
+    """Core attention (TEDotProductAttention, DSAttention) with KV cache quantization.
 
-            # Weights/bias/_extra_state come from the wrapped TE grouped linear, which already
-            # assigns each expert its global identity. Skip _MegatronParallelLinear's local-index
-            # amax emission by starting from the base MCore module's sharded_state_dict.
-            sharded_state_dict = super(_MegatronParallelLinear, self).sharded_state_dict(
-                prefix, sharded_offsets, metadata
-            )
+    Adds q/k/v_bmm_quantizers that quantize the post-RoPE query, key and value tensors.
+    """
 
-            # Collect the quantizer buffers exactly like _MegatronParallelLinear.sharded_state_dict.
-            quantizer_state_dict = {}
-            for k, v in self.state_dict(prefix="", keep_vars=True).items():
-                if "_quantizer" in k and "_amax" in k:
-                    self._process_quantizer_amax(k, v, quantizer_state_dict)
-                elif k == "input_quantizer._pre_quant_scale":
-                    self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
-                elif self._parameter_to_keep_in_quantizer_state_dict(k):
-                    quantizer_state_dict[k] = v
-                elif "quantizer" in k:
-                    warn_rank_0(
-                        f"Quantizer state {k} is not supported for sharded_state_dict. "
-                        "Please use regular state_dict."
-                    )
+    def _setup(self):
+        """Initialize quantizers for Q, K, V tensors."""
+        self.q_bmm_quantizer = TensorQuantizer()
+        self.k_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
 
-            # Channel shard axes (per real key); _global_amax stays un-sharded along channels but
-            # still rides with the expert identity below.
-            shard_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+        # Set parallel_state for distributed sync of BMM quantizers
+        try:
+            data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+        except AssertionError:
+            data_parallel_group = get_data_parallel_group()
+        self.parallel_state = ParallelState(
+            data_parallel_group,
+            mcore_parallel.get_tensor_model_parallel_group(),
+        )
 
-            # Split per-expert weight_quantizer.{i}.* from shared (input/output) quantizer buffers.
-            expert_re = re.compile(r"^weight_quantizer\.(\d+)\.(.+)$")
-            per_expert_subs = [[] for _ in range(self.num_gemms)]
-            shared_state = {}
-            for k, v in quantizer_state_dict.items():
-                m = expert_re.match(k)
-                if m:
-                    per_expert_subs[int(m.group(1))].append((m.group(2), v, shard_axis_dict.get(k)))
-                else:
-                    shared_state[k] = v
+    def forward(self, query, key, value, *args, **kwargs):
+        """Apply post-RoPE quantization to KV cache."""
+        # Quantize Q, K, V
+        query = self.q_bmm_quantizer(query)
+        if value is None:
+            # Absorbed MLA (DSAttention) passes value=None: the key is the KV latent that both K
+            # and V are read from, so calibrate V on it too (output unused) to export a V scale.
+            self.v_bmm_quantizer(key)
+        else:
+            value = self.v_bmm_quantizer(value)
+        key = self.k_bmm_quantizer(key)
+        return super().forward(query, key, value, *args, **kwargs)
 
-            # Shared quantizer buffers: replicated across experts, plain base offsets.
-            shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
-            sharded_state_dict.update(
-                make_sharded_tensors_for_checkpoint(
-                    shared_state, prefix, shared_axis_dict, sharded_offsets
+    def modelopt_post_restore(self, name=""):
+        """Restore quantizer states after model loading."""
+        for tq in [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]:
+            # TODO: Add support for non-scalar states such as
+            # Affine KVCache  bias vector which is per head per channel
+            if not all(v.numel() == 1 for v in tq.state_dict().values()):
+                raise NotImplementedError(
+                    "Only scalar states are supported for KV Cache/BMM Quantizers"
                 )
-            )
+        # dtype and device should have been set in `megatron_replace_quant_module_hook`
+        # via `_configure_attention_for_kv_cache_quant`
+        assert hasattr(self, "device") and hasattr(self, "dtype")
+        self.to(device=self.device, dtype=self.dtype)
 
-            # Per-expert amax: assign the same global expert identity the weights use.
-            ep_group, expt_dp_group = self._expert_parallel_groups()
-            num_global_experts = get_pg_size(ep_group) * self.num_gemms
-            local_expert_indices_offset = get_pg_rank(ep_group) * self.num_gemms
-            edp_replica_id = get_pg_rank(expt_dp_group)
-            ep_axis = len(sharded_offsets)
-            for gemm_idx, subs in enumerate(per_expert_subs):
-                if not subs:
-                    continue
-                global_expert_idx = local_expert_indices_offset + gemm_idx
-                if singleton_local_shards:
-                    expert_prefix = f"{global_expert_idx}.{prefix}"
-                    new_sharded_offsets = sharded_offsets
-                else:
-                    expert_prefix = prefix
-                    new_sharded_offsets = (
-                        *sharded_offsets,
-                        (ep_axis, global_expert_idx, num_global_experts),
-                    )
-                expert_state = {f"{gemm_idx}.weight_quantizer.{sub}": v for sub, v, _ in subs}
-                expert_axis = {
-                    f"{gemm_idx}.weight_quantizer.{sub}": axis
-                    for sub, _, axis in subs
-                    if axis is not None
-                }
-                sub_sd = make_sharded_tensors_for_checkpoint(
-                    expert_state, "", expert_axis, new_sharded_offsets
-                )
-                # Rewrite each ShardedTensor.key to carry the global expert identity (dict keys,
-                # which map to the local buffers on restore, are left untouched).
-                replace_prefix_for_sharding(sub_sd, f"{gemm_idx}.", expert_prefix)
-                for sub, _, _ in subs:
-                    sh_ten = sub_sd[f"{gemm_idx}.weight_quantizer.{sub}"]
-                    replica_id = sh_ten.replica_id
-                    if len(replica_id) == 3:
-                        sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
-                    sharded_state_dict[f"{prefix}weight_quantizer.{gemm_idx}.{sub}"] = sh_ten
-            return sharded_state_dict
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        # Currently we do not need sharded_state_dict for core attention since the amax are scalar values.
+        # However we would need this in future to support non-scalar states such as
+        # Affine KVCache Quant bias vector.
+        state_dict = self.state_dict(prefix="", keep_vars=True)
+        return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
 
-    @QuantModuleRegistry.register(
-        {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}
-    )
-    class _MegatronTEGroupedColumnParallelLinear(
-        _QuantMegatronTEGroupedLinear, _MegatronColumnParallelLinear
-    ):
-        pass
 
-    @QuantModuleRegistry.register(
-        {TERowParallelGroupedLinear: "megatron_TERowParallelGroupedLinear"}
-    )
-    class _MegatronTEGroupedRowParallelLinear(
-        _QuantMegatronTEGroupedLinear, _MegatronRowParallelLinear
-    ):
-        pass
+if HAS_DSA:
 
-    @QuantModuleRegistry.register({megatron_moe.TEGroupedMLP: "megatron_moe_TEGroupedMLP"})
-    class _MegatronTEGroupedMLP(_MegatronMLP):
-        def _setup(self):
-            if not hasattr(self, "parallel_state") or self.parallel_state is None:
-                self.parallel_state = ParallelState(
-                    mcore_parallel.get_expert_data_parallel_group(),
-                    tensor_parallel_group=mcore_parallel.get_expert_tensor_parallel_group(),
-                    expert_model_parallel_group=mcore_parallel.get_expert_model_parallel_group(),
-                )
-            # These child linears are still native MCore modules here. Seed `_parallel_state`
-            # directly so the later QuantModule conversion sees the intended parallel state.
-            self.linear_fc1._parallel_state = self.parallel_state
-            self.linear_fc2._parallel_state = self.parallel_state
+    @QuantModuleRegistry.register({DSAttention: "megatron_DSAttention"})
+    class _QuantDSAttention(_QuantCoreAttention):
+        """DSAttention with KV-cache quantization.
 
-    @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
-    class _QuantTEDotProductAttention(QuantModule):
-        """Quantized version of TEDotProductAttention for Megatron models with KV cache quantization.
-
-        This class adds KV cache quantization support to Transformer Engine's TEDotProductAttention
-        module used in Megatron-Core models. It introduces three quantizers (q_bmm_quantizer,
-        k_bmm_quantizer, v_bmm_quantizer) that quantize the query, key, and value tensors after
-        RoPE has been applied.
+        torch's state_dict() / load_state_dict() route ``_extra_state`` only through classes that
+        override these; TEDotProductAttention does, DSAttention does not, so without them the
+        quantizer state (including amax) was dropped from checkpoints.
         """
 
-        def _setup(self):
-            """Initialize quantizers for Q, K, V tensors."""
-            self.q_bmm_quantizer = TensorQuantizer()
-            self.k_bmm_quantizer = TensorQuantizer()
-            self.v_bmm_quantizer = TensorQuantizer()
+        def get_extra_state(self):
+            return quant_module_get_extra_state(self)
 
-            # Set parallel_state for distributed sync of BMM quantizers
-            try:
-                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
-            except AssertionError:
-                data_parallel_group = get_data_parallel_group()
-            self.parallel_state = ParallelState(
-                data_parallel_group,
-                mcore_parallel.get_tensor_model_parallel_group(),
-            )
-
-        def forward(self, query, key, value, *args, **kwargs):
-            """Apply post-RoPE quantization to KV cache."""
-            # Quantize Q, K, V
-            query = self.q_bmm_quantizer(query)
-            key = self.k_bmm_quantizer(key)
-            value = self.v_bmm_quantizer(value)
-            return super().forward(query, key, value, *args, **kwargs)
-
-        def modelopt_post_restore(self, name=""):
-            """Restore quantizer states after model loading."""
-            for tq in [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]:
-                # TODO: Add support for non-scalar states such as
-                # Affine KVCache  bias vector which is per head per channel
-                if not all(v.numel() == 1 for v in tq.state_dict().values()):
-                    raise NotImplementedError(
-                        "Only scalar states are supported for KV Cache/BMM Quantizers"
-                    )
-            # dtype and device should have been set in `megatron_replace_quant_module_hook`
-            # via `_configure_attention_for_kv_cache_quant`
-            assert hasattr(self, "device") and hasattr(self, "dtype")
-            self.to(device=self.device, dtype=self.dtype)
-
-        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-            # Currently we do not need sharded_state_dict for TEDotProductAttention since the amax are scalar values.
-            # However we would need this in future to support non-scalar states such as
-            # Affine KVCache Quant bias vector.
-            state_dict = self.state_dict(prefix="", keep_vars=True)
-            return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+        def set_extra_state(self, state):
+            quant_module_set_extra_state(self, state)
 
 
 def _is_supported_megatron_model(model: torch.nn.Module) -> bool:

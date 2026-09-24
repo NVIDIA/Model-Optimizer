@@ -34,6 +34,8 @@ KV_SCALE_EXPORT_PREFIXES = {
     "Qwen3VLForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "Qwen3_5ForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
     "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
+    "Glm5NextForConditionalGeneration": "model.language_model.layers.{}.self_attn.",
+    "GlmMoeDsaForCausalLM": "model.layers.{}.self_attn.",
 }
 
 
@@ -54,6 +56,8 @@ PER_EXPERT_MOE_ARCHS = {
     "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.mlp.experts.{}",
     "Qwen3MoeForCausalLM": "model.layers.{}.mlp.experts.{}",
     "NemotronHForCausalLM": "backbone.layers.{}.mixer.experts.{}",
+    "Glm5NextForConditionalGeneration": "model.language_model.layers.{}.mlp.experts.{}",
+    "GlmMoeDsaForCausalLM": "model.layers.{}.mlp.experts.{}",
 }
 
 
@@ -82,3 +86,33 @@ def test_qwen3_5_moe_expert_names_match_released_checkpoint():
 
     fc2 = mapping["experts.linear_fc2"].target_name_or_prefix.format(7).format(3) + "."
     assert fc2 == "model.language_model.layers.7.mlp.experts.3.down_proj."
+
+
+def test_glm5_next_names_match_released_checkpoint():
+    """Rule targets must format to tensor names of the released zai-org/GLM-5.3-Flash checkpoint."""
+    mapping = all_mcore_hf_export_mapping["Glm5NextForConditionalGeneration"]
+    assert mapping["fold_attn_mlp_layer_pairs"] is True
+    assert mapping["mtp_in_decoder_layers"] is True
+
+    layer = "model.language_model.layers.3."
+    expected = {
+        ("hc_fn", 3, "attn"): layer + "hc_attn_fn",
+        ("hc_base", 3, "ffn"): layer + "hc_ffn_base",
+        ("hc_scale", 3, "ffn"): layer + "hc_ffn_scale",
+        ("kda", 3): layer + "self_attn.",
+        ("kda.beta_proj", 3): layer + "self_attn.b_proj.",
+        ("kda.out_norm", 3): layer + "self_attn.o_norm.",
+        ("kda.A_log", 3): layer + "self_attn.A_log",
+        ("linear_kv_down_proj", 3): layer + "self_attn.kv_a_proj_with_mqa.",
+        ("indexer.linear_wq_b", 3): layer + "self_attn.indexer.wq_b.",
+        ("indexer.index_kpool_compress_ape", 3): layer
+        + "self_attn.indexer.index_kpool_compress_ape",
+        ("fused_pre_mlp_layernorm", 3): layer + "post_attention_layernorm.weight",
+        ("shared_experts.linear_fc2", 3): layer + "mlp.shared_experts.down_proj.",
+        ("mtp.eh_proj", 3): layer + "eh_proj.weight",
+        ("mtp.final_layernorm", 3): layer + "shared_head.norm.",
+    }
+    for (rule, *args), name in expected.items():
+        assert mapping[rule].target_name_or_prefix.format(*args) == name, rule
+    assert mapping["kda"].func_name == "kda_slicing"
+    assert mapping["router"].func_kwargs["mapping"] == {"expert_bias": "e_score_correction_bias"}

@@ -26,6 +26,9 @@ Changelog
 
 - Add an end-to-end W4A4 NVFP4 PTQ and QAD tutorial for Qwen3.6-35B-A3B also covering evaluation and vLLM throughput benchmarking. See `examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge/tutorials/Qwen3.6-35B-A3B/>`_ for details.
 - Add ``--mlflow <tracking-uri>`` to ``examples/megatron_bridge/quantize.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too), so a Megatron-Bridge PTQ run records the invocation, every argument as a searchable param, the resolved recipe, the master rank's log and the quantizer summary, and writes ``.experiment.json`` into ``--export_megatron_path``. The experiment defaults to ``$USER/megatron_bridge_quantize/<model basename>-<recipe name or --quant_cfg>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
+- Add unified HF export of GLM-5 / GLM-5.2 (``glm_moe_dsa``) checkpoints quantized with ``examples/megatron_bridge``. The MTP layer, which Megatron-Bridge does not build for these models, is copied through unquantized from the source checkpoint.
+- Add GLM-5.3-Flash (``glm5_next``) support to ``examples/megatron_bridge`` PTQ and unified HF export with the ``models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`` recipe, matching ``nvidia/GLM-5.3-Flash-NVFP4``. Requires a Megatron-Bridge and Megatron-Core with GLM-5.3-Flash support. DSA sparse-attention models also gain FP8 KV-cache quantization on Megatron.
+- Add ``--ep_size`` to ``examples/megatron_bridge/export_quantized_megatron_to_hf.py`` so large MoE models with grouped-GEMM experts can be exported with their experts sharded across GPUs. Checkpoints built with ``--no_moe_grouped_gemm`` must still be exported at ``--ep_size 1``.
 
 *Misc*
 
@@ -77,6 +80,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix shared ONNX export metadata and Diffusers attention policy: every ``NVFP4QuantExporter`` post-process now upgrades the default-domain opset to at least 23, all FP8 custom-op exports re-run ONNX shape/type inference after setting output metadata, and quantized SDPA derives FP8 MHA enablement from the live Q/K/V quantizers instead of honoring a caller-set ``_disable_fp8_mha`` attribute.
 - Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
 - Fix ``examples/hf_ptq/hf_ptq.py`` discarding a completed PTQ run (no checkpoint exported) when the optional post-quantization sanity-check ``generate()`` call raised, for example because ``device_map="auto"`` placed part of the model on CPU. That failure is now caught and only skips the sanity check; export proceeds regardless.
