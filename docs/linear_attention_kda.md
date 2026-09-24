@@ -44,7 +44,8 @@ Chunk size is 64. Working arithmetic is FP32, including inside an outer BF16
 training-autocast context; double inputs use FP64. Output returns to the query
 dtype. Select `torch.set_float32_matmul_precision("highest")` to exclude TF32.
 Operand and arithmetic rounding use identity STE; state carry is differentiable.
-Exact triangular solve is the only supported solve in this delivery.
+Exact triangular solve is the default; an explicit
+[Neumann policy](linear_attention_solve.md) enables polynomial approximation.
 
 Raw gate activation follows the loaded FLA model: without `lower_bound`, it is
 `-exp(A_log) * softplus(raw_gate + dt_bias)`; with a lower bound, it is

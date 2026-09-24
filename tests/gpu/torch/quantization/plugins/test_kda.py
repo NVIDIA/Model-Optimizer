@@ -59,6 +59,7 @@ def _forward(model, hidden):
         "prefill_fp8",
         "prefill_nvfp4",
         "arithmetic",
+        "solve",
         "decode_token",
         "decode_replay",
         "decode_token_int8",
@@ -98,6 +99,12 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
         cfg["quant_cfg"].append({"quantizer_name": "*kda_state_quantizer", "cfg": state_attributes})
     if mode == "arithmetic":
         cfg["linear_attention"][0]["cfg"]["elementwise"] = {"value_residual": "bfloat16"}
+    if mode == "solve":
+        cfg["linear_attention"][0]["cfg"]["solve"] = {
+            "method": "neumann",
+            "degree": 3,
+            "implementation": "triton",
+        }
     if mode.startswith("decode"):
         cfg["quant_cfg"].append({"quantizer_name": "*kda_state_quantizer", "cfg": state_attributes})
         policy_cfg = cfg["linear_attention"][0]["cfg"]

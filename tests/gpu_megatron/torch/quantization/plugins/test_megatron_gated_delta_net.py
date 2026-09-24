@@ -110,7 +110,9 @@ def _config_for_mode(mode):
     if mode.startswith("prefill"):
         policy = cfg["linear_attention"][0]["cfg"]
         policy["backend"] = "matmul"
-        if mode == "prefill_arithmetic":
+        if mode == "prefill_solve":
+            policy["solve"] = {"method": "neumann", "degree": 1, "implementation": "triton"}
+        elif mode == "prefill_arithmetic":
             policy["matmul"] = {
                 "output_value": {"accumulator_dtype": "float16", "reduction_block": 16}
             }
@@ -231,6 +233,7 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
         "prefill_fp8",
         "prefill_nvfp4",
         "prefill_arithmetic",
+        "prefill_solve",
         "decode_token",
         "decode_replay",
         "state_int8",
@@ -260,6 +263,7 @@ def _test_gdn_context_parallel_helper(rank, size, mode):
         "w",
         "prefill_fp8",
         "prefill_arithmetic",
+        "prefill_solve",
         "decode_token",
         "decode_replay",
         "state_int8",

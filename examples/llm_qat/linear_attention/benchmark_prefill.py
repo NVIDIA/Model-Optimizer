@@ -54,6 +54,7 @@ def main():
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--revision", default=None)
+    parser.add_argument("--solve-degrees", type=int, nargs="*", default=[])
     options = parser.parse_args()
     torch.manual_seed(2026)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -123,6 +124,26 @@ def main():
 
         variants[mode] = run
 
+    for degree in options.solve_degrees:
+        sites = LinearAttentionMatmulSites()
+        w = TensorQuantizer(QuantizerAttributeConfig(enable=False))
+        policy = LinearAttentionConfig(
+            backend="matmul",
+            solve={"method": "neumann", "degree": degree, "implementation": "triton"},
+        )
+
+        def run_solve(sites=sites, w=w, policy=policy):
+            return materialized(
+                *inputs,
+                initial_state=state,
+                output_final_state=True,
+                sites=sites,
+                w_quantizer=w,
+                policy=policy,
+            )
+
+        variants[f"neumann_{degree}"] = run_solve
+
     def measure(fn):
         torch.cuda.synchronize()
         baseline_bytes = torch.cuda.memory_allocated()
@@ -168,8 +189,9 @@ def main():
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     sources = [
         Path("modelopt/torch/quantization/linear_attention") / name
-        for name in ("prefill.py", "kda.py", "matmul.py", "reference.py", "config.py")
+        for name in ("prefill.py", "kda.py", "matmul.py", "reference.py", "config.py", "solve.py")
     ]
+    sources.append(Path("modelopt/torch/kernels/quantization/linear_attention/neumann.py"))
     result = {
         "attention": options.attention,
         "git_head": revision,
