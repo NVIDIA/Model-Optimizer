@@ -368,6 +368,10 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                     "KV-cache AutoQuant does not support cost_excluded_layers; use "
                     "disabled_layers to exclude non-KV-cache modules from the search."
                 )
+        if self.method_options and self.auto_quantize_method != "aumann_shapley":
+            raise ValueError(
+                f"auto_quantize_method={self.auto_quantize_method!r} accepts no method_options."
+            )
         return self
 
 

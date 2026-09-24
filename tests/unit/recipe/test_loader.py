@@ -2420,6 +2420,20 @@ def test_load_recipe_autoquantize_method_options_cannot_select_method(tmp_path):
         load_recipe(recipe_file)
 
 
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_load_recipe_autoquantize_rejects_options_for_methods_without_options(tmp_path, method):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + f"  auto_quantize_method: {method}\n"
+        + "  method_options:\n"
+        + "    num_path_nodes: 2\n"
+    )
+
+    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*no method_options"):
+        load_recipe(recipe_file)
+
+
 def test_load_recipe_autoquantize_rejects_two_search_targets(tmp_path):
     recipe_file = tmp_path / "aq_opts.yml"
     recipe_file.write_text(
@@ -2456,6 +2470,22 @@ def test_load_recipe_autoquantize_damage_bound_without_bit_budget(tmp_path):
     aq = load_recipe(recipe_file).auto_quantize
 
     assert aq.constraints.effective_bits == 4.8
+    assert "effective_bits" not in aq.constraints.model_fields_set
+    assert aq.method_options == {"max_predicted_damage": 0.05}
+
+
+def test_load_recipe_autoquantize_damage_bound_survives_override_round_trip(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    aq = load_recipe(recipe_file, overrides=["auto_quantize.score_size=64"]).auto_quantize
+
+    assert aq.score_size == 64
     assert "effective_bits" not in aq.constraints.model_fields_set
     assert aq.method_options == {"max_predicted_damage": 0.05}
 

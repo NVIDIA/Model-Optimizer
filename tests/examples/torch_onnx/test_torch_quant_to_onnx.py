@@ -14,18 +14,22 @@
 # limitations under the License.
 
 
+import importlib
 from collections import defaultdict
+from pathlib import Path
 
 import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
 from modelopt.recipe import load_recipe
+from modelopt.recipe.config import AutoQuantizeConfig
 
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
 _QFORMATS = ["fp8", "int8", "mxfp8", "nvfp4", "auto"]
 _RESNET_RECIPE_QFORMATS = {"fp8", "int8"}
+_EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "torch_onnx"
 
 _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
@@ -166,14 +170,18 @@ def test_torch_onnx_auto_quantize_recipe(tmp_path):
     run_example_command(cmd_parts, "torch_onnx")
 
 
-def test_auto_quantize_recipe_mapping():
-    from examples.torch_onnx.torch_quant_to_onnx import (
-        _enables_resnet_residual_quantization,
-        _mtq_inputs_from_auto_quantize_config,
-    )
+def _import_torch_quant_to_onnx(monkeypatch):
+    monkeypatch.syspath_prepend(str(_EXAMPLE_DIR))
+    return importlib.import_module("torch_quant_to_onnx")
+
+
+def test_auto_quantize_recipe_mapping(monkeypatch):
+    torch_quant_to_onnx = _import_torch_quant_to_onnx(monkeypatch)
 
     recipe = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits")
-    inputs = _mtq_inputs_from_auto_quantize_config(recipe.auto_quantize, recipe.quantize)
+    inputs = torch_quant_to_onnx._mtq_inputs_from_auto_quantize_config(
+        recipe.auto_quantize, recipe.quantize
+    )
 
     assert inputs["num_score_steps"] == recipe.auto_quantize.score_size
     assert len(inputs["quantization_formats"]) == 2
@@ -186,4 +194,36 @@ def test_auto_quantize_recipe_mapping():
         )
     )
     assert any(entry.get("parent_class") == "nn.Conv2d" for entry in block_format["quant_cfg"])
-    assert _enables_resnet_residual_quantization(load_recipe("timm/resnet/ptq/fp8"))
+    assert torch_quant_to_onnx._enables_resnet_residual_quantization(
+        load_recipe("timm/resnet/ptq/fp8")
+    )
+
+
+def test_auto_quantize_damage_bound_recipe_mapping(monkeypatch):
+    torch_quant_to_onnx = _import_torch_quant_to_onnx(monkeypatch)
+
+    base = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    values = {name: getattr(base, name) for name in type(base).model_fields}
+    auto_config = AutoQuantizeConfig.model_validate(
+        {
+            **values,
+            "constraints": {},
+            "auto_quantize_method": "aumann_shapley",
+            "method_options": {
+                "num_path_nodes": 3,
+                "damage_link": "additive",
+                "max_predicted_damage": 0.05,
+            },
+        }
+    )
+
+    inputs = torch_quant_to_onnx._mtq_inputs_from_auto_quantize_config(auto_config)
+
+    assert "effective_bits" not in inputs["constraints"]
+    assert inputs["constraints"]["cost_model"] == "weight"
+    assert inputs["method"] == {
+        "method": "aumann_shapley",
+        "num_path_nodes": 3,
+        "damage_link": "additive",
+        "max_predicted_damage": 0.05,
+    }
