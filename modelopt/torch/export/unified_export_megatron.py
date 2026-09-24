@@ -182,6 +182,7 @@ class GPTModelExporter:
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
 
         # Update hf_config
+        self._src_num_hidden_layers = self._hf_text_config.num_hidden_layers
         self._hf_text_config.num_hidden_layers = language_model.config.num_layers
         self._hf_text_config.hidden_size = language_model.config.hidden_size
         # MLA's kv_channels is the V head dim, not HF's head_dim (e.g. glm5_next derives it from RoPE).
@@ -210,6 +211,7 @@ class GPTModelExporter:
                 del self._hf_config.quantization_config
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
+        self.all_mcore_mappings = all_mcore_hf_export_mapping[self.arch]
         if self.rules.get("fold_attn_mlp_layer_pairs", False):
             # Each HF decoder layer is an attention and an MLP physical layer in Megatron.
             self._hf_text_config.num_hidden_layers = language_model.config.num_layers // 2
@@ -783,6 +785,15 @@ class GPTModelExporter:
                             layer.mlp.shared_experts.gate_weight, layer_id, is_mtp=is_mtp
                         )
                 if hasattr(layer.mlp.experts, "local_experts"):
+                    # SequentialMLP rules index experts by local position, so EP>1 would collide.
+                    if (
+                        torch.distributed.is_initialized()
+                        and get_expert_model_parallel_world_size() > 1
+                    ):
+                        raise NotImplementedError(
+                            "Export at expert parallel size > 1 needs grouped-GEMM experts; "
+                            "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
+                        )
                     if not self.rules.get("use_packed_local_experts", False):
                         for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
                             self.rules["local_experts.linear_fc1"](
@@ -889,6 +900,8 @@ class GPTModelExporter:
         mtp_state_dict = {}
         if not self._hf_pretrained_model_name:
             return mtp_state_dict
+        if self.rules.get("mtp_in_decoder_layers", False):
+            return self._copy_decoder_mtp_layers_from_pretrained()
 
         mtp_exists = False
 
@@ -942,6 +955,34 @@ class GPTModelExporter:
             self.exclude_modules.append("mtp*")
         return mtp_state_dict
 
+    def _copy_decoder_mtp_layers_from_pretrained(self) -> dict[str, torch.Tensor]:
+        """Copy MTP layers stored as extra decoder layers (GLM-5.x) from the source, dequantized.
+
+        Used when Megatron did not build the MTP (e.g. Megatron-Bridge's GLM-5 bridge); the copies
+        stay BF16 and are excluded from quantization, like the released NVFP4 checkpoints.
+        """
+        num_mtp = getattr(self._hf_text_config, "num_nextn_predict_layers", 0) or 0
+        source = self._hf_pretrained_model_name
+        if num_mtp == 0 or source is None or not os.path.isdir(source):
+            return {}
+        layers_prefix = self.all_mcore_mappings["input_layernorm"].target_name_or_prefix
+        layers_prefix = layers_prefix.split("{}")[0]  # e.g. "model.layers."
+        keys = _read_checkpoint_keys(source)
+        mtp_state_dict = {}
+        for i in range(num_mtp):
+            src = f"{layers_prefix}{self._src_num_hidden_layers + i}."
+            dst = f"{layers_prefix}{self._hf_text_config.num_hidden_layers + i}."
+            for key in sorted(
+                k for k in keys if k.startswith(src) and not k.endswith("_scale_inv")
+            ):
+                mtp_state_dict[dst + key[len(src) :]] = get_safetensor(
+                    str(source), key, dequantize=True
+                )
+            self.exclude_modules.append(dst + "*")
+        if mtp_state_dict:
+            print(f"Copied {len(mtp_state_dict)} MTP tensors from {source}")
+        return mtp_state_dict
+
     def _get_gated_delta_net_state_dict(self, layer, layer_id, is_mtp=False):
         """Export a GatedDeltaNet (Qwen3.5 linear-attention) layer's ``self_attention``."""
         gdn = layer.self_attention
@@ -970,9 +1011,13 @@ class GPTModelExporter:
             raise NotImplementedError(f"No export rule for the DSA indexer of {self.arch}.")
         for name in ("linear_wq_b", "linear_wk", "k_norm", "linear_weights_proj"):
             self.rules[f"indexer.{name}"](getattr(indexer, name), layer_id, is_mtp=is_mtp)
+        # KPool (GLM-5.3-Flash) only; plain DSA indexers (GLM-5.2) have no compression params.
         for name in ("index_kpool_compress_ape", "index_kpool_compress_gate"):
-            param = getattr(indexer, name).detach().to(self.dtype)
-            self.rules[f"indexer.{name}"](param, layer_id, is_mtp=is_mtp)
+            param = getattr(indexer, name, None)
+            if param is not None:
+                self.rules[f"indexer.{name}"](
+                    param.detach().to(self.dtype), layer_id, is_mtp=is_mtp
+                )
 
     def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):

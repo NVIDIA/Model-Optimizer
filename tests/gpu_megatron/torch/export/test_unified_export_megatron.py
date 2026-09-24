@@ -46,6 +46,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
+from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import IQ_FORMATS
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -955,6 +956,7 @@ def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:
     exporter._hf_pretrained_model_name = str(model_dir)
     exporter._state_dict = {}  # MTP keys are absent — they should be picked up
     exporter.exclude_modules = []
+    exporter.rules = {}  # a Qwen-style ``mtp.*`` checkpoint, not MTP stored as decoder layers
     return exporter
 
 
@@ -1026,6 +1028,40 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
+
+
+def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
+    """GLM-5 keeps MTP as an extra decoder layer; copy it dequantized when Megatron did not build it."""
+    model_dir = tmp_path / "fake_glm5"
+    model_dir.mkdir()
+    fp8 = torch.full((128, 128), 2.0).to(torch.float8_e4m3fn)
+    save_file(
+        {
+            "model.layers.1.input_layernorm.weight": torch.ones(8),  # pruned decoder layer
+            "model.layers.2.enorm.weight": torch.full((8,), 3.0),  # MTP layer of the source
+            "model.layers.2.eh_proj.weight": fp8,
+            "model.layers.2.eh_proj.weight_scale_inv": torch.full((1, 1), 0.5),
+        },
+        str(model_dir / "model.safetensors"),
+    )
+    exporter = _make_exporter_for_mtp(model_dir)
+    exporter.rules = {"mtp_in_decoder_layers": True}
+    exporter.all_mcore_mappings = all_mcore_hf_export_mapping["GlmMoeDsaForCausalLM"]
+    # Depth-pruned from 2 to 1 decoder layers: the source MTP (layer 2) lands at layer 1.
+    exporter._src_num_hidden_layers = 2
+    exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
+
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert sorted(mtp_state_dict) == [
+        "model.layers.1.eh_proj.weight",
+        "model.layers.1.enorm.weight",
+    ]
+    assert mtp_state_dict["model.layers.1.eh_proj.weight"].dtype == torch.bfloat16
+    torch.testing.assert_close(
+        mtp_state_dict["model.layers.1.eh_proj.weight"].float(), torch.ones(128, 128)
+    )
+    assert exporter.exclude_modules == ["model.layers.1.*"]
 
 
 class _FakeTEGroupedMLP:

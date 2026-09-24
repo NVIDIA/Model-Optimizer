@@ -41,29 +41,32 @@ _DENSE_KWARGS = {
 
 
 @pytest.mark.parametrize(
-    ("create_model", "model_kwargs"),
+    ("create_model", "model_kwargs", "export_parallelism"),
     [
         # MoE: routed experts used to be dropped silently from the export.
-        (create_tiny_qwen3_moe_dir, _DENSE_KWARGS),
+        (create_tiny_qwen3_moe_dir, _DENSE_KWARGS, "pp_size"),
         # Dense VLM: only the language model is quantized, vision is copied through.
-        (create_tiny_qwen3vl_dir, {}),
-        # Mamba hybrid + MoE, and the one architecture that keeps grouped-GEMM experts.
-        (create_tiny_nemotron_h_dir, {}),
+        (create_tiny_qwen3vl_dir, {}, "pp_size"),
+        # Mamba hybrid + MoE with grouped-GEMM experts: exported with its experts sharded
+        # across ranks (EP), resharded from the TP-quantized checkpoint.
+        (create_tiny_nemotron_h_dir, {}, "ep_size"),
     ],
     ids=["qwen3_moe", "qwen3vl", "nemotron_h"],
 )
 @pytest.mark.timeout(360)  # quantize + export in one test; 1-gpu CI exceeds the default 300s
-def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwargs):
+def test_quantize_and_export(
+    tmp_path: Path, num_gpus, create_model, model_kwargs, export_parallelism
+):
     """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint."""
     hf_model_path = create_model(tmp_path, with_tokenizer=True, **model_kwargs)
-    megatron_path = tmp_path / "fp8_megatron"
-    hf_export_path = tmp_path / "fp8_hf"
+    megatron_path = tmp_path / "nvfp4_megatron"
+    hf_export_path = tmp_path / "nvfp4_hf"
 
     # Step 1: quantize and save a Megatron checkpoint
     quantize_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
-        recipe="general/ptq/fp8_default-kv_fp8",
+        recipe="general/ptq/nvfp4_default-kv_fp8",
         tp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=4,
@@ -81,7 +84,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwarg
         hf_model_name_or_path=hf_model_path,
         megatron_path=megatron_path,
         export_unified_hf_path=hf_export_path,
-        pp_size=num_gpus,
+        **{export_parallelism: num_gpus},
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()

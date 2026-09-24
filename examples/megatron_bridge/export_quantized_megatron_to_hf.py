@@ -90,6 +90,12 @@ def get_args() -> argparse.Namespace:
     # Only Pipeline parallelism is supported for export
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument(
+        "--ep_size",
+        type=int,
+        default=1,
+        help="Expert parallel size (grouped-GEMM experts only); shards the experts across ranks",
+    )
+    parser.add_argument(
         "--num_layers_in_first_pipeline_stage",
         type=int,
         default=None,
@@ -126,7 +132,7 @@ def main(args: argparse.Namespace):
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
-            "expert_model_parallel_size": 1,  # Expert parallelism is not supported
+            "expert_model_parallel_size": args.ep_size,
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
