@@ -47,13 +47,7 @@ import sys
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-from mlflow_utils import (
-    NON_PARAMS,
-    add_mlflow_args,
-    mlflow_run,
-    record_exported_checkpoint,
-    resolve_mlflow_args,
-)
+from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -115,9 +109,8 @@ PRUNE = Tool(
     variant_help="the pruning target, or export_config",
     variant=_prune_variant,
     model=lambda args: args.hf_model_name_or_path,
-    # Either, both or neither: a chain joins on the Megatron one, which is what a
-    # distillation or a quantization continues from.
-    checkpoint=lambda args: args.output_megatron_path or args.output_hf_path or None,
+    # Exactly one: the parser makes the two output flags a required exclusive group.
+    checkpoint=lambda args: args.output_megatron_path or args.output_hf_path,
     # Known only after the search, so main() stashes it on args.
     metrics=lambda args: (
         {} if getattr(args, "prune_score", None) is None else {"prune_score": args.prune_score}
@@ -773,10 +766,6 @@ def main(args: argparse.Namespace):
 
         copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         args.checkpoint_exported = True
-        # The Tool names the Megatron checkpoint when there is one, since that is what a
-        # chain joins on, so the HF one needs its own pointer only then.
-        if args.output_megatron_path:
-            record_exported_checkpoint(args, args.output_hf_path, dist.is_master())
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
     # Accuracy gate: exit non-zero if pruned model's score is below the bound

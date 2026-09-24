@@ -831,28 +831,19 @@ def test_an_unreachable_server_is_not_handed_to_megatron_bridge(monkeypatch, fak
 
 
 @pytest.mark.parametrize(
-    ("outputs", "chains_on"),
-    [(("mcore", "hf"), "mcore"), ((None, "hf"), "hf"), ((None, None), None)],
-    ids=["both", "hf-only", "scored-nothing-saved"],
+    "flag", ["--output_megatron_path", "--output_hf_path"], ids=["megatron", "hf"]
 )
-def test_the_megatron_checkpoint_is_what_a_pruning_run_chains_on(
-    fake_mlflow, tmp_path, outputs, chains_on
-):
-    """Both outputs are optional -- a quantization continues from the Megatron one -- and
-    scoring candidates without saving is a valid run that produced no weights to name."""
-    megatron, hf = outputs
-    argv = ["--prune_target_params", "4e9"]
-    for flag, value in (("--output_megatron_path", megatron), ("--output_hf_path", hf)):
-        if value:
-            argv += [flag, str(tmp_path / value)]
-    args = _parse_prune("--mlflow", URI, *argv)
+def test_a_pruning_run_points_whichever_checkpoint_it_saved(fake_mlflow, tmp_path, flag):
+    """``prune_minitron.py`` makes the two output flags a required exclusive group, so
+    exactly one is set and it is the one a chain joins on."""
+    args = _parse_prune("--mlflow", URI, flag, str(tmp_path), "--prune_target_params", "4e9")
 
-    assert PRUNE.checkpoint(args) == (str(tmp_path / chains_on) if chains_on else None)
-    assert ("checkpoint_path" in mlflow_lib.run_tags(args, PRUNE)) is bool(chains_on)
+    assert PRUNE.checkpoint(args) == str(tmp_path)
 
     with mlflow_utils.mlflow_run(args, PRUNE):
-        args.checkpoint_exported = True  # harmless when nothing was saved
+        args.checkpoint_exported = True
 
+    assert json.loads((tmp_path / ".experiment.json").read_text())["run_id"] == "deadbeef"
     assert fake_mlflow.status == "FINISHED"
 
 
