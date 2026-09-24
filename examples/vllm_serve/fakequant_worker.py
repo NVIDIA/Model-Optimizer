@@ -37,6 +37,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
 )
+from modelopt.torch.quantization.plugins.vllm_linear_attention import bind_vllm_linear_attention
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
@@ -114,23 +115,32 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
 
-        calib_dataloader = get_dataset_dataloader(
-            dataset_name=quant_config["dataset"],
-            tokenizer=tokenizer,
-            batch_size=quant_config["calib_batch_size"],
-            num_samples=quant_config["calib_size"],
-            device=self.device,
-        )
-
-        calibrate_loop = calibrate_fun(calib_dataloader, self)
-
         quant_cfg = get_quant_config(quant_config, model)
+        calibrate_loop = None
+        if quant_cfg.get("algorithm", "max") is not None:
+            calib_dataloader = get_dataset_dataloader(
+                dataset_name=quant_config["dataset"],
+                tokenizer=tokenizer,
+                batch_size=quant_config["calib_batch_size"],
+                num_samples=quant_config["calib_size"],
+                device=self.device,
+            )
+            worker_loop = calibrate_fun(calib_dataloader, self)
+
+            def calibrate_loop(converted):
+                self._linear_attention_layers = bind_vllm_linear_attention(
+                    converted, self.model_runner
+                )
+                worker_loop(converted)
+
         # Before calibration, which is the run this artifact is most wanted for if it dies.
         mlflow_tracker.log_quant_config(quant_cfg)
 
         with disable_compilation(model):
             print("Quantizing model...")
             mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+        self._linear_attention_layers = bind_vllm_linear_attention(model, self.model_runner)
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
@@ -142,6 +152,7 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
                 torch.distributed.barrier()
 
+    self._linear_attention_layers = bind_vllm_linear_attention(model, self.model_runner)
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
         mlflow_tracker.log_quant_summary(model)

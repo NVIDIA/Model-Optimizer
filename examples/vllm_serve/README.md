@@ -7,6 +7,10 @@ Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated
 The general fakequant example is tested with vLLM 0.9.0, 0.19.1, 0.26.0, and 0.28.0. The
 compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
+For GDN/KDA recurrent-state QDQ before native prefill and decode, see the
+[linear-attention fakequant guide](../../docs/linear_attention_vllm.md), which
+documents the initial vLLM 0.15.x runtime requirements and state-only INT8 recipe.
+
 ## Prepare environment
 
 Use the Dockerfile to build an environment with vLLM 0.28.0:
