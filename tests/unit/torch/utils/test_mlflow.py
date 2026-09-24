@@ -19,7 +19,9 @@ import getpass
 import io
 import json
 import logging
+import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -37,11 +39,13 @@ from modelopt.torch.utils.mlflow import (
     command_text,
     default_experiment_name,
     drop_experiment_json,
+    log_active_run_experiment_json,
     mask_tracking_uri,
     masked_args,
     resolve_mlflow_args,
     resolved_recipe_texts,
     run_tags,
+    split_tracking_credentials,
     tracked_run,
     validate_tracking_uri,
 )
@@ -52,6 +56,15 @@ URI = "https://mlflow.example.com"
 # precisely to prove such credentials are masked.
 CREDS_URI = "https://user:tok@mlflow.example.com"  # trufflehog:ignore
 SHORT_CREDS_URI = "https://u:tok@host"  # trufflehog:ignore
+
+
+def _install_foreign(monkeypatch, fake):
+    """Register *fake* as both ``mlflow`` and the ``mlflow.tracking`` the client comes from."""
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setitem(
+        sys.modules, "mlflow.tracking", SimpleNamespace(MlflowClient=fake._client())
+    )
+    return fake
 
 
 def _unreachable(fake):
@@ -1054,6 +1067,123 @@ def test_a_failed_tracked_run_leaves_no_pointer_but_is_still_recorded(fake_mlflo
     assert fake_mlflow.status == "FAILED"
 
 
+# --- pointing a checkpoint at a run this process did not open ---------------------------
+
+
+class ForeignMlflow:
+    """A run opened by another library -- Megatron-Bridge's LoggerConfig, in practice.
+
+    ``start_run`` raises: nothing here may open a run of its own, which is what the fluent
+    ``mlflow.log_text`` would do once the foreign run has been closed.
+    """
+
+    def __init__(self, run=True, ended=False):
+        self.texts = {}
+        self.logged_to = None
+        self._ended = ended
+        self._run = (
+            SimpleNamespace(
+                info=SimpleNamespace(experiment_id="9", run_id="cafe", run_name="qad-1")
+            )
+            if run
+            else None
+        )
+
+    def active_run(self):
+        return None if self._ended else self._run
+
+    def last_active_run(self):
+        return self._run
+
+    def get_tracking_uri(self):
+        return f"{URI}/"
+
+    def get_experiment(self, experiment_id):
+        return SimpleNamespace(name="tester/megatron_bridge_distill/Qwen3-0.6B-nvfp4")
+
+    def log_text(self, text, artifact_file):
+        # The 2.9 floor's signature: no run_id. Reaching this at all is the bug.
+        raise AssertionError("the fluent log_text would resolve (and open) a run of its own")
+
+    def start_run(self, *args, **kwargs):
+        raise AssertionError("recording a foreign run must not open a run of its own")
+
+    def _client(self):
+        fake = self
+
+        class Client:
+            def log_text(self, run_id, text, artifact_file):
+                fake.logged_to = run_id
+                fake.texts[artifact_file] = text
+
+        return Client
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["still-open", "already-closed"])
+def test_the_active_run_can_claim_a_checkpoint(monkeypatch, tmp_path, ended):
+    """A training job's run is opened by Megatron-Bridge, but its checkpoint still has to
+    name it, in the same format a run we opened ourselves would write -- and Megatron-Bridge
+    exits from inside its training loop, so this is reached after atexit closed the run."""
+    fake = _install_foreign(monkeypatch, ForeignMlflow(ended=ended))
+
+    log_active_run_experiment_json(tmp_path)
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "cafe"
+    assert written["run_name"] == "qad-1"
+    assert written["experiment_name"] == "tester/megatron_bridge_distill/Qwen3-0.6B-nvfp4"
+    assert written["run_url"] == f"{URI}/#/experiments/9/runs/cafe"
+    assert json.loads(fake.texts["experiment.json"]) == written
+    assert fake.logged_to == "cafe"  # uploaded to the foreign run, not a new one
+
+
+def test_no_run_to_record_clears_the_pointer_quietly(monkeypatch, tmp_path, capsys):
+    """An untracked job reaches this too. It saved these weights, so a pointer inherited
+    from an earlier run must go -- and an absent mlflow is not worth warning about."""
+    monkeypatch.setitem(sys.modules, "mlflow", None)  # import mlflow -> ImportError
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    assert log_active_run_experiment_json(tmp_path) is False
+
+    assert not stale.exists()
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_a_server_blip_costs_the_display_name_not_the_pointer(monkeypatch, tmp_path, capsys):
+    """Only the experiment name needs the server; the ids are on run.info already, and
+    run_id is what anything resolves the run by."""
+    fake = ForeignMlflow()
+    fake.get_experiment = lambda experiment_id: 1 / 0
+    _install_foreign(monkeypatch, fake)
+
+    assert log_active_run_experiment_json(tmp_path) is True
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "cafe"
+    assert written["experiment_name"] == ""
+    assert written["run_url"].endswith("/#/experiments/9/runs/cafe")
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_a_failed_upload_still_leaves_the_pointer_on_disk(monkeypatch, tmp_path, capsys):
+    """The file beside the weights is what travels with the checkpoint. An upload that
+    fails -- an mlflow too old for the call, a server that went away -- must not cost it."""
+    fake = ForeignMlflow()
+
+    class Exploding:
+        def log_text(self, *args, **kwargs):
+            raise TypeError("log_text() got an unexpected keyword argument")
+
+    fake._client = lambda: Exploding
+    _install_foreign(monkeypatch, fake)
+
+    log_active_run_experiment_json(tmp_path)
+
+    assert json.loads((tmp_path / EXPERIMENT_JSON).read_text())["run_id"] == "cafe"
+    assert "WARNING" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("relative", [True, False], ids=["relative", "absolute"])
 def test_a_source_path_joins_whatever_the_caller_typed(monkeypatch, tmp_path, relative):
     """The previous stage tagged its output resolved, so a relative source must match it."""
@@ -1074,3 +1204,103 @@ def test_a_hub_model_id_is_not_mistaken_for_a_path():
 
     assert tags["source_checkpoint_path"] == "Qwen/Qwen3-8B"
     assert tags["model"] == "Qwen3-8B"
+
+
+def test_a_run_closed_by_a_co_owner_keeps_the_outputs_and_the_status(fake_mlflow, tmp_path):
+    """The sequence a preempted distillation goes through: Megatron-Bridge shares the run and
+    ends it as KILLED from its SIGTERM handler, then exits from inside train(). Everything the
+    close path uploads -- the pointer artifact first, before the log -- has to reach that run
+    rather than a second one, and the status it was closed with says more than ours."""
+    with tracked_run(_run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: True):
+        fake_mlflow.end_run(status="KILLED")  # the co-owner, from its signal handler
+
+    assert fake_mlflow.strays == 0  # re-attached, rather than opening a run of its own
+    assert fake_mlflow.resumed == "deadbeef"
+    assert json.loads(fake_mlflow.texts["experiment.json"])["run_id"] == "deadbeef"
+    assert "total_time_s" in fake_mlflow.metrics
+    assert fake_mlflow.status == "KILLED"
+
+
+def test_outputs_are_never_uploaded_into_a_run_this_one_does_not_own(fake_mlflow, capsys):
+    """The design rests on Megatron-Bridge joining the active run rather than opening its
+    own. If that ever stops holding, uploading would put this run's log in someone else's and
+    close it with this block's status, which is worse than the stray run it guards against."""
+    logger = _logger()
+    logger.start()
+    fake_mlflow._run = SimpleNamespace(info=SimpleNamespace(run_id="someone-else"))
+
+    logger.finish("FINISHED")
+
+    assert fake_mlflow.metrics == {}  # nothing of this run's went into the other one
+    assert fake_mlflow.status is None  # and the other one is still open
+    assert "is active instead of this one" in capsys.readouterr().out
+
+
+def test_a_clean_close_elsewhere_does_not_mask_this_block_s_failure(fake_mlflow, tmp_path):
+    """Only a co-owner's *abnormal* status is kept. Otherwise a component that ended the run
+    on its way out would report a run that crashed here as FINISHED."""
+    with (
+        pytest.raises(RuntimeError),
+        tracked_run(_run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: False),
+    ):
+        fake_mlflow.end_run(status="FINISHED")
+        raise RuntimeError("export blew up")
+
+    assert fake_mlflow.strays == 0
+    assert fake_mlflow.status == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("uri", "stripped", "username", "password"),
+    [
+        (CREDS_URI, URI, "user", "tok"),
+        (URI, URI, None, None),
+        # Percent-encoded userinfo: requests decodes what it finds in a URI, so this must too,
+        # or the two paths authenticate as different users.
+        ("https://al%3Ace:tok%2Fen@mlflow.example.com", URI, "al:ce", "tok/en"),
+        # MLflow sends basic auth only with both variables set, so half a credential has
+        # nowhere to go; the caller is told rather than handed a URI it would record from.
+        ("https://tok@mlflow.example.com", None, None, None),
+        ("https://:tok@mlflow.example.com", None, None, None),
+        # urlparse reads "user:" as the scheme and leaves the credential in .path, where the
+        # userinfo check never sees it -- so this fails closed rather than returning it.
+        ("user:tok@mlflow.example.com", None, None, None),
+    ],
+    ids=["pair", "none", "percent-encoded", "no-password", "no-username", "no-scheme"],
+)  # trufflehog:ignore
+def test_credentials_move_out_of_the_uri_into_mlflows_own_variables(
+    uri, stripped, username, password
+):
+    """A caller handing the URI to something that records it cannot mask the credential --
+    the value is also what authenticates -- so it moves where MLflow reads it from."""
+    assert split_tracking_credentials(uri) == stripped
+    assert os.environ.get("MLFLOW_TRACKING_USERNAME") == username
+    assert os.environ.get("MLFLOW_TRACKING_PASSWORD") == password
+
+
+def test_credentials_the_caller_exported_win(monkeypatch):
+    """Those were set deliberately; a URI is the fallback, not an override."""
+    monkeypatch.setenv("MLFLOW_TRACKING_USERNAME", "from-the-environment")
+
+    split_tracking_credentials(CREDS_URI)
+
+    assert os.environ["MLFLOW_TRACKING_USERNAME"] == "from-the-environment"
+
+
+def test_an_unreadable_run_clears_the_pointer_rather_than_leaving_a_wrong_one(
+    monkeypatch, tmp_path, capsys
+):
+    """A resumed run starts with the previous run's pointer in place and has already proven
+    it saved. If the server goes away before we can name our own run, a stale pointer would
+    be a wrong answer rather than no answer."""
+    fake = ForeignMlflow()
+    # run.info itself unusable, so not even the ids can be recorded.
+    fake._run = SimpleNamespace(info=None)
+    _install_foreign(monkeypatch, fake)
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    assert log_active_run_experiment_json(tmp_path) is False
+
+    assert not stale.exists()
+    assert "WARNING" in capsys.readouterr().out
