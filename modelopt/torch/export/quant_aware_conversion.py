@@ -35,7 +35,7 @@ operations.
 
 Scope
 -----
-Two reverse primitives cover the conversion_mapping cases:
+Three reverse primitives cover the conversion_mapping cases:
 
 * **Rename** — a key-level string substitution. Because a quantized linear stores
   every tensor under ``<module>.<leaf>``, renaming the module substring rewrites the
@@ -44,6 +44,10 @@ Two reverse primitives cover the conversion_mapping cases:
   ``gate_proj`` + ``up_proj``). ``weight``/``weight_scale``/``weight_scale_inv``/
   ``bias`` are chunked along the fused (output) dim; 0-d scalar ``weight_scale_2``/
   ``input_scale`` are duplicated to each part (they are per-tensor and shared).
+* **Merge** — re-fuse tensors split by a conversion mapping (e.g. RADIO
+  ``attention.{q,k,v}_proj`` -> ``attn.qkv``). Complete tensor groups are concatenated
+  in source-pattern order and the conversion's sub-model scope is preserved. A merge
+  with per-tensor scalar quantization state is ambiguous and triggers the safe fallback.
 
 MoE experts need only **Rename**: ModelOpt's export already expands the fused,
 stacked in-memory experts (``experts.gate_up_proj`` of shape ``[E, 2F, H]``) into
@@ -59,6 +63,7 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -125,6 +130,14 @@ class SplitRule:
     dim: int = 0
 
 
+@dataclass(frozen=True)
+class _MergeRule:
+    """Reverse of a ``Chunk`` conversion: concatenate a complete tensor group."""
+
+    converter: Any
+    dim: int
+
+
 def _split_leaf_tensor(leaf: str, tensor: torch.Tensor, n: int, idx: int, dim: int):
     """Return the ``idx``-th of ``n`` parts of ``tensor`` for tensor leaf ``leaf``."""
     if leaf in _SCALAR_LEAF_SUFFIXES or tensor.dim() == 0:
@@ -165,6 +178,63 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
             state_dict[target_key] = _split_leaf_tensor(leaf, tensor, n, idx, rule.dim)
 
 
+def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> None:
+    """Merge all complete tensor groups matched by a reversed ``WeightConverter``."""
+    converter = rule.converter
+    source_patterns = tuple(_as_list(converter.source_patterns))
+    groups: dict[str, dict[str, str]] = {}
+
+    for key in state_dict:
+        # ``rename_source_key`` owns scope handling: it strips the converter's prefix for
+        # matching and re-attaches it to the result.
+        target_key, source_pattern = converter.rename_source_key(key)
+        if source_pattern is None:
+            continue
+        sources = groups.setdefault(target_key, {})
+        if source_pattern in sources:
+            raise QuantConversionUnsupportedError(
+                f"multiple tensors for merge source '{source_pattern}' into '{target_key}'"
+            )
+        sources[source_pattern] = key
+
+    if not groups:
+        raise QuantConversionUnsupportedError(
+            f"merge rule for {source_patterns} matched no state-dict key "
+            f"(scope_prefix={getattr(converter, 'scope_prefix', None)!r})"
+        )
+
+    for target_key, sources in groups.items():
+        missing = [pattern for pattern in source_patterns if pattern not in sources]
+        if missing:
+            raise QuantConversionUnsupportedError(
+                f"incomplete merge into '{target_key}'; missing source patterns {missing}"
+            )
+        source_keys = [sources[pattern] for pattern in source_patterns]
+        tensors = [state_dict[key] for key in source_keys]
+        if any(tensor.dim() == 0 for tensor in tensors):
+            raise QuantConversionUnsupportedError(
+                f"cannot merge per-tensor scalar quantization state into '{target_key}'"
+            )
+        dtypes = {tensor.dtype for tensor in tensors}
+        if len(dtypes) > 1:
+            raise QuantConversionUnsupportedError(
+                f"cannot merge mixed dtypes {sorted(str(dtype) for dtype in dtypes)} "
+                f"into '{target_key}'"
+            )
+        if target_key in state_dict and target_key not in source_keys:
+            raise QuantConversionUnsupportedError(f"merge collision on '{target_key}'")
+        try:
+            merged = torch.cat(tensors, dim=rule.dim)
+        except (IndexError, RuntimeError) as exc:
+            shapes = [tuple(tensor.shape) for tensor in tensors]
+            raise QuantConversionUnsupportedError(
+                f"cannot merge tensors with shapes {shapes} into '{target_key}'"
+            ) from exc
+        for source_key in source_keys:
+            state_dict.pop(source_key)
+        state_dict[target_key] = merged
+
+
 def _compile_rename_rules(rename_rules: list[RenameRule]):
     """Pre-compile rename rules into ``(compiled_pattern, repl, scope_prefixes)`` triples."""
     return [(re.compile(r.pattern), r.repl, r.scope_prefixes) for r in rename_rules]
@@ -198,15 +268,18 @@ def apply_reverse_rules(
     state_dict: dict[str, torch.Tensor],
     split_rules: list[SplitRule],
     rename_rules: list[RenameRule],
+    merge_rules: list[_MergeRule] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Apply quant-aware reverse conversion: splits first, then renames.
+    """Apply quant-aware reverse conversion: tensor transforms first, then renames.
 
-    Splits run on the in-memory (post-conversion) names; renames then map the
-    resulting keys back to the original hub names. Renames are applied in order.
+    Splits and merges run on the in-memory (post-conversion) names; renames then map
+    the resulting keys back to the original hub names. Renames are applied in order.
     """
     out = dict(state_dict)
     for rule in split_rules:
         _apply_split_rule(out, rule)
+    for merge_rule in merge_rules or []:
+        _apply_merge_rule(out, merge_rule)
 
     compiled = _compile_rename_rules(rename_rules)
     renamed: dict[str, torch.Tensor] = {}
@@ -226,11 +299,11 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     when the mapping uses an op that cannot be reversed quant-aware yet, so the
     caller can fall back to the legacy behavior.
     """
-    split_rules, rename_rules, expert_fused_leaves = _build_reverse_rules(model)
-    if not split_rules and not rename_rules:
+    split_rules, merge_rules, rename_rules, expert_fused_leaves = _build_reverse_rules(model)
+    if not split_rules and not merge_rules and not rename_rules:
         return state_dict
     _assert_experts_pre_expanded(state_dict, expert_fused_leaves)
-    return apply_reverse_rules(state_dict, split_rules, rename_rules)
+    return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules)
 
 
 def build_reverse_name_mapper(model):
@@ -243,14 +316,14 @@ def build_reverse_name_mapper(model):
     post-conversion namespace -- so a deployment loader matching those patterns against
     the (reverted) hub-named modules finds no match, silently loads an excluded BF16
     layer as quantized, and fails. Applying the same rename rules to those name strings
-    keeps them aligned with the weights. Only the rename rules apply (splits act on
-    tensors, not names).
+    keeps them aligned with the weights. Only the rename rules apply (tensor transforms
+    do not have a one-to-one name mapping).
 
     Returns ``None`` when no renaming applies. Raises
     :class:`QuantConversionUnsupportedError` when the mapping can't be reversed, so the
     caller can keep the in-memory names for BOTH weights and config (mutually consistent).
     """
-    _, rename_rules, _ = _build_reverse_rules(model)
+    _, _, rename_rules, _ = _build_reverse_rules(model)
     if not rename_rules:
         return None
     compiled = _compile_rename_rules(rename_rules)
@@ -397,14 +470,15 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     return kept
 
 
-def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list[str]]:
+def _build_reverse_rules(
+    model,
+) -> tuple[list[SplitRule], list[_MergeRule], list[RenameRule], list[str]]:
     """Derive reverse rules from the model's transformers conversion mapping.
 
-    Returns ``(split_rules, rename_rules, expert_fused_leaves)``; the last is the set
-    of in-memory fused expert leaf names, used to guard against experts that were not
-    pre-expanded. Returns empty lists when no mapping applies (export unchanged). Uses
-    transformers' own ``reverse_transform()`` to get correctly-reversed name patterns
-    (so anchored regex renamings reverse properly), then translates them:
+    Returns tensor-transform rules, rename rules, and fused expert leaves. The last is
+    used to guard against experts that were not pre-expanded. Returns empty lists when
+    no mapping applies (export unchanged). Uses transformers' own
+    ``reverse_transform()`` to get correctly-reversed name patterns, then translates them:
 
     * ``WeightRenaming`` -> :class:`RenameRule` (carries scale siblings for free).
     * Expert ``WeightConverter`` (reverse contains ``SplitModulelist``): ModelOpt's
@@ -413,6 +487,8 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
       as rename rules -- no tensor manipulation.
     * Dense fusing ``WeightConverter`` (reverse is ``Chunk`` only): the fused tensor
       survives in the state dict, so it is un-fused via a :class:`SplitRule`.
+    * Dense splitting ``WeightConverter`` (reverse is ``Concatenate`` only): the split
+      tensors are re-fused under the transform's original sub-model scope.
 
     Raises :class:`QuantConversionUnsupportedError` for any op shape not covered, so
     the caller falls back to the legacy (in-memory-name) behavior.
@@ -427,11 +503,12 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
         raise QuantConversionUnsupportedError(f"could not read conversion mapping: {exc}") from exc
 
     if not conversions:
-        return [], [], []
+        return [], [], [], []
 
     try:
         from transformers.core_model_loading import (
             Chunk,
+            Concatenate,
             SplitModulelist,
             WeightConverter,
             WeightRenaming,
@@ -442,6 +519,7 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
         ) from exc
 
     split_rules: list[SplitRule] = []
+    merge_rules: list[_MergeRule] = []
     # WeightRenamings and expert-leaf (converter-derived) renames are collected
     # separately so they can be ordered correctly on the save path -- see the
     # ``rename_rules`` assembly below.
@@ -460,27 +538,36 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
                     RenameRule(pattern=pattern, repl=repl, scope_prefixes=scope_prefixes)
                 )
         elif isinstance(rev, WeightConverter):
-            # Converter-derived rules (expert leaf renames, dense split) are matched by
-            # module suffix, not by an anchored pattern, so they carry no scope and would
-            # reach identically-named modules in sibling namespaces. No current model
-            # scopes a WeightConverter -- transformers only scopes WeightRenaming /
-            # PrefixChange -- so rather than emit rules we cannot scope, refuse the
-            # conversion and let the caller fall back to in-memory names. That is a
-            # warning plus unchanged names, instead of a silently mis-named checkpoint.
-            if _scope_prefixes(rev):
-                raise QuantConversionUnsupportedError(
-                    f"scoped WeightConverter (scope_prefix="
-                    f"{getattr(rev, 'scope_prefix', None)!r}) cannot be reversed scope-aware"
-                )
             ops = list(rev.operations)
+            scope_prefixes = _scope_prefixes(rev)
             if any(isinstance(op, SplitModulelist) for op in ops):
+                if scope_prefixes:
+                    raise QuantConversionUnsupportedError(
+                        "scoped expert WeightConverter cannot be reversed scope-aware"
+                    )
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to
                 # per-expert 2-D linears, so only per-expert leaf names remain to map.
                 leaf_renamings.extend(_expert_leaf_renames(rev))
                 expert_fused_leaves.append(_leaf(_as_list(rev.source_patterns)[0]))
             elif ops and all(isinstance(op, Chunk) for op in ops):
+                if scope_prefixes:
+                    raise QuantConversionUnsupportedError(
+                        "scoped dense Chunk WeightConverter cannot be reversed scope-aware"
+                    )
                 # Dense fused linear survives in the state dict -> un-fuse (split).
                 split_rules.append(_dense_split_rule(rev, ops))
+            elif len(ops) == 1 and isinstance(ops[0], Concatenate):
+                if not callable(getattr(rev, "rename_source_key", None)):
+                    raise QuantConversionUnsupportedError(
+                        "WeightConverter.rename_source_key is unavailable in this transformers "
+                        "version; cannot reverse a merge scope-aware"
+                    )
+                merge_rules.append(
+                    _MergeRule(
+                        converter=rev,
+                        dim=ops[0].dim,
+                    )
+                )
             else:
                 raise QuantConversionUnsupportedError(
                     f"unsupported reverse ops: {[type(o).__name__ for o in ops]}"
@@ -500,7 +587,7 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
     # substrings and are applied first.
     weight_renamings = _drop_shadowed_prefix_renames(model, weight_renamings)
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
-    return split_rules, rename_rules, expert_fused_leaves
+    return split_rules, merge_rules, rename_rules, expert_fused_leaves
 
 
 # ModelOpt's export splits a fused ``gate_up_proj`` into these per-expert linears,

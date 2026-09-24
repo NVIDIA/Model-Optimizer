@@ -60,6 +60,22 @@ def _set_scope_attr(transform, name, value):
             raise
 
 
+def _radio_qkv_conversion(base_model_prefix=""):
+    """Build the RADIO fused-QKV conversion with an optional parent-model scope."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import Chunk, WeightConverter
+
+    qkv = WeightConverter(
+        source_patterns="attn.qkv",
+        target_patterns=["attention.q_proj", "attention.k_proj", "attention.v_proj"],
+        operations=[Chunk(dim=0)],
+    )
+    qkv.scope_prefix = "vision_model"
+    _set_scope_attr(qkv, "base_model_prefix", base_model_prefix)
+    return qkv
+
+
 # Tiny Mixtral shaped to match the synthetic expert tensors built by ``_nvfp4_linear`` below.
 _MIXTRAL_KWARGS = {
     "hidden_size": 32,
@@ -454,32 +470,98 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
     assert not any("language_model.visual" in k for k in reverted)
 
 
-def test_scoped_weight_converter_is_refused():
-    """A scoped ``WeightConverter`` must fall back rather than emit unscoped rules.
+def test_scoped_radio_qkv_converter_restores_hub_layout():
+    """RADIO Q/K/V tensors are re-fused in scope before hub-name renames run."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import WeightRenaming
 
-    Converter-derived rules (expert leaf renames, dense splits) match by module suffix,
-    so they cannot be confined to a sub-model subtree the way an anchored rename can.
-    No current architecture scopes a converter -- transformers only scopes
-    ``WeightRenaming``/``PrefixChange`` -- so if one ever appears, refusing the whole
-    conversion keeps the in-memory names (a warning) instead of silently rewriting an
-    identically-named module in a sibling namespace.
-    """
+    qkv = _radio_qkv_conversion(base_model_prefix="model")
+    radio_blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
+    radio_blocks.scope_prefix = "vision_model"
+    _set_scope_attr(radio_blocks, "base_model_prefix", "model")
+    projector = WeightRenaming("mlp1", "vision_projector.mlp1")
+
+    model = types.SimpleNamespace(_weight_conversions=[qkv, radio_blocks, projector])
+
+    q = torch.full((2, 3), 1.0)
+    k = torch.full((2, 3), 2.0)
+    v = torch.full((2, 3), 3.0)
+    language_q = torch.full((2, 3), 4.0)
+    sd = {
+        "model.vision_model.encoder.layer.0.attention.q_proj.weight": q,
+        "model.vision_model.encoder.layer.0.attention.k_proj.weight": k,
+        "model.vision_model.encoder.layer.0.attention.v_proj.weight": v,
+        "vision_projector.mlp1.0.weight": torch.randn(3, 3),
+        # Same leaf outside the converter's scope must not start an incomplete group.
+        "model.language_model.layers.0.attention.q_proj.weight": language_q,
+    }
+
+    out = revert_weight_conversion_quant_aware(model, sd)
+
+    qkv_key = "model.vision_model.radio_model.model.blocks.0.attn.qkv.weight"
+    assert torch.equal(out[qkv_key], torch.cat((q, k, v), dim=0))
+    assert "mlp1.0.weight" in out
+    assert out["model.language_model.layers.0.attention.q_proj.weight"] is language_q
+    assert not any("model.vision_model.encoder" in key for key in out)
+    assert not any("vision_projector.mlp1" in key for key in out)
+
+
+def test_radio_merge_that_matches_no_keys_raises():
+    """An unused merge rule must not let later renames create a mixed-name checkpoint."""
+    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    state_dict = {"language_model.layers.0.weight": torch.randn(2, 2)}
+
+    with pytest.raises(QuantConversionUnsupportedError, match="matched no state-dict key"):
+        revert_weight_conversion_quant_aware(model, state_dict)
+
+
+@pytest.mark.parametrize(
+    ("leaf", "tensors", "message"),
+    [
+        (
+            "weight",
+            (torch.ones(2, 3), torch.ones(2, 3, dtype=torch.float16), torch.ones(2, 3)),
+            "mixed dtypes",
+        ),
+        (
+            "input_scale",
+            (torch.tensor(1.0), torch.tensor(1.0), torch.tensor(1.0)),
+            "per-tensor scalar quantization state",
+        ),
+    ],
+    ids=["mixed-dtype", "scalar-quantization-state"],
+)
+def test_radio_merge_rejects_unsafe_tensor_groups(leaf, tensors, message):
+    """Unsafe tensor groups must trigger the atomic in-memory-name fallback."""
+    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    state_dict = {
+        f"vision_model.encoder.layer.0.attention.{part}_proj.{leaf}": tensor
+        for part, tensor in zip(("q", "k", "v"), tensors)
+    }
+
+    with pytest.raises(QuantConversionUnsupportedError, match=message):
+        revert_weight_conversion_quant_aware(model, state_dict)
+
+
+def test_radio_merge_requires_converter_rename_source_key():
+    """A transformers version without the bound rename helper must fall back cleanly."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import Chunk, WeightConverter
 
-    conv = WeightConverter(
-        source_patterns="mlp.gate_up_proj",
-        target_patterns=["mlp.gate_proj", "mlp.up_proj"],
+    class ConverterWithoutRename(WeightConverter):
+        rename_source_key = None
+
+    converter = ConverterWithoutRename(
+        source_patterns="attn.qkv",
+        target_patterns=["attention.q_proj", "attention.k_proj", "attention.v_proj"],
         operations=[Chunk(dim=0)],
     )
-    conv.scope_prefix = "model.language_model"
-    _set_scope_attr(conv, "base_model_prefix", "model")
-    model = types.SimpleNamespace(_weight_conversions=[conv])
+    model = types.SimpleNamespace(_weight_conversions=[converter])
 
-    sd = _nvfp4_linear("model.language_model.layers.0.mlp.gate_up_proj", 8, 16)
-    with pytest.raises(QuantConversionUnsupportedError, match="scoped WeightConverter"):
-        revert_weight_conversion_quant_aware(model, sd)
+    with pytest.raises(QuantConversionUnsupportedError, match="rename_source_key is unavailable"):
+        revert_weight_conversion_quant_aware(model, {})
 
 
 def test_split_collision_raises():
