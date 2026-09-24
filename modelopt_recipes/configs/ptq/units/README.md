@@ -35,5 +35,7 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at every kernel chunk boundary; needs `fla-core==0.5.1`, Triton, and SM89+ |
 | `gdn_state_int8_dynamic.yaml` | Signed symmetric dynamic INT8 recurrent-state QDQ with identity STE |
 | `gdn_w_fp8_dynamic.yaml` | FP8 E4M3 dynamic (per token and head) fake quantization of the WY tensor `w` that multiplies the GatedDeltaNet state; requires identity STE, `fla-core==0.5.1`, and Triton |
+| `gdn_prefill_fp8_dynamic.yaml` | Dynamic per-row E4M3 operand fake QDQ for all GDN prefill matmuls; requires the explicit `linear_attention` `matmul` backend |
+| `gdn_prefill_nvfp4_dynamic.yaml` | Dynamic block-16 NVFP4 operand fake QDQ for all GDN prefill matmuls; requires the explicit `linear_attention` `matmul` backend |
 
 See the [linear-attention training guide](../../../../docs/linear_attention_qat.md) for GDN policy, hardware, checkpoint, and gradient requirements.

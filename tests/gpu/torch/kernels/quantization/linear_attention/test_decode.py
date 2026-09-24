@@ -20,12 +20,20 @@ import triton
 import triton.language as tl
 
 from modelopt.torch.kernels.quantization.linear_attention.decode import _fp8_qdq, fused_recurrence
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.linear_attention import (
+    LinearAttentionConfig,
+    LinearAttentionMatmulSites,
+    matmul_gdn,
+    matmul_kda,
+)
 from modelopt.torch.quantization.linear_attention.config import LinearAttentionDecodeConfig
 from modelopt.torch.quantization.linear_attention.decode import (
     _encode,
     recurrent_decode,
     recurrent_decode_reference,
 )
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 @pytest.mark.parametrize("kda", [False, True])
@@ -368,3 +376,59 @@ def test_hadamard_long_trajectory(kda):
     for a, e in zip(*results):
         assert torch.isfinite(a).all() and torch.isfinite(e).all()
         assert (a - e).norm() / e.norm().clamp_min(1e-8) < 1e-4
+
+
+@pytest.mark.parametrize("kda", [False, True])
+@pytest.mark.parametrize("state_format", ["fp8_e4m3", "int8"])
+def test_packed_quantized_prefix_and_replay_composition(kda, state_format):
+    torch.manual_seed(591)
+    q, k = [
+        F.normalize(torch.randn(1, 73, 1, 16, device="cuda"), dim=-1).requires_grad_()
+        for _ in range(2)
+    ]
+    v = torch.randn(1, 73, 2, 19, device="cuda", requires_grad=True)
+    g = (-torch.rand((1, 73, 2, 16) if kda else (1, 73, 2), device="cuda") * 0.03).requires_grad_()
+    beta = (torch.rand(1, 73, 2, device="cuda") * 0.4).requires_grad_()
+    initial = (torch.randn(3, 2, 19, 16, device="cuda") * 0.1).requires_grad_()
+    sites = LinearAttentionMatmulSites()
+    attributes = {"num_bits": (4, 3), "type": "dynamic", "axis": (0, 1, 2)}
+    for quantizer in sites.modules():
+        if isinstance(quantizer, TensorQuantizer):
+            quantizer.set_from_attribute_config(attributes)
+            quantizer.enable()
+    w = TensorQuantizer(QuantizerAttributeConfig(**attributes))
+    outputs = []
+    function = matmul_kda if kda else matmul_gdn
+    args = q, k, v, g, beta
+    for implementation in ("torch", "triton"):
+        policy = LinearAttentionConfig(
+            backend="matmul",
+            state={"block_v": 16},
+            elementwise={"value_residual": "bfloat16"},
+            decode={
+                "mode": "replay",
+                "implementation": implementation,
+                "prefill_state_qdq": True,
+                "decay_log_step": 1 / 256,
+                "replay": {"window": 5},
+            },
+        )
+        output, final = function(
+            *args,
+            initial_state=initial,
+            state_v_first=True,
+            cu_seqlens=torch.tensor([0, 0, 9, 73]),
+            prefill_lengths=[0, 3, 33],
+            output_final_state=True,
+            sites=sites,
+            w_quantizer=w,
+            policy=policy,
+            state_qdq=True,
+            state_format=state_format,
+        )
+        gradients = torch.autograd.grad(
+            output.square().sum() + final.square().sum(), (*args, initial)
+        )
+        outputs.append((output, final, *gradients))
+    for actual, expected in zip(*outputs):
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=2e-5)

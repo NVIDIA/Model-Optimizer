@@ -29,11 +29,14 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
+    LinearAttentionMatmulSites,
     matmul_gdn,
     matmul_kda,
 )
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,6 +71,8 @@ def main():
         torch.randn(1, options.heads, options.dim, options.dim, device="cuda") * 0.1
     ).requires_grad_()
     args = q, k, v, g, beta
+    sites = LinearAttentionMatmulSites()
+    w = TensorQuantizer(QuantizerAttributeConfig(enable=False))
     function = matmul_kda if options.attention == "kda" else matmul_gdn
     variants: dict[str, Callable[[], tuple[torch.Tensor, torch.Tensor]]] = {}
     for mode in ["exact", "token", "decay", "replay"]:
@@ -84,6 +89,8 @@ def main():
                     *args,
                     initial_state=initial,
                     output_final_state=True,
+                    sites=sites,
+                    w_quantizer=w,
                     policy=policy,
                     state_qdq=mode != "exact",
                     state_format=options.state_format,
