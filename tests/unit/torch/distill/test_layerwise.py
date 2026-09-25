@@ -232,3 +232,15 @@ def test_layerwise_gradient_flow():
     assert updated_any, (
         "No parameters were updated in 'features.2' or related layers during training"
     )
+
+
+def test_layerwise_stale_output_warning_is_bounded(layerwise_distillation_model):
+    """Both layerwise hooks must share the parent's latch instead of failing or repeating."""
+    layerwise_distillation_model.train()
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        for _ in range(3):
+            layerwise_distillation_model(get_input_tensor())
+        stale = [x for x in w if "already has an intermediate output stored" in str(x.message)]
+        assert len(stale) == 2  # teacher's input/output hook and the student's output hook
