@@ -116,6 +116,19 @@ __device__ __forceinline__ float quantize_scale_fp8(float block_max, float globa
   return quantized * global_scale;
 }
 
+// NVFP4 block scale. Like the modelopt CUDA extension, a zero, inf or NaN global scale gives a
+// unit block scale.
+__device__ __forceinline__ float nvfp4_block_scale(float block_max, float global_scale) {
+  if (!(global_scale > 0.0f && isfinite(global_scale)))
+    return 1.0f;
+  return quantize_scale_fp8(block_max, global_scale);
+}
+
+// Only a zero block scale zeroes the block; small nonzero scales quantize normally.
+__device__ __forceinline__ float nvfp4_inv_scale(float scale) {
+  return scale > 0.0f ? 1.0f / scale : 0.0f;
+}
+
 // =============================================================================
 // BF16 WMMA Conv3D Implicit GEMM Kernel
 // =============================================================================
@@ -312,11 +325,9 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
 
           // Warp reduce — lanes outside this sub-block contribute 0, which is correct
           float block_max = warp_reduce_max(local_max);
-          float scale = quantize_scale_fp8(block_max, global_scale);
-          if (scale < 1e-5f)
-            scale = 1.0f;
+          float scale = nvfp4_block_scale(block_max, global_scale);
           scales[sb] = scale;
-          inv_scales[sb] = 1.0f / scale;
+          inv_scales[sb] = nvfp4_inv_scale(scale);
         }
 
         // Pass 3: Quantize and store to shared memory
@@ -505,10 +516,8 @@ __global__ void fp4_fake_quant_kernel(const float *__restrict__ x, float *__rest
   float block_max = warp_reduce_max(local_max);
 
   // Quantize the scale via FP8 E4M3 round-trip
-  float scale = quantize_scale_fp8(block_max, global_scale);
-  if (scale < 1e-5f)
-    scale = 1.0f;
-  float inv_scale = 1.0f / scale;
+  float scale = nvfp4_block_scale(block_max, global_scale);
+  float inv_scale = nvfp4_inv_scale(scale);
 
   // Pass 2: quantize + dequantize each element
   for (int i = lane_id; i < block_size; i += 32) {

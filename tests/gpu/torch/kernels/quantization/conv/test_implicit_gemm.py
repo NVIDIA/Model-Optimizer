@@ -421,6 +421,29 @@ class TestConv3dFP4QuantBlockSizes:
             f"fp4_block_size={fp4_block_size}: mean diff {mean_diff:.6e} too high"
         )
 
+    @pytest.mark.parametrize("fp4_block_size", [16, 128])
+    def test_quant_small_inputs_not_zeroed(self, cuda_conv3d, fp4_block_size):
+        """Scaling the activation and its amax by a power of two scales the output by the same factor.
+
+        Activation blocks with small magnitudes must not be flushed to zero by an absolute scale floor.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(1, 16, 8, 8, 8, device="cuda", dtype=torch.float32)
+        w = torch.randn(32, 16, 3, 3, 3, device="cuda", dtype=torch.float32)
+        act_amax = x.abs().max().unsqueeze(0)
+        kwargs = {
+            "stride": (1, 1, 1),
+            "padding": (1, 1, 1),
+            "dilation": (1, 1, 1),
+            "quant_act": True,
+            "fp4_block_size": fp4_block_size,
+        }
+        reference = cuda_conv3d(x, w, act_amax=act_amax, **kwargs)
+        assert reference.abs().max() > 0
+        factor = 2.0**-20
+        out = cuda_conv3d(x * factor, w, act_amax=act_amax * factor, **kwargs)
+        assert torch.equal(out, reference * factor)
+
     def test_smaller_block_less_error(self, cuda_conv3d):
         """Smaller FP4 block sizes should generally produce lower quantization error.
 
@@ -607,13 +630,15 @@ def _py_fp4_fake_quant_ref(x_flat, global_amax, block_size):
         block = x_np[b * block_size : (b + 1) * block_size]
         block_max = float(max(abs(v) for v in block))
 
-        # Scale quantization
-        scaled = block_max / (6.0 * global_scale)
-        scaled = min(scaled, 448.0)
-        quantized_scale = fp8_e4m3_roundtrip(scaled) * global_scale
-        if quantized_scale < 1e-5:
+        # Scale quantization; a zero, inf or NaN global scale gives a unit block scale
+        if 0.0 < global_scale < math.inf:
+            scaled = block_max / (6.0 * global_scale)
+            scaled = min(scaled, 448.0)
+            quantized_scale = fp8_e4m3_roundtrip(scaled) * global_scale
+        else:
             quantized_scale = 1.0
-        inv_scale = 1.0 / quantized_scale
+        # Only a zero block scale zeroes the block
+        inv_scale = 1.0 / quantized_scale if quantized_scale > 0.0 else 0.0
 
         for i in range(block_size):
             val = block[i]
@@ -721,6 +746,29 @@ class TestFP4FakeQuantScale:
         assert out.shape == inp.shape
         # Block 1 exact values should be close to E2M1 levels
         assert out[8:].abs().max() <= 6.0 + 1e-5
+
+    def test_small_inputs_not_zeroed(self, cuda_fp4):
+        """Scaling the input and global amax by a power of two scales the output by the same factor.
+
+        Blocks with small magnitudes must not be flushed to zero by an absolute scale floor.
+        """
+        torch.manual_seed(0)
+        inp = torch.randn(64 * 16, device="cuda") * 10
+        amax = inp.abs().max().unsqueeze(0)
+        reference = cuda_fp4(inp, amax, 16)
+        assert reference.abs().max() > 0
+        for factor in (2.0**-10, 2.0**-20):
+            assert torch.equal(cuda_fp4(inp * factor, amax * factor, 16), reference * factor)
+
+    @pytest.mark.parametrize("global_amax", [0.0, float("inf"), float("nan")])
+    def test_invalid_global_amax_uses_unit_scale(self, cuda_fp4, global_amax):
+        """A zero, inf or NaN global amax uses a unit block scale, like the modelopt CUDA extension."""
+        torch.manual_seed(0)
+        e2m1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
+        inp = e2m1[torch.randint(0, 8, (64 * 16,), device="cuda")]
+        inp = inp * (torch.randint(0, 2, inp.shape, device="cuda") * 2 - 1)
+        out = cuda_fp4(inp, torch.tensor([global_amax], device="cuda"), 16)
+        assert torch.equal(out, inp)
 
 
 class TestFP4FakeQuantBlockSizes:
