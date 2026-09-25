@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 
 import pytest
@@ -1582,17 +1583,22 @@ def test_provision_ssh_explicit_identity_overrides_default(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_read_cluster_artifact_logs_mode_ok(monkeypatch):
+def test_read_cluster_artifact_logs_mode_ok(monkeypatch, tmp_path):
     """path=None → wraps `nemo experiment logs <id> <job_idx>`."""
     captured = {}
+    monkeypatch.setattr(shutil, "which", lambda command: f"/mcp/bin/{command}")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "wrong-home"))
+    (tmp_path / "experiments" / "cicd" / "cicd_42").mkdir(parents=True)
 
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
+        captured["env"] = kwargs["env"]
         return subprocess.CompletedProcess(
             args=argv,
             returncode=0,
             stdout="line 1\nline 2\nline 3\n",
-            stderr="",
+            stderr="remote log line\n",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -1604,11 +1610,16 @@ def test_read_cluster_artifact_logs_mode_ok(monkeypatch):
     assert result["ok"] is True
     assert result["mode"] == "logs"
     assert "line 1" in result["content"]
+    assert "remote log line" in result["content"]
     # Verify the wrapped command
-    assert "nemo" in captured["argv"]
-    assert "experiment" in captured["argv"]
-    assert "logs" in captured["argv"]
-    assert "cicd_42" in captured["argv"]
+    assert captured["argv"] == [
+        "/mcp/bin/nemo",
+        "experiment",
+        "logs",
+        "cicd_42",
+        "0",
+    ]
+    assert captured["env"]["NEMORUN_HOME"] == str(tmp_path)
 
 
 def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):

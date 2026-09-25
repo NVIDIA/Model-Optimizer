@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -2113,15 +2114,22 @@ def read_cluster_artifact_impl(
         # Mode 1: fetch log via `nemo experiment logs`. Subprocess
         # because the CLI handles tunnel auth and remote-path
         # resolution.
+        nemo_cli = shutil.which("nemo") or str(Path(sys.executable).with_name("nemo"))
         argv = [
-            "uv",
-            "run",
-            "nemo",
+            nemo_cli,
             "experiment",
             "logs",
             experiment_id,
             str(job_idx),
         ]
+        child_env = os.environ.copy()
+        exp_dir = _resolve_experiment_dir(experiment_id)
+        if exp_dir is not None:
+            experiments_root = next(
+                (parent for parent in exp_dir.parents if parent.name == "experiments"), None
+            )
+            if experiments_root is not None:
+                child_env["NEMORUN_HOME"] = str(experiments_root.parent)
         try:
             proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
                 argv,
@@ -2129,6 +2137,7 @@ def read_cluster_artifact_impl(
                 text=True,
                 timeout=60,
                 check=False,
+                env=child_env,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -2154,7 +2163,7 @@ def read_cluster_artifact_impl(
                     f"{proc.returncode}. stderr: {proc.stderr.strip()[-400:]}"
                 ),
             }
-        content = (proc.stdout or "")[-8192:]
+        content = "\n".join(part for part in (proc.stdout, proc.stderr) if part)[-8192:]
         return {
             "ok": True,
             "experiment_id": experiment_id,
