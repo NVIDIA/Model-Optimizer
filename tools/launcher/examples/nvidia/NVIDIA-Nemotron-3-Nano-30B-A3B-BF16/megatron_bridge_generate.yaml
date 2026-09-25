@@ -1,0 +1,44 @@
+# Megatron-Bridge generation on quantized nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+#
+# Mirrors the user-provided reference command:
+#   torchrun --nproc_per_node 8 examples/quantization/ptq_generate.py \
+#     --megatron-load-path /models/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-MLM \
+#     --hf-model-id /models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+#     --trust-remote-code --tp 8 --ep 8
+#
+# Cluster shape: 2 nodes x 4 GPUs = 8 ranks.
+# Loads the MCore ckpt written by megatron_bridge_ptq.yaml (same OUTPUT_DIR).
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_bridge_generate.yaml --yes
+
+job_name: Nemotron-3-Nano_megatron_bridge_generate
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Megatron-Bridge PTQ generate on Nano-30B-A3B (nvfp4): 2 nodes x 4 GPUs, TP=8 EP=8"
+
+  global_vars:
+    output_dir: /cicd/megatron-bridge
+
+  task_0:
+    script: common/megatron_bridge/generate/generate.sh
+    environment:
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MEGATRON_LOAD_PATH: <<global_vars.output_dir>>/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-MLM
+      - TP: "8"
+      - PP: "1"
+      - EP: "8"
+      - ETP: "1"
+      - TRUST_REMOTE_CODE: "true"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      partition: batch
+      nodes: 2
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      time: "01:00:00"
