@@ -1622,8 +1622,71 @@ def test_read_cluster_artifact_logs_mode_ok(monkeypatch, tmp_path):
     assert captured["env"]["NEMORUN_HOME"] == str(tmp_path)
 
 
-def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):
+def test_read_cluster_artifact_logs_mode_uses_interpreter_sibling(monkeypatch, tmp_path):
+    """Missing PATH entry falls back to the CLI beside the Python interpreter."""
+    captured = {}
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "local_experiments" / "cicd" / "cicd_42").mkdir(parents=True)
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+    monkeypatch.setattr(bridge.sys, "executable", "/venv/bin/python")
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="log", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl("cicd_42", None, 0)
+
+    assert result["ok"] is True
+    assert captured["argv"][0] == "/venv/bin/nemo"
+    assert captured["env"]["NEMORUN_HOME"] == str(tmp_path)
+
+
+def test_read_cluster_artifact_logs_mode_missing_cli(monkeypatch, tmp_path):
+    """Missing Nemo cli returns a structured failure instead of raising."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "experiments" / "cicd" / "cicd_42").mkdir(parents=True)
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+    monkeypatch.setattr(bridge.sys, "executable", "/venv/bin/python")
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl("cicd_42", None, 0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "nemo_cli_not_found"
+    assert "/venv/bin/nemo" in result["diagnostic"]
+
+
+def test_read_cluster_artifact_logs_mode_preserves_both_streams(monkeypatch, tmp_path):
+    """Large stderr output cannot evict stdout from the returned excerpt."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "experiments" / "cicd" / "cicd_42").mkdir(parents=True)
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="stdout-marker\n" + "o" * 5000,
+            stderr="stderr-marker\n" + "e" * 5000,
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = bridge.read_cluster_artifact_impl("cicd_42", None, 0)
+
+    assert result["ok"] is True
+    assert result["content"].startswith("o" * 4095)
+    assert result["content"].endswith("e" * 4096)
+    assert len(result["content"]) == 8192
+
+
+def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch, tmp_path):
     """Nemo cli non-zero → structured logs_fetch_failed."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "experiments" / "cicd" / "cicd_42").mkdir(parents=True)
 
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(
@@ -1644,8 +1707,10 @@ def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):
     assert result["exit_code"] == 1
 
 
-def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
+def test_read_cluster_artifact_logs_mode_timeout(monkeypatch, tmp_path):
     """Hanging tunnel → structured logs_fetch_timeout, no exception."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "experiments" / "cicd" / "cicd_42").mkdir(parents=True)
 
     def fake_run(argv, **kwargs):
         raise subprocess.TimeoutExpired(cmd=argv, timeout=60)
@@ -1658,6 +1723,31 @@ def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
     )
     assert result["ok"] is False
     assert result["reason"] == "logs_fetch_timeout"
+
+
+@pytest.mark.parametrize("path", [None, "result.json"])
+def test_read_cluster_artifact_rejects_invalid_experiment_id(path):
+    """Unsafe experiment ids are rejected before either artifact mode runs."""
+    result = bridge.read_cluster_artifact_impl("../cicd_*", path, 0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "invalid_experiment_id"
+
+
+def test_read_cluster_artifact_logs_mode_requires_experiment_dir(monkeypatch, tmp_path):
+    """An unresolved id does not invoke Nemo with a stale environment."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "wrong-home"))
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess should not run")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+    result = bridge.read_cluster_artifact_impl("cicd_42", None, 0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "experiment_dir_not_found"
+    assert "wrong-home" in result["diagnostic"]
 
 
 # ---------------------------------------------------------------------------

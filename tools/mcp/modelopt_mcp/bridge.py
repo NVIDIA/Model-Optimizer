@@ -1589,13 +1589,19 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
     """
+    resolved = _resolve_experiment_dir_and_root(experiment_id)
+    return resolved[0] if resolved is not None else None
+
+
+def _resolve_experiment_dir_and_root(experiment_id: str) -> tuple[Path, Path] | None:
+    """Return an experiment directory together with its matched search root."""
     for root in _experiment_search_roots():
         direct = root / experiment_id
         if direct.exists():
-            return direct
+            return direct, root
         for nested in root.glob(f"*/{experiment_id}"):
             if nested.exists():
-                return nested
+                return nested, root
     return None
 
 
@@ -2110,6 +2116,10 @@ def read_cluster_artifact_impl(
     The tool returns ``{ok, content, ...}`` with the file content as a
     text string (8 KB max — same as the launcher's log_excerpt cap).
     """
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
     if not path:
         # Mode 1: fetch log via `nemo experiment logs`. Subprocess
         # because the CLI handles tunnel auth and remote-path
@@ -2123,13 +2133,17 @@ def read_cluster_artifact_impl(
             str(job_idx),
         ]
         child_env = os.environ.copy()
-        exp_dir = _resolve_experiment_dir(experiment_id)
-        if exp_dir is not None:
-            experiments_root = next(
-                (parent for parent in exp_dir.parents if parent.name == "experiments"), None
-            )
-            if experiments_root is not None:
-                child_env["NEMORUN_HOME"] = str(experiments_root.parent)
+        resolved = _resolve_experiment_dir_and_root(experiment_id)
+        if resolved is None:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "experiment_dir_not_found",
+                "diagnostic": _experiment_not_found_diagnostic(),
+            }
+        _, experiment_root = resolved
+        child_env["NEMORUN_HOME"] = str(experiment_root.parent)
         try:
             proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
                 argv,
@@ -2139,6 +2153,14 @@ def read_cluster_artifact_impl(
                 check=False,
                 env=child_env,
             )
+        except FileNotFoundError as e:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "nemo_cli_not_found",
+                "diagnostic": f"Could not execute the NeMo Run CLI at {nemo_cli!r}: {e}",
+            }
         except subprocess.TimeoutExpired:
             return {
                 "ok": False,
@@ -2160,10 +2182,15 @@ def read_cluster_artifact_impl(
                 "exit_code": proc.returncode,
                 "diagnostic": (
                     f"`nemo experiment logs` exited with code "
-                    f"{proc.returncode}. stderr: {proc.stderr.strip()[-400:]}"
+                    f"{proc.returncode}. stderr: {(proc.stderr or '').strip()[-400:]}"
                 ),
             }
-        content = "\n".join(part for part in (proc.stdout, proc.stderr) if part)[-8192:]
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if stdout and stderr:
+            content = f"{stdout[-4095:]}\n{stderr[-4096:]}"
+        else:
+            content = (stdout or stderr)[-8192:]
         return {
             "ok": True,
             "experiment_id": experiment_id,
