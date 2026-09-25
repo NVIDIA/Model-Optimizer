@@ -129,9 +129,16 @@ Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-r
 ### Step 9 — Verify completed run
 
 Read [run-validation.md](references/run-validation.md) before reporting scores:
-validate logs and sample coverage, complete **Timeout and Output-Limit Accounting**
-for every task, and report missing telemetry as unknown. For comparisons, also
-apply its **External Baseline Sanity Check**, then use `compare-results`.
+validate logs and coverage, complete **Timeout and Output-Limit Accounting** for
+every task, and report missing telemetry as unknown. Parents and evaluators must
+also apply its **Aggregate Model-Output-Fault Policy** per benchmark/run: report
+category counts, their deduplicated union, the verified unique-successful-response
+denominator, and the unrounded rate. At ≤2.0%, warn rather than invalidate or
+retry only when raw responses are preserved and scored incorrect, coverage is
+complete, and all independent gates pass. Above tolerance, return findings and
+a recommendation without automatically resubmitting. Never tune token limits
+merely to pass. For comparisons, also apply its **External Baseline Sanity
+Check**, then use `compare-results`.
 
 ---
 
