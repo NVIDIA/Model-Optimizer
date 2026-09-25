@@ -18,8 +18,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
-import transformers
 
 from modelopt.torch.export.plugins.hf_spec_export import (
     DFlashExporter,
@@ -170,13 +170,15 @@ class TestGetRopeTheta:
 
     def test_reads_the_rope_parameters_dict(self):
         """The transformers 5.12+ layout: the value lives only in the dict."""
-        config = transformers.PretrainedConfig(rope_parameters={"rope_theta": 1000000.0})
-        assert _get_rope_theta(config) == 1000000.0
+        assert _get_rope_theta(SimpleNamespace(rope_parameters={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
 
     def test_reads_the_legacy_rope_scaling_dict(self):
         """Older transformers spell the same dict rope_scaling."""
-        config = transformers.PretrainedConfig(rope_scaling={"rope_theta": 1000000.0})
-        assert _get_rope_theta(config) == 1000000.0
+        assert _get_rope_theta(SimpleNamespace(rope_scaling={"rope_theta": 1000000.0})) == (
+            1000000.0
+        )
 
     def test_prefers_the_dict_over_a_disagreeing_flat_field(self):
         """Both present and disagreeing: the dict wins.
@@ -186,27 +188,27 @@ class TestGetRopeTheta:
         in the dict while the class default (10000.0 for Qwen3) stays visible as a flat
         rope_theta, so reading flat first exports a drafter whose RoPE base is 100x off.
         """
-        config = transformers.PretrainedConfig(
-            rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0}
-        )
+        config = SimpleNamespace(rope_theta=10000.0, rope_parameters={"rope_theta": 1000000.0})
         assert _get_rope_theta(config) == 1000000.0
 
     def test_falls_back_to_a_flat_attribute(self):
         """The transformers 4.x layout: only the flat field exists."""
-        assert _get_rope_theta(transformers.PretrainedConfig(rope_theta=12345.0)) == 12345.0
+        assert _get_rope_theta(SimpleNamespace(rope_theta=12345.0)) == 12345.0
 
     def test_missing_everywhere_returns_the_default(self):
         """An absent base must stay absent rather than become a wrong number."""
-        assert _get_rope_theta(transformers.PretrainedConfig()) is None
-        assert _get_rope_theta(transformers.PretrainedConfig(), 7.0) == 7.0
+        assert _get_rope_theta(SimpleNamespace()) is None
+        assert _get_rope_theta(SimpleNamespace(), 7.0) == 7.0
 
     def test_reads_a_real_config_whichever_layout_it_uses(self):
         """A real config resolves on every supported transformers version.
 
         Asserts the outcome, not the layout: 5.12 keeps the value only in the dict while
         the minimum supported version (4.57) has only the flat field and no dict at all.
-        The layouts themselves are pinned above, built explicitly.
+        The layouts themselves are pinned above, built explicitly, so they stay covered
+        where transformers is absent -- this is the only test here that needs it.
         """
+        transformers = pytest.importorskip("transformers")
         config = transformers.Qwen3Config(
             hidden_size=32,
             num_hidden_layers=2,
