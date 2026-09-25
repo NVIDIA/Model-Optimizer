@@ -30,12 +30,12 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
 import torch
 
 # hf_streaming_dataset imports LabelSmoother at module scope.
 pytest.importorskip("transformers")
+httpx = pytest.importorskip("httpx")
 
 from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
