@@ -16,6 +16,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag" type="button" data-tag="quantization" aria-pressed="false">Quantization</button>
          <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
+         <button class="announcement-tag" type="button" data-tag="scale-learning" aria-pressed="false">Scale learning</button>
          <button class="announcement-tag" type="button" data-tag="local-hessian" aria-pressed="false">Local-Hessian</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
@@ -28,6 +29,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-16" data-title="Scale Learning: Training NVFP4 Block Scales to Recover Accuracy" data-summary="How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers." data-tags="scale-learning quantization nvfp4 qad modelopt">
+       <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/scale-learning.html">Scale Learning: Training NVFP4 Block Scales to Recover Accuracy</a></h2>
+       <p>How ModelOpt learns NVFP4 per-block weight scales with gradients instead of setting them with a calibration rule, and what that recovers.</p>
+       <div class="announcement-card-tags"><span>scale-learning</span><span>quantization</span><span>nvfp4</span><span>qad</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation" data-summary="Weight-only NVFP4 is slower than BF16 on Blackwell; W4A4 unlocks the FP4 kernels, and QAD recovers the accuracy it costs." data-tags="quantization nvfp4 w4a4 qad distillation megatron-bridge">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
