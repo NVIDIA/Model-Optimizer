@@ -30,7 +30,7 @@ import onnx
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
 from modelopt.onnx.quantization.autotune.benchmark import TensorRTPyBenchmark, TrtExecBenchmark
-from modelopt.onnx.quantization.autotune.common import Config, PatternCache
+from modelopt.onnx.quantization.autotune.common import Config, PatternCache, RemoteConnectionError
 from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
 _benchmark_instance = None
@@ -53,7 +53,7 @@ def benchmark_onnx_model(
         Returns float('inf') on failure (invalid model, build error, etc.)
 
     Raises:
-        No exceptions raised - errors are caught and logged, returning float('inf')
+        RemoteConnectionError: If the remote board is unreachable.
     """
     global _benchmark_instance
 
@@ -76,6 +76,8 @@ def benchmark_onnx_model(
         logger.debug(f"Benchmark result: {latency:.2f} ms")
         return latency
 
+    except RemoteConnectionError:
+        raise
     except Exception as e:
         logger.error(f"Benchmark error: {e}", exc_info=True)
         return float("inf")
@@ -88,6 +90,7 @@ def init_benchmark_instance(
     warmup_runs: int = 5,
     timing_runs: int = 20,
     trtexec_args: list[str] | None = None,
+    remote_connection_retries: int = 3,
 ):
     """Initialize global TensorRT benchmark instance for model performance measurement.
 
@@ -104,6 +107,9 @@ def init_benchmark_instance(
                     Higher values give more stable median (default: 20)
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
+        remote_connection_retries: Number of TCP connection attempts to the remote board
+                     before aborting (default: 3). Only relevant when --remoteAutoTuningConfig
+                     is present in trtexec_args.
     """
     global _benchmark_instance
     try:
@@ -114,6 +120,7 @@ def init_benchmark_instance(
                 timing_runs=timing_runs,
                 plugin_libraries=plugin_libraries,
                 trtexec_args=trtexec_args,
+                remote_connection_retries=remote_connection_retries,
             )
             logger.info("Trtexec benchmark initialized")
         else:
@@ -132,6 +139,35 @@ def init_benchmark_instance(
     except Exception as e:
         logger.error(f"TensorRT initialization failed: {e}", exc_info=True)
         return None
+
+
+def _benchmark_or_save(
+    autotuner: "QDQAutotuner",
+    state_path: Path,
+    model_path: str | bytes,
+    log_file: str | None = None,
+    flush_timing_cache: bool = False,
+) -> float:
+    """Run benchmark, saving autotuner state and re-raising on remote board loss.
+
+    Wraps :func:`benchmark_onnx_model` so that every call site gets identical
+    save-state-then-raise behaviour when a ``RemoteConnectionError`` propagates.
+
+    Returns:
+        Measured latency in ms, or ``float('inf')`` on non-connection failure.
+
+    Raises:
+        RemoteConnectionError: After saving autotuner state to *state_path*.
+    """
+    try:
+        return benchmark_onnx_model(model_path, log_file, flush_timing_cache=flush_timing_cache)
+    except RemoteConnectionError:
+        logger.error("Remote board connection lost, saving state before exit")
+        autotuner.save_state(str(state_path))
+        logger.info(
+            f"State saved to {state_path}, re-run the same command to resume from this checkpoint"
+        )
+        raise
 
 
 def _region_matches_filter(region, graph, filter_patterns: list[str]) -> bool:
@@ -303,7 +339,9 @@ def region_pattern_autotuning_workflow(
         baseline_path = output_dir / "baseline.onnx"
         autotuner.export_onnx(str(baseline_path), insert_qdq=False, model_transform=model_transform)
         baseline_log = logs_dir / "baseline.log"
-        baseline_latency = benchmark_onnx_model(str(baseline_path), str(baseline_log))
+        baseline_latency = _benchmark_or_save(
+            autotuner, state_path, str(baseline_path), str(baseline_log)
+        )
         autotuner.submit(baseline_latency)
         logger.info(f"Baseline: {baseline_latency:.2f} ms")
     else:
@@ -347,8 +385,12 @@ def region_pattern_autotuning_workflow(
             )
             test_log = logs_dir / f"region_{region.id}_scheme_{scheme_idx}.log"
             flush_timing_cache = (iteration_count % 10) == 0
-            latency = benchmark_onnx_model(
-                model_bytes, str(test_log), flush_timing_cache=flush_timing_cache
+            latency = _benchmark_or_save(
+                autotuner,
+                state_path,
+                model_bytes,
+                str(test_log),
+                flush_timing_cache=flush_timing_cache,
             )
 
             autotuner.submit(latency, success=(latency != float("inf")))
@@ -384,7 +426,7 @@ def region_pattern_autotuning_workflow(
     final_model_path = output_dir / "optimized_final.onnx"
     autotuner.export_onnx(str(final_model_path), insert_qdq=True, model_transform=model_transform)
     final_log = logs_dir / "final.log"
-    final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
+    final_latency = _benchmark_or_save(autotuner, state_path, str(final_model_path), str(final_log))
 
     if final_latency > 0 and final_latency != float("inf"):
         speedup = baseline_latency / final_latency
