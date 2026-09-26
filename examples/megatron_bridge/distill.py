@@ -23,6 +23,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
+import warnings
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
@@ -172,9 +173,23 @@ def get_args():
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
     parser.add_argument(
-        "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
+        "--no_skip_lm_loss",
+        action="store_true",
+        help="DEPRECATED and ignored. Whether the LM loss is skipped is derived from --kd_loss_alpha "
+        "(skipped iff alpha == 1.0).",
     )
-    parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
+    parser.add_argument(
+        "--kd_loss_scale",
+        type=float,
+        default=None,
+        help="DEPRECATED and ignored. Use --kd_loss_alpha.",
+    )
+    parser.add_argument(
+        "--kd_loss_alpha",
+        type=float,
+        default=0.9,
+        help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
+    )
     parser.add_argument(
         "--no_async_save",
         action="store_true",
@@ -185,8 +200,21 @@ def get_args():
         "--logit_kl_topk",
         type=int,
         default=None,
-        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries, "
-        "replacing the full-vocab temporaries with [seq, k] ones.",
+        help="Restrict the logit KL loss to the teacher's top-k vocabulary entries plus a residual "
+        "bucket for the remaining probability mass (distributions are still normalized over the full vocab).",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p",
+        type=float,
+        default=None,
+        help="Nucleus threshold in (0, 1] applied on top of --logit_kl_topk: only the smallest prefix "
+        "of the sorted top-k whose cumulative teacher probability reaches this value is distilled.",
+    )
+    parser.add_argument(
+        "--logit_kl_top_p_min_k",
+        type=int,
+        default=1,
+        help="Minimum number of top-k entries kept per token when --logit_kl_top_p is active.",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
@@ -434,10 +462,22 @@ def main(args: argparse.Namespace):
             f"sizes differ ({padded['student']} vs {padded['teacher']})."
         )
 
+    if args.kd_loss_scale is not None:
+        warnings.warn(
+            "--kd_loss_scale is deprecated and ignored; use --kd_loss_alpha instead.",
+            FutureWarning,
+        )
+    if args.no_skip_lm_loss:
+        warnings.warn(
+            "--no_skip_lm_loss is deprecated and ignored; whether the LM loss is skipped is derived "
+            "from --kd_loss_alpha (skipped iff 1.0).",
+            FutureWarning,
+        )
     kd_config = ModelOptDistillConfig(
-        skip_lm_loss=not args.no_skip_lm_loss,
-        kd_loss_scale=args.kd_loss_scale,
+        kd_loss_alpha=args.kd_loss_alpha,
         logit_kl_topk=args.logit_kl_topk,
+        logit_kl_top_p=args.logit_kl_top_p,
+        logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
     )
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
