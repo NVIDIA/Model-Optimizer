@@ -42,7 +42,11 @@ from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .kv_cache_auto_quant import AutoQuantizeKVSearcher, get_kv_cache_auto_quantize_config
+from .kv_cache_auto_quant import (
+    _KV_QUANTIZER_ATTRS,
+    AutoQuantizeKVSearcher,
+    get_kv_cache_auto_quantize_config,
+)
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
@@ -424,11 +428,6 @@ def _auto_quantize_kv_cache(
             "KV-cache AutoQuantize is single-process only; distributed scoring, selection, "
             "and checkpoint writes are not synchronized."
         )
-    if is_quantized(model):
-        raise NotImplementedError(
-            "KV-cache AutoQuantize requires an unquantized model; composing it after GEMM "
-            "PTQ or AutoQuantize is not supported yet."
-        )
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
     if fixed_quantization_config is not None or module_search_spaces:
@@ -445,6 +444,20 @@ def _auto_quantize_kv_cache(
         raise ValueError("cost_model='kv_cache' requires a non-empty quantization_formats list.")
     if data_loader is None or forward_step is None:
         raise ValueError("data_loader and forward_step must be provided for KV-cache AutoQuantize.")
+
+    converted_for_search = not is_quantized(model)
+    if not converted_for_search:
+        enabled_kv_quantizers = [
+            name
+            for name, module in model.named_modules(remove_duplicate=False)
+            if name.endswith(_KV_QUANTIZER_ATTRS) and getattr(module, "is_enabled", False)
+        ]
+        if enabled_kv_quantizers:
+            raise ValueError(
+                "The preceding quantization stage left K/V quantizers enabled: "
+                f"{enabled_kv_quantizers}. Disable them before running KV-cache AutoQuantize; "
+                "clearing them now would not undo prior calibration or sensitivity measurements."
+            )
 
     processed_kv_formats: list[tuple[dict[str, Any], str | None]] = []
     for candidate in quantization_formats:
@@ -474,8 +487,9 @@ def _auto_quantize_kv_cache(
         num_calib_steps,
         num_score_steps,
     )
-    model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
-    set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+    if converted_for_search:
+        model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+        set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
         model,
