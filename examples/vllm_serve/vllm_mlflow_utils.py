@@ -46,6 +46,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.mlflow import (
     TRACKING_URI_ENV,
     MlflowRunLogger,
+    Tool,
     command_text,
     default_experiment_name,
     resolve_tracking_uri,
@@ -84,20 +85,27 @@ MLFLOW_ENV_VARS = frozenset(
 )
 
 
+# This example serves a checkpoint rather than producing one, so the Tool carries only what
+# names the run: there is no output to point at and no chain to join.
+TOOL = Tool(
+    name=TOOL_NAME,
+    tracks=(
+        "Track this server's calibration on an MLflow server "
+        "(e.g. https://<your-mlflow-server>/), uploading the command, the resolved "
+        "recipe, the quantization config actually applied, the worker log and the "
+        "quantizer summary. This is the quantization tracking server, which is "
+        "unrelated to any tracking server an evaluation harness exports its scores to."
+    ),
+    variant_help="recipe name, or the quantization config",
+    # Read from the environment, which is where this example's quantization settings live.
+    variant=lambda args: quant_variant(),
+    model=lambda args: args.model,
+)
+
+
 def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
     """Add the MLflow tracking flags to the launcher's parser."""
-    _add_mlflow_args(
-        parser,
-        TOOL_NAME,
-        tracks=(
-            "Track this server's calibration on an MLflow server "
-            "(e.g. https://<your-mlflow-server>/), uploading the command, the resolved "
-            "recipe, the quantization config actually applied, the worker log and the "
-            "quantizer summary. This is the quantization tracking server, which is "
-            "unrelated to any tracking server an evaluation harness exports its scores to."
-        ),
-        variant_help="recipe name, or the quantization config",
-    )
+    _add_mlflow_args(parser, TOOL)
 
 
 def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -119,7 +127,7 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
     os.environ[EXPERIMENT_ENV] = (
         args.mlflow_experiment
         or os.environ.get(EXPERIMENT_ENV)
-        or default_experiment_name(TOOL_NAME, args.model, quant_variant())
+        or default_experiment_name(TOOL.name, TOOL.model(args), TOOL.variant(args))
     )
     if args.mlflow_run_name:
         os.environ[RUN_NAME_ENV] = args.mlflow_run_name

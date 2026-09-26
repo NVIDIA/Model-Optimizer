@@ -28,8 +28,8 @@ from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
+    HF_PTQ,
     _resolve_model_path,
-    add_mlflow_args,
     build_quant_cfg,
     cleanup_distributed,
     copy_custom_model_files,
@@ -45,7 +45,6 @@ from example_utils import (
     needs_checkpoint_path_update,
     recipe_layerwise_blocks,
     resolve_checkpoint_dir,
-    resolve_mlflow_args,
     run_nemotron_vl_preview,
     save_processor_config,
     save_source_config,
@@ -101,6 +100,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.mlflow import add_mlflow_args, resolve_mlflow_args
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -1750,13 +1750,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    add_mlflow_args(parser)
+    add_mlflow_args(parser, HF_PTQ)
 
     args = parser.parse_args()
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False
-    resolve_mlflow_args(args, parser)
+    resolve_mlflow_args(args, parser, HF_PTQ)
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
