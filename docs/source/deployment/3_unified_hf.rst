@@ -52,6 +52,7 @@ The unified HF export API supports the following quantization formats:
 6. W4A8_AWQ - 4-bit weights and 8-bit activations with AWQ optimization
 7. IQ1_S - 1-bit codebook quantization using the GGML block layout
 8. IQ2_XS - 2-bit codebook quantization using the GGML block layout
+9. Q8_0 - 8-bit symmetric integer quantization using the GGML block layout
 
 .. note::
    GGML has no equivalent for ModelOpt's per-tensor FP8 weight-and-activation format. In particular,
@@ -59,32 +60,33 @@ The unified HF export API supports the following quantization formats:
    activation scale semantics. Converting a ModelOpt FP8 checkpoint to GGUF therefore requires
    conversion to another GGML-supported tensor type rather than a lossless FP8 encoding.
 
-IQ weight representation
-~~~~~~~~~~~~~~~~~~~~~~~~
+GGML weight representation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For IQ1_S and IQ2_XS, unified export replaces each floating-point ``<module>.weight`` with a
-``uint8`` tensor containing byte-exact GGML blocks. Its shape is
-``[*logical_shape[:-1], logical_shape[-1] // 256, payload_bytes]``, where ``payload_bytes`` is 50
-for IQ1_S and 74 for IQ2_XS. No separate shape tensor is stored: a loader recovers the logical
-shape as ``[*weight.shape[:-2], weight.shape[-2] * 256]``. This is unambiguous because IQ export
-requires the logical last dimension to be divisible by 256.
+For IQ1_S, IQ2_XS, and Q8_0, unified export replaces each floating-point
+``<module>.weight`` with a ``uint8`` tensor containing byte-exact GGML blocks. Its shape is
+``[*logical_shape[:-1], logical_shape[-1] // block_size, payload_bytes]``. The block size and
+payload size are 256 and 50 for IQ1_S, 256 and 74 for IQ2_XS, and 32 and 34 for Q8_0. No separate
+shape tensor is stored: a loader recovers the logical shape as
+``[*weight.shape[:-2], weight.shape[-2] * block_size]``. This is unambiguous because export
+requires each logical row to contain complete blocks.
 
 .. note::
-   Megatron IQ export currently requires tensor and pipeline model parallel sizes of 1. Packing
+   Megatron GGML export currently requires tensor and pipeline model parallel sizes of 1. Packing
    happens during export, so a tensor-parallel shard would be packed as if it were a whole
-   weight, and a pipeline stage holding no IQ layer would not reach the same rejection as its
+   weight, and a pipeline stage holding no GGML layer would not reach the same rejection as its
    peers. Expert parallelism is supported, assuming every expert uses the same format.
 
 .. warning::
-   Megatron fused-MoE IQ export is not currently supported. Its packed tensor would require the
+   Megatron fused-MoE GGML export is not currently supported. Its packed tensor would require the
    deployment consumer to understand
-   ``[num_experts, out_features, in_features // 256, payload_bytes]`` rather than the ordinary HF
-   fused-expert order. The exporter raises ``NotImplementedError`` until a deployment loader owns
-   this layout and is covered by an integration test. Dense and individually named expert weights
-   continue to use the representation above.
+   ``[num_experts, out_features, in_features // block_size, payload_bytes]`` rather than the
+   ordinary HF fused-expert order. The exporter raises ``NotImplementedError`` until a
+   deployment loader owns this layout and is covered by an integration test. Dense and
+   individually named expert weights continue to use the representation above.
 
-The generated configuration records ``quant_method: modelopt``, ``packing: ggml``, the 256-value
-block size, and the payload byte count. IQ payloads are not represented as compressed-tensors
+The generated configuration records ``quant_method: modelopt``, ``packing: ggml``, the format's
+block size, and the payload byte count. GGML payloads are not represented as compressed-tensors
 integer ``weights`` groups because all scales and indices are embedded in each packed block.
 
 Each 74-byte IQ2_XS block represents 256 logical weights:
@@ -98,6 +100,10 @@ Each 74-byte IQ2_XS block represents 256 logical weights:
 
 The canonical 512-by-8 IQ2_XS codebook is part of the implementation rather than the checkpoint.
 The complete block therefore costs ``74 * 8 / 256 = 2.3125`` bits per logical weight.
+
+Each 34-byte Q8_0 block represents 32 logical weights: bytes 0--1 hold the little-endian FP16
+scale, and bytes 2--33 hold 32 signed int8 quants. The block costs
+``34 * 8 / 32 = 8.5`` bits per logical weight.
 
 Minimum Framework Versions
 --------------------------

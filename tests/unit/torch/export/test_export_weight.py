@@ -105,13 +105,16 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
-@pytest.mark.parametrize(("num_bits", "payload_bytes"), [("iq1_s", 50), ("iq2_xs", 74)])
-def test_export_iq_payload_as_weight(num_bits, payload_bytes):
+@pytest.mark.parametrize(
+    ("num_bits", "block_size", "payload_bytes"),
+    [("iq1_s", 256, 50), ("iq2_xs", 256, 74), ("q8_0", 32, 34)],
+)
+def test_export_iq_payload_as_weight(num_bits, block_size, payload_bytes):
     linear = nn.Linear(256, 4, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
             num_bits=num_bits,
-            block_sizes={-1: 256},
+            block_sizes={-1: block_size},
             backend="ggml",
         )
     )
@@ -120,7 +123,7 @@ def test_export_iq_payload_as_weight(num_bits, payload_bytes):
     state_dict = postprocess_state_dict(linear.state_dict(), maxbound=448, quantization=None)
 
     assert isinstance(linear.weight, nn.Parameter)
-    assert state_dict["weight"].shape == (4, 1, payload_bytes)
+    assert state_dict["weight"].shape == (4, 256 // block_size, payload_bytes)
     assert state_dict["weight"].dtype == torch.uint8
     assert "packed_weights" not in state_dict
     assert "weight_shape" not in state_dict

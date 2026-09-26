@@ -27,7 +27,7 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.models import get_spec, list_all_possible
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -52,7 +52,7 @@ from modelopt.torch.utils import clear_cuda_cache
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
-    IQ_FORMATS,
+    GGML_FORMATS,
     KV_CACHE_FP8,
     KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_INT8,
@@ -444,11 +444,11 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
 
 
 def uses_iq_quantization(module) -> bool:
-    """Whether any weight quantizer in ``module`` or its children targets an IQ format.
+    """Whether any weight quantizer in ``module`` or its children targets a GGML format.
 
     ``get_quantization_format`` returns the *first* non-``NONE`` format it finds, so in a
-    mixed-format model IQ layers sitting behind, say, an FP8 layer are invisible to it. Callers
-    that must reject IQ specifically need to see every layer.
+    mixed-format model GGML layers sitting behind, say, an FP8 layer are invisible to it. Callers
+    that must reject GGML specifically need to see every layer.
 
     This reads ``num_bits`` directly rather than resolving each layer's full format, so an
     unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
@@ -456,17 +456,17 @@ def uses_iq_quantization(module) -> bool:
     Known gap, shared with ``get_quantization_format``: ``weight_attr_names`` yields nothing for
     a TEGroupedLinear, whose parameters are ``weight0..N`` while its quantizer is a single
     ``GroupedQuantizer`` under ``weight_quantizer``. Neither function sees such a module, so an
-    experts-only IQ model reports no format at all -- not just here. Closing it belongs in
+    experts-only GGML model reports no format at all -- not just here. Closing it belongs in
     ``weight_attr_names``, where it affects every format, rather than in this helper.
     """
     for weight_name in weight_attr_names(module):
         weight_quantizer = representative_weight_quantizer(module, weight_name)
-        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never IQ --
-        # IQ is a single quantizer with backend="ggml".
+        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never GGML --
+        # GGML is a single quantizer with backend="ggml".
         if (
             weight_quantizer is not None
             and weight_quantizer.is_enabled
-            and getattr(weight_quantizer, "num_bits", None) in IQ_FORMATS
+            and getattr(weight_quantizer, "num_bits", None) in GGML_FORMATS
         ):
             return True
     return any(uses_iq_quantization(child) for _, child in module.named_children())
@@ -506,21 +506,21 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
-        if weight_quantizer.num_bits in IQ_FORMATS:
+        if weight_quantizer.num_bits in GGML_FORMATS:
             if weight_quantizer.backend != "ggml":
-                raise ValueError("IQ formats require the built-in 'ggml' quantization backend")
+                raise ValueError("GGML formats require the built-in 'ggml' quantization backend")
             # Both exporters return before collecting input_scale and before the pre_quant_scale
             # handling below, so an enabled activation quantizer would be dropped without a trace
             # and the checkpoint would load as weight-only. Refuse instead.
             if input_quantizer is not None and input_quantizer.is_enabled:
                 raise NotImplementedError(
-                    "IQ1_S/IQ2_XS export is weight-only, but this layer has an enabled input "
+                    "GGML export is weight-only, but this layer has an enabled input "
                     "quantizer. The GGML block payload carries no activation scale, so the "
                     "activation quantization would be silently lost."
                 )
             if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
                 raise NotImplementedError(
-                    "IQ1_S/IQ2_XS export does not support an AWQ-style pre_quant_scale."
+                    "GGML export does not support an AWQ-style pre_quant_scale."
                 )
             return weight_quantizer.num_bits
 
@@ -772,10 +772,10 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
-        elif v in IQ_FORMATS:
-            iq_format = IQ_FORMAT_REGISTRY[v]
-            block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
-            effective_bits = iq_format.effective_bits
+        elif v in GGML_FORMATS:
+            ggml_format = GGML_FORMAT_REGISTRY[v]
+            block_size, payload_bytes = ggml_format.block_size, ggml_format.block_bytes
+            effective_bits = ggml_format.effective_bits
             if block_size_value != block_size:
                 raise ValueError(
                     f"{v.upper()} requires block size {block_size}, got {block_size_value}"
