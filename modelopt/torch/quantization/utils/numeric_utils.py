@@ -31,6 +31,7 @@ __all__ = [
     "E4M3_KMIN",
     "E4M3_MAX",
     "E8M0_BIAS",
+    "FOUR_OVER_SIX_MULTIPLIER",
     "mxfp4_to_nvfp4_global_amax",
     "mxfp4_to_nvfp4_per_block_amax",
 ]
@@ -41,6 +42,10 @@ E4M3_MAX = 448.0
 E4M3_MAX_46 = 256.0  # 4 Over 6 max FP8 scale
 E4M3_KMAX = 8
 E4M3_KMIN = -9  # E4M3 represents 2^k exactly for k in [-9, 8]
+
+# Four-Over-Six (4/6) picks, per block, the full E2M1 range (M=6) or a reduced one (M=4);
+# choosing M=4 is the same as scaling that block's amax by 6/4.
+FOUR_OVER_SIX_MULTIPLIER = E2M1_MAX / 4.0  # 1.5
 # E2M1 magnitude grid indexed by the low 3 bits of an FP4 nibble.
 _E2M1_MAGNITUDE = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 # Cache of the E2M1 magnitude lookup table per (device, dtype) so we don't

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Static NVFP4 E2M1 weight quantizer with Four-Over-Six (4/6) enabled (256 FP8 scale normalization).
-# The per-block M=6 vs M=4 choice is made by the calibration algorithm (MSE), configured in the preset.
+# The per-block M=6 vs M=4 choice is made by the `four_over_six` calibration algorithm.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig
 num_bits: e2m1
