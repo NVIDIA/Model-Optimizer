@@ -80,11 +80,12 @@ def get_cuda_ext_mx(raise_if_failed: bool = False):
 
 
 def get_cuda_ext_ggml(raise_if_failed: bool = False):
-    """Return the GGML-compatible IQ packing extension, exposing one packer per IQ format.
+    """Return the GGML-compatible packing extension, exposing one packer per format.
 
     The formats share their packing helpers, CUDA version requirement, and build flags, so they
-    build as a single extension: ``iq1_s_pack(input, grid)`` and
-    ``iq2_xs_pack(input, grid, scales)``.
+    build as a single extension: ``iq1_s_pack(input, grid)``,
+    ``iq2_xs_pack(input, grid, scales)``, ``iq2_xxs_pack(input, grid, scales)``, and
+    ``q8_0_pack(input)``.
     """
     if not hasattr(get_cuda_ext_ggml, "extension") or (
         raise_if_failed and get_cuda_ext_ggml.extension is None
@@ -96,6 +97,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
                 kernels_ggml / "iq1_s.cu",
                 kernels_ggml / "iq2_xs.cu",
                 kernels_ggml / "iq2_xxs.cu",
+                kernels_ggml / "q8_0.cu",
             ],
             cuda_version_specifiers=">=11.8",
             fail_msg="GGML IQ CUDA packing extension is unavailable.",
