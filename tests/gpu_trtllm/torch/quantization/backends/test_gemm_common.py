@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.quantize_common import compute_backward_grad
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.fp8_per_tensor_gemm import Fp8PerTensorLinear
+from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.nvfp4_gemm import Nvfp4Linear
 from modelopt.torch.quantization.backends.utils import fp4_compatible, fp8_compatible
 
@@ -269,3 +270,24 @@ def test_dynamic_gemm(model, config, gemm_forward, atol, rtol):
             output_dynamic_quant_gemm, output_dynamic_quant_compressed, atol=atol / 2
         )
         assert torch.allclose(output_calib_quant_gemm, output_calib_quant_compressed, atol=atol / 2)
+
+
+@pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")
+def test_nvfp4_gemm_matches_after_compress():
+    """Regression test for https://github.com/NVIDIA/Model-Optimizer/issues/2330.
+
+    NVFP4_DEFAULT_CFG carries ``effective_bits`` (an AutoQuantize cost-model
+    hint), which quantize() stores as ``_effective_bits``. The availability
+    check must not reject the module on that metadata key.
+    """
+    model = OneLayerLinear(in_features=64, out_features=32).to(torch.bfloat16).cuda()
+    input_tensor = model.get_input().to(torch.bfloat16).cuda()
+
+    def forward_loop(model):
+        model(input_tensor)
+
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
+    mtq.compress(model)
+
+    module = model.net[0]
+    assert gemm_registry.find_match(module, input_tensor) == Nvfp4Linear.apply
