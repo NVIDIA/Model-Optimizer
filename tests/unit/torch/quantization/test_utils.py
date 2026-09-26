@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
+
 import pytest
 import torch
 
@@ -20,6 +22,11 @@ from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_amax,
     reduce_block_amax,
+)
+from modelopt.torch.quantization.utils.core_utils import (
+    calibrate_with_adapters,
+    enable_fake_quant,
+    replace_function,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -333,3 +340,61 @@ def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatc
     assert "L1" not in call_log_for_layer1
 
     assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))
+
+
+def test_replace_function_restores_on_exception():
+    """replace_function must restore the original function even if the body raises."""
+
+    def _original():
+        return "original"
+
+    def _replacement():
+        return "replacement"
+
+    package = types.SimpleNamespace(func=_original)
+
+    with pytest.raises(RuntimeError, match="boom"), replace_function(package, "func", _replacement):
+        assert package.func is _replacement
+        assert package._func is _original
+        raise RuntimeError("boom")
+
+    assert package.func is _original
+    assert not hasattr(package, "_func")
+
+
+def test_calibrate_with_adapters_reenables_on_exception():
+    """calibrate_with_adapters must re-enable LoRA adapters even if calibration raises."""
+
+    class _Model:
+        def __init__(self):
+            self.adapters_enabled = True
+
+        def disable_adapters(self):
+            self.adapters_enabled = False
+
+        def enable_adapters(self):
+            self.adapters_enabled = True
+
+    model = _Model()
+    args = types.SimpleNamespace(lora=True)
+
+    with pytest.raises(RuntimeError, match="boom"), calibrate_with_adapters(model, args):
+        assert not model.adapters_enabled
+        raise RuntimeError("boom")
+
+    assert model.adapters_enabled
+
+
+def test_enable_fake_quant_restores_on_exception():
+    """enable_fake_quant must restore per-module fake_quant flags even if the body raises."""
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    model[0].weight_quantizer = types.SimpleNamespace(_fake_quant=False)
+    model[1].weight_quantizer = types.SimpleNamespace(_fake_quant=True)
+
+    with pytest.raises(RuntimeError, match="boom"), enable_fake_quant(model):
+        assert model[0].weight_quantizer._fake_quant
+        assert model[1].weight_quantizer._fake_quant
+        raise RuntimeError("boom")
+
+    assert not model[0].weight_quantizer._fake_quant
+    assert model[1].weight_quantizer._fake_quant
