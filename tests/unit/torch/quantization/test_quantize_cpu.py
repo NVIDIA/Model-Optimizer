@@ -625,6 +625,80 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
         mtq.quantize(model, config, lambda m: m(m.get_input()))
 
 
+class _ToyIndexer(torch.nn.Module):
+    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``DSAIndexer``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.wk = torch.nn.Linear(16, 8)
+
+    def forward(self, x):
+        return self.wk(x)
+
+
+class _QuantToyIndexer(_ToyIndexer):
+    def _setup(self):
+        self.indexer_k_quantizer = TensorQuantizer()
+
+    def forward(self, x):
+        return self.indexer_k_quantizer(super().forward(x))
+
+
+class _ToyIndexerModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(16, 16)
+        self.indexer = _ToyIndexer()
+
+    def forward(self, x):
+        return self.indexer(self.linear(x))
+
+
+INDEXER_K_ONLY_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
+    "algorithm": "max",
+}
+
+
+def test_indexer_k_patterns_on_unconverted_indexer_raise():
+    """An indexer the plugins do not recognize must fail instead of leaving its K cache unquantized."""
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(_ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
+
+
+def test_indexer_k_patterns_on_model_without_indexer_are_allowed():
+    """Other architectures and pipeline stages without an indexer layer have nothing to quantize."""
+    model = SimpleLinear()
+    mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: m(m.get_input()))
+
+
+def test_indexer_k_patterns_on_converted_indexer_pass():
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(
+            _ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16))
+        )
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert model.indexer.indexer_k_quantizer.is_enabled
+    assert model.indexer.indexer_k_quantizer.amax is not None
+
+
+def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
+    """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"][1]["cfg"] = [{"num_bits": 8, "axis": None}, {"num_bits": 8, "axis": None}]
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert isinstance(model.indexer.indexer_k_quantizer, SequentialQuantizer)
+
+
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
     """When two cfg-bearing entries match the same quantizer, the second fully replaces the first."""
     model = SimpleLinear()

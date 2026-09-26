@@ -38,12 +38,18 @@ from unittest.mock import Mock
 import pytest
 import torch
 from _test_utils.torch.transformers_models import (
+    DeepseekV32Config,
     create_tiny_deepseek_v3_dir,
+    create_tiny_deepseek_v4_config_dir,
+    create_tiny_deepseek_v32_dir,
+    create_tiny_glm5_next_config_dir,
     create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
 )
-from vllm import LLM
+from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.inputs import TokensPrompt
+from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -59,6 +65,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
+from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBase
 
 
 def _load_example_module(name: str):
@@ -250,6 +257,27 @@ def test_allocate_calibration_blocks_rejects_insufficient_capacity(monkeypatch):
             _calibration_worker(num_blocks=6),
             sequence_lengths=[8, 16],
         )
+
+
+def test_allocate_calibration_blocks_caps_at_block_table_row(monkeypatch):
+    """A cache group whose block-table row is shorter than the warmup count (a circular
+    per-request cache, e.g. GLM-5.3-Flash's k-pool tail) gets at most one row of blocks."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(return_value=4)),
+    )
+    row_capacity = Mock(return_value=2)
+    capped_spec = SimpleNamespace(max_num_blocks_per_req=row_capacity)
+    worker = _calibration_worker(num_blocks=8, cache_specs=("attention", capped_spec))
+    worker.model_runner.vllm_config = "vllm_config"
+    worker.model_runner.max_model_len = 4096
+
+    block_tables, _ = module._allocate_calibration_blocks(worker, sequence_lengths=[64])
+
+    assert block_tables == [([1, 2, 3, 4], [5, 6])]
+    row_capacity.assert_called_once_with("vllm_config", 4096)
 
 
 @pytest.mark.parametrize("has_calibration_error", [False, True])
@@ -652,6 +680,124 @@ def tiny_deepseek_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
+_INDEXER_K_FP8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+    ],
+    "algorithm": "max",
+}
+
+# model -> (architecture vLLM must know, tiny checkpoint builder, extra LLM kwargs)
+_DSA_MODELS = {
+    "deepseek_v32": ("DeepseekV32ForCausalLM", create_tiny_deepseek_v32_dir, {}),
+    "glm5_next": (
+        "Glm5NextForCausalLM",
+        create_tiny_glm5_next_config_dir,
+        {"load_format": "dummy"},
+    ),
+    "deepseek_v4": (
+        "DeepseekV4ForCausalLM",
+        create_tiny_deepseek_v4_config_dir,
+        {"load_format": "dummy"},
+    ),
+}
+
+
+@pytest.fixture(scope="module", params=list(_DSA_MODELS))
+def tiny_dsa_llm(request, tmp_path_factory):
+    """Tiny DeepSeek Sparse Attention models: DeepSeek-V3.2, GLM-5.3-Flash and DeepSeek-V4-Pro."""
+    arch, build, extra = _DSA_MODELS[request.param]
+    if arch not in ModelRegistry.get_supported_archs():
+        pytest.skip(f"this vLLM release has no {arch}")
+    if request.param == "deepseek_v32" and DeepseekV32Config is None:
+        pytest.skip("DeepSeek-V3.2 needs transformers >= 5.x")
+    if not has_deep_gemm():
+        pytest.skip("vLLM's sparse-attention indexer needs DeepGEMM")
+    if torch.cuda.get_device_capability()[0] not in (9, 10):
+        pytest.skip("vLLM's sparse-attention indexer backends need Hopper or Blackwell")
+    llm = _boot_llm(build(tmp_path_factory.mktemp(request.param)), **extra)
+    try:
+        yield llm
+    finally:
+        _shutdown_llm(llm)
+
+
+def _cache_row_signature(kv_cache, chunk=2048):
+    """Per-row checksum of the uint8 indexer cache, chunked to avoid copying the KV pool."""
+    weights = torch.arange(1, kv_cache.shape[-1] + 1, device=kv_cache.device) * 1000003 % 998244353
+    return torch.cat(
+        [
+            (kv_cache[i : i + chunk].to(torch.int64) * weights).sum(-1)
+            for i in range(0, kv_cache.shape[0], chunk)
+        ]
+    )
+
+
+def _indexer_cache_rows(kv_cache, mask):
+    """Dequantized values and raw fp32 scale bits of the cache rows selected by ``mask``."""
+    num_blocks, block_size, row_bytes = kv_cache.shape
+    head_dim = row_bytes - 4
+    block, pos = mask.nonzero(as_tuple=True)
+    flat = kv_cache.view(num_blocks, block_size * row_bytes)
+    values = flat[block[:, None], pos[:, None] * head_dim + torch.arange(head_dim).cuda()]
+    scales = flat[block[:, None], block_size * head_dim + pos[:, None] * 4 + torch.arange(4).cuda()]
+    values = values.contiguous().view(torch.float8_e4m3fn).float()
+    return values, scales.contiguous().view(torch.int32).squeeze(-1)
+
+
+def _calibrate_and_clip_indexer_k(self):
+    """Run on the worker: calibrate an FP8 indexer-K quantizer, then clip it to 1/8 of its amax.
+
+    Calibration goes through real scheduled prefills: the fused indexers write their cache only
+    when ``attn_metadata`` is set, which a dummy run does not do.
+    """
+    model = self.get_model()
+    batches = [{"input_ids": torch.randint(1, 100, (1, 40))} for _ in range(2)]
+    forward_loop = _load_example_module("vllm_ptq_utils").calibrate_fun(batches, self)
+    with disable_compilation(model):
+        mtq.quantize(model, _INDEXER_K_FP8_CFG, forward_loop=forward_loop)
+
+    amaxes, self.indexer_k_snapshots = {}, {}
+    for name, module in model.named_modules():
+        if isinstance(module, _QuantVLLMIndexerBase):
+            quantizer = module.indexer_k_quantizer
+            amaxes[name] = None if quantizer.amax is None else quantizer.amax.item()
+            if amaxes[name]:
+                quantizer.amax = quantizer.amax / 8
+            self.indexer_k_snapshots[name] = _cache_row_signature(module.k_cache.kv_cache)
+    return amaxes
+
+
+def _indexer_k_rows_written(self):
+    """Run on the worker: rows the indexer kernels wrote since the snapshot, max over the clip."""
+    torch.cuda.synchronize()
+    result = {}
+    for name, module in self.get_model().named_modules():
+        if name not in self.indexer_k_snapshots:
+            continue
+        cache = module.k_cache.kv_cache
+        changed = (_cache_row_signature(cache) != self.indexer_k_snapshots[name]).view(
+            cache.shape[:2]
+        )
+        changed[0] = False  # vLLM's null block, where other layers write scratch data
+        values, scale_bits = _indexer_cache_rows(cache, changed)
+        # Hybrid models alias one KV pool across cache groups; the indexer kernels' own rows have a
+        # power-of-two scale and use the FP8 range (or the fixed scale of the 1e-4 amax floor).
+        fp8_max = values.abs().amax(-1)
+        power_of_two = (scale_bits > 0) & ((scale_bits & 0x7FFFFF) == 0)
+        floor_scale = scale_bits == torch.tensor(2.0**-22).view(torch.int32).item()
+        kernel_rows = power_of_two & (((fp8_max > 224) & (fp8_max <= 448)) | floor_scale)
+        scale = torch.ldexp(torch.ones_like(fp8_max), ((scale_bits >> 23) & 0xFF) - 127)
+        row_max = (fp8_max * scale)[kernel_rows]
+        clip = module.indexer_k_quantizer.amax.item()
+        result[name] = (
+            int(kernel_rows.sum()),
+            row_max.max().item() / clip if row_max.numel() else 0,
+        )
+    return result
+
+
 def _assert_quantizer_amax_is_static(summary):
     """Every enabled quantizer must own a registered ``_amax`` after
     calibration. Missing ``_amax`` → repr ``amax=dynamic`` → regression.
@@ -736,6 +882,26 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     )
     assert action == "group", (action, vllm_key)
     assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
+
+
+@pytest.mark.timeout(600)  # engine boot and the DeepGEMM JIT dominate
+def test_tiny_dsa_indexer_k_quantize(tiny_dsa_llm):
+    """The indexer K cache the sparse-attention kernels read holds fake-quantized keys."""
+    amaxes = tiny_dsa_llm.collective_rpc(_calibrate_and_clip_indexer_k)[0]
+    assert amaxes, "no indexer was converted"
+    assert all(amax is not None and 0 < amax < float("inf") for amax in amaxes.values()), amaxes
+
+    # Prefill plus decode steps that complete further pools / compression groups.
+    prompts = [TokensPrompt(prompt_token_ids=list(range(1 + i, 41 + i))) for i in range(2)]
+    params = SamplingParams(max_tokens=12, ignore_eos=True, temperature=0.0, detokenize=False)
+    tiny_dsa_llm.generate(prompts, params)
+
+    for name, (rows, max_over_clip) in tiny_dsa_llm.collective_rpc(_indexer_k_rows_written)[
+        0
+    ].items():
+        assert rows > 0, f"{name}: the serving step wrote no indexer cache rows"
+        # Re-storing a clipped key in the FP8 cache rounds it up by at most 2**-4.
+        assert max_over_clip <= 1.07, (name, rows, max_over_clip)
 
 
 def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):

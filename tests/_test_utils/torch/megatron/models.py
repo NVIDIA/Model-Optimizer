@@ -164,8 +164,12 @@ def get_mcore_gpt_model(
     assert activation_func in ["swiglu", "squared_relu"]
     assert normalization in ["LayerNorm", "RMSNorm"]
     assert transformer_impl in ["local", "transformer_engine", "modelopt"]
-    assert not (multi_latent_attention and experimental_attention_variant is not None), (
-        "multi_latent_attention and experimental_attention_variant are mutually exclusive."
+    # DSA (DeepSeek Sparse Attention) is an MLA variant; the other experimental variants replace MLA.
+    assert not (multi_latent_attention and experimental_attention_variant not in (None, "dsa")), (
+        "multi_latent_attention is only compatible with the 'dsa' experimental attention variant."
+    )
+    assert not (experimental_attention_variant == "dsa" and not multi_latent_attention), (
+        "The 'dsa' experimental attention variant requires multi_latent_attention=True."
     )
     print(f"Using `{transformer_impl=}` model spec for building GPT Model.")
 
@@ -183,7 +187,21 @@ def get_mcore_gpt_model(
             **config_kwargs,
         }
 
-    if experimental_attention_variant:
+    if experimental_attention_variant == "dsa":
+        # DSA indexer defaults for tiny models (override via config_kwargs). The indexer head must
+        # hold the MLA positional slice, and rotate_activation needs fast_hadamard_transform.
+        config_kwargs = {
+            "experimental_attention_variant": "dsa",
+            "dsa_indexer_n_heads": 2,
+            "dsa_indexer_head_dim": 32,
+            "dsa_indexer_topk": 8,
+            # Without the indexer loss the indexer runs under no_grad and its params get no gradient.
+            "dsa_indexer_loss_coeff": 0.01,
+            "dsa_indexer_rotate_activation": False,
+            "qk_layernorm": True,
+            **config_kwargs,
+        }
+    elif experimental_attention_variant:
         # GatedDeltaNet/gated-attention shape defaults for tiny models (override via config_kwargs).
         config_kwargs = {
             "experimental_attention_variant": experimental_attention_variant,

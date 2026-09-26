@@ -246,23 +246,25 @@ def disable_compilation(model):
     Args:
         model: The model to disable compilation for.
     """
-    do_not_compile = True
     if hasattr(model, "model"):
-        do_not_compile = model.model.do_not_compile
-        model.model.do_not_compile = True
+        inner = model.model
     elif hasattr(model, "language_model"):
-        do_not_compile = model.language_model.model.do_not_compile
-        model.language_model.model.do_not_compile = True
+        inner = model.language_model.model
     else:
         raise ValueError("Model does not have a model or language_model attribute")
 
+    # Models without vLLM's torch.compile decorator (e.g. the sparse-attention DeepSeek/GLM
+    # models, which use breakable CUDA graphs instead) have nothing to disable.
+    if not hasattr(inner, "do_not_compile"):
+        yield
+        return
+
+    do_not_compile = inner.do_not_compile
+    inner.do_not_compile = True
     try:
         yield
     finally:
-        if hasattr(model, "model"):
-            model.model.do_not_compile = do_not_compile
-        elif hasattr(model, "language_model"):
-            model.language_model.model.do_not_compile = do_not_compile
+        inner.do_not_compile = do_not_compile
 
 
 # vLLM Attention stores ``device``/``dtype`` as plain attrs; ``dtype`` may be a string
