@@ -96,6 +96,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
                 kernels_ggml / "iq1_s.cu",
                 kernels_ggml / "iq2_xs.cu",
                 kernels_ggml / "iq2_xxs.cu",
+                kernels_ggml / "iq2_s.cu",
             ],
             cuda_version_specifiers=">=11.8",
             fail_msg="GGML IQ CUDA packing extension is unavailable.",
