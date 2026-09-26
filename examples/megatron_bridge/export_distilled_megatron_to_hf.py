@@ -60,11 +60,21 @@ from pathlib import Path
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    checkpoint_name,
+    checkpoint_root,
+    mlflow_run,
+    record_exported_checkpoint,
+    resolve_mlflow_args,
+)
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
     load_mbridge_model_from_hf,
@@ -73,6 +83,24 @@ from modelopt.torch.utils.plugins.mbridge import (
 
 # Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
 _ITER_DIR_PREFIX = "iter_"
+
+
+DISTILL_EXPORT = Tool(
+    name="megatron_bridge_distill_export",
+    tracks=(
+        "Track this export on an MLflow server, uploading the command and the run log, and "
+        "writing .experiment.json into each exported checkpoint."
+    ),
+    variant_help="the distilled checkpoint's directory name",
+    variant=lambda args: checkpoint_name(args.megatron_path),
+    model=lambda args: args.student_hf_path,
+    # The root given, not the per-iteration directories under it: those are pointed at this
+    # run by record_exported_checkpoint.
+    checkpoint=lambda args: args.hf_export_path,
+    source=lambda args: checkpoint_root(args.megatron_path),
+    settles_pointer=False,
+    non_params=NON_PARAMS,
+)
 
 
 def _iteration_dir_name(iteration: int) -> str:
@@ -230,8 +258,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
 
+    add_mlflow_args(parser, DISTILL_EXPORT)
+
     args = parser.parse_args()
-    print_args(args)
+    resolve_mlflow_args(args, parser, DISTILL_EXPORT)
+    print_args(masked_args(args))
 
     return args
 
@@ -281,6 +312,7 @@ def main(args: argparse.Namespace):
                 args.student_hf_path,
                 trust_remote_code=args.trust_remote_code,
             )
+            record_exported_checkpoint(args, hf_export_path, dist.is_master())
             print_rank_0(f"Saved distilled VLM to {hf_export_path} in HF format")
     else:
         print_rank_0("Exporting distilled checkpoint(s) to HF format")
@@ -299,6 +331,9 @@ def main(args: argparse.Namespace):
                     template_hf=args.student_hf_model,
                     trust_remote_code=args.trust_remote_code,
                 )
+                # is_rank_0 was captured before dist.cleanup(): afterwards every rank
+                # reports itself as rank 0, and they would all write.
+                record_exported_checkpoint(args, hf_export_path, is_rank_0)
                 print(f"Exported HuggingFace checkpoint to {hf_export_path}")
 
 
@@ -306,7 +341,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, DISTILL_EXPORT):
+            main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:

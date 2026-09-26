@@ -40,14 +40,37 @@ import argparse
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.core.utils import unwrap_model
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    checkpoint_name,
+    checkpoint_root,
+    mlflow_run,
+    resolve_mlflow_args,
+)
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
     use_moe_grouped_gemm,
+)
+
+EXPORT = Tool(
+    name="megatron_bridge_export",
+    tracks=(
+        "Track this export on an MLflow server, uploading the command and the run log, and "
+        "writing .experiment.json into --export_unified_hf_path."
+    ),
+    variant_help="the Megatron checkpoint's directory name",
+    variant=lambda args: checkpoint_name(args.megatron_path),
+    model=lambda args: args.hf_model_name_or_path,
+    checkpoint=lambda args: args.export_unified_hf_path,
+    source=lambda args: checkpoint_root(args.megatron_path),
+    non_params=NON_PARAMS,
 )
 
 
@@ -102,9 +125,16 @@ def get_args() -> argparse.Namespace:
         help="Number of layers in the last pipeline stage (Uneven Pipeline Parallelism)",
     )
 
-    args = parser.parse_args()
+    add_mlflow_args(parser, EXPORT)
 
-    print_args(args)
+    args = parser.parse_args()
+    resolve_mlflow_args(args, parser, EXPORT)
+
+    print_args(masked_args(args))
+
+    # Flipped by main() once the HuggingFace checkpoint is on disk, which is what the MLflow
+    # provenance pointer claims authorship of.
+    args.checkpoint_exported = False
 
     return args
 
@@ -168,6 +198,7 @@ def main(args: argparse.Namespace):
         export_dir=args.export_unified_hf_path,
         trust_remote_code=trust_remote_code,
     )
+    args.checkpoint_exported = True
     print_rank_0(f"Exported HuggingFace checkpoint to {args.export_unified_hf_path}")
 
 
@@ -175,7 +206,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with mlflow_run(args, EXPORT):
+            main(args)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:

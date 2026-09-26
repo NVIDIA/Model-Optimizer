@@ -64,7 +64,7 @@ from pathlib import Path
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-from mlflow_utils import NON_PARAMS, mlflow_run
+from mlflow_utils import NON_PARAMS, add_mlflow_args, mlflow_run, resolve_mlflow_args
 from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
@@ -78,13 +78,7 @@ from modelopt.recipe.presets import (
 )
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.mlflow import (
-    Tool,
-    add_mlflow_args,
-    masked_args,
-    resolve_mlflow_args,
-    resolved_recipe_texts,
-)
+from modelopt.torch.utils.mlflow import Tool, masked_args, resolved_recipe_texts
 from modelopt.torch.utils.plugins.mbridge import (
     get_language_model,
     load_mbridge_model_from_hf,
