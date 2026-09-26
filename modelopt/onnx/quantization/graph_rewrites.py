@@ -225,7 +225,9 @@ def remove_output_initializers(graph: gs.Graph, graph_initializers: list):
     """
     init_names = [init.name for init in graph_initializers]
     init_names_removed = []
-    for output_tensor in graph.outputs:
+    # Iterate over a copy: removing from graph.outputs while iterating it skips the
+    # element after each removal, so adjacent initializer outputs were left behind.
+    for output_tensor in list(graph.outputs):
         if output_tensor.name in init_names:
             graph.outputs.remove(output_tensor)
             init_names_removed.append(output_tensor.name)
