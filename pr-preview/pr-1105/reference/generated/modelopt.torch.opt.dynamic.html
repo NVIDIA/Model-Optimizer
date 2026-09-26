@@ -1,0 +1,616 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>dynamic &mdash; Model Optimizer 0.0.1.dev1+g525235002</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=1ae7504c"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="hparam" href="modelopt.torch.opt.hparam.html" />
+    <link rel="prev" title="conversion" href="modelopt.torch.opt.conversion.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.opt.html">opt</a></li>
+      <li class="breadcrumb-item active">dynamic</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.opt.dynamic.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="dynamic">
+<h1>dynamic<a class="headerlink" href="#dynamic" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.opt.dynamic">Basic dynamic module class and hparam class.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.opt.dynamic.DynamicModule" title="modelopt.torch.opt.dynamic.DynamicModule"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DynamicModule</span></code></a></p></td>
+<td><p>Base class for dynamic modules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.opt.dynamic.DynamicSpace" title="modelopt.torch.opt.dynamic.DynamicSpace"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DynamicSpace</span></code></a></p></td>
+<td><p>A class to represent all dynamic model choices over a model with multiple submodules.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DynamicModule</span></span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Module</span></code></p>
+<p>Base class for dynamic modules.</p>
+<p>Dynamic modules are usually extended from <code class="docutils literal notranslate"><span class="pre">torch.nn.Module</span></code>’s. They
+dynamically support a family of <cite>torch.nn.Module</cite>’s with different architectural
+parameters, such as input/output channel numbers.</p>
+<p>Dynamic modules can also be used to construct the basic searchable unit in a search space with
+the option to select and sample a candidate unit.</p>
+<p>Candidate units are usually described using <code class="docutils literal notranslate"><span class="pre">Hparam</span></code> objects and dynamic attributes. Each
+hparam describes a basic searchable unit (e.g. number of output channels in <code class="docutils literal notranslate"><span class="pre">DynamicConv2d</span></code>).
+Dynamic attributes are callbacks to dynamically construct the attribute depending on the current
+value of the hparam(s), e.g., the <code class="docutils literal notranslate"><span class="pre">weight</span></code> tensor in <code class="docutils literal notranslate"><span class="pre">DynamicConv2d</span></code> that depends on the
+hparam <code class="docutils literal notranslate"><span class="pre">out_channels</span></code>.</p>
+<p>In addition, dynamic modules also support registering general attributes that are removed upon
+export the module. This is useful for storing temporary attributes that are not hparams or
+existing attributes that are converted to dynamic attributes.</p>
+<p>For a <code class="docutils literal notranslate"><span class="pre">DynamicModule</span></code> class that contains other dynamic modules, the class implementation
+should ensure only to expose <code class="docutils literal notranslate"><span class="pre">hparams</span></code> in the outermost class and handle other <code class="docutils literal notranslate"><span class="pre">hparams</span></code>
+internally including <code class="docutils literal notranslate"><span class="pre">hparams</span></code> of child modules that are exposed on their own usually
+(e.g. block module implementations containing DynamicLinear).</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initializing a dynamic module is not allowed!</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.convert">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">convert</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">setup_kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.convert" title="Link to this definition"></a></dt>
+<dd><p>Converts a module in-place into its dynamic counterpart by patching its class.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>) – The module to be converted into a dynamic module.</p></li>
+<li><p><strong>**setup_kwargs</strong> (<em>Any</em>) – Keyword arguments to be passed to the <code class="docutils literal notranslate"><span class="pre">DynamicModule._setup</span></code> method.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The converted dynamic module.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.opt.dynamic.DynamicModule" title="modelopt.torch.opt.dynamic.DynamicModule"><em>DynamicModule</em></a></p>
+</dd>
+</dl>
+<p>This should generally be a <em>final</em> method and child classes should inherit <code class="docutils literal notranslate"><span class="pre">_setup()</span></code>
+instead to customize the conversion process.</p>
+<p>Patching is achieved by updating the <code class="docutils literal notranslate"><span class="pre">__class__</span></code> attribute of the module to its dynamic
+counterpart. The dynamic counterpart is a subclass of the original class, hence, we ensure
+the module is fully compatible with the original class. Simultaneously, we can inject the
+corresponding dynamic behavior in a standardized and rigoruos fashion.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.export" title="Link to this definition"></a></dt>
+<dd><p>Export self (a dynamic module) <strong>in-place</strong> and return the exported module.</p>
+<p>The export process will remove the top-level dynamic module and replace it with the original
+module class. Note that the original class may be either another type of dynamic module or
+a vanilla nn.Module. Consequently, any methods (including properties) that are implemented
+in the child class will be removed. Hparams as well as dynamic and temporary attributes are
+handled in a special fashion, see below.</p>
+<p>In order to ensure that the exported module is still consistent there a several mechanisms
+in place to handle hparams, dynamic attributes, and temporary attributes:</p>
+<ul class="simple">
+<li><dl class="simple">
+<dt><strong>Hparams</strong> of the current type are replaced with their currently active value.</dt><dd><p>Note that we do not need to explicitly handle hparams of the parent class as they are
+mutually-exclusive, i.e., hparams are unique across all levels of inheritance.</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt><strong>Dynamic Attributes</strong> are handled depending on whether they exist in a parent class:</dt><dd><ol class="arabic simple">
+<li><p>The same dynamic attribute exists in a parent class. In this case, the callback is
+folded into (“appended to”) the callback for the same dynamic attribute of the parent
+class. This way we ensure that the final value of the attribute remains consistent.</p></li>
+<li><p>The dynamic attribute does not exist in a parent class. In this case, the attribute
+is not dynamic anymore as there are no more callbacks that could affect the value.
+Therefore, we simply overwrite the underlying original object with the current value
+and revert it to a regular attribute.</p></li>
+</ol>
+</dd>
+</dl>
+</li>
+<li><p><strong>Temporary Attributes</strong> are kept until the final export, i.e., until the resulting class
+is not a dynamic module anymore. This is to ensure that folded callbacks that may need
+access to these attributes can still access them.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.extra_repr">
+<span class="sig-name descname"><span class="pre">extra_repr</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.extra_repr" title="Link to this definition"></a></dt>
+<dd><p>Generate extra_repr making sure all dynamic keys exist in self.__dict__.</p>
+<p>Pytorch heavily uses self.__dict__ to generate extra_repr. However, we remove certain
+attributes from self.__dict__ so we can manage them dynamically. Temporarily, adding them
+back in here and removing them again afterwards.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.freeze">
+<span class="sig-name descname"><span class="pre">freeze</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.freeze" title="Link to this definition"></a></dt>
+<dd><p>Restrict the hparams of the dynamic module to the original choices.</p>
+<p>This is useful to enforce the behavior of the parent class.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>After this call, the module’s hparams can no longer be modified although the underlying
+type is still a dynamic module.</p>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.get_hparam">
+<span class="sig-name descname"><span class="pre">get_hparam</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.get_hparam" title="Link to this definition"></a></dt>
+<dd><p>Look up and return hparam (like “torch.nn.Module.get_parameter()” but for hparam).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>target</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam" title="modelopt.torch.opt.hparam.Hparam"><em>Hparam</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.get_original_cls_by_level">
+<span class="sig-name descname"><span class="pre">get_original_cls_by_level</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.get_original_cls_by_level" title="Link to this definition"></a></dt>
+<dd><p>Return the original class of the dynamic module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>level</strong> (<em>int</em>) – The level of inheritance to get the original class from.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The original class of the dynamic module at the specified level.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>type</em>[<em>Module</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.modify">
+<span class="sig-name descname"><span class="pre">modify</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.modify" title="Link to this definition"></a></dt>
+<dd><p>Modify the module’s dynamic choices in a standardized &amp; scalable fashion.</p>
+<p>This method can be overridden by the child class! While users can also directly modify
+the choices of individual hparams, this method should provide a way to modify a batch of
+dynamic modules with the same arguments, e.g., <code class="docutils literal notranslate"><span class="pre">out_features_ratio</span></code> for <code class="docutils literal notranslate"><span class="pre">DynamicLinear</span></code>.</p>
+<p>Note that arguments of the modify method that are exposed to the user via the rule system
+should be specified as <strong>keyword-only arguments</strong>. When they are exposed as keyword-only
+arguments, the <cite>_DMRegistryCls</cite> can automatically generate the corresponding config class
+on the fly that lets user provide configs and then they are automatically validated before
+being passed to the <code class="docutils literal notranslate"><span class="pre">modify</span></code> method.</p>
+<p>If possible, modify()’s keyword arguments should have default values that leave the hparams
+intact if not provided, e.g., one might call <code class="docutils literal notranslate"><span class="pre">some_dynamic_module.modify()</span></code> without any
+arguments and the module will remain unchanged.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.named_hparams">
+<span class="sig-name descname"><span class="pre">named_hparams</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">configurable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.named_hparams" title="Link to this definition"></a></dt>
+<dd><p>Return an iterator over all hparams of the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>configurable</strong> (<em>bool</em><em> | </em><em>None</em>) – Whether to include configurable hparams.</p>
+</dd>
+<dt class="field-even">Yields<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>(name, Hparam)</em> – tuple containing the name and hparam.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Iterator</em>[<em>tuple</em>[<em>str</em>, <a class="reference internal" href="modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam" title="modelopt.torch.opt.hparam.Hparam"><em>Hparam</em></a>]]</p>
+</dd>
+</dl>
+<p>Default behavior is to iterate over configurable and non-configurable hparams. Set
+<code class="docutils literal notranslate"><span class="pre">configurable</span></code> accordingly to only iterate over either. If <code class="docutils literal notranslate"><span class="pre">configurable</span></code> is set to
+<code class="docutils literal notranslate"><span class="pre">True</span></code>, only configurable symbols are iterated over. If <code class="docutils literal notranslate"><span class="pre">configurable</span></code> is set to
+<code class="docutils literal notranslate"><span class="pre">False</span></code>, configurable symbols are skipped over (only non-configurable symbols).</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.original_cls">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">original_cls</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">type</span><span class="p"><span class="pre">[</span></span><span class="pre">Module</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.original_cls" title="Link to this definition"></a></dt>
+<dd><p>Return the original class of the dynamic module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The original class of the dynamic module at the current level.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicModule.reset_dynamic_attributes">
+<span class="sig-name descname"><span class="pre">reset_dynamic_attributes</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicModule.reset_dynamic_attributes" title="Link to this definition"></a></dt>
+<dd><p>Context manager to temporarily remove any dynamic attributes and re-register values.</p>
+<p>This context manager is intended to be used when we want to access a dynamic attribute in
+its original unmodified version, i.e., without this class interfering with its original
+value and its corresponding getattr/setattr/delattr behavior.</p>
+<p>Upon exiting the context manager, the dynamic attributes are re-registered and the same
+callbacks are re-registered together with the new value.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DynamicSpace</span></span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A class to represent all dynamic model choices over a model with multiple submodules.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.__init__" title="Link to this definition"></a></dt>
+<dd><p>Initialize the dynamic space from the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.config">
+<span class="sig-name descname"><span class="pre">config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">configurable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.config" title="Link to this definition"></a></dt>
+<dd><p>Return the config dict of all hyperparameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> – A model that contains DynamicModule(s).</p></li>
+<li><p><strong>configurable</strong> (<em>bool</em><em> | </em><em>None</em>) – None -&gt; all hps, True -&gt; configurable hps, False -&gt; non-configurable hps</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A dict of <code class="docutils literal notranslate"><span class="pre">(parameter_name,</span> <span class="pre">choice)</span></code> that specifies an active subnet.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.convert_to_dynamic">
+<span class="sig-name descname"><span class="pre">convert_to_dynamic</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dm_registry</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.convert_to_dynamic" title="Link to this definition"></a></dt>
+<dd><p>Convert the model to dynamic modules according to the rules and provided registry.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>rules</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em><em>] </em><em>| </em><em>None</em><em>] </em><em>| </em><em>None</em>) – A dictionary containing rules for the dynamic modules.</p></li>
+<li><p><strong>dm_registry</strong> (<em>_DMRegistryCls</em>) – A registry containing the dynamic modules to be converted to.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A dictionary containing the converted modules with submodule names as keys and the
+converted dynamic modules as values.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Module</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dm_registry</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.export" title="Link to this definition"></a></dt>
+<dd><p>Recursively export the module including self and return the result.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>dm_registry</strong> (<em>_DMRegistryCls</em>) – A dynamic module registry to check for dynamic modules that should be
+exported.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The model after exporting the dynamic modules found in the registry.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.get_hparam">
+<span class="sig-name descname"><span class="pre">get_hparam</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.get_hparam" title="Link to this definition"></a></dt>
+<dd><p>Get the hparam with the given name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>name</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam" title="modelopt.torch.opt.hparam.Hparam"><em>Hparam</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.is_configurable">
+<span class="sig-name descname"><span class="pre">is_configurable</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.is_configurable" title="Link to this definition"></a></dt>
+<dd><p>Check if the model has any configurable hyperparameters.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> – A model to be checked for DynamicModule(s) with configurable hyperparameters.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if the model contains DynamicModule(s) with configurable hyperparameters w/ more
+than one choice.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.is_dynamic">
+<span class="sig-name descname"><span class="pre">is_dynamic</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.is_dynamic" title="Link to this definition"></a></dt>
+<dd><p>Check if any module is dynamic.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>True if the model contains DynamicModule(s).</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.named_dynamic_modules">
+<span class="sig-name descname"><span class="pre">named_dynamic_modules</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.named_dynamic_modules" title="Link to this definition"></a></dt>
+<dd><p>Recursively yield the name and instance of <em>all</em> DynamicModules.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Yields<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>(name, DynamicModule)</em> – tuple containing the name and module.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Iterator</em>[<em>tuple</em>[<em>str</em>, <a class="reference internal" href="#modelopt.torch.opt.dynamic.DynamicModule" title="modelopt.torch.opt.dynamic.DynamicModule"><em>DynamicModule</em></a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.named_hparams">
+<span class="sig-name descname"><span class="pre">named_hparams</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">configurable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unique</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.named_hparams" title="Link to this definition"></a></dt>
+<dd><p>Recursively yield the name and instance of <em>all</em> hparams.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>configurable</strong> (<em>bool</em><em> | </em><em>None</em>) – Whether to include configurable hparams.</p></li>
+<li><p><strong>unique</strong> (<em>bool</em><em> | </em><em>None</em>) – Whether to include unique hparams. If <code class="docutils literal notranslate"><span class="pre">configurable</span></code> is set to <code class="docutils literal notranslate"><span class="pre">True</span></code>,
+then <code class="docutils literal notranslate"><span class="pre">unique</span></code> will be set to <code class="docutils literal notranslate"><span class="pre">True</span></code> by default.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Yields<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>(name, Hparam)</em> – tuple containing the name and hparam.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Iterator</em>[<em>tuple</em>[<em>str</em>, <a class="reference internal" href="modelopt.torch.opt.hparam.html#modelopt.torch.opt.hparam.Hparam" title="modelopt.torch.opt.hparam.Hparam"><em>Hparam</em></a>]]</p>
+</dd>
+</dl>
+<p>Default behavior is to iterate over all hparams. If <code class="docutils literal notranslate"><span class="pre">configurable</span></code> is set to <code class="docutils literal notranslate"><span class="pre">True</span></code>,
+only configurable, non-duplicate symbols are iterated over.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.select">
+<span class="sig-name descname"><span class="pre">select</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strict</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.select" title="Link to this definition"></a></dt>
+<dd><p>Select the subnet provided by config.</p>
+<p>If <cite>strict</cite> is set, then <cite>config</cite> must contain the exact set of keys representing both the
+configurable and non-configurable hparams.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>strict</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.opt.dynamic.DynamicSpace.size">
+<span class="sig-name descname"><span class="pre">size</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.opt.dynamic.DynamicSpace.size" title="Link to this definition"></a></dt>
+<dd><p>Get the search space size of the model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A int representing the search space size of the model.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.opt.conversion.html" class="btn btn-neutral float-left" title="conversion" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.opt.hparam.html" class="btn btn-neutral float-right" title="hparam" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

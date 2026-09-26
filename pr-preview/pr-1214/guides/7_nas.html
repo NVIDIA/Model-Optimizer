@@ -1,0 +1,784 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NAS &mdash; Model Optimizer 0.0.1.dev1+g881967daf</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="AutoCast (ONNX)" href="8_autocast.html" />
+    <link rel="prev" title="Sparsity" href="6_sparsity.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">NAS</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#introduction">Introduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#convert-and-save">Convert and save</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#profiling-a-search-space">Profiling a search space</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#nas-training">NAS training</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#prerequisites">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#restore-the-search-space">Restore the search space</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#training">Training</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#subnet-architecture-search">Subnet architecture search</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id1">Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#performing-search">Performing search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#fine-tuning">Fine-tuning</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#nas-model-prerequisites">NAS Model Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#convert-your-model">Convert your model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#the-conversion-process">The conversion process</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#layer-support">Layer support</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#generating-a-search-space">Generating a search space</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#id2">Prerequisites</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#traceability">Traceability</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#distributeddataparallel">DistributedDataParallel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#auxiliary-modules">Auxiliary modules</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#known-limitations">Known limitations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#nas-concepts">NAS Concepts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#concepts">Concepts</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#neural-architecture-search-nas">Neural Architecture Search (NAS)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#search-space">Search space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#architecture-hyperparameters">Architecture hyperparameters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#subnet">Subnet</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt-converted-model">ModelOpt-converted model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#nas-based-training">NAS-based training</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#architecture-search-selection">Architecture search &amp; selection</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#subnet-fine-tuning">Subnet fine-tuning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#nas-vs-pruning">NAS vs. Pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#advanced-adding-a-new-nas-prune-algorithm">[Advanced] Adding a new NAS/Prune Algorithm</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">NAS</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/guides/7_nas.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="nas">
+<h1>NAS<a class="headerlink" href="#nas" title="Link to this heading"></a></h1>
+<section id="introduction">
+<h2>Introduction<a class="headerlink" href="#introduction" title="Link to this heading"></a></h2>
+<p>ModelOpt provides NAS methods (aka <code class="docutils literal notranslate"><span class="pre">mode</span></code>) like AutoNAS via the
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.html#module-modelopt.torch.nas" title="modelopt.torch.nas"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.nas</span></code></a> module. Given a model, these methods finds the
+subnet which meets the given deployment constraints (e.g. FLOPs, parameters) from your provided
+base model with little to no accuracy degradation (depending on how aggressive is the model size reduced).
+More details on this NAS mode is as follows:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">autonas</span></code>: A NAS method suitable for Computer Vision models that searches for the layerwise parameters like number of channels,
+kernel size, network depth etc.</p></li>
+</ol>
+<p>Follow the steps described below to obtain the optimal model meeting your unique requirements
+using <a class="reference internal" href="../reference/generated/modelopt.torch.nas.html#module-modelopt.torch.nas" title="modelopt.torch.nas"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.nas</span></code></a>:</p>
+<ol class="arabic simple">
+<li><p><strong>Convert your model via</strong> <a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert</span></code></a>:
+Natively generate a neural architecture search space from your PyTorch base model using a simple
+set of configurations. Conveniently save and restore the model architecture and weights during
+the process.</p></li>
+<li><p><strong>NAS training</strong>: Seamlessly train the resulting search space within your existing training
+pipeline.</p></li>
+<li><p><strong>Subnet architecture search via</strong> <a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search</span></code></a>:
+Search for the best neural architecture (subnet) satisfying your deployment constraints, e.g.,
+FLOPs / parameters.</p></li>
+<li><p><strong>Fine-tuning</strong>: Optionally, fine-tune the resulting subnet to achieve even higher accuracy.</p></li>
+</ol>
+<p><em>To find out more about NAS and related concepts, please refer to the below section</em>
+<a class="reference internal" href="#nas-concepts"><span class="std std-ref">NAS Concepts</span></a>.</p>
+</section>
+<section id="convert-and-save">
+<span id="nas-conversion"></span><h2>Convert and save<a class="headerlink" href="#convert-and-save" title="Link to this heading"></a></h2>
+<p>You can convert your model and generate a search space from it using
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a>.
+The resulting search space should be saved using <a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>.
+It can be loaded back using <a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore()</span></code></a>
+to perform the subsequent steps of architecture search.</p>
+<p>Example usage:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.nas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+
+<span class="c1"># User-defined model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+
+<span class="c1"># Generate the search space for AutoNAS</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;autonas&quot;</span><span class="p">)</span>
+
+<span class="c1"># Save the search space for future use</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;modelopt_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The NAS API’s are a super-set of the pruning API’s. You can use the pruning modes (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;fastnas&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;gradnas&quot;</span></code>, etc.)
+here as well.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>In the above example, we have used the default AutoNAS <code class="docutils literal notranslate"><span class="pre">config</span></code> for <code class="docutils literal notranslate"><span class="pre">mtn.convert()</span></code>.
+You can see it using
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html#modelopt.torch.nas.autonas.AutoNASConfig" title="modelopt.torch.nas.autonas.AutoNASConfig"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.autonas.AutoNASConfig()</span></code></a>.
+You can also specify custom configurations to have a different search space. See
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a> documentation for more information.
+An example config is shown below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.nas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtn</span>
+
+<span class="n">config</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">autonas</span><span class="o">.</span><span class="n">AutoNASConfig</span><span class="p">()</span>
+<span class="n">config</span><span class="p">[</span><span class="s2">&quot;nn.Conv2d&quot;</span><span class="p">][</span><span class="s2">&quot;*&quot;</span><span class="p">][</span><span class="s2">&quot;out_channels_ratio&quot;</span><span class="p">]</span> <span class="o">+=</span> <span class="p">(</span><span class="mf">0.1</span><span class="p">,)</span>  <span class="c1"># include more channel choices</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">model_or_model_factory</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;autonas&quot;</span><span class="p">,</span> <span class="n">config</span><span class="p">)])</span>
+</pre></div>
+</div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If you want to learn more about the conversion process and the prerequisites for your model,
+you can take a look at <a class="reference internal" href="#nas-prereqs"><span class="std std-ref">NAS Model Prerequisites</span></a>.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Please see <a class="reference internal" href="2_save_load.html#save-restore"><span class="std std-ref">saving and restoring of ModelOpt-modified models</span></a> to learn
+about all the available options for saving and restoring.</p>
+</div>
+<section id="profiling-a-search-space">
+<h3>Profiling a search space<a class="headerlink" href="#profiling-a-search-space" title="Link to this heading"></a></h3>
+<p>The search space can be used to perform architecture search according to your desired deployment
+constraints.</p>
+<p>To better understand the performance and the range of the resulting search space, you can profile
+the search space together with your deployment constraints using
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.profile" title="modelopt.torch.nas.algorithms.profile"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.profile()</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="c1"># Looking for a subnet with at most 4 GFLOPs</span>
+<span class="n">constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;flops&quot;</span><span class="p">:</span> <span class="mf">4.0e9</span><span class="p">}</span>
+
+<span class="c1"># Measure FLOPs against dummy_input</span>
+<span class="c1"># Can be provided as a single tensor or tuple of input args to the model.</span>
+<span class="n">dummy_input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">224</span><span class="p">,</span> <span class="mi">224</span><span class="p">)</span>
+
+<span class="n">is_sat</span><span class="p">,</span> <span class="n">search_space_stats</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">profile</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">dummy_input</span><span class="p">,</span> <span class="n">constraints</span><span class="o">=</span><span class="n">constraints</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Following info will be printed:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>Profiling the following subnets from the given model: (&#39;min&#39;, &#39;centroid&#39;, &#39;max&#39;).
+--------------------------------------------------------------------------------
+
+                            Profiling Results
+┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ Constraint   ┃ min          ┃ centroid     ┃ max          ┃ max/min ratio ┃
+┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ flops        │ 975.84M      │ 3.68G        │ 9.18G        │ 9.40          │
+│ params       │ 4.84M        │ 12.33M       │ 25.50M       │ 5.27          │
+└──────────────┴──────────────┴──────────────┴──────────────┴───────────────┘
+
+            Constraints Evaluation
+┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
+┃              ┃              ┃ Satisfiable  ┃
+┃ Constraint   ┃ Upper Bound  ┃ Upper Bound  ┃
+┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
+│ flops        │ 4.00G        │ True         │
+└──────────────┴──────────────┴──────────────┘
+
+Search Space Summary:
+----------------------------------------------------------------------------------------------------
+* conv1.out_channels                                                               [32, 64]
+  conv1.in_channels                                                                [3]
+  bn1.num_features                                                                 [32, 64]
+* layer1.depth                                                                     [1, 2, 3]
+* layer1.0.conv1.out_channels                                                      [32, 64]
+  layer1.0.conv1.in_channels                                                       [32, 64]
+  layer1.0.bn1.num_features                                                        [32, 64]
+* layer1.0.conv2.out_channels                                                      [32, 64]
+  ...
+  ...
+  ...
+* layer4.2.conv1.out_channels                                                      [256, 352, 512]
+  layer4.2.conv1.in_channels                                                       [2048]
+  layer4.2.bn1.num_features                                                        [256, 352, 512]
+* layer4.2.conv2.out_channels                                                      [256, 352, 512]
+  layer4.2.conv2.in_channels                                                       [256, 352, 512]
+  layer4.2.bn2.num_features                                                        [256, 352, 512]
+  layer4.2.conv3.out_channels                                                      [2048]
+  layer4.2.conv3.in_channels                                                       [256, 352, 512]
+----------------------------------------------------------------------------------------------------
+Number of configurable hparams: 40
+Total size of the search space: 1.90e+18
+Note: all constraints can be satisfied within the search space!
+</pre></div>
+</div>
+<p>You can also skip the <code class="docutils literal notranslate"><span class="pre">constraints</span></code> parameter to just print the range of available constraints
+without checking if it is within your constraints. The profiling results will help you understand
+the search space and come up with a potential search constraint that you can iterate on.</p>
+</section>
+</section>
+<section id="nas-training">
+<h2>NAS training<a class="headerlink" href="#nas-training" title="Link to this heading"></a></h2>
+<section id="prerequisites">
+<h3>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading"></a></h3>
+<p>During NAS training, you can use your existing training infrastructure. However, we recommend
+you make the following modifications to your training hyperparameters:</p>
+<p>For AutoNAS:</p>
+<ol class="arabic simple">
+<li><p>Increase the training time (epochs) by 2-3x.</p></li>
+<li><p>Make sure that the learning rate schedule is adjusted for the longer training time.</p></li>
+<li><p>We recommend using a continuously decaying learning
+rate schedule such as the cosine annealing schedule (see
+<a class="reference external" href="https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#torch.optim.lr_scheduler.CosineAnnealingLR" rel="noopener noreferrer" target="_blank">PyTorch documentation</a>).</p></li>
+</ol>
+</section>
+<section id="restore-the-search-space">
+<h3>Restore the search space<a class="headerlink" href="#restore-the-search-space" title="Link to this heading"></a></h3>
+<p>Please restore the search space from the saved one to continue with the rest of the steps as shown
+below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Provide the model before conversion to mto.restore</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mto</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">model_or_model_factory</span><span class="p">,</span> <span class="s2">&quot;modelopt_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="training">
+<h3>Training<a class="headerlink" href="#training" title="Link to this heading"></a></h3>
+<p>You can now proceed with your existing training pipeline with the changes in training time and learning rate.</p>
+</section>
+</section>
+<section id="subnet-architecture-search">
+<h2>Subnet architecture search<a class="headerlink" href="#subnet-architecture-search" title="Link to this heading"></a></h2>
+<p>The next step in NAS is to perform architecture search on the resulting search space to find the
+best subnet satisfying your deployment constraints.</p>
+<section id="id1">
+<h3>Prerequisites<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p>To perform the search (<a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search()</span></code></a>) on a trained
+model, a score function, a dummy input (to measure your deployment constraints), the training
+dataloader (to calibrate the normalization layers) and the constraints are required. Please see
+the <a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search()</span></code></a> API for more details.</p></li>
+<li><p>Depending on the algorithm, you may be able to provide multiple search constraint such as
+<code class="docutils literal notranslate"><span class="pre">flops</span></code> or <code class="docutils literal notranslate"><span class="pre">params</span></code> by specifying an upper bound for each.</p></li>
+</ol>
+</section>
+<section id="performing-search">
+<h3>Performing search<a class="headerlink" href="#performing-search" title="Link to this heading"></a></h3>
+<p>Below is an example of running search on an AutoNAS converted and trained model.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Wrap your original validation function to only take the model as input.</span>
+<span class="c1"># This function acts as the score function to rank models.</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">score_func</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">validate</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">val_loader</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+
+
+<span class="c1"># Specify the sample input including target data shape for FLOPs calculation.</span>
+<span class="n">dummy_input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">224</span><span class="p">,</span> <span class="mi">224</span><span class="p">)</span>
+
+<span class="c1"># Looking for a subnet with at most 4 GFLOPs</span>
+<span class="n">search_constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;flops&quot;</span><span class="p">:</span> <span class="mf">4.0e9</span><span class="p">}</span>
+
+<span class="c1"># search_res (dict) contains state_dict / stats of the searcher</span>
+<span class="n">searched_model</span><span class="p">,</span> <span class="n">search_res</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">search</span><span class="p">(</span>
+    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+    <span class="n">constraints</span><span class="o">=</span><span class="n">search_constraints</span><span class="p">,</span>
+    <span class="n">dummy_input</span><span class="o">=</span><span class="n">dummy_input</span><span class="p">,</span>
+    <span class="n">config</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;data_loader&quot;</span><span class="p">:</span> <span class="n">train_loader</span><span class="p">,</span>  <span class="c1"># training data is used for calibrating BN layers</span>
+        <span class="s2">&quot;score_func&quot;</span><span class="p">:</span> <span class="n">score_func</span><span class="p">,</span>  <span class="c1"># validation score is used to rank the subnets</span>
+        <span class="c1"># checkpoint to store the search state and resume or re-run the search with different constraint</span>
+        <span class="s2">&quot;checkpoint&quot;</span><span class="p">:</span> <span class="s2">&quot;modelopt_search_checkpoint.pth&quot;</span><span class="p">,</span>
+    <span class="p">},</span>
+<span class="p">)</span>
+
+<span class="c1"># Save the searched model for further fine-tuning</span>
+<span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">searched_model</span><span class="p">,</span> <span class="s2">&quot;modelopt_searched_model.pth&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>If the runtime of the score function is longer than a few minutes, consider subsampling the
+dataset used in the score function. A PyTorch dataset can be subsampled using
+<a class="reference external" href="https://pytorch.org/docs/stable/data.html#torch.utils.data.Subset" rel="noopener noreferrer" target="_blank">torch.utils.data.Subset</a>
+as following:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">subset_dataset</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">Subset</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="n">indices</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>NAS will modify the model in-place.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html#modelopt.torch.nas.algorithms.search" title="modelopt.torch.nas.algorithms.search"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.search()</span></code></a> supports distributed data parallelism
+via <code class="docutils literal notranslate"><span class="pre">DistributedDataParallel</span></code> in PyTorch.</p>
+</div>
+</section>
+</section>
+<section id="fine-tuning">
+<h2>Fine-tuning<a class="headerlink" href="#fine-tuning" title="Link to this heading"></a></h2>
+<p>After search, the accuracy drop may be less significant compared with pruning, however, we still
+recommend to run fine-tuning to recover the best accuracy. A usually good fine-tuning schedule
+for AutoNAS is to repeat the pre-training schedule (1x epochs) with 0.5x-1x initial learning rate as done in FastNAS.
+Please refer to the <a class="reference internal" href="3_pruning.html#pruning-fine-tuning"><span class="std std-ref">Pruning fine-tuning section</span></a> for more details.</p>
+</section>
+<section id="nas-model-prerequisites">
+<span id="nas-prereqs"></span><h2>NAS Model Prerequisites<a class="headerlink" href="#nas-model-prerequisites" title="Link to this heading"></a></h2>
+<p>In this guide, we will go through the steps to set up your model to work with NAS and pruning. At
+the end of this guide, you will be able to <a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">convert</span></code></a>
+your own model to generate a search space that can be used for NAS and pruning.</p>
+<section id="convert-your-model">
+<h3>Convert your model<a class="headerlink" href="#convert-your-model" title="Link to this heading"></a></h3>
+<p>Most PyTorch models, including custom models, are natively compatible with ModelOpt (depending on how the forward is
+implemented). To quickly test whether your model is compatible you can simply try to convert it:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.nas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtn</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+
+<span class="c1"># User-defined model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+
+<span class="c1"># Convert the model into a search space</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;fastnas&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>If you encounter problems or would like to understand more about the conversion process, please
+continue reading. Otherwise, you can skip the rest of this guide.</p>
+</section>
+<section id="the-conversion-process">
+<h3>The conversion process<a class="headerlink" href="#the-conversion-process" title="Link to this heading"></a></h3>
+<p>ModelOpt will automatically generate a search space for you from your custom PyTorch model.
+This is a one time process process performed during pruning and NAS. Once a model is converted, you
+can save and restore it for downstream tasks like training, inference, and fine-tuning.</p>
+<p>To help you better understand how the search space is derived from your model, we go through the
+process in more detail below.</p>
+<section id="layer-support">
+<h4>Layer support<a class="headerlink" href="#layer-support" title="Link to this heading"></a></h4>
+<p>You can make the most use out of ModelOpt with model architectures consisting of layers that
+ModelOpt can automatically convert into searchable units.</p>
+<p>Specifically, the following <a class="reference external" href="https://pytorch.org/docs/stable/nn.html" rel="noopener noreferrer" target="_blank">native PyTorch layers</a>
+can be converted into searchable units:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+
+<span class="c1"># We convert native PyTorch convolutional layers to automatically search over the number of</span>
+<span class="c1"># channels and optionally over the kernel size.</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">Conv1d</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">Conv2d</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">Conv3d</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">ConvTranspose1d</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">ConvTranspose2d</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">ConvTranspose3d</span>
+
+<span class="c1"># We convert native PyTorch linear layers to automatically search over the number of features</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">Linear</span>
+
+<span class="c1"># We convert native PyTorch sequential layers that contain residual blocks to automatically</span>
+<span class="c1"># search over the number of layers (depth) in the sequential layer.</span>
+<span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span>
+
+<span class="c1"># We convert Megatron-core / Megatron-Bridge GPT or MoE or Mamba Hybrid style models (e.g. Llama3, Nemotron-3-Nano, Qwen3-30B-A3B)</span>
+<span class="c1"># to automatically search over the</span>
+<span class="c1"># MLP hidden size, number of attention heads</span>
+<span class="c1"># number of mamba heads, mamba head dimension,</span>
+<span class="c1"># number of moe experts, moe ffn hidden size, moe shared expert intermediate size,</span>
+<span class="c1"># and depth of the model.</span>
+<span class="n">megatron</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">gpt</span><span class="o">.</span><span class="n">GPTModel</span>
+<span class="n">megatron</span><span class="o">.</span><span class="n">core</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">mamba</span><span class="o">.</span><span class="n">MambaModel</span>
+
+<span class="c1"># We convert Hugging Face Attention layers to automatically search over the number of heads</span>
+<span class="c1"># and MLP hidden size.</span>
+<span class="c1"># Make sure `config.use_cache` is set to False during pruning.</span>
+<span class="n">transformers</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">bert</span><span class="o">.</span><span class="n">modeling_bert</span><span class="o">.</span><span class="n">BertAttention</span>
+<span class="n">transformers</span><span class="o">.</span><span class="n">models</span><span class="o">.</span><span class="n">gptj</span><span class="o">.</span><span class="n">modeling_gptj</span><span class="o">.</span><span class="n">GPTJAttention</span>
+</pre></div>
+</div>
+</section>
+<section id="generating-a-search-space">
+<h4>Generating a search space<a class="headerlink" href="#generating-a-search-space" title="Link to this heading"></a></h4>
+<p>To generate a search space from your desired model, a simple call to
+<a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a> suffices:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.nas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtn</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+
+<span class="c1"># User-defined model</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+
+<span class="c1"># Convert the model for NAS/pruning</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;fastnas&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Your generated <code class="docutils literal notranslate"><span class="pre">model</span></code> represents a search space consisting of a collection of subnets.
+Note that you can use the converted model like any other, regular PyTorch model. It will behave
+according to the currently activated subnet.</p>
+<p>Roughly, the <a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">convert</span></code></a> process can be broken down into
+the following steps:</p>
+<ol class="arabic simple">
+<li><p>Trace through the model to resolve layer dependencies and record how layers are connected.</p></li>
+<li><p>Convert supported layers into searchable units, i.e., dynamic layers and connect them
+according to the recorded dependencies.</p></li>
+<li><p>Generate a consistent search space from the converted model.</p></li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>During pruning, the conversion is performed implicitly when
+<a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune</span></code></a> is called.</p>
+</div>
+</section>
+</section>
+<section id="id2">
+<h3>Prerequisites<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
+<p>In order to correctly generate a search space, your original model should satisfy the following
+prerequisites.</p>
+<section id="traceability">
+<h4>Traceability<a class="headerlink" href="#traceability" title="Link to this heading"></a></h4>
+<p>The model needs to be traceable with ModelOpt’s <a class="reference external" href="https://pytorch.org/docs/stable/fx.html" rel="noopener noreferrer" target="_blank">torch.fx</a>-like tracer.</p>
+<p>If not, you will see errors or warnings when you run <a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a>.
+Note that some of these warnings may not affect the search space and hence can be ignored.</p>
+<p>Note that in some cases certain layers cannot be traced and, if possible, you should adjust their
+definition and forward method to be traceable. Otherwise, such layers and all affected layers will
+be ignored in the conversion process.</p>
+</section>
+<section id="distributeddataparallel">
+<h4>DistributedDataParallel<a class="headerlink" href="#distributeddataparallel" title="Link to this heading"></a></h4>
+<p>Wrapping the model with <code class="docutils literal notranslate"><span class="pre">DistributedDataParallel</span></code> should occur <strong>after</strong> the conversion process
+and during wrapping <code class="docutils literal notranslate"><span class="pre">find_unused_parameters=True</span></code> needs to be set:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">model</span> <span class="o">=</span> <span class="n">mtn</span><span class="o">.</span><span class="n">convert</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">DistributedDataParallel</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">find_unused_parameters</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="auxiliary-modules">
+<h4>Auxiliary modules<a class="headerlink" href="#auxiliary-modules" title="Link to this heading"></a></h4>
+<p>If your model contains auxiliary modules, e.g., branches that are active only
+during the training, ensure that you convert the full model such that <strong>all</strong> modules
+are active during the conversion process.</p>
+</section>
+</section>
+<section id="known-limitations">
+<h3>Known limitations<a class="headerlink" href="#known-limitations" title="Link to this heading"></a></h3>
+<p>Please be aware of other potential limitations as mentioned in the <a class="reference internal" href="../support/2_faqs.html#nas-faqs"><span class="std std-ref">NAS FAQs</span></a>!</p>
+</section>
+</section>
+<section id="nas-concepts">
+<span id="id3"></span><h2>NAS Concepts<a class="headerlink" href="#nas-concepts" title="Link to this heading"></a></h2>
+<p>Below, we will provide an overview of ModelOpt’s neural architecture search (NAS) and pruning
+algorithms as well as its basic concepts and terminology.</p>
+<section id="overview">
+<h3>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h3>
+<table class="docutils align-default" id="id4">
+<caption><span class="caption-text">Glossary</span><a class="headerlink" href="#id4" title="Link to this table"></a></caption>
+<colgroup>
+<col style="width: 37.9%" />
+<col style="width: 62.1%" />
+</colgroup>
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#neural-architecture-search-nas">Neural Architecture Search (NAS)</a></p></td>
+<td><p>The process of finding the best neural network architecture for a given task.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#search-space">Search space</a></p></td>
+<td><p>The set of possible candidate architecture that are searched during pruning or NAS.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#architecture-hyperparameters">Architecture hyperparameters</a></p></td>
+<td><p>The set of hyperparameters, e.g., number of layers, describing the search space.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#subnet">Subnet</a></p></td>
+<td><p>A candidate architecture in the search space.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#nas-based-training">NAS-based training</a></p></td>
+<td><p>The process of training the collection of subnets in the search space.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#architecture-search-selection">Architecture search &amp; selection</a></p></td>
+<td><p>The process of finding an optimal subnet within a trained search space.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#subnet-fine-tuning">Subnet fine-tuning</a></p></td>
+<td><p>The process of training the selected subnet in isolation for improved final accuracy.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="3_pruning.html#pruning-concepts"><span class="std std-ref">Pruning</span></a></p></td>
+<td><p>The process of removing redundant components from a neural network for a given task.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="concepts">
+<h3>Concepts<a class="headerlink" href="#concepts" title="Link to this heading"></a></h3>
+<p>Below, we provide an introduction to the concepts and terminology of neural architecture
+search. During regular neural network training, only the neural network weights are
+trained. However during NAS, both the weights and the architecture of the model are trained.</p>
+<section id="neural-architecture-search-nas">
+<h4>Neural Architecture Search (NAS)<a class="headerlink" href="#neural-architecture-search-nas" title="Link to this heading"></a></h4>
+<p>Neural architecture search is the process of finding the best neural network architecture from
+a set of candidate architectures. NAS is usually performed before, during, or in-between training.
+During NAS different performance metrics, such as accuracy, on-device latency, or size of the model,
+are used to evaluate the candidate architectures.</p>
+</section>
+<section id="search-space">
+<span id="search-space-subnets"></span><h4>Search space<a class="headerlink" href="#search-space" title="Link to this heading"></a></h4>
+<p>The search space is defined as the (discrete) set of all possible neural architectures that are
+trained. Search spaces are derived from a (user-specified) base architecture (e.g., ResNet50) and a
+set of <strong>configs</strong> that describe how to parameterize the base architecture, see
+<a class="reference internal" href="#nas-prereqs"><span class="std std-ref">NAS Model Prerequisites</span></a> for more info.</p>
+</section>
+<section id="architecture-hyperparameters">
+<h4>Architecture hyperparameters<a class="headerlink" href="#architecture-hyperparameters" title="Link to this heading"></a></h4>
+<p>The search space is parameterized via a set of discrete architecture hyperparameters that describe
+individual “modifications” to the base architecture, e.g., the number of channels in a convolutional
+layer, the number of repeated building blocks, number of attention heads in a transformer layer, etc.
+Each possible architecture in the search space can be described as a distinct configuration of the
+set of architecture hyperparameters.</p>
+</section>
+<section id="subnet">
+<h4>Subnet<a class="headerlink" href="#subnet" title="Link to this heading"></a></h4>
+<p>The search space consists of a collection of <em>subnets</em>, where each subnet represents a neural
+architecture. Each <strong>subnet</strong> constitutes a neural architecture with different layers and operators
+or different parameterization (e.g. channel number) of each layer.</p>
+<p>To better characterize a given search space, we usually consider a few distinct subnets:</p>
+<ul class="simple">
+<li><p>Minimum subnet (<code class="docutils literal notranslate"><span class="pre">min</span></code>): The smallest subnet within the search space.</p></li>
+<li><p>Centroid subnet (<code class="docutils literal notranslate"><span class="pre">centroid</span></code>): The subnet for which each architecture hyperparameter is set to
+the value closest to its centroid (mean).</p></li>
+<li><p>Maximum subnet (<code class="docutils literal notranslate"><span class="pre">max</span></code>): The largest subnet within the search space.</p></li>
+</ul>
+</section>
+<section id="modelopt-converted-model">
+<h4>ModelOpt-converted model<a class="headerlink" href="#modelopt-converted-model" title="Link to this heading"></a></h4>
+<p>After the conversion, the user-provided neural network will represent the search space. It can be
+obtained via <a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html#modelopt.torch.nas.conversion.convert" title="modelopt.torch.nas.conversion.convert"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtn.convert()</span></code></a>, see <a class="reference internal" href="#nas-conversion"><span class="std std-ref">Convert and save</span></a>.</p>
+<p>During the conversion process, the search space is automatically derived from a given base
+architecture and the relevant architecture hyperparameters are automatically identified.</p>
+<p>The next step is to train the converted model (instead of the original architecture) to find the
+optimal subnet for your deployment constraints.</p>
+</section>
+<section id="nas-based-training">
+<h4>NAS-based training<a class="headerlink" href="#nas-based-training" title="Link to this heading"></a></h4>
+<p>During training of an search space, we simultaneously train both the model’s weights and
+architecture:</p>
+<ul class="simple">
+<li><p>Using <a class="reference internal" href="../reference/generated/modelopt.torch.nas.html#module-modelopt.torch.nas" title="modelopt.torch.nas"><code class="xref py py-mod docutils literal notranslate"><span class="pre">modelopt.torch.nas</span></code></a> you can re-use your existing
+training loop to train the search space.</p></li>
+<li><p>During search space training the entire collection of subnets is automatically trained together
+with its weights.</p></li>
+<li><p>Given that we train both the architecture (all subnets) and the weights, training data may vary
+compared to regular training as described in the NAS Training section above.</p></li>
+</ul>
+</section>
+<section id="architecture-search-selection">
+<span id="search-space-search-selection"></span><h4>Architecture search &amp; selection<a class="headerlink" href="#architecture-search-selection" title="Link to this heading"></a></h4>
+<p>At the end of search space training process, the next step is to <strong>search</strong> and select the subnet
+from the search space:</p>
+<ul class="simple">
+<li><p>The search procedure is a discrete optimization problem to determine the optimal subnet
+configuration from the search space.</p></li>
+<li><p>The search procedure takes your deployment constraints, e.g., FLOPs, parameters or latency and inference device, into
+account to determine the optimal (most accurate) subnet configuration while satisfying the
+constraints.</p></li>
+<li><p>The resulting subnet can be used for further downstream tasks, e.g., fine-tuning and deployment.</p></li>
+</ul>
+</section>
+<section id="subnet-fine-tuning">
+<h4>Subnet fine-tuning<a class="headerlink" href="#subnet-fine-tuning" title="Link to this heading"></a></h4>
+<p>To further boost the accuracy of the selected subnet, the subnet is usually fine-tuned on the
+original task:</p>
+<ul class="simple">
+<li><p>To fine-tune the subnet, you can simply repeat the training pipeline of the original model
+with the adjusted training schedule as described in the Fine-tuning section above.</p></li>
+<li><p>The fine-tuned model constitutes the deployable model with the optimal trade-off between
+accuracy and your provided constraints.</p></li>
+</ul>
+</section>
+</section>
+<section id="nas-vs-pruning">
+<h3>NAS vs. Pruning<a class="headerlink" href="#nas-vs-pruning" title="Link to this heading"></a></h3>
+<p>The difference between NAS and pruning is summarized below.</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 40.0%" />
+<col style="width: 40.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head stub"></th>
+<th class="head"><p>NAS</p></th>
+<th class="head"><p>Pruning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><th class="stub"><p>Search space</p></th>
+<td><p>More flexible search space with additional searchable dimensions such as network depth,
+kernel size, or selection of activation function.</p></td>
+<td><p>Less flexible search space with searchable dimensions constrained to fewer options such as
+number of channels and features or attention heads.</p></td>
+</tr>
+<tr class="row-odd"><th class="stub"><p>Training time</p></th>
+<td><p>Usually requires training a model for additional time before a subnet can be searched.</p></td>
+<td><p>No training is required when a pre-trained checkpoint is available. If not, regular
+training can be used to pre-train a checkpoint.</p></td>
+</tr>
+<tr class="row-even"><th class="stub"><p>Performance</p></th>
+<td><p>Can provide improved accuracy-latency trade-off due to more flexible search space and the
+increased training time.</p></td>
+<td><p>May provide similar performance to NAS in particular applications, however, usually exhibits
+worse performance due to the limited search space and training time.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<section id="advanced-adding-a-new-nas-prune-algorithm">
+<h2>[Advanced] Adding a new NAS/Prune Algorithm<a class="headerlink" href="#advanced-adding-a-new-nas-prune-algorithm" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Please refer to this <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/compare/template/new-nas-mode" rel="noopener noreferrer" target="_blank">template</a>
+for adding a new NAS algorithm.</p></li>
+<li><p>Please refer to <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/prune/plugins/mcore_minitron.py" rel="noopener noreferrer" target="_blank">mcore_minitron.py</a>
+for an actual example of adding Minitron Pruning algorithm.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="6_sparsity.html" class="btn btn-neutral float-left" title="Sparsity" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="8_autocast.html" class="btn btn-neutral float-right" title="AutoCast (ONNX)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
