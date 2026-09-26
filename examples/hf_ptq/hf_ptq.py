@@ -381,6 +381,11 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
+    method_options = aq_config.method_options or {}
+    if aq_config.uses_predicted_damage_target:
+        # The recipe validator rejects an explicit bit budget; remove only the schema default.
+        constraints.pop("effective_bits", None)
+
     is_kv_search = aq_config.constraints.cost_model == "kv_cache"
     if is_kv_search:
         return {
@@ -393,6 +398,10 @@ def _mtq_inputs_from_auto_quantize_config(
             "method": aq_config.auto_quantize_method,
             "score_size": aq_config.score_size,
         }
+
+    method = aq_config.auto_quantize_method
+    if method_options:
+        method = {"method": method, **method_options}
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
@@ -431,7 +440,7 @@ def _mtq_inputs_from_auto_quantize_config(
         "module_search_spaces": module_search_spaces,
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
-        "method": aq_config.auto_quantize_method,
+        "method": method,
         "score_size": aq_config.score_size,
     }
 
@@ -490,13 +499,16 @@ def auto_quantize(
         def loss_func(output, data):
             return output.loss
 
-    if inputs["method"] == "gradient":
+    method_name = (
+        inputs["method"]["method"] if isinstance(inputs["method"], dict) else inputs["method"]
+    )
+    if method_name == "gradient":
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
             return model(**inputs_)
 
-    elif inputs["method"] == "kl_div":
+    elif method_name in ("kl_div", "aumann_shapley"):
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -510,9 +522,13 @@ def auto_quantize(
                 return _select_unpadded_logits(logits, batch)
             return logits
 
+        if method_name == "aumann_shapley":
+            loss_func = None
+
     else:
         raise ValueError(
-            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize method: {method_name}. Must be 'gradient', 'kl_div', "
+            "or 'aumann_shapley'"
         )
 
     auto_quantize_kwargs: dict[str, Any] = {
