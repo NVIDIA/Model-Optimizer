@@ -1,0 +1,11 @@
+# Schema validation error: QAT mode requires training config
+_test:
+  description: "Schema error: QAT mode requires training configuration"
+
+  validate:
+    expect_error: "QAT mode requires"
+
+version: "1.0"
+quantization:
+  mode: qat
+  preset: fp8

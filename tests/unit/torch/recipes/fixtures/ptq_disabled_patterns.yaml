@@ -1,0 +1,23 @@
+# Disabled patterns create enable=false entries
+_test:
+  description: "disabled_patterns injects enable:false entries"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "*layers.0*":
+            enable: false
+          "*layers.1*":
+            enable: false
+
+version: "1.0"
+quantization:
+  preset: fp8
+  disabled_patterns:
+    - "*layers.0*"
+    - "*layers.1*"

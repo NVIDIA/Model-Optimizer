@@ -1,0 +1,16 @@
+# KV cache adds quantizer patterns
+_test:
+  description: "KV cache section adds bmm/kv quantizer patterns"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_kv_patterns_present: true
+
+version: "1.0"
+quantization:
+  preset: fp8
+  kv_cache:
+    format: fp8

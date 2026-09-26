@@ -1,0 +1,11 @@
+# Sparsity at boundary value 1.0 (valid)
+_test:
+  description: "Sparsity boundary: 1.0 is valid"
+
+  validate:
+    expect_success: true
+
+version: "1.0"
+sparsity:
+  method: sparse_gpt
+  sparsity: 1.0
