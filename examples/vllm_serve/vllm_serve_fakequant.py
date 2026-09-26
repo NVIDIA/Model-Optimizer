@@ -58,10 +58,13 @@ import uvloop
 import vllm
 from packaging import version
 from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 vllm_version = version.parse(vllm.__version__)
+try:  # vLLM 0.29 moved the serve argument parser out of ``vllm.entrypoints.openai``
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+except ImportError:
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
 if vllm_version <= version.parse("0.11.0"):
     from vllm.utils import FlexibleArgumentParser
 else:

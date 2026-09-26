@@ -66,6 +66,11 @@ from modelopt.torch.utils.plugins.mbridge import (
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
 
+try:
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexer
+except ImportError:  # megatron-core without DeepSeek Sparse Attention
+    DSAIndexer = None
+
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
@@ -480,6 +485,19 @@ def main(args: argparse.Namespace):
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+
+    if DSAIndexer is not None and not (student_provider.dsa_indexer_loss_coeff or 0) > 0:
+        # Without the indexer loss MCore runs the DSA indexer under no_grad, so its parameters never
+        # get a gradient; left trainable, they fail the grad-buffer bucket reset of
+        # overlap_grad_reduce. Freeze them before DDP builds its buffers.
+        def _freeze_dsa_indexers_hook(model_chunks):
+            for chunk in model_chunks:
+                for module in unwrap_model(chunk).modules():
+                    if isinstance(module, DSAIndexer):
+                        module.requires_grad_(False)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_freeze_dsa_indexers_hook)
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(

@@ -226,6 +226,46 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
+def _check_indexer_k_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables ``indexer_k_quantizer`` but no sparse-attention indexer got one.
+
+    The quantizer only exists on indexers that a framework plugin (vLLM, Megatron-Core) converted.
+    When a plugin does not recognize the installed framework's indexer class, the pattern matches
+    nothing and the indexer K cache silently stays unquantized. Intent is read like in
+    :func:`_check_weight_quantization_took_effect`, but only from patterns naming the quantizer,
+    so catch-all patterns do not count. A model without an ``*Indexer`` module (another
+    architecture, or a pipeline stage holding no indexer layer) is skipped.
+    """
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    if not any(
+        entry.enable and "indexer_k_quantizer" in pattern
+        for pattern, entry in last_entry_per_pattern.items()
+    ):
+        return
+    if any(
+        module.is_enabled
+        for name, module in model.named_modules()
+        # A list-valued ``cfg`` turns the quantizer into a SequentialQuantizer container.
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+        and name.endswith("indexer_k_quantizer")
+    ):
+        return
+    indexers = sorted(
+        {
+            type(module).__name__
+            for module in model.modules()
+            if type(module).__name__.endswith("Indexer")
+        }
+    )
+    if indexers:
+        raise RuntimeError(
+            "The quantization config enables indexer_k_quantizer, but no sparse-attention "
+            f"indexer of this model ({', '.join(indexers)}) has an enabled one. Either the "
+            "indexer class of the installed vLLM / Megatron-Core version is not supported by "
+            "the ModelOpt indexer plugins, or a later config entry disabled the quantizer."
+        )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -331,6 +371,7 @@ def quantize(
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
+    _check_indexer_k_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 

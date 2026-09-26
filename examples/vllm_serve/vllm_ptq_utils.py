@@ -108,6 +108,14 @@ def _allocate_calibration_blocks(
         request_block_ids = []
         for group in kv_cache_groups:
             num_blocks = block_count(sequence_length, group.kv_cache_spec)
+            # Circular per-request caches (e.g. GLM-5.3-Flash's k-pool tail) hold fewer blocks
+            # than the warmup policy counts for a long prompt; never exceed the block-table row.
+            row_capacity = getattr(group.kv_cache_spec, "max_num_blocks_per_req", None)
+            if row_capacity is not None:
+                num_blocks = min(
+                    num_blocks,
+                    row_capacity(self.model_runner.vllm_config, self.model_runner.max_model_len),
+                )
             block_ids = list(range(next_block_id, next_block_id + num_blocks))
             next_block_id += num_blocks
             allocated_block_ids.extend(block_ids)
