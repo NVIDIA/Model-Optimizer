@@ -451,10 +451,11 @@ def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
     def spy(method):
         def wrapped(self, *args):
             batch_data = args[-1]
-            # Track an activation alongside the mapping: the arrays are the memory, and
-            # they could outlive the mapping that carried them.
+            # Track an output activation alongside the mapping: marking every tensor as an
+            # output is what makes a batch big, and the arrays could outlive the mapping
+            # that carried them. batch_data holds the input feed first, so index by name.
             batch_refs.append(weakref.ref(batch_data))
-            array_refs.append(weakref.ref(next(iter(batch_data.values()))))
+            array_refs.append(weakref.ref(batch_data["Y1"]))
             gc.collect()
             concurrent.append(sum(ref() is not None for ref in batch_refs))
             array_concurrent.append(sum(ref() is not None for ref in array_refs))
