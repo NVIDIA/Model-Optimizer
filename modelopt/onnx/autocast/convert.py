@@ -232,6 +232,8 @@ def convert_to_f16(
     use_standalone_type_inference: bool = False,
     opset: int | None = None,
     nodes_to_exclude: list[str] | None = None,
+    *,
+    defer_nvfp4_trt_inference: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
 
@@ -252,6 +254,8 @@ def convert_to_f16(
                increased if Q/DQ nodes in the model require a higher version (e.g., FP8 requires 19,
                INT4 requires 21, NVFP4 requires 23).
         nodes_to_exclude: List of regex patterns to match node names that should remain in FP32.
+        defer_nvfp4_trt_inference: Defer TensorRT inference for annotated NVFP4 plugins until
+            compute dtypes are converted. The caller must validate the converted graph in TensorRT.
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
     original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
@@ -291,7 +295,7 @@ def convert_to_f16(
         trt_plugins=trt_plugins,
         max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
     )
-    sanitizer.find_custom_nodes()
+    sanitizer.find_custom_nodes(defer_nvfp4_trt_inference=defer_nvfp4_trt_inference)
     sanitizer.convert_opset()
     sanitizer.ensure_graph_name_exists()
     sanitizer.convert_fp64_to_fp32()
@@ -314,6 +318,7 @@ def convert_to_f16(
         tensor_block_dict=tensor_block_dict,
         use_standalone_type_inference=use_standalone_type_inference,
         original_network_io_metadata=original_network_io_metadata,
+        defer_nvfp4_trt_inference=defer_nvfp4_trt_inference,
     )
     node_name_rule = DisabledNodeNameRegexRule(nodes_to_exclude or [])
     high_precision_nodes = [
