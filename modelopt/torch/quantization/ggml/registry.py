@@ -13,21 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The GGML IQ formats, listed once for backend dispatch and export."""
+"""GGML block formats, listed once for backend dispatch and export."""
 
-from .common import IQFormat
+from .common import GGMLFormat, IQFormat
 from .iq1_s import IQ1_S_FORMAT
 from .iq2_xs import IQ2_XS_FORMAT
 from .iq2_xxs import IQ2_XXS_FORMAT
+from .q8_0 import Q8_0_FORMAT
 
-__all__ = ["IQ_FORMAT_REGISTRY", "IQFormat"]
+__all__ = ["GGML_FORMAT_REGISTRY", "IQ_FORMAT_REGISTRY", "GGMLFormat", "IQFormat"]
 
-# Every IQ format, keyed by the name a quantizer's num_bits carries, in increasing bits per
-# weight. Backend dispatch and both exporters read this mapping and export's IQ_FORMATS is derived
-# from it, so adding a format is one entry here rather than a row in several parallel tables.
+# Every GGML block format, keyed by the name a quantizer's num_bits carries, in increasing bits
+# per weight. Backend dispatch reads this mapping, and export will derive its supported formats
+# from it rather than maintaining parallel metadata and packer tables.
 #
 # It is an explicit list rather than formats registering themselves on import, so its contents
 # never depend on which modules happen to have been imported first.
-IQ_FORMAT_REGISTRY: dict[str, IQFormat] = {
-    fmt.name: fmt for fmt in (IQ1_S_FORMAT, IQ2_XXS_FORMAT, IQ2_XS_FORMAT)
+GGML_FORMAT_REGISTRY: dict[str, GGMLFormat] = {
+    fmt.name: fmt for fmt in (IQ1_S_FORMAT, IQ2_XXS_FORMAT, IQ2_XS_FORMAT, Q8_0_FORMAT)
+}
+
+# Compatibility view for the already-merged IQ export path. Export migrates to the general
+# registry in the Q8_0 export PR; IQ-specific conformance tests continue to use this subset.
+IQ_FORMAT_REGISTRY: dict[str, GGMLFormat] = {
+    name: fmt for name, fmt in GGML_FORMAT_REGISTRY.items() if name.startswith("iq")
 }

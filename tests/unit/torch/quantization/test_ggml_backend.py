@@ -25,15 +25,16 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
+import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.backend import ggml_fake_quant
 from modelopt.torch.quantization.ggml.common import narrow_to_float32
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # Every registered format, paired with its own module. The module -- not the registry -- supplies
 # what a test expects, so a mis-wired registry entry cannot make both sides of an assertion agree.
-FORMAT_NAMES = sorted(IQ_FORMAT_REGISTRY)
+FORMAT_NAMES = sorted(GGML_FORMAT_REGISTRY)
 FORMAT_MODULES = [
     (name, importlib.import_module(f"modelopt.torch.quantization.ggml.{name}"))
     for name in FORMAT_NAMES
@@ -43,11 +44,11 @@ FORMAT_MODULES = [
 def _substitute(monkeypatch, name, **changes):
     """Replace parts of one registered format for the duration of a test.
 
-    Dispatch reads IQ_FORMAT_REGISTRY, so that is where a substitute has to go: patching the
+    Dispatch reads GGML_FORMAT_REGISTRY, so that is where a substitute has to go: patching the
     format module's function would not reach it.
     """
     monkeypatch.setitem(
-        IQ_FORMAT_REGISTRY, name, dataclasses.replace(IQ_FORMAT_REGISTRY[name], **changes)
+        GGML_FORMAT_REGISTRY, name, dataclasses.replace(GGML_FORMAT_REGISTRY[name], **changes)
     )
 
 
@@ -89,6 +90,7 @@ def test_ggml_backend_rejects_unknown_format():
 def test_ggml_codecs_are_exported_from_quantization_package():
     assert mtq.quantize_iq1_s is iq1_s_module.quantize_iq1_s
     assert mtq.quantize_iq2_xs is iq2_xs_module.quantize_iq2_xs
+    assert mtq.quantize_q8_0 is q8_0_module.quantize_q8_0
 
 
 @pytest.mark.parametrize(
@@ -108,7 +110,7 @@ def test_ggml_backend_forwards_chunk_sizes(monkeypatch, extra_args):
         return inputs
 
     # The dispatcher resolves through the registry, so that is the seam to patch.
-    monkeypatch.setitem(IQ_FORMAT_REGISTRY, "iq1_s", SimpleNamespace(fake_quant=fake_quant))
+    monkeypatch.setitem(GGML_FORMAT_REGISTRY, "iq1_s", SimpleNamespace(fake_quant=fake_quant))
     inputs = torch.ones(1, 256)
     quantizer = SimpleNamespace(num_bits="iq1_s", backend_extra_args=extra_args)
 
@@ -125,7 +127,8 @@ def test_ggml_backend_rejects_unknown_extra_arg():
 
 @pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
 def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(monkeypatch, num_bits, module):
-    weight = torch.randn(1, 256)
+    block_size = GGML_FORMAT_REGISTRY[num_bits].block_size
+    weight = torch.randn(1, block_size)
     quantizer = SimpleNamespace(num_bits=num_bits, _quantizer_cache=None)
     original_quantize = getattr(module, f"quantize_{num_bits}")
     call_count = 0
@@ -136,7 +139,7 @@ def test_ggml_backend_caches_packed_weight_and_invalidates_on_change(monkeypatch
         return original_quantize(*args, **kwargs)
 
     _substitute(monkeypatch, num_bits, quantize=counted_quantize)
-    fake_quant = IQ_FORMAT_REGISTRY[num_bits].fake_quant
+    fake_quant = GGML_FORMAT_REGISTRY[num_bits].fake_quant
 
     fake_quant(weight, quantizer, block_chunk_size=1)
     fake_quant(weight, quantizer, block_chunk_size=1)
@@ -183,8 +186,9 @@ def test_ggml_weight_is_packed_once_across_forwards(monkeypatch, num_bits, modul
         return original(weight, **kwargs)
 
     _substitute(monkeypatch, num_bits, quantize=counting)
+    block_size = GGML_FORMAT_REGISTRY[num_bits].block_size
     quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: block_size}, backend="ggml")
     )
     weight = torch.randn(4, 256)
 
@@ -192,7 +196,9 @@ def test_ggml_weight_is_packed_once_across_forwards(monkeypatch, num_bits, modul
         for _ in range(5):
             quantizer(weight)
 
-    assert calls == [(4, 256)], f"expected one pack, got {len(calls)}"
+    assert calls == [(weight.numel() // block_size, block_size)], (
+        f"expected one pack, got {len(calls)}"
+    )
 
 
 @pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
@@ -212,8 +218,9 @@ def test_ggml_decode_chunk_is_sized_independently_of_the_encode_chunk(
         return original(packed_weights, weight_shape, **kwargs)
 
     _substitute(monkeypatch, num_bits, dequantize=recording)
+    block_size = GGML_FORMAT_REGISTRY[num_bits].block_size
     quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: 256}, backend="ggml")
+        QuantizerAttributeConfig(num_bits=num_bits, block_sizes={-1: block_size}, backend="ggml")
     )
     quantizer(torch.randn(4, 256))
 
@@ -226,13 +233,13 @@ def test_registry_lists_every_exported_encoder():
     encoders = {
         name.removeprefix("quantize_") for name in ggml.__all__ if name.startswith("quantize_")
     }
-    assert encoders == set(IQ_FORMAT_REGISTRY)
+    assert encoders == set(GGML_FORMAT_REGISTRY)
 
 
 @pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
 def test_registry_record_is_wired_to_its_own_codec(num_bits, module):
     """Each record points at its own format's encoder, decoder, geometry and chunk defaults."""
-    record = IQ_FORMAT_REGISTRY[num_bits]
+    record = GGML_FORMAT_REGISTRY[num_bits]
     upper = num_bits.upper()
 
     assert record.name == num_bits
@@ -248,7 +255,7 @@ def test_registry_record_is_wired_to_its_own_codec(num_bits, module):
 @pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
 def test_public_fake_quant_is_the_registered_record(num_bits, module):
     """The per-format entry point and backend dispatch run the same code path."""
-    assert getattr(module, f"{num_bits}_fake_quant").__self__ is IQ_FORMAT_REGISTRY[num_bits]
+    assert getattr(module, f"{num_bits}_fake_quant").__self__ is GGML_FORMAT_REGISTRY[num_bits]
 
 
 @pytest.mark.parametrize("num_bits", FORMAT_NAMES)
@@ -260,6 +267,9 @@ def test_format_fake_quant_rejects_another_formats_quantizer(num_bits):
     """
     other = next(name for name in FORMAT_NAMES if name != num_bits)
     expected = f"The ggml {num_bits.upper()} backend requires num_bits={num_bits!r}"
+    block_size = GGML_FORMAT_REGISTRY[num_bits].block_size
 
     with pytest.raises(ValueError, match=re.escape(expected)):
-        IQ_FORMAT_REGISTRY[num_bits].fake_quant(torch.ones(1, 256), SimpleNamespace(num_bits=other))
+        GGML_FORMAT_REGISTRY[num_bits].fake_quant(
+            torch.ones(1, block_size), SimpleNamespace(num_bits=other)
+        )

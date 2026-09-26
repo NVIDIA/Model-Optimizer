@@ -122,11 +122,11 @@ def fake_quantize_with_cache(
 
 
 @dataclass(frozen=True)
-class IQFormat:
-    """Everything backend dispatch and export need to know about one IQ format.
+class GGMLFormat:
+    """Everything backend dispatch and export need to know about one GGML format.
 
     Each format module declares one of these beside its encoder and decoder, and
-    :data:`~modelopt.torch.quantization.ggml.registry.IQ_FORMAT_REGISTRY` lists them. The
+    :data:`~modelopt.torch.quantization.ggml.registry.GGML_FORMAT_REGISTRY` lists them. The
     per-format pieces -- codebook, search, payload layout -- stay in the format's module; what
     lives here is the part every format does the same way.
     """
@@ -174,6 +174,11 @@ class IQFormat:
         )
 
 
+# Compatibility alias for callers that imported the record type before the registry was
+# generalized from the IQ family to every supported GGML block format.
+IQFormat = GGMLFormat
+
+
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
     """Narrow ``blocks`` to float32 the way the CUDA ``load_float`` helper does.
 
@@ -192,14 +197,16 @@ def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
     return finite.float()
 
 
-def validate_weight(weight: torch.Tensor, format_name: str) -> None:
+def validate_weight(
+    weight: torch.Tensor, format_name: str, *, block_size: int = GGML_BLOCK_SIZE
+) -> None:
     """Validate weight metadata accepted by the current GGML block encoders."""
     if weight.numel() == 0:
         raise ValueError(f"{format_name} requires a non-empty weight")
-    if weight.dim() == 0 or weight.shape[-1] % GGML_BLOCK_SIZE:
+    if weight.dim() == 0 or weight.shape[-1] % block_size:
         raise ValueError(
             f"{format_name} requires the last weight dimension to be divisible by "
-            f"{GGML_BLOCK_SIZE}, got shape {tuple(weight.shape)}"
+            f"{block_size}, got shape {tuple(weight.shape)}"
         )
     if not weight.is_floating_point():
         raise TypeError(f"{format_name} requires a floating-point weight, got {weight.dtype}")
@@ -218,6 +225,7 @@ def validate_packed_weights(
     weight_shape: torch.Tensor,
     *,
     block_bytes: int,
+    block_size: int = GGML_BLOCK_SIZE,
     format_name: str,
 ) -> tuple[int, ...]:
     """Validate a packed payload and return its logical shape."""
@@ -234,9 +242,9 @@ def validate_packed_weights(
     if weight_shape.dim() != 1 or weight_shape.dtype not in integral_dtypes:
         raise ValueError("weight_shape must be a one-dimensional integral tensor")
     shape = tuple(int(v) for v in weight_shape.detach().cpu().tolist())
-    if not shape or any(dimension <= 0 for dimension in shape) or shape[-1] % GGML_BLOCK_SIZE:
+    if not shape or any(dimension <= 0 for dimension in shape) or shape[-1] % block_size:
         raise ValueError(f"invalid {format_name} logical weight shape: {shape}")
-    expected_payload_values = math.prod(shape) // GGML_BLOCK_SIZE * block_bytes
+    expected_payload_values = math.prod(shape) // block_size * block_bytes
     if packed_weights.numel() != expected_payload_values:
         raise ValueError("packed_weights size does not match weight_shape")
     return shape

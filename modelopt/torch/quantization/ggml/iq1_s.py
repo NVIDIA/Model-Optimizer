@@ -247,5 +247,5 @@ IQ1_S_FORMAT = IQFormat(
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_s and
 # dequantize_iq1_s when it was built, so patching those module functions changes neither backend
-# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
 iq1_s_fake_quant = IQ1_S_FORMAT.fake_quant
