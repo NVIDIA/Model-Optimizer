@@ -1,0 +1,20 @@
+_target_: nemo_run.config.Script
+args:
+- --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+- model.model_name_or_path=/hf-local/Qwen/Qwen3-8B
+- data.offline_data_path=/scratchspace/offline_hidden_states
+- training.output_dir=/scratchspace/eagle3
+- training.training_seq_len=4096
+- training.disable_tqdm=true
+- training.ar_validate_steps=500000
+entrypoint: bash
+env:
+  HF_HOME: /cicd/hf-cache
+  HF_TOKEN: ''
+  LAUNCH_SCRIPT: python
+  MLM_SKIP_INSTALL: '1'
+  TRITON_CACHE_DIR: /cicd/triton-cache
+inline: ''
+m: false
+metadata: {}
+path: common/eagle3/train_eagle.sh

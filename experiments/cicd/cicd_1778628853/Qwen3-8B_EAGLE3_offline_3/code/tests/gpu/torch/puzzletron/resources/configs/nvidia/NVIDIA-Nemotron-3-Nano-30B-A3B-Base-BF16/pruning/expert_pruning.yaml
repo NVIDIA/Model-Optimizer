@@ -1,0 +1,18 @@
+defaults:
+  - /pruning/pruning_defaults@_here_
+
+eval_samples: 10
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruning.experiment_id}
+pruning_mixin:
+  _target_: modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalPruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor
+    target_name: "mixer"
+
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.expert_removal_hooks.NemotronHRemoveExpertsIndependentHook}
+activation_hooks_kwargs:    # Additional kwargs to pass to the hook init
+
+num_experts_to_keep_list: [96, 64, 32, 16, 8]  # num_experts in teacher is 128
+mlp_init_mode: "ExpertRemoval"
+mlp_init_config_yaml:
+  expert_scores_key: "expert_ranks_mse"
