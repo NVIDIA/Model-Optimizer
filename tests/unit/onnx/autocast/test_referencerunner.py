@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import json
 import os
 import tempfile
+import weakref
 from collections import OrderedDict
 from unittest.mock import Mock
 
@@ -439,3 +441,37 @@ def test_multi_batch_aggregation_statistics(reference_runner):
         assert results["Y2"].absmax == 70.0
         assert results["Y2"].min_val == -50.0
         assert results["Y2"].max_val == 70.0
+
+
+def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
+    """Batches are folded as they stream in, so peak memory is independent of batch count."""
+    batch_refs = []
+    concurrent = []
+
+    def spy(method):
+        def wrapped(self, *args):
+            batch_refs.append(weakref.ref(args[-1]))
+            gc.collect()
+            concurrent.append(sum(ref() is not None for ref in batch_refs))
+            return method(self, *args)
+
+        return wrapped
+
+    monkeypatch.setattr(
+        ReferenceRunner, "_init_tensor_stats", spy(ReferenceRunner._init_tensor_stats)
+    )
+    monkeypatch.setattr(
+        ReferenceRunner, "_fold_tensor_stats", spy(ReferenceRunner._fold_tensor_stats)
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for i in range(5):
+            np.savez(
+                os.path.join(temp_dir, f"batch_{i:03d}.npz"),
+                X1=np.full((1, 3), i, dtype=np.float32),
+                X2=np.full((1, 3), i + 1, dtype=np.float32),
+            )
+        reference_runner.run(temp_dir)
+
+    assert len(concurrent) == 5, "every batch should reach the aggregator"
+    assert max(concurrent) == 1, f"batches were retained instead of streamed: {concurrent}"
