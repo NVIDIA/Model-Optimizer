@@ -1162,6 +1162,68 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         assert (scale_arr > 0).all()
 
 
+def create_test_model_with_dq_transpose_matmul(out_features: int, in_features: int):
+    """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
+
+    This is how a torch ``Linear`` exports when the weight reaches MatMul transposed, as in
+    MaxViT's attention blocks.
+    """
+    rng = np.random.RandomState(7)
+    weight = rng.randn(out_features, in_features).astype(np.float32)
+    scale = (np.abs(weight).max(axis=1) / 127.0).astype(np.float32)
+    zero_point = np.zeros(out_features, dtype=np.int8)
+
+    nodes = [
+        helper.make_node(
+            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=0
+        ),
+        helper.make_node(
+            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=0
+        ),
+        helper.make_node("Transpose", ["w_dq"], ["w_t"], name="w_t", perm=[1, 0]),
+        helper.make_node("MatMul", ["input", "w_t"], ["output"], name="matmul"),
+    ]
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="dq_transpose_matmul",
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [3, in_features])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [3, out_features])],
+        initializer=[
+            numpy_helper.from_array(weight, "weight"),
+            numpy_helper.from_array(scale, "w_scale"),
+            numpy_helper.from_array(zero_point, "w_zp"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
+class TestQdqToDqTranspose:
+    """qdq_to_dq must trace a Transpose between DequantizeLinear and its consumer."""
+
+    # out == in is the case a naive fix gets wrong silently: the scale shape still matches
+    # the untransposed axis, so nothing raises and the weight is quantized along the wrong one.
+    @pytest.mark.parametrize(("out_features", "in_features"), [(96, 32), (32, 32)])
+    def test_dq_transpose_matmul_matches_qdq(self, out_features, in_features):
+        model = create_test_model_with_dq_transpose_matmul(out_features, in_features)
+        inputs = {"input": np.random.RandomState(11).randn(3, in_features).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        weight = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert weight.data_type == TensorProto.INT8
+        assert np.array_equal(run(converted), expected)
+
+
 class TestQdqToDqValidation:
     """Regression tests for qdq_to_dq input validation."""
 

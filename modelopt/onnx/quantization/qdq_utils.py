@@ -579,11 +579,11 @@ def _get_scale_and_zp(
 
 def _get_successive_consumers(
     node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]]
-) -> tuple[onnx.NodeProto, onnx.NodeProto]:
+) -> tuple[onnx.NodeProto, onnx.NodeProto, list[int] | None]:
     """Get the DequantizeLinear node and its consumer node for a given QuantizeLinear node.
 
     This function validates and retrieves the next two nodes in the quantization chain:
-    QuantizeLinear -> DequantizeLinear -> Operation
+    QuantizeLinear -> DequantizeLinear -> [Cast | Transpose]* -> Operation
 
     Args:
         node: The QuantizeLinear node to find consumers for
@@ -593,6 +593,8 @@ def _get_successive_consumers(
         Tuple containing:
             - dq_node: The DequantizeLinear node that consumes the QuantizeLinear output
             - quantized_node: The operation node that consumes the DequantizeLinear output
+            - perm: Permutation mapping the operation's axes back onto the weight's own axes,
+              or None when no Transpose separates them
     """
     dq_node = tensor_consumers.get(node.output[0], [None])[0]
     if not dq_node or dq_node.op_type != "DequantizeLinear":
@@ -601,13 +603,24 @@ def _get_successive_consumers(
     quantized_node = tensor_consumers.get(dq_node.output[0], [None])[0]
     if not quantized_node:
         raise ValueError(f"No consumer found for {dq_node.name}")
-    if quantized_node.op_type == "Cast":
+
+    perm = None
+    while quantized_node.op_type in ("Cast", "Transpose"):
+        if quantized_node.op_type == "Transpose":
+            node_perm = next(
+                (list(attr.ints) for attr in quantized_node.attribute if attr.name == "perm"), None
+            )
+            assert node_perm is not None, f"Permutation not found for {quantized_node.name}"
+            # Composing back to front keeps perm relative to the weight across a Transpose chain.
+            perm = node_perm if perm is None else [perm[i] for i in node_perm]
         next_node = tensor_consumers.get(quantized_node.output[0], [None])[0]
         if not next_node:
-            raise ValueError(f"No consumer found after Cast for {quantized_node.name}")
+            raise ValueError(
+                f"No consumer found after {quantized_node.op_type} for {quantized_node.name}"
+            )
         quantized_node = next_node
 
-    return dq_node, quantized_node
+    return dq_node, quantized_node, perm
 
 
 def _convert_weight(
@@ -615,6 +628,7 @@ def _convert_weight(
     scale: onnx.TensorProto,
     zp: onnx.TensorProto,
     quantized_node: onnx.NodeProto,
+    perm: list[int] | None = None,
 ) -> np.ndarray:
     """Convert a weight tensor to INT8/FP8 format based on scale and zero point.
 
@@ -623,6 +637,7 @@ def _convert_weight(
         scale: The scale tensor for quantization
         zp: The zero point tensor for quantization
         quantized_node: The operation node that will use the converted weight
+        perm: Permutation of a Transpose between the weight and quantized_node, if any
 
     Returns:
         The converted weight tensor as a numpy array
@@ -661,6 +676,14 @@ def _convert_weight(
         raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
 
     axis = axis_map[op_type]
+
+    if perm is not None:
+        # axis_map is in the consumer's layout; a Transpose in between means that is not
+        # the weight's own layout. Map it back, since the scale indexes the stored weight.
+        assert len(perm) == len(weight_shape), (
+            f"Transpose perm {perm} does not match weight rank {len(weight_shape)}"
+        )
+        axis = perm[axis]
 
     if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
         raise ValueError(
@@ -754,10 +777,10 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             scale, zp = _get_scale_and_zp(node, initializers, tensor_producers)
 
             # Validate Q->DQ->Op pattern and get consumers
-            dq_node, quantized_node = _get_successive_consumers(node, tensor_consumers)
+            dq_node, quantized_node, perm = _get_successive_consumers(node, tensor_consumers)
 
             # Convert weight
-            scaled = _convert_weight(weight_array, scale, zp, quantized_node)
+            scaled = _convert_weight(weight_array, scale, zp, quantized_node, perm)
 
             # Create and update new weight tensor
             if zp.data_type == onnx_dtype_map["Float8"]:
