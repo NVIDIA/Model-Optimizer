@@ -20,6 +20,7 @@ of each layout adapter on stand-in modules, without booting an ``LLM`` (see
 ``test_vllm_dynamic_modules.py`` for the end-to-end DeepSeek-V3.2 run).
 """
 
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -409,8 +410,19 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
         ),
     )
     monkeypatch.setattr(_TestGlm5NextIndexer, "kpool_ops", kpool_ops)
+    monkeypatch.setattr(vllm_indexer, "_glm5next_indexers", weakref.WeakSet())
     indexer = _TestGlm5NextIndexer.convert(_NativeGlm5NextIndexer(kv_cache))
     vllm_indexer._install_kpool_cache_hooks(kpool_ops)  # a second indexer must not double-wrap
+
+    # No enabled quantizer: the kernel runs and the wrapper returns before looking up the cache.
+    indexer.indexer_k_quantizer.disable()
+    with monkeypatch.context() as m:
+        lookups = []
+        m.setattr(vllm_indexer, "_glm5next_quantizer_for", lookups.append)
+        kpool_ops.kpool_compress_and_write_cache(kv_cache, None, None, None, slot_mapping, 4)
+    assert not lookups
+    assert torch.equal(kv_cache, before)
+
     quantizer = indexer.indexer_k_quantizer = _fp8_quantizer(amax=2.0)
 
     # Prefill: pools at ``loc`` masked by ``write_mask``; an unrelated cache is left alone.
@@ -431,5 +443,5 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
         kv_cache, None, None, None, None, None, dec_slots, dec_pos, 4
     )
     _assert_requantized(before, kv_cache, torch.tensor([17, 30]), quantizer)
-    assert kernel_calls == ["prefill", "prefill", "decode"]
+    assert kernel_calls == ["prefill", "prefill", "prefill", "decode"]
     assert getattr(kpool_ops.kpool_compress_and_write_cache, "_modelopt_indexer_k_wrapped", False)

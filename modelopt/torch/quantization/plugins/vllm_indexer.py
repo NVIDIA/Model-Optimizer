@@ -342,6 +342,9 @@ def _wrap_kpool_cache_writer(kpool_ops: ModuleType, name: str, written_slots: Ca
     @functools.wraps(original)
     def wrapper(*args, **kwargs):
         out = original(*args, **kwargs)
+        # Conversion registers every indexer, also those whose quantizer is disabled.
+        if not any(indexer.indexer_k_quantizer.is_enabled for indexer in _glm5next_indexers):
+            return out
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
         kv_cache = bound.arguments["kv_cache"]

@@ -2118,6 +2118,7 @@ def test_indexer_k_quant_interleaved_rope(dist_workers_size_1):
 
 def _csa_indexer_model():
     """A standalone DeepSeek-V4 CSA indexer (compress ratio 4), as built by the dsv4_hybrid spec."""
+    # Imported here: CSA (older megatron-core) and Transformer Engine are optional; the test skips.
     from megatron.core.extensions.transformer_engine import TELinear, TENorm
     from megatron.core.models.common.embeddings import RotaryEmbedding
     from megatron.core.process_groups_config import ProcessGroupCollection
