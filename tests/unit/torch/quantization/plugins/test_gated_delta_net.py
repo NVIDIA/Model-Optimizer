@@ -1,0 +1,263 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from copy import deepcopy
+
+import pytest
+import torch
+import torch.nn as nn
+
+import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.plugins import gated_delta_net
+from modelopt.torch.quantization.plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
+
+GDN_STATE_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1), "type": "dynamic"}
+
+
+def chunk_gated_delta_rule(q, k, v, g, beta, **kwargs):
+    """Stand-in with the fla kernel's name; the real kernel needs a GPU."""
+    return q + k + v, None
+
+
+class TinyGatedDeltaNet(nn.Module):
+    """A module that, like Megatron-Core's GatedDeltaNet, calls ``self.gated_delta_rule``."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(4, 4)
+        self.gated_delta_rule = chunk_gated_delta_rule
+
+    def forward(self, x):
+        out, _ = self.gated_delta_rule(x, x, x, x[..., 0], x[..., 0])
+        return self.proj(out)
+
+
+@QuantModuleRegistry.register({TinyGatedDeltaNet: "TinyGatedDeltaNet"})
+class _QuantTinyGatedDeltaNet(GatedDeltaNetStateQuantMixin):
+    def forward(self, x):
+        gated_delta_rule = self.gated_delta_rule
+        self.gated_delta_rule = lambda *a, **kw: self._state_quantized_chunk_gated_delta_rule(
+            gated_delta_rule, *a, **kw
+        )
+        try:
+            return super().forward(x)
+        finally:
+            self.gated_delta_rule = gated_delta_rule
+
+
+GDN_W_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1, 2), "type": "dynamic"}
+
+
+def quant_cfg(state=True, w=False):
+    entries = [{"quantizer_name": "*", "enable": False}]
+    if state:
+        entries.append({"quantizer_name": "*gdn_state_quantizer", "cfg": GDN_STATE_FP8_DYNAMIC})
+    if w:
+        entries.append({"quantizer_name": "*gdn_w_quantizer", "cfg": GDN_W_FP8_DYNAMIC})
+    return {"quant_cfg": entries, "algorithm": "max"}
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"num_bits": (4, 3), "axis": (0, 1)},  # static
+        {"num_bits": (4, 3), "type": "dynamic"},  # per tensor
+        {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},  # int8
+        {"num_bits": (4, 3), "type": "dynamic", "block_sizes": {-1: 16}},  # blockwise
+    ],
+)
+def test_validate_state_quantizer_rejects_unsupported(attributes):
+    with pytest.raises(ValueError, match="supports only"):
+        mtq.quantize(
+            TinyGatedDeltaNet(),
+            {
+                "quant_cfg": [
+                    {"quantizer_name": "*", "enable": False},
+                    {"quantizer_name": "*gdn_state_quantizer", "cfg": attributes},
+                ],
+                "algorithm": None,
+            },
+        )
+
+
+def test_dynamic_export_removes_linear_attention_attributes():
+    model = _QuantTinyGatedDeltaNet.convert(TinyGatedDeltaNet())
+    model.export()
+    assert type(model) is TinyGatedDeltaNet
+    for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
+        assert not hasattr(model, name)
+
+
+def test_disabled_state_quantizer_calls_original_kernel():
+    model = TinyGatedDeltaNet()
+    x = torch.randn(2, 8, 3, 4)
+    expected = model(x)
+
+    disable_all = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"}
+    mtq.quantize(model, disable_all, lambda m: m(x))
+
+    assert isinstance(model, _QuantTinyGatedDeltaNet)
+    assert not model.gdn_state_quantizer.is_enabled and not model.gdn_w_quantizer.is_enabled
+    assert torch.equal(model(x), expected)
+    assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
+
+
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch):
+    calls = []
+
+    def fake_state_qdq_kernel(*args, **kwargs):
+        calls.append(kwargs)
+        return chunk_gated_delta_rule(*args)
+
+    monkeypatch.setattr(
+        gated_delta_net, "_state_qdq_chunk_gated_delta_rule", lambda: fake_state_qdq_kernel
+    )
+    model = TinyGatedDeltaNet()
+    x = torch.randn(2, 8, 3, 4)
+    mtq.quantize(model, quant_cfg(), lambda m: m(x))
+
+    model(x)
+    assert calls and calls[-1] == {
+        "chunk_size": 64,
+        "state_qdq": 1,
+        "state_qdq_block_v": 64,
+        "w_quantizer": None,
+    }
+
+    # The deterministic torch kernel has no quantized counterpart.
+    model.gated_delta_rule = lambda *a, **kw: chunk_gated_delta_rule(*a, **kw)
+    with pytest.raises(NotImplementedError, match="deterministic torch kernel"):
+        model(x)
+
+
+@pytest.mark.parametrize("state", [False, True])
+def test_w_quantizer_is_passed_to_the_kernel(monkeypatch, state):
+    """``*gdn_w_quantizer`` in the config hands the module's TensorQuantizer to the kernel, with
+    or without the state quantizer."""
+    calls = []
+
+    def fake_state_qdq_kernel(*args, **kwargs):
+        calls.append(kwargs)
+        return chunk_gated_delta_rule(*args)
+
+    monkeypatch.setattr(
+        gated_delta_net, "_state_qdq_chunk_gated_delta_rule", lambda: fake_state_qdq_kernel
+    )
+    model = TinyGatedDeltaNet()
+    x = torch.randn(2, 8, 3, 4)
+    mtq.quantize(model, quant_cfg(state=state, w=True), lambda m: m(x))
+    assert model.gdn_w_quantizer.is_enabled and model.gdn_state_quantizer.is_enabled == state
+
+    model(x)
+    assert calls[-1]["state_qdq"] == int(state)
+    assert calls[-1]["w_quantizer"] is model.gdn_w_quantizer
+
+    # The w quantizer really quantizes: 256 random values per token collapse onto the E4M3 grid,
+    # which has at most 127 distinct magnitudes per (row-specific) scale.
+    w = torch.randn(1, 1, 1, 256)
+    quantized = model.gdn_w_quantizer(w)
+    assert not torch.equal(quantized, w)
+    assert torch.unique(quantized.abs()).numel() <= 127 < torch.unique(w.abs()).numel()
+
+
+@pytest.mark.parametrize("site", ["state", "w"])
+@pytest.mark.parametrize(
+    "overrides",
+    [{"pass_through_bwd": False}, {"type": "static"}, {"fake_quant": False}, {"rotate": True}],
+)
+def test_unsupported_quantizer_fails_during_conversion(site, overrides):
+    cfg = quant_cfg(state=site == "state", w=site == "w")
+    cfg = deepcopy(cfg)
+    cfg["quant_cfg"][-1]["cfg"].update(overrides)
+    with pytest.raises(ValueError, match="supports only"):
+        mtq.quantize(TinyGatedDeltaNet(), cfg)
+
+
+@pytest.mark.parametrize("axis", [None, (0, 1), (0, 1, 2)])
+def test_w_grouping_is_preserved_during_conversion(axis):
+    cfg = deepcopy(quant_cfg(state=False, w=True))
+    cfg["algorithm"] = None
+    cfg["quant_cfg"][-1]["cfg"]["axis"] = axis
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    assert model.gdn_w_quantizer.axis == axis
+
+
+@pytest.mark.parametrize(("state", "w"), [(True, False), (False, True), (True, True)])
+def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
+    model = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
+    cfg = quant_cfg(state=state, w=w)
+    cfg["algorithm"] = None
+    mtq.quantize(model, cfg)
+    if w:
+        # Save the actual quantizer settings, including edits after conversion.
+        model[0].gdn_w_quantizer.axis = None
+    path = tmp_path / "gdn.pth"
+    mto.save(model, path)
+    restored = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
+    mto.restore(restored, path)
+    for name, enabled in (("gdn_state_quantizer", state), ("gdn_w_quantizer", w)):
+        original = getattr(model[0], name)
+        quantizer = getattr(restored[0], name)
+        assert quantizer.is_enabled == enabled
+        assert quantizer.axis == original.axis
+        assert quantizer.num_bits == original.num_bits
+        assert quantizer._dynamic == original._dynamic
+        assert not hasattr(restored[1], name)
+
+
+def test_quant_cfg_refinement_updates_and_validates_existing_quantized_module():
+    cfg = quant_cfg()
+    cfg["algorithm"] = None
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    assert model.gdn_state_quantizer.is_enabled
+    assert not model.gdn_w_quantizer.is_enabled
+
+    cfg = quant_cfg(state=False, w=True)
+    cfg["algorithm"] = None
+    mtq.quantize(model, cfg)
+    assert not model.gdn_state_quantizer.is_enabled
+    assert model.gdn_w_quantizer.is_enabled
+
+    cfg = deepcopy(cfg)
+    cfg["quant_cfg"][-1]["cfg"]["pass_through_bwd"] = False
+    with pytest.raises(ValueError, match="supports only"):
+        mtq.quantize(model, cfg)
+
+
+def test_restore_legacy_gdn_without_new_quantizer_handles():
+    config = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None}
+    model = mtq.quantize(TinyGatedDeltaNet(), config)
+    state = mto.modelopt_state(model)
+    for _, mode_state in state["modelopt_state_dict"]:
+        metadata = mode_state["metadata"]
+        for name in ("gdn_state_quantizer", "gdn_w_quantizer"):
+            metadata["quantizer_state"].pop(name, None)
+    restored = TinyGatedDeltaNet()
+    mto.restore_from_modelopt_state(restored, state)
+    restored.load_state_dict(model.state_dict())
+    x = torch.randn(2, 8, 3, 4)
+    torch.testing.assert_close(restored(x), model(x))
+    assert not restored.gdn_state_quantizer.is_enabled
+    assert not restored.gdn_w_quantizer.is_enabled
+
+
+def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
+    model = mtq.quantize(
+        TinyGatedDeltaNet(), mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(2, 8, 3, 4))
+    )
+    assert not model.gdn_state_quantizer.is_enabled
+    assert not model.gdn_w_quantizer.is_enabled

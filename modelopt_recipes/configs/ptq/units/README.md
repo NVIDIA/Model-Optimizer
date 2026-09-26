@@ -32,3 +32,5 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `experts_nvfp4.yaml` | NVFP4 W4A4 on `*.experts.*` weight/input quantizers |
 | `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |
+| `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at every kernel chunk boundary; needs `fla-core==0.5.1`, Triton, and SM89+ |
+| `gdn_w_fp8_dynamic.yaml` | FP8 E4M3 dynamic (per token and head) fake quantization of the WY tensor `w` that multiplies the GatedDeltaNet state; requires identity STE, `fla-core==0.5.1`, and Triton |

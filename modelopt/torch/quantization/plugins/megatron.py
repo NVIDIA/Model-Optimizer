@@ -21,7 +21,7 @@ import re
 import textwrap
 import types
 from contextlib import contextmanager
-from functools import cache
+from functools import cache, partial
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -61,6 +61,7 @@ from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
+from .gated_delta_net import GatedDeltaNetStateQuantMixin
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -78,6 +79,13 @@ try:
     HAS_TE = True
 except ImportError:
     HAS_TE = False
+
+try:
+    from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+
+    HAS_GDN = True
+except ImportError:
+    HAS_GDN = False
 
 
 __all__ = []
@@ -1072,6 +1080,57 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
+
+
+if HAS_GDN:
+
+    @QuantModuleRegistry.register({GatedDeltaNet: "megatron_GatedDeltaNet"})
+    class _QuantGatedDeltaNet(GatedDeltaNetStateQuantMixin):
+        """GatedDeltaNet with fake quantization of the recurrent state at kernel chunk boundaries.
+
+        Routes ``self.gated_delta_rule`` through state/W QDQ from both Megatron's direct
+        forward and older split-forward layouts. The older dynamic-batching inference
+        paths (``ssm_prefill`` / ``ssm_decode``) are left untouched.
+        """
+
+        def _setup(self):
+            super()._setup()
+            try:
+                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+            except AssertionError:
+                data_parallel_group = get_data_parallel_group()
+            self.parallel_state = ParallelState(
+                data_parallel_group,
+                mcore_parallel.get_tensor_model_parallel_group(),
+            )
+
+        @contextmanager
+        def _quantized_gdn_kernel(self):
+            gated_delta_rule = self.gated_delta_rule
+            self.gated_delta_rule = partial(
+                self._state_quantized_chunk_gated_delta_rule, gated_delta_rule
+            )
+            try:
+                yield
+            finally:
+                self.gated_delta_rule = gated_delta_rule
+
+        def forward(self, *args, **kwargs):
+            if hasattr(GatedDeltaNet, "forward_pre_attn_and_core_attn"):
+                return super().forward(*args, **kwargs)
+            with self._quantized_gdn_kernel():
+                return super().forward(*args, **kwargs)
+
+        def forward_pre_attn_and_core_attn(self, *args, **kwargs):
+            with self._quantized_gdn_kernel():
+                return super().forward_pre_attn_and_core_attn(*args, **kwargs)
+
+        def validate_linear_attention(self):
+            super().validate_linear_attention()
+            if self.config.context_parallel_size > 1 and (
+                self.gdn_state_quantizer.is_enabled or self.gdn_w_quantizer.is_enabled
+            ):
+                raise NotImplementedError("GDN QAT does not support Megatron context parallelism.")
 
 
 def _is_supported_megatron_model(model: torch.nn.Module) -> bool:

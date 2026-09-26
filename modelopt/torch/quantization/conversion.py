@@ -67,6 +67,7 @@ def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -
 
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
     set_quantizer_by_cfg(model, config.get("quant_cfg", []))
+    _validate_linear_attention_quantizers(model)
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -142,7 +143,14 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         # QuantModule.set_extra_state().
         return model
 
-    quantizer_state_dict = metadata["quantizer_state"]
+    quantizer_state_dict = dict(metadata["quantizer_state"])
+    # Older checkpoints predate these disabled handles; preserve their baseline path.
+    for name, module in _linear_attention_modules(model).items():
+        for handle in ("gdn_state_quantizer", "gdn_w_quantizer"):
+            key = f"{name}.{handle}" if name else handle
+            quantizer = getattr(module, handle)
+            if key not in quantizer_state_dict and not quantizer.is_enabled:
+                quantizer_state_dict[key] = quantizer.get_modelopt_state()
     unmatched_keys = quantizer_state_dict.keys() - quantizer_state(model).keys()
     extra_keys = quantizer_state(model).keys() - quantizer_state_dict.keys()
 
@@ -200,6 +208,22 @@ def update_quantize_metadata(
         metadata["shared_quant_states"] = shared_state_metadata
     else:
         metadata.pop("shared_quant_states", None)
+
+
+def _linear_attention_modules(model):
+    # Optional framework plugins import conversion; defer this import to avoid that cycle.
+    from .plugins.gated_delta_net import GatedDeltaNetStateQuantMixin
+
+    return {
+        get_unwrapped_name(name, model): module
+        for name, module in model.named_modules()
+        if isinstance(module, GatedDeltaNetStateQuantMixin)
+    }
+
+
+def _validate_linear_attention_quantizers(model):
+    for module in _linear_attention_modules(model).values():
+        module.validate_linear_attention()
 
 
 def quantizer_state(model: nn.Module) -> dict[str, Any]:
