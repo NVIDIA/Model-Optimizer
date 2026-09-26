@@ -578,7 +578,7 @@ def _get_scale_and_zp(
 
 
 def _get_successive_consumers(
-    node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]]
+    node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]], weight_rank: int
 ) -> tuple[onnx.NodeProto, onnx.NodeProto, list[int] | None]:
     """Get the DequantizeLinear node and its consumer node for a given QuantizeLinear node.
 
@@ -588,6 +588,7 @@ def _get_successive_consumers(
     Args:
         node: The QuantizeLinear node to find consumers for
         tensor_consumers: Dictionary mapping tensor names to their consumer nodes
+        weight_rank: Rank of the weight being converted, used when a Transpose omits `perm`
 
     Returns:
         Tuple containing:
@@ -608,9 +609,10 @@ def _get_successive_consumers(
     while quantized_node.op_type in ("Cast", "Transpose"):
         if quantized_node.op_type == "Transpose":
             node_perm = next(
-                (list(attr.ints) for attr in quantized_node.attribute if attr.name == "perm"), None
+                (list(attr.ints) for attr in quantized_node.attribute if attr.name == "perm"),
+                # ONNX defaults a missing `perm` to reversing the axes.
+                list(reversed(range(weight_rank))),
             )
-            assert node_perm is not None, f"Permutation not found for {quantized_node.name}"
             # Composing back to front keeps perm relative to the weight across a Transpose chain.
             perm = node_perm if perm is None else [perm[i] for i in node_perm]
         next_node = tensor_consumers.get(quantized_node.output[0], [None])[0]
@@ -777,7 +779,9 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             scale, zp = _get_scale_and_zp(node, initializers, tensor_producers)
 
             # Validate Q->DQ->Op pattern and get consumers
-            dq_node, quantized_node, perm = _get_successive_consumers(node, tensor_consumers)
+            dq_node, quantized_node, perm = _get_successive_consumers(
+                node, tensor_consumers, weight_array.ndim
+            )
 
             # Convert weight
             scaled = _convert_weight(weight_array, scale, zp, quantized_node, perm)

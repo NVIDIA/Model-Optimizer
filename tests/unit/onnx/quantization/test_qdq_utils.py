@@ -1162,11 +1162,14 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         assert (scale_arr > 0).all()
 
 
-def create_test_model_with_dq_transpose_matmul(out_features: int, in_features: int):
+def create_test_model_with_dq_transpose_matmul(
+    out_features: int, in_features: int, perm: list[int] | None = [1, 0]
+):
     """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
 
     This is how a torch ``Linear`` exports when the weight reaches MatMul transposed, as in
-    MaxViT's attention blocks.
+    MaxViT's attention blocks. ``perm=None`` omits the attribute, which ONNX defines as
+    reversing the axes.
     """
     rng = np.random.RandomState(7)
     weight = rng.randn(out_features, in_features).astype(np.float32)
@@ -1180,7 +1183,9 @@ def create_test_model_with_dq_transpose_matmul(out_features: int, in_features: i
         helper.make_node(
             "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=0
         ),
-        helper.make_node("Transpose", ["w_dq"], ["w_t"], name="w_t", perm=[1, 0]),
+        helper.make_node(
+            "Transpose", ["w_dq"], ["w_t"], name="w_t", **({} if perm is None else {"perm": perm})
+        ),
         helper.make_node("MatMul", ["input", "w_t"], ["output"], name="matmul"),
     ]
     graph = helper.make_graph(
@@ -1222,6 +1227,20 @@ class TestQdqToDqTranspose:
         weight = next(t for t in converted.graph.initializer if t.name == "weight")
         assert weight.data_type == TensorProto.INT8
         assert np.array_equal(run(converted), expected)
+
+    def test_dq_transpose_without_perm_reverses_axes(self):
+        """ONNX lets Transpose omit `perm`, which reverses the axes."""
+
+        def converted_weight(perm):
+            model = create_test_model_with_dq_transpose_matmul(96, 32, perm=perm)
+            converted = qdq_to_dq(model)
+            return numpy_helper.to_array(
+                next(t for t in converted.graph.initializer if t.name == "weight")
+            )
+
+        # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so compare the
+        # converted weight against the equivalent explicit permutation instead.
+        assert np.array_equal(converted_weight(None), converted_weight([1, 0]))
 
 
 class TestQdqToDqValidation:
