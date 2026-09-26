@@ -103,7 +103,7 @@ python image_prep.py \
     --fp16 # <Optional, if the input ONNX is in FP16 precision>
 ```
 
-> *For Int4 quantization, it is recommended to set `--calibration_data_size=64`.*
+> *There is no INT4-specific image-count requirement. The `awq_clip` method uses calibration data to search weight-clipping parameters, while `rtn_dq` does not use calibration data. Choose a representative dataset and validate the quantized model's accuracy for your model and resource constraints.*
 
 ### Quantize ONNX Model to FP8, INT8 or INT4
 
