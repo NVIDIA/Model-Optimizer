@@ -23,7 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..common.nvfp4_quant import fp4_round_magnitude, fp8_quantize_scale
+from ..common.nvfp4_quant import fp8_quantize_scale, nvfp4_scalar_quant
 from .fp4_kernel import _torch_dtype_to_tl
 
 __all__ = ["fp4_fake_quant_block"]
@@ -71,30 +71,20 @@ def fp4_fake_quant_kernel(
     )
 
     global_scale = tl.load(global_scale_ptr).to(tl.float32)
-    global_scale_safe = tl.where(global_scale > 0.0, global_scale, 1e-12)
+    global_scale_valid = (global_scale > 0.0) & (global_scale < float("inf"))  # False for NaN
+    global_scale_safe = tl.where(global_scale_valid, global_scale, 1.0)
 
     tile = tl.load(x_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
 
     tile_reshaped = tl.reshape(tile, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE))
-    x_abs = tl.abs(tile_reshaped)
-
-    block_max = tl.max(x_abs, axis=2, keep_dims=True)
-
+    block_max = tl.max(tl.abs(tile_reshaped), axis=2, keep_dims=True)
     block_max_quant = fp8_quantize_scale(block_max, global_scale_safe)
-    block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
+    # Like the CUDA extension, a zero, inf or NaN global amax uses a unit block scale.
+    block_max_quant = tl.where(global_scale_valid, block_max_quant, 1.0)
 
-    block_max_quant_broadcast = tl.broadcast_to(
-        block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE)
-    )
-
-    abs_scaled = x_abs / block_max_quant_broadcast
-
-    q_val = fp4_round_magnitude(abs_scaled)
-
-    x_rescaled = q_val * block_max_quant_broadcast
-    x_rescaled = tl.where(tile_reshaped >= 0, x_rescaled, -x_rescaled)
-
-    tile_quant = tl.reshape(x_rescaled, (TILE_M, TILE_N))
+    # Only a zero block scale zeroes the block; small nonzero scales quantize normally.
+    x_quant = nvfp4_scalar_quant(tile_reshaped, block_max_quant, BLOCK_SIZE)
+    tile_quant = tl.reshape(x_quant, (TILE_M, TILE_N))
 
     tl.store(y_block_ptr, tile_quant.to(OUT_DTYPE), boundary_check=(0, 1))
 
