@@ -770,6 +770,25 @@ class TestFP4FakeQuantScale:
         out = cuda_fp4(inp, torch.tensor([global_amax], device="cuda"), 16)
         assert torch.equal(out, inp)
 
+    @pytest.mark.parametrize("scale_steps", [1, 2, 3, 4, 5, 6, 7, 12])
+    def test_subnormal_fp8_block_scale(self, cuda_fp4, scale_steps):
+        """Block scales in the FP8 E4M3 subnormal range (multiples of 2^-9 below 2^-6) are exact.
+
+        A global amax of 6 * 448 gives a global scale of 1, so a block whose max is 6 * s gets the
+        block scale s and E2M1 values times s come back unchanged. 12 * 2^-9 is a normal control.
+        """
+        scale = scale_steps * 2.0**-9
+        e2m1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
+        sign = torch.tensor([1, -1, 1, -1, -1, 1, -1, 1], device="cuda")
+        inp = torch.cat([e2m1 * sign, e2m1 * -sign]) * scale
+        amax = torch.tensor([6.0 * 448.0], device="cuda")
+        assert torch.equal(cuda_fp4(inp, amax, 16), inp)
+        assert torch.equal(_py_fp4_fake_quant_ref(inp, amax, 16), inp)
+        if _triton_fp4_available():
+            from modelopt.torch.kernels.quantization.gemm import fp4_fake_quant_block
+
+            assert torch.equal(fp4_fake_quant_block(inp.view(1, 16), amax[0]).view(-1), inp)
+
 
 class TestFP4FakeQuantBlockSizes:
     """Test different block sizes."""

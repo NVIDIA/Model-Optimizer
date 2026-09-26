@@ -42,8 +42,10 @@
 // 7. L2-friendly block scheduling (swizzled grid)
 // 8. FP8 E4M3 round-trip for scale quantization
 
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <torch/extension.h>
@@ -74,39 +76,9 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
   return val;
 }
 
+// Round to nearest even E4M3, saturating at +-448; subnormals are kept, as in the Triton kernels.
 __device__ __forceinline__ float fp8_e4m3_round_trip(float x) {
-  if (x == 0.0f)
-    return 0.0f;
-
-  unsigned int bits = __float_as_uint(x);
-  unsigned int sign = bits >> 31;
-  int exp = ((bits >> 23) & 0xff) - 127;
-  unsigned int mantissa = bits & 0x7fffff;
-
-  if (exp > 8)
-    return sign ? -448.0f : 448.0f;
-  if (exp < -9)
-    return 0.0f;
-
-  unsigned int mantissa_3bit = (mantissa + (1 << 19)) >> 20;
-  if (mantissa_3bit > 7) {
-    mantissa_3bit = 0;
-    exp += 1;
-    if (exp > 8)
-      return sign ? -448.0f : 448.0f;
-  }
-
-  if (exp < -6) {
-    int shift = -6 - exp;
-    mantissa_3bit = (mantissa_3bit | 8) >> shift;
-    exp = -6;
-  }
-
-  int fp32_exp = exp + 127;
-  unsigned int fp32_mantissa = mantissa_3bit << 20;
-  unsigned int fp32_bits = (sign << 31) | (fp32_exp << 23) | fp32_mantissa;
-
-  return __uint_as_float(fp32_bits);
+  return static_cast<float>(__nv_fp8_e4m3(x));
 }
 
 __device__ __forceinline__ float quantize_scale_fp8(float block_max, float global_scale) {
@@ -124,9 +96,10 @@ __device__ __forceinline__ float nvfp4_block_scale(float block_max, float global
   return quantize_scale_fp8(block_max, global_scale);
 }
 
-// Only a zero block scale zeroes the block; small nonzero scales quantize normally.
+// Only a zero block scale zeroes the block; small nonzero scales quantize normally. A subnormal
+// scale counts as zero (its reciprocal can overflow), as it already is under flush-to-zero.
 __device__ __forceinline__ float nvfp4_inv_scale(float scale) {
-  return scale > 0.0f ? 1.0f / scale : 0.0f;
+  return scale >= FLT_MIN ? 1.0f / scale : 0.0f;
 }
 
 // =============================================================================
