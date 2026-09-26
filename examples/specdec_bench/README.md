@@ -145,6 +145,32 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
+## Speculation Profiles
+
+Any run with `--save_dir` that measures acceptance also writes `speculation_profile.json` next to
+`acceptance_rate.json`. It is the deployment-facing view of the same numbers: per-position acceptance
+plus enough provenance to know what they describe.
+
+The point is that a draft checkpoint's weights say nothing about how good it is, so deployment
+tooling guesses -- dynamo's simulator models every draft model with one hardcoded acceptance vector.
+Attaching the measurement to the exported checkpoint (`export_hf_checkpoint.py
+--speculation_profile`) removes the guess.
+
+Both acceptance conventions are emitted, because the two known consumers disagree: dynamo's mocker
+wants **conditional** rates (P(draft i+1 accepted | first i accepted)) while vLLM's synthetic
+rejection sampler wants **marginal** rates (P(first i+1 all accepted)). Publishing one and letting a
+consumer assume the other is a silent, plausible-looking failure.
+
+Each profile self-checks that `mean_accept_length == 1 + sum(marginal_accept_rates)`. Because both
+sides derive from the same histogram, that identity holds exactly *unless the published vector is
+truncated* -- so what it really catches is a `num_speculative_tokens` that understates the K the run
+used, which would otherwise ship a profile describing a weaker draft than was measured. A failure is
+recorded in the artifact and warned about rather than raised, so the discrepancy stays inspectable.
+
+See [`examples/speculative_decoding`](../speculative_decoding/README.md#speculation-profiles) for the
+schema, the second (in-training) producer, and guidance on comparing against published model-card
+numbers.
+
 ## Uploading results to S3
 
 Each `run.py` invocation writes a result directory containing `configuration.json`,
