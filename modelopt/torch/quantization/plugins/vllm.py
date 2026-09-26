@@ -239,30 +239,64 @@ _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+_COMPILE_MARKER_PATHS = (
+    (),
+    ("model",),
+    ("language_model",),
+    ("model", "model"),
+    ("language_model", "model"),
+)
+
+
+def _resolve_compile_target(model):
+    """Return the nearest model that owns vLLM's do_not_compile marker."""
+    for path in _COMPILE_MARKER_PATHS:
+        target = model
+        for attr in path:
+            target = getattr(target, attr, None)
+            if target is None:
+                break
+        else:
+            if hasattr(target, "do_not_compile"):
+                return target
+    return None
+
+
 @contextmanager
 def disable_compilation(model):
-    """Disable compilation for a model.
+    """Temporarily disable vLLM compilation for a model.
 
     Args:
         model: The model to disable compilation for.
     """
-    do_not_compile = True
-    if hasattr(model, "model"):
-        do_not_compile = model.model.do_not_compile
-        model.model.do_not_compile = True
-    elif hasattr(model, "language_model"):
-        do_not_compile = model.language_model.model.do_not_compile
-        model.language_model.model.do_not_compile = True
-    else:
-        raise ValueError("Model does not have a model or language_model attribute")
+    target = _resolve_compile_target(model)
+    if target is None:
+        target = getattr(model, "model", None)
+        if target is None:
+            language_model = getattr(model, "language_model", None)
+            target = getattr(language_model, "model", None)
+        if target is None:
+            raise ValueError("Model does not have a model or language_model.model attribute")
+        warnings.warn(
+            f"{type(target).__name__} does not expose vLLM's 'do_not_compile' marker, so "
+            "ModelOpt cannot dynamically disable torch.compile during calibration. This is "
+            "harmless when vLLM is already running in eager mode (for example, with "
+            "--enforce-eager or CompilationMode.NONE). Otherwise, calibration may enter a "
+            "compiled path; rerun with --enforce-eager or add vLLM compile-wrapper support "
+            "for this model.",
+            stacklevel=2,
+        )
 
+    had_do_not_compile = "do_not_compile" in vars(target)
+    previous_do_not_compile = getattr(target, "do_not_compile", None)
+    target.do_not_compile = True
     try:
         yield
     finally:
-        if hasattr(model, "model"):
-            model.model.do_not_compile = do_not_compile
-        elif hasattr(model, "language_model"):
-            model.language_model.model.do_not_compile = do_not_compile
+        if had_do_not_compile:
+            target.do_not_compile = previous_do_not_compile
+        else:
+            vars(target).pop("do_not_compile", None)
 
 
 # vLLM Attention stores ``device``/``dtype`` as plain attrs; ``dtype`` may be a string

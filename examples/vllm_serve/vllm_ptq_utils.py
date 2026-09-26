@@ -62,9 +62,25 @@ def _get_calibration_block_count(
             return num_blocks
 
     else:
+        try:
+            from vllm.v1.kv_cache_interface import KpoolTailSpec, UniformTypeKVCacheSpecs
+        except ImportError:
+            KpoolTailSpec = ()
+            UniformTypeKVCacheSpecs = ()
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
             """Calculate the current vLLM warmup block reservation."""
+            # KpoolTailSpec is a one-block circular scratch cache. The generic
+            # vLLM warmup helper sees its SlidingWindowSpec base and reserves
+            # one block per block_size tokens, overflowing the one-block table.
+            unwrapped_spec = (
+                kv_cache_spec.first_spec
+                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+                else kv_cache_spec
+            )
+            if isinstance(unwrapped_spec, KpoolTailSpec):
+                return 1
+
             # Calibration runs before model_state is initialized, so call the
             # underlying reservation policy rather than _warmup_block_counter.
             return _reserved_block_count(
@@ -156,27 +172,46 @@ def _cleanup_calibration_requests(
             raise finish_error from execute_error
 
 
+
+def _get_unpadded_input_ids(batch: dict[str, Any]) -> list[list[int]]:
+    """Remove tokenizer padding before constructing vLLM scheduler requests."""
+    input_ids = torch.as_tensor(batch["input_ids"]).detach().cpu()
+    if input_ids.ndim == 1:
+        input_ids = input_ids.unsqueeze(0)
+    if input_ids.ndim != 2:
+        raise ValueError(
+            f"Calibration input_ids must have shape [batch, sequence], got {input_ids.shape}."
+        )
+
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is None:
+        sequences = input_ids.tolist()
+    else:
+        attention_mask = torch.as_tensor(attention_mask).detach().cpu()
+        if attention_mask.ndim == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError(
+                "Calibration attention_mask must match input_ids shape, got "
+                f"{attention_mask.shape} and {input_ids.shape}."
+            )
+        sequences = [
+            ids[mask.to(dtype=torch.bool)].tolist()
+            for ids, mask in zip(input_ids, attention_mask, strict=True)
+        ]
+
+    if any(not sequence for sequence in sequences):
+        raise ValueError("Calibration input contains an empty sequence after removing padding.")
+    return sequences
+
+
 def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], None]:
     """Create a calibration loop backed by the vLLM worker scheduler."""
 
     def calibrate_loop(model: Any) -> None:
         """Calibrate the model with batches submitted through the scheduler."""
         for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
-            input_ids_batch = batch["input_ids"]
-
-            # Convert to list of flat token id lists (one per sequence in batch)
-            if torch.is_tensor(input_ids_batch):
-                input_ids_batch = input_ids_batch.cpu()
-                # Handle both [batch_size, seq_len] and [seq_len]
-                if input_ids_batch.dim() == 1:
-                    input_ids_batch = input_ids_batch.unsqueeze(0)
-                input_ids_list_batch = [seq.tolist() for seq in input_ids_batch]
-            else:
-                input_ids_list_batch = [
-                    list(seq) if not isinstance(seq, list) else seq for seq in input_ids_batch
-                ]
-                if input_ids_list_batch and isinstance(input_ids_list_batch[0], int):
-                    input_ids_list_batch = [input_ids_list_batch]
+            input_ids_list_batch = _get_unpadded_input_ids(batch)
 
             num_groups = len(self.model_runner.kv_cache_config.kv_cache_groups)
             block_ids_batch, new_block_ids_to_zero = _allocate_calibration_blocks(
@@ -323,3 +358,4 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
             )
 
     return quant_cfg
+

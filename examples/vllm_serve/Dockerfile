@@ -1,4 +1,4 @@
-ARG VLLM_VERSION=0.28.0
+ARG VLLM_VERSION=0.30.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}
 
 # Set environment variables

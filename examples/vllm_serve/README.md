@@ -4,15 +4,15 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-The general fakequant example is tested with vLLM 0.9.0, 0.19.1, 0.26.0, and 0.28.0. The
+The general fakequant example is tested with vLLM 0.9.0, 0.19.1, 0.26.0, 0.30.0 and 0.30.0. The
 compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment
 
-Use the Dockerfile to build an environment with vLLM 0.28.0:
+Use the Dockerfile to build an environment with vLLM 0.30.0:
 
 ```bash
-docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.28.0 .
+docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 ```
 
 To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
@@ -26,7 +26,7 @@ For a direct installation from the ModelOpt repository root, install the tested 
 release and the ModelOpt extras used by this example:
 
 ```bash
-python3 -m pip install "vllm==0.28.0"
+python3 -m pip install "vllm==0.30.0"
 python3 -m pip install -e ".[all,mlflow]"
 ```
 
@@ -58,7 +58,7 @@ python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0 and
-0.28.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
+0.30.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
 
 ```bash
 KV_QUANT_CFG=NVFP4_KV_CFG QUANT_CALIB_SIZE=512 \
