@@ -64,10 +64,51 @@ __all__ = [
 
 
 # TODO: Descriptors for the supported algorithms
+
+
+def _apply_calibration_plan(model, algo_cfg, algorithm, forward_loop) -> None:
+    """Compile `algo_cfg` into ordered stages and apply each as its own calibration mode.
+
+    Compile first, so a bad plan fails before any expensive calibration. Each stage is then a
+    real mode application: it is recorded in the modelopt state under its own name, and the
+    mode graph checks the hand-off. The values derived from the plan -- the write-mask, the
+    hand-off kwargs -- travel through `mode_kwargs`, which reaches the convert entrypoint but
+    is deliberately never saved.
+    """
+    from .algo_cfg import compile_algo_cfg, derive_handoff, stage_predicate, stage_targets
+    from .mode import BaseCalibrateModeDescriptor, CalibrateModeRegistry
+    from .utils import print_rank_0
+
+    plan = compile_algo_cfg({"algo_cfg": algo_cfg, "algorithm": algorithm}, model)
+    print_rank_0(f"calibration plan: {' -> '.join(str(s.algo) for s in plan)}")
+    for i, stage in enumerate(plan):
+        if stage.algo is None:
+            continue
+        name = BaseCalibrateModeDescriptor._get_mode_name(stage.algo, check=True)
+        descriptor = CalibrateModeRegistry[name]
+        _, quantizers = stage_targets(model, stage)
+        # A grid change invalidates the hand-off: the amax an earlier stage produced described
+        # the old grid, so this stage must re-initialize rather than skip.
+        changed = type(descriptor).prepare(model, quantizers, stage.cfg)
+        apply_mode(
+            model,
+            mode=[(name, stage.cfg)],
+            registry=CalibrateModeRegistry,
+            mode_kwargs=[
+                {
+                    "forward_loop": forward_loop,
+                    "should_process": stage_predicate(model, stage),
+                    "handoff": {} if changed else derive_handoff(model, plan, i),
+                }
+            ],
+        )
+
+
 def calibrate(
     model: nn.Module,
     algorithm: QuantizeAlgoCfgType = "max",
     forward_loop: ForwardLoop | None = None,
+    algo_cfg: list | None = None,
 ) -> nn.Module:
     """Adjusts weights and scaling factors based on selected algorithms.
 
@@ -89,6 +130,12 @@ def calibrate(
         forward_loop: A callable which takes the model as argument and forwards calibration data
             through the model. This is not required for weight-only quantization with the ``"max"``
             algorithm.
+        algo_cfg: An optional ordered list of :class:`AlgoCfgEntry
+            <modelopt.torch.quantization.config.AlgoCfgEntry>` dicts assigning a calibration
+            pipeline to a scope, e.g.
+            ``[{"module_name": "*mlp*", "cfg": ["awq_lite", "mse"]}]``. When given, the config is
+            compiled into an ordered list of scoped stages run by the ``"calibration_plan"`` mode,
+            and ``algorithm`` becomes the fallback for targets no entry matches.
 
     Returns: The calibrated pytorch model.
     """
@@ -112,12 +159,19 @@ def calibrate(
     is_training = model.training
     model.eval()
 
+    # A scoped plan runs through the `calibration_plan` mode, which compiles `algo_cfg` and
+    # `algorithm` into one ordered stage list and records a single mode. Without `algo_cfg`
+    # the plan is the all-"*" single-stage case, which is exactly what the legacy per-algorithm
+    # modes already do -- so that path is left alone and its recorded state stays byte-identical.
     with forward_with_reshard(model):
-        apply_mode(
-            model,
-            mode=get_modelike_from_algo_cfg(algorithm),
-            mode_kwargs={"forward_loop": forward_loop},
-        )
+        if algo_cfg:
+            _apply_calibration_plan(model, algo_cfg, algorithm, forward_loop)
+        else:
+            apply_mode(
+                model,
+                mode=get_modelike_from_algo_cfg(algorithm),
+                mode_kwargs={"forward_loop": forward_loop},
+            )
 
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
@@ -331,7 +385,12 @@ def quantize(
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+    return calibrate(
+        model,
+        config.get("algorithm"),
+        forward_loop=forward_loop,
+        algo_cfg=config.get("algo_cfg"),
+    )
 
 
 # TODO: create a config interface for auto_quantize and expose setting
