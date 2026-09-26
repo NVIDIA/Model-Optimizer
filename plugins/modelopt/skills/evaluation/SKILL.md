@@ -42,7 +42,7 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
 2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
-3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
+3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`, `${HARBOR_ECS_REGION}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
 Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
@@ -64,6 +64,7 @@ for an "AA" request. If the user asks for MRCR:
 2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
    sets the context cap, dataset *and* metric prefix; the three are not
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+   Take the largest variant within the checkpoint's trained context — see the recipe.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
    `transformers`; prepare fails without it) and
@@ -72,16 +73,17 @@ for an "AA" request. If the user asks for MRCR:
    Gym and must apply, so the template's `container:` is `???` and the bootstrap
    exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
    NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
-5. Long-context deploy (`--max-model-len 1100000` +
-   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
-   multi-instance fan-out); **never cap output tokens**; report the needle-count
-   strata alongside `pass@1/accuracy`.
+5. Long-context deploy: for **1M**, `--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; for **128K**, `--max-model-len` at the
+   checkpoint's trained context (room for the answer above 131,072) and no
+   override. 1M also needs `gpu_memory_utilization: 0.95`. Both: multi-instance fan-out;
+   **never cap output tokens**; report the needle-count strata alongside
+   `pass@1/accuracy`.
 6. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gym.sh"`; it
    enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
    and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
-   **`limit_samples` is inert on the gym path** — canary with the gym's own
-   `++limit=N` (see the recipe's Canary section), remembering the prepare pass
-   still runs in full.
+   Canary with `limit_samples` — the MRCR template forwards it as `++limit`
+   (see the recipe's Canary section); the prepare pass still runs in full.
 
 ---
 

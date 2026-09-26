@@ -43,25 +43,32 @@ services:
       - ???:/cache/huggingface
     generation: {temperature: 1.0, top_p: 0.95}   # from model card (reasoning mode); adjust per card — mandatory lookup (references/model-card-research.md), same as 0.2.6
     proxy:
-      request_timeout: 3600                      # canonical; MUST be >= benchmarks[].solver.agent_kwargs.llm_kwargs.timeout
-      extra_body: {skip_special_tokens: false}   # add model-card sampling extras here if the card specifies them; mirror them in the export tags below
-      interceptors:
+      request_timeout: 3600                      # ALWAYS set (else inherits the model fragment); MUST be >= benchmarks[].solver.agent_kwargs.llm_kwargs.timeout
+      extra_body:                                # card extras only, no no-op defaults; reasoning toggles in chat_template_kwargs
+        skip_special_tokens: false
+        chat_template_kwargs: {enable_thinking: true}   # toggle key is per model family
+      model_traffic: {capture_request_body: true}  # per service, never in a shared block
+      interceptors:                              # lists REPLACE on merge — restate the whole chain
+        # SWE-bench prepends system_message + turn_counter — see swebench_verified.md
         - name: drop_params                        # agents send max_tokens; many servers reject it
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
           config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
-        # SWE-bench (OpenHands, multi-turn) adds turn_counter + system_message AND USES A DIFFERENT
-        # ORDER (drop_params before consolidate_system) — don't lift this chain — see swebench_verified.md
+        - name: consolidate_system
+        # reasoning models only; reasoning_replay.mode is per model (think_tags default / native / both)
+        # - name: reasoning
+        # - name: reasoning_replay
+        #   config: {mode: think_tags}
         # FEP-1104/1120 diagnostics — uncomment for a CANARY/debug run, drop it for the scored run:
         # first_n caps only 200s, so every error pair (full req+res bodies) is retained in memory for
         # the whole run and re-serialized on each write — unbounded growth exactly when the server errors.
-        # - name: http_pairs_dump                    # canonical LAST in the chain (SWE-bench: first)
+        # - name: http_pairs_dump                    # LAST in the chain
         #   config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}   # $$ defers expansion to run time
     node_pool: gpu
 
 benchmarks:
   - playbook: terminal_bench_2_1     # SWE-bench: swebench_verified (see recipe)
     repeats: 8                       # AA count — keep for a scored run (canary: -O benchmarks.0.repeats=1)
-    max_concurrent: 50               # canonical TB2.1 bench.yaml; keep == sandbox.concurrency
+    max_concurrent: 50               # canonical TB2.1 (nano-class; larger models 15); keep == sandbox.concurrency
     solver:
       service: model
       timeout_strategy: max          # canonical TB2.1; "task" = leaderboard-comparable
@@ -69,15 +76,15 @@ benchmarks:
       agent_kwargs: {llm_kwargs: {timeout: 3600}}
     sandbox:
       max_task_lifetime_sec: 21600   # ModelOpt 6h: agent budget plus setup/verification
-      region: us-east-1              # MUST match the region in ${HARBOR_ECR_REPOSITORY} (SWE-bench: us-east-2 + ${HARBOR_SWEBENCH_ECR_REPOSITORY})
+      region: ${HARBOR_ECS_REGION:-us-east-1}      # SWE-bench: us-east-2 + ${HARBOR_SWEBENCH_ECR_REPOSITORY}
       ecr_repository: ${HARBOR_ECR_REPOSITORY}      # from modelopttools:eval-config
       concurrency: 50
-      log_stream_prefix: terminalbench21-???
+      log_stream_prefix: terminalbench-21-???
 
 cluster:
   type: slurm
   hostname: ???                      # login FQDN
-  username: ${oc.env:USER}
+  username: ${USER}                  # NOT ${oc.env:USER} — nel-next only expands ${VAR}; fails at --submit
   account: ???
   walltime: "08:00:00"               # partition must allow; leave room for model startup + 4h trials
   shards: 1                          # N = N nodes (each redeploys vLLM)
@@ -89,7 +96,7 @@ cluster:
     HF_HOME: /cache/huggingface
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-    AWS_DEFAULT_REGION: us-east-1     # match sandbox.region / the region in ${HARBOR_ECR_REPOSITORY}
+    AWS_DEFAULT_REGION: ${HARBOR_ECS_REGION:-us-east-1}   # match sandbox.region / the region in ${HARBOR_ECR_REPOSITORY}
     LLM_API_KEY: "no-key-needed"
   mount_home: false
   auto_resume: true
@@ -112,4 +119,5 @@ output:
       exclude_patterns: ["shard*", "model_traffic.jsonl"]   # captured request bodies (FEA-224) stay in the run dir
       description: ???               # '<model> | T=1.0 top_p=0.95 | <benchmark> (timeout_strategy=…) | r8'
       # model/checkpoint_path/benchmark drive dashboard attribution (engine logs only a generic metric key); temperature/top_p mirror generation above.
-      tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", temperature: '1.0', top_p: '0.95'}
+      # task_name = upstream slug (SWE-bench: swebench-verified); nemo-evaluator-next-version = eval_image version.
+      tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", task_name: terminal-bench-2.1, nemo-evaluator-next-version: "0.5.0.1", temperature: '1.0', top_p: '0.95'}
