@@ -24,7 +24,7 @@ import torch
 pytest.importorskip("transformers")
 import transformers
 
-from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseConfig, FakeBaseModel
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
@@ -162,3 +162,57 @@ def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
     assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
     assert captured["args"] == ("qwen3-vl",)
     assert captured["kwargs"]["torch_dtype"] == "auto"
+
+
+class TestFakeBaseRopeTheta:
+    """The RoPE base has to survive the fake base, whichever shape the target stores it in.
+
+    The draft injects the target's KV, so a mismatched base trains and exports without
+    complaint and only misbehaves at serve time.
+    """
+
+    def test_from_source_carries_a_transformers_5_base_theta(self, tmp_path, monkeypatch):
+        """The seam, not the reader.
+
+        Reading rope_theta correctly is the exporter's ``_get_rope_theta`` and is tested
+        there. What is pinned here is that this call site uses it: a plain
+        ``getattr(base_cfg, "rope_theta")`` reads None from a transformers 5 config and
+        silently builds a draft with no RoPE base at all.
+        """
+        base_cfg = transformers.PretrainedConfig(
+            model_type="llama",
+            hidden_size=_HIDDEN_SIZE,
+            vocab_size=_VOCAB_SIZE,
+            num_hidden_layers=2,
+            max_position_embeddings=128,
+            tie_word_embeddings=False,
+            rope_parameters={"rope_theta": 1000000.0},
+        )
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: base_cfg)
+        tensors = {
+            "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "norm.weight": torch.ones(_HIDDEN_SIZE),
+        }
+        shard = tmp_path / "model-00001-of-00001.safetensors"
+        safetensors.torch.save_file(tensors, shard)
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": dict.fromkeys(tensors, shard.name)})
+        )
+
+        model = FakeBaseModel.from_source(str(tmp_path))
+
+        assert model.config.rope_theta == 1000000.0
+        assert model.config.rope_parameters == {"rope_theta": 1000000.0}
+
+    def test_config_publishes_both_shapes(self):
+        """Consumers that prefer the dict must find it on a fake base too."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=1000000.0)
+        assert config.rope_theta == 1000000.0
+        assert config.rope_parameters == {"rope_theta": 1000000.0}
+
+    def test_unknown_theta_publishes_no_dict(self):
+        """An absent base must stay absent rather than become a wrong default."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=None)
+        assert config.rope_theta is None
+        assert not getattr(config, "rope_parameters", None)

@@ -605,3 +605,46 @@ class DSparkExporter(DFlashExporter):
             }
         )
         return config
+
+
+class DFlash2Exporter(DFlashExporter):
+    """Draft model exporter for DFlash2 (DFlash backbone + convolutions + selector).
+
+    Same z-lab-compatible format as DFlash, plus the DFlash2 weights
+    (``layers.*.attention_conv.*`` / ``layers.*.mlp_conv.*`` /
+    ``candidate_selector.*``, already captured by the inherited ``dflash_module.``
+    stripping) and the config fields the SGLang/vLLM ``DFlash2DraftModel`` loader
+    needs to rebuild them (``conv_kernel_size``, ``conv_group_size``,
+    ``selector_rank``, ``selector_top_k``).
+
+    The architecture name is what selects the DFlash2 serving path: a checkpoint
+    declaring ``DFlashDraftModel`` loads as a plain DFlash draft and would silently
+    ignore the convolutions and the selector.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the DFlash2 architecture fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+
+        config["architectures"] = ["DFlash2DraftModel"]
+        # Present because HFDFlash2Model.modify validates them at convert time.
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "dflash2"),
+                "conv_kernel_size": draft_config.conv_kernel_size,
+                "conv_group_size": draft_config.conv_group_size,
+                "selector_rank": draft_config.selector_rank,
+                "selector_top_k": draft_config.selector_top_k,
+                # The published DFlash2 checkpoints carry block_size inside
+                # dflash_config; the DFlash loader reads it from the top level.
+                # Emit both so either contract resolves to the same value.
+                "block_size": config["block_size"],
+            }
+        )
+        # vLLM reads is_causal from the TOP level, and the published DFlash2 checkpoints
+        # state it explicitly rather than leaving it to be inferred from layer_types.
+        # Mirror dflash_config.causal, which DFlashExporter writes unconditionally from
+        # dflash_draft_attention; no parent writes a top-level is_causal.
+        config["is_causal"] = config["dflash_config"]["causal"]
+        return config

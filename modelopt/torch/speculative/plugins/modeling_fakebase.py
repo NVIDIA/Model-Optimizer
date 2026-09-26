@@ -124,7 +124,12 @@ class FakeBaseConfig(PretrainedConfig):
         )
         self.intermediate_size = intermediate_size
         # For some drafter algo (e.g. DFlash) rope theta must match target model. Extract here.
+        # Published in both shapes: consumers built for Transformers 5 read the
+        # rope_parameters dict first, and a fake base that only carried the flat field
+        # would hand them nothing.
         self.rope_theta = rope_theta
+        if rope_theta is not None:
+            self.rope_parameters = {"rope_theta": rope_theta}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype
@@ -179,6 +184,8 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
+        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -203,7 +210,12 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(base_cfg, "rope_theta", None),
+            # Shared with the exporter deliberately: where a config keeps rope_theta
+            # depends on the transformers version, and a local getattr got that wrong
+            # here for two months while the exporter had it right. The draft injects
+            # the target's KV, so a wrong base trains and exports without complaint
+            # and only misbehaves at serve time.
+            rope_theta=_get_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

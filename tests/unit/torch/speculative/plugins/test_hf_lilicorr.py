@@ -420,6 +420,99 @@ class TestLiLiCorrForward:
         assert draft_tokens.shape == (1, 3)
 
 
+class TestLiLiCorrSublayerConvs:
+    """The optional grouped-convolution path, shared with DFlash2 via DFlashGroupedConv.
+
+    This is the composition `lilicorr_conv.yaml` ships and the only place
+    `_install_sublayer_convs` runs, so it is also what guards LiLiCorr's init from
+    changes made on the DFlash2 side of the shared class.
+    """
+
+    CONV_KWARGS = {"conv_kernel_size": 2, "conv_group_size": 8}
+
+    def _conv_converted(self, **arch_overrides):
+        config = _get_lilicorr_config()
+        config["dflash_architecture_config"].update(self.CONV_KWARGS)
+        config["dflash_architecture_config"].update(arch_overrides)
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def test_convs_replace_the_no_op_wrappers(self):
+        """Both sublayer wrappers on every draft layer become a real convolution."""
+        from modelopt.torch.speculative.plugins.modeling_dflash2 import DFlashGroupedConv
+
+        module = self._conv_converted().dflash_module
+        assert len(module.layers) == NUM_DRAFT_LAYERS
+        for layer in module.layers:
+            for wrapper_name in ("attention_conv", "mlp_conv"):
+                conv = getattr(layer, wrapper_name)
+                assert isinstance(conv, DFlashGroupedConv)
+                assert conv.taps == self.CONV_KWARGS["conv_kernel_size"]
+                assert conv.group_size == self.CONV_KWARGS["conv_group_size"]
+
+    def test_plain_lilicorr_keeps_the_no_op_wrappers(self):
+        """Without the two geometry keys the draft is the plain reranker."""
+        from modelopt.torch.speculative.plugins.modeling_dflash import _IdentitySublayerWrapper
+
+        module = _converted().dflash_module
+        for layer in module.layers:
+            assert isinstance(layer.attention_conv, _IdentitySublayerWrapper)
+            assert isinstance(layer.mlp_conv, _IdentitySublayerWrapper)
+
+    def test_default_init_is_an_exact_identity(self):
+        """`conv_projection_init_std` defaults to 0, so a conv run starts as the plain reranker.
+
+        This is LiLiCorr's own choice, written by `_install_sublayer_convs` after the
+        conv is constructed. It must not depend on how `DFlashGroupedConv` happens to
+        initialize itself for DFlash2.
+        """
+        module = self._conv_converted().dflash_module
+        for layer in module.layers:
+            for wrapper_name in ("attention_conv", "mlp_conv"):
+                conv = getattr(layer, wrapper_name)
+                assert conv.kernel_projection.weight.abs().max() == 0.0
+
+        conv = module.layers[0].attention_conv.double()
+        x = torch.randn(2, SEQ_LEN, conv.base_kernel.shape[-1], dtype=torch.double)
+        assert torch.equal(conv.finish(*conv.prepare(x)), x)
+
+    def test_non_zero_init_std_perturbs_the_start(self):
+        """A non-zero `conv_projection_init_std` is still honoured, and only LiLiCorr sets it."""
+        module = self._conv_converted(conv_projection_init_std=0.5).dflash_module
+        for layer in module.layers:
+            for wrapper_name in ("attention_conv", "mlp_conv"):
+                conv = getattr(layer, wrapper_name)
+                assert conv.kernel_projection.weight.abs().max() > 0.0
+
+        conv = module.layers[0].attention_conv.double()
+        x = torch.randn(2, SEQ_LEN, conv.base_kernel.shape[-1], dtype=torch.double)
+        assert not torch.allclose(conv.finish(*conv.prepare(x)), x)
+
+    def test_forward_trains_the_convs(self):
+        """The conv path produces a finite loss and gradients reach the convolutions."""
+        model = self._conv_converted()
+        model.train()
+        out = model(**_make_batch(model.dflash_config.vocab_size))
+        assert torch.isfinite(out.loss).all()
+        out.loss.backward()
+
+        for layer in model.dflash_module.layers:
+            for wrapper_name in ("attention_conv", "mlp_conv"):
+                conv = getattr(layer, wrapper_name)
+                for grad in (conv.base_kernel.grad, conv.kernel_projection.weight.grad):
+                    assert grad is not None and torch.isfinite(grad).all()
+                    assert grad.abs().sum() > 0
+
+    def test_one_geometry_key_alone_is_rejected(self):
+        """Half the geometry would silently build a draft with no convolutions."""
+        config = _get_lilicorr_config()
+        config["dflash_architecture_config"]["conv_kernel_size"] = 2
+        model = get_tiny_llama(num_hidden_layers=4)
+        with pytest.raises(ValueError, match="conv_kernel_size"):
+            mtsp.convert(model, [("dflash", config)])
+
+
 class TestLiLiCorrOptimization:
     """The objective is trainable: a fixed batch is driven down.
 
