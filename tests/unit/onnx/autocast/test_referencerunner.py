@@ -445,14 +445,19 @@ def test_multi_batch_aggregation_statistics(reference_runner):
 
 def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
     """Batches are folded as they stream in, so peak memory is independent of batch count."""
-    batch_refs = []
-    concurrent = []
+    batch_refs, array_refs = [], []
+    concurrent, array_concurrent = [], []
 
     def spy(method):
         def wrapped(self, *args):
-            batch_refs.append(weakref.ref(args[-1]))
+            batch_data = args[-1]
+            # Track an activation alongside the mapping: the arrays are the memory, and
+            # they could outlive the mapping that carried them.
+            batch_refs.append(weakref.ref(batch_data))
+            array_refs.append(weakref.ref(next(iter(batch_data.values()))))
             gc.collect()
             concurrent.append(sum(ref() is not None for ref in batch_refs))
+            array_concurrent.append(sum(ref() is not None for ref in array_refs))
             return method(self, *args)
 
         return wrapped
@@ -475,3 +480,6 @@ def test_multi_batch_does_not_accumulate_batches(reference_runner, monkeypatch):
 
     assert len(concurrent) == 5, "every batch should reach the aggregator"
     assert max(concurrent) == 1, f"batches were retained instead of streamed: {concurrent}"
+    assert max(array_concurrent) == 1, (
+        f"batch activations were retained instead of streamed: {array_concurrent}"
+    )
