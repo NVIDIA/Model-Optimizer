@@ -1165,9 +1165,11 @@ class TestReplaceZeroScaleWithSmallestNonzero:
 def create_test_model_with_dq_transpose_matmul(
     out_features: int,
     in_features: int,
-    perm: list[int] | None = [1, 0],
+    *,
+    perm: list[int] | None = (1, 0),
     q_axis: int = 0,
     transpose: bool = True,
+    declare_axis: bool = True,
 ):
     """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
 
@@ -1181,12 +1183,14 @@ def create_test_model_with_dq_transpose_matmul(
     scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
     zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
 
+    # ONNX defaults an omitted `axis` to 1, so a caller omitting it must pass q_axis=1.
+    axis_attr = {"axis": q_axis} if declare_axis else {}
     nodes = [
         helper.make_node(
-            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=q_axis
+            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", **axis_attr
         ),
         helper.make_node(
-            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=q_axis
+            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", **axis_attr
         ),
     ]
     matmul_rhs = "w_dq"
@@ -1197,7 +1201,7 @@ def create_test_model_with_dq_transpose_matmul(
                 ["w_dq"],
                 ["w_t"],
                 name="w_t",
-                **({} if perm is None else {"perm": perm}),
+                **({} if perm is None else {"perm": list(perm)}),
             )
         )
         matmul_rhs = "w_t"
@@ -1261,11 +1265,14 @@ class TestQdqToDqTranspose:
 
     # Square weights are the dangerous shape: the scale length matches either axis, so an
     # axis mismatch passes validation and silently changes the model's output.
-    @pytest.mark.parametrize(("q_axis", "transpose"), [(0, False), (1, True)])
-    def test_conversion_follows_the_source_qdq_axis(self, q_axis, transpose):
-        """The retained DequantizeLinear dequantizes along the axis it declares."""
+    @pytest.mark.parametrize(
+        ("q_axis", "transpose", "declare_axis"),
+        [(0, False, True), (1, True, True), (1, True, False)],
+    )
+    def test_conversion_follows_the_source_qdq_axis(self, q_axis, transpose, declare_axis):
+        """The retained DequantizeLinear dequantizes along its axis, declared or defaulted."""
         model = create_test_model_with_dq_transpose_matmul(
-            32, 32, q_axis=q_axis, transpose=transpose
+            32, 32, q_axis=q_axis, transpose=transpose, declare_axis=declare_axis
         )
         inputs = {"input": np.random.RandomState(11).randn(3, 32).astype(np.float32)}
 
