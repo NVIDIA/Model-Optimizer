@@ -92,7 +92,7 @@ python download_example_onnx.py \
 
 ### Prepare calibration data
 
-Calibration data is a representative subset of your training or validation dataset used during quantization to determine the optimal scale factors for converting floating-point values to lower precision formats (INT8, FP8, INT4). This data helps maintain model accuracy after quantization by analyzing the distribution of activations throughout the network.
+Calibration data is a representative subset of your training or validation dataset used during quantization. For FP8 and INT8, and for the INT4 AWQ methods, it determines the optimal scale factors for converting floating-point values to lower precision formats. This data helps maintain model accuracy after quantization by analyzing the distribution of activations throughout the network. INT4 `rtn_dq` does not use calibration data, so you can skip this step for it.
 
 First, prepare some calibration data. TensorRT recommends calibration data size to be at least 500 for CNN and ViT models. The following command picks up 500 images from the [tiny-imagenet](https://huggingface.co/datasets/zh-plus/tiny-imagenet) dataset and converts them to a numpy-format calibration array. Reduce the calibration data size for resource constrained environments.
 
@@ -103,7 +103,7 @@ python image_prep.py \
     --fp16 # <Optional, if the input ONNX is in FP16 precision>
 ```
 
-> *There is no INT4-specific image-count requirement. The `awq_clip` method uses calibration data to search weight-clipping parameters, while `rtn_dq` does not use calibration data. Choose a representative dataset and validate the quantized model's accuracy for your model and resource constraints.*
+> *There is no INT4-specific image-count requirement. The AWQ methods (`awq_clip`, `awq_lite`, `awq_full`) use calibration data to search scaling and weight-clipping parameters, while `rtn_dq` does not use calibration data. For AWQ, choose a representative dataset and validate the quantized model's accuracy for your model and resource constraints.*
 
 ### Quantize ONNX Model to FP8, INT8 or INT4
 
@@ -123,6 +123,8 @@ python -m modelopt.onnx.quantization \
     --calibration_method=<max|entropy|awq_clip|rtn_dq> \
     --output_path=vit_base_patch16_224.quant.onnx
 ```
+
+> *With `--calibration_method=rtn_dq`, `--calibration_data_path` (or `calibration_data` in the Python API) can be omitted; the calibration data is not used.*
 
 #### Option 2: Python API
 
