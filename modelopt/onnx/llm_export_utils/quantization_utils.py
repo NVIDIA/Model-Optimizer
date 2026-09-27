@@ -22,6 +22,19 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 
+class UnsupportedPrecisionError(ValueError):
+    """Exception raised when an unsupported precision is requested."""
+
+    def __init__(self, precision: str) -> None:
+        """Initialize the exception.
+
+        Args:
+            precision: The unsupported precision string.
+        """
+        super().__init__(f"Unsupported precision: {precision}")
+        self.precision = precision
+
+
 def _quantize_model(model, quant_config, calib_dataloader=None):
     """The calibration loop for the model can be setup using the modelopt API.
 
@@ -67,7 +80,7 @@ def get_quant_config(precision, lm_head_precision="fp16"):
         quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
 
     else:
-        raise ValueError(f"Unsupported precision: {precision}")
+        raise UnsupportedPrecisionError(precision)
 
     quant_cfg_list: list = [e for e in quant_cfg["quant_cfg"] if "quantizer_name" in e]
 
