@@ -124,18 +124,11 @@ class FakeBaseConfig(PretrainedConfig):
         )
         self.intermediate_size = intermediate_size
         # For some drafter algo (e.g. DFlash) rope theta must match target model. Extract here.
-        # Published in both shapes: consumers built for Transformers 5 read the
-        # rope_parameters dict first, and a fake base that only carried the flat field
-        # would hand them nothing.
+        # Published in both shapes: Transformers 5 consumers read the dict first, and it has
+        # to be well-formed -- the EAGLE draft config is built from this class too, and
+        # rotary embeddings index rope_parameters["rope_type"] unconditionally.
         self.rope_theta = rope_theta
         if rope_theta is not None:
-            # rope_type is not optional padding: this class is also the class the EAGLE
-            # draft config is built from (`type(base_config).from_dict(arch_config)` in
-            # hf_eagle.modify), and transformers' rotary embeddings index
-            # config.rope_parameters["rope_type"] unconditionally. A dict carrying only
-            # rope_theta raises KeyError there. "default" matches what every real config
-            # produces and what the draft wants -- the long-context scaling families are
-            # deliberately not inherited, they are re-applied at export.
             self.rope_parameters = {"rope_theta": rope_theta, "rope_type": "default"}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
@@ -217,11 +210,8 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            # Shared with the exporter deliberately: where a config keeps rope_theta
-            # depends on the transformers version, and a local getattr got that wrong
-            # here for two months while the exporter had it right. The draft injects
-            # the target's KV, so a wrong base trains and exports without complaint
-            # and only misbehaves at serve time.
+            # Shared with the exporter: where a config keeps rope_theta depends on the
+            # transformers version, and reading it wrong is silent until serve time.
             rope_theta=_get_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg

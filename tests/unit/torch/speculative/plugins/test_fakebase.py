@@ -216,8 +216,7 @@ class TestFakeBaseRopeTheta:
 
         This class is also the class the EAGLE draft config is built from, so the dict
         reaches `LlamaRotaryEmbedding`, which indexes ``rope_parameters["rope_type"]``
-        unconditionally. Publishing only rope_theta raised KeyError there and took the
-        offline EAGLE3 example tests down while every unit test stayed green.
+        unconditionally.
         """
         from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
