@@ -1073,6 +1073,134 @@ def test_submit_job_dry_run_skips_verify(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Launcher subprocess stdin — regression tests for
+# https://github.com/NVIDIA/Model-Optimizer/issues/2551
+#
+# When modelopt-mcp runs as a stdio MCP server, its stdin is the JSON-RPC
+# transport pipe. Launcher children must not inherit it or they block on
+# the pipe instead of exiting. Every launcher subprocess call therefore
+# passes stdin=DEVNULL explicitly.
+# ---------------------------------------------------------------------------
+
+
+def _launcher_calls(calls):
+    """Filter captured subprocess calls down to modelopt-launcher invocations."""
+    return [(argv, kwargs) for argv, kwargs in calls if "modelopt-launcher" in argv]
+
+
+def test_submit_job_dry_run_detaches_stdin(monkeypatch, tmp_path):
+    """dry_run launcher must not inherit the MCP server's stdio pipe."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="dry-run ok\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=True,
+        dry_run=True,
+    )
+    launcher_calls = _launcher_calls(calls)
+    assert launcher_calls, "expected the dry-run path to invoke the launcher"
+    for _, kwargs in launcher_calls:
+        assert kwargs.get("stdin") == subprocess.DEVNULL
+
+
+def test_submit_job_slurm_detaches_stdin(monkeypatch, tmp_path):
+    """Slurm live-submit launcher must not inherit the MCP server's stdio pipe."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setattr(bridge, "verify_slurm_setup_impl", lambda **_: {"ok": True})
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="Configuring global options\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local=None,
+        cluster_host="cluster.example.com",
+        cluster_user="user",
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    launcher_calls = _launcher_calls(calls)
+    assert launcher_calls, "expected the slurm path to invoke the launcher"
+    for _, kwargs in launcher_calls:
+        assert kwargs.get("stdin") == subprocess.DEVNULL
+
+
+def test_submit_job_docker_detaches_stdin(monkeypatch, tmp_path):
+    """Docker live-submit launcher must not inherit the MCP server's stdio pipe."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setattr(bridge, "verify_docker_setup_impl", lambda: {"ok": True})
+
+    calls = []
+
+    class FakePopen:
+        pid = 4242
+
+        def __init__(self, argv, **kwargs):
+            calls.append((argv, kwargs))
+            kwargs["stdout"].write(b"launcher starting\n")
+            kwargs["stdout"].flush()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setenv("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "0")
+
+    bridge.submit_job_impl(
+        yaml_path="config.yaml",
+        hf_local="/tmp/hf",
+        cluster_host=None,
+        cluster_user=None,
+        identity=None,
+        job_dir=None,
+        job_name=None,
+        extra_overrides=None,
+        skip_verify=False,
+    )
+    launcher_calls = _launcher_calls(calls)
+    assert launcher_calls, "expected the docker path to invoke the launcher"
+    for _, kwargs in launcher_calls:
+        assert kwargs.get("stdin") == subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
 # job_status / job_logs — filesystem-based
 # ---------------------------------------------------------------------------
 
