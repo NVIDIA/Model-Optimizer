@@ -1244,19 +1244,20 @@ class TestQdqToDqTranspose:
         assert weight.data_type == TensorProto.INT8
         assert np.array_equal(run(converted), expected)
 
-    def test_dq_transpose_without_perm_reverses_axes(self):
-        """ONNX lets Transpose omit `perm`, which reverses the axes."""
+    def test_dq_transpose_without_perm_is_traced(self):
+        """ONNX lets Transpose omit `perm`; the MatMul behind it must still be found."""
+        model = create_test_model_with_dq_transpose_matmul(96, 32, perm=None)
+        initializer = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer}
 
-        def converted_weight(perm):
-            model = create_test_model_with_dq_transpose_matmul(96, 32, perm=perm)
-            converted = qdq_to_dq(model)
-            return numpy_helper.to_array(
-                next(t for t in converted.graph.initializer if t.name == "weight")
-            )
+        converted = qdq_to_dq(model)
 
-        # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so compare the
-        # converted weight against the equivalent explicit permutation instead.
-        assert np.array_equal(converted_weight(None), converted_weight([1, 0]))
+        # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so check the
+        # converted weight directly. The Q/DQ pair declares axis 0.
+        expected = np.clip(
+            np.round(initializer["weight"] / initializer["w_scale"][:, None]), -128, 127
+        ).astype(np.int8)
+        actual = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert np.array_equal(numpy_helper.to_array(actual), expected)
 
     # Square weights are the dangerous shape: the scale length matches either axis, so an
     # axis mismatch passes validation and silently changes the model's output.
