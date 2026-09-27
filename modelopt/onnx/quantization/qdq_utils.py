@@ -630,7 +630,9 @@ def _convert_weight(
     scale: onnx.TensorProto,
     zp: onnx.TensorProto,
     quantized_node: onnx.NodeProto,
+    *,
     perm: list[int] | None = None,
+    dq_axis: int | None = None,
 ) -> np.ndarray:
     """Convert a weight tensor to INT8/FP8 format based on scale and zero point.
 
@@ -640,6 +642,7 @@ def _convert_weight(
         zp: The zero point tensor for quantization
         quantized_node: The operation node that will use the converted weight
         perm: Permutation of a Transpose between the weight and quantized_node, if any
+        dq_axis: The axis declared by the source Q/DQ pair, if it declares one
 
     Returns:
         The converted weight tensor as a numpy array
@@ -677,15 +680,20 @@ def _convert_weight(
     if op_type not in axis_map:
         raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
 
-    axis = axis_map[op_type]
-
-    if perm is not None:
-        # axis_map is in the consumer's layout; a Transpose in between means that is not
-        # the weight's own layout. Map it back, since the scale indexes the stored weight.
-        assert len(perm) == len(weight_shape), (
-            f"Transpose perm {perm} does not match weight rank {len(weight_shape)}"
-        )
-        axis = perm[axis]
+    if dq_axis is not None:
+        # The retained DequantizeLinear dequantizes along the axis it declares, so the weight
+        # has to be quantized along that same one. It already indexes the stored weight, so no
+        # Transpose remapping applies.
+        axis = dq_axis % len(weight_shape)
+    else:
+        axis = axis_map[op_type]
+        if perm is not None:
+            # axis_map is in the consumer's layout; a Transpose in between means that is not
+            # the weight's own layout. Map it back, since the scale indexes the stored weight.
+            assert len(perm) == len(weight_shape), (
+                f"Transpose perm {perm} does not match weight rank {len(weight_shape)}"
+            )
+            axis = perm[axis]
 
     if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
         raise ValueError(
@@ -784,7 +792,10 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             )
 
             # Convert weight
-            scaled = _convert_weight(weight_array, scale, zp, quantized_node, perm)
+            dq_axis = next((attr.i for attr in dq_node.attribute if attr.name == "axis"), None)
+            scaled = _convert_weight(
+                weight_array, scale, zp, quantized_node, perm=perm, dq_axis=dq_axis
+            )
 
             # Create and update new weight tensor
             if zp.data_type == onnx_dtype_map["Float8"]:

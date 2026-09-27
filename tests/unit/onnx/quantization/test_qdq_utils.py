@@ -1163,7 +1163,11 @@ class TestReplaceZeroScaleWithSmallestNonzero:
 
 
 def create_test_model_with_dq_transpose_matmul(
-    out_features: int, in_features: int, perm: list[int] | None = [1, 0]
+    out_features: int,
+    in_features: int,
+    perm: list[int] | None = [1, 0],
+    q_axis: int = 0,
+    transpose: bool = True,
 ):
     """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
 
@@ -1173,26 +1177,38 @@ def create_test_model_with_dq_transpose_matmul(
     """
     rng = np.random.RandomState(7)
     weight = rng.randn(out_features, in_features).astype(np.float32)
-    scale = (np.abs(weight).max(axis=1) / 127.0).astype(np.float32)
-    zero_point = np.zeros(out_features, dtype=np.int8)
+    reduced = tuple(axis for axis in range(2) if axis != q_axis)
+    scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
+    zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
 
     nodes = [
         helper.make_node(
-            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=0
+            "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=q_axis
         ),
         helper.make_node(
-            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=0
+            "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=q_axis
         ),
-        helper.make_node(
-            "Transpose", ["w_dq"], ["w_t"], name="w_t", **({} if perm is None else {"perm": perm})
-        ),
-        helper.make_node("MatMul", ["input", "w_t"], ["output"], name="matmul"),
     ]
+    matmul_rhs = "w_dq"
+    if transpose:
+        nodes.append(
+            helper.make_node(
+                "Transpose",
+                ["w_dq"],
+                ["w_t"],
+                name="w_t",
+                **({} if perm is None else {"perm": perm}),
+            )
+        )
+        matmul_rhs = "w_t"
+    nodes.append(helper.make_node("MatMul", ["input", matmul_rhs], ["output"], name="matmul"))
+
+    rows, cols = (in_features, out_features) if transpose else (out_features, in_features)
     graph = helper.make_graph(
         nodes=nodes,
         name="dq_transpose_matmul",
-        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [3, in_features])],
-        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [3, out_features])],
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [3, rows])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [3, cols])],
         initializer=[
             numpy_helper.from_array(weight, "weight"),
             numpy_helper.from_array(scale, "w_scale"),
@@ -1241,6 +1257,25 @@ class TestQdqToDqTranspose:
         # onnxruntime cannot execute DQ -> Transpose(no perm) -> MatMul, so compare the
         # converted weight against the equivalent explicit permutation instead.
         assert np.array_equal(converted_weight(None), converted_weight([1, 0]))
+
+    # Square weights are the dangerous shape: the scale length matches either axis, so an
+    # axis mismatch passes validation and silently changes the model's output.
+    @pytest.mark.parametrize(("q_axis", "transpose"), [(0, False), (1, True)])
+    def test_conversion_follows_the_source_qdq_axis(self, q_axis, transpose):
+        """The retained DequantizeLinear dequantizes along the axis it declares."""
+        model = create_test_model_with_dq_transpose_matmul(
+            32, 32, q_axis=q_axis, transpose=transpose
+        )
+        inputs = {"input": np.random.RandomState(11).randn(3, 32).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+        assert np.array_equal(run(converted), expected)
 
 
 class TestQdqToDqValidation:
