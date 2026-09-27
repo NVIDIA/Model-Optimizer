@@ -280,7 +280,7 @@ def calculate_subblock_stats_for_puzzle_dir(
 
     master_puzzle_dir = Path(master_puzzle_dir)
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename
-    # The file is written only once all stats are computed, so reuse it when resuming a run.
+    # The file is published atomically once all stats are computed, so reuse it when resuming a run.
     if subblock_stats_file.exists() and not merge_with_existing_stats:
         mprint(f"Subblock stats file {subblock_stats_file} already exists, skipping...")
         return
@@ -361,7 +361,9 @@ def calculate_subblock_stats_for_puzzle_dir(
 
         subblock_stats.append(curr_subblock_stats)
 
-    json_dump(subblock_stats, subblock_stats_file)
+    tmp_stats_file = subblock_stats_file.with_name(subblock_stats_file.name + ".tmp")
+    json_dump(subblock_stats, tmp_stats_file)
+    tmp_stats_file.replace(subblock_stats_file)
 
     mprint(subblock_stats_file)
 
