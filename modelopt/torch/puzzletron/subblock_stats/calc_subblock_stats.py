@@ -279,6 +279,12 @@ def calculate_subblock_stats_for_puzzle_dir(
         ]
 
     master_puzzle_dir = Path(master_puzzle_dir)
+    subblock_stats_file = master_puzzle_dir / subblock_stats_filename
+    # The file is written only once all stats are computed, so reuse it when resuming a run.
+    if subblock_stats_file.exists() and not merge_with_existing_stats:
+        mprint(f"Subblock stats file {subblock_stats_file} already exists, skipping...")
+        return
+
     teacher_dir = (
         Path(teacher_dir) if teacher_dir is not None else master_puzzle_dir / "ckpts" / "teacher"
     )
@@ -287,12 +293,6 @@ def calculate_subblock_stats_for_puzzle_dir(
     # Get language model config for LM-specific attributes (VL models have nested config)
     lm_config = descriptor.get_language_model_config(model_config)
     subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes)
-
-    subblock_stats_file = master_puzzle_dir / subblock_stats_filename
-    if subblock_stats_file.exists() and not merge_with_existing_stats:
-        raise ValueError(
-            f"Subblock stats file {subblock_stats_file} already exists and `merge_with_existing_stats` was set to False."
-        )
 
     if subblock_stats_file.exists():
         with open(subblock_stats_file) as f:
