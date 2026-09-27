@@ -100,6 +100,17 @@ def test_quantize_rejects_trt_plugins_with_trt_rtx_abi():
         )
 
 
+def test_quantize_rejects_nvfp4_with_explicit_cnn_error():
+    with pytest.raises(
+        ValueError,
+        match="NVFP4 quantization is not supported for ONNX PTQ",
+    ):
+        moq.quantize(
+            "model.onnx",
+            quantize_mode="nvfp4",
+        )
+
+
 def test_realign_input_shapes_profile_after_calibration_eps_update():
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
 

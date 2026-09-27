@@ -27,6 +27,9 @@ Mul
 - INT4 mode: Gemm, MatMul
 - FP8 mode: Conv, Gemm, MatMul
 
+NVFP4 is not supported by this ONNX PTQ entry point, including for convolutional
+(CNN detector) graphs. Requesting NVFP4 fails early with an explicit error.
+
 This tool inserts Quantize-Dequantize (QDQ) nodes following compiler-friendly patterns and generates an explicit ONNX
 model.
 """
@@ -523,6 +526,8 @@ def quantize(
             Path to the input ONNX model.
         quantize_mode:
             Quantization mode. One of 'int8' (default), 'int4' and 'fp8'.
+            NVFP4 is not supported here, including for convolutional (CNN detector)
+            graphs, and requesting it raises an explicit error.
         calibration_data:
             Calibration data, either a numpy array or list/dict of numpy arrays.
         calibration_method:
@@ -699,6 +704,14 @@ def quantize(
         raise ValueError(
             "TensorRT plugin paths are not supported with the TensorRT-RTX backend. "
             "Remove --trt_plugins or select the classic TensorRT EP."
+        )
+    mode_lower = quantize_mode.lower()
+    if "nvfp4" in mode_lower or "float4" in mode_lower:
+        raise ValueError(
+            f"NVFP4 quantization is not supported for ONNX PTQ, including convolutional "
+            f"(CNN detector) graphs. Got quantize_mode={quantize_mode!r}. "
+            "Use 'int8', 'fp8' or 'int4' for CNN models, or see examples/torch_onnx "
+            "for NVFP4 via the PyTorch to ONNX path."
         )
 
     configure_logging(log_level.upper(), log_file)
