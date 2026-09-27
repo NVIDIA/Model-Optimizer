@@ -129,7 +129,14 @@ class FakeBaseConfig(PretrainedConfig):
         # would hand them nothing.
         self.rope_theta = rope_theta
         if rope_theta is not None:
-            self.rope_parameters = {"rope_theta": rope_theta}
+            # rope_type is not optional padding: this class is also the class the EAGLE
+            # draft config is built from (`type(base_config).from_dict(arch_config)` in
+            # hf_eagle.modify), and transformers' rotary embeddings index
+            # config.rope_parameters["rope_type"] unconditionally. A dict carrying only
+            # rope_theta raises KeyError there. "default" matches what every real config
+            # produces and what the draft wants -- the long-context scaling families are
+            # deliberately not inherited, they are re-applied at export.
+            self.rope_parameters = {"rope_theta": rope_theta, "rope_type": "default"}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
         self.dtype = dtype

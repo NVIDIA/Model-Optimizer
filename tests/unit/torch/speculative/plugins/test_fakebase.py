@@ -203,13 +203,39 @@ class TestFakeBaseRopeTheta:
         model = FakeBaseModel.from_source(str(tmp_path))
 
         assert model.config.rope_theta == 1000000.0
-        assert model.config.rope_parameters == {"rope_theta": 1000000.0}
+        assert model.config.rope_parameters == {"rope_theta": 1000000.0, "rope_type": "default"}
 
     def test_config_publishes_both_shapes(self):
         """Consumers that prefer the dict must find it on a fake base too."""
         config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=1000000.0)
         assert config.rope_theta == 1000000.0
-        assert config.rope_parameters == {"rope_theta": 1000000.0}
+        assert config.rope_parameters == {"rope_theta": 1000000.0, "rope_type": "default"}
+
+    def test_config_drives_a_transformers_rotary_embedding(self):
+        """The published dict has to satisfy transformers, not just carry the number.
+
+        This class is also the class the EAGLE draft config is built from, so the dict
+        reaches `LlamaRotaryEmbedding`, which indexes ``rope_parameters["rope_type"]``
+        unconditionally. Publishing only rope_theta raised KeyError there and took the
+        offline EAGLE3 example tests down while every unit test stayed green.
+        """
+        from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+
+        config = FakeBaseConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=128,
+            rope_theta=1000000.0,
+        )
+        config.head_dim = 16
+
+        rotary = LlamaRotaryEmbedding(config=config)
+        cos, sin = rotary(torch.zeros(1, 4, 64), torch.arange(4).unsqueeze(0))
+
+        assert rotary.rope_type == "default"
+        assert cos.shape == (1, 4, 16)
 
     def test_unknown_theta_publishes_no_dict(self):
         """An absent base must stay absent rather than become a wrong default."""
