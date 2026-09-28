@@ -13,22 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DBRX specs (HF model type ``dbrx``)."""
+"""Llama4 specs (HF model type ``llama4``)."""
 
 from ..specs import ModelSpec, MoESpec, register
 
 __all__: list[str] = []
 
-# Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
-# w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
-# experts.mlp (see modeling_ptq.py).
+# Llama4TextExperts is fused: one module holding 3-D gate_up_proj and down_proj
+# parameters, run through torch.bmm. There is no (gate, up) pair left to fuse, and the
+# grouped-export path (get_experts_list) does not apply. The block also carries a
+# shared_expert MLP, which is an ordinary dense MLP, not part of this layout.
 register(
     ModelSpec(
-        model_type="dbrx",
+        model_type="llama4",
         min_transformers_version="4.57",
         moe_spec=MoESpec(
-            block_names=("DbrxFFN",),
-            expert_linear_names=("w1_linear", "w2_linear", "v1_linear"),
+            block_names=("Llama4TextMoe",),
+            expert_linear_names=("gate_up_proj", "down_proj"),
+            fused_expert_names=True,
         ),
     )
 )

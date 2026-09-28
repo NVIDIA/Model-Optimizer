@@ -13,22 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DBRX specs (HF model type ``dbrx``)."""
+"""Falcon specs (HF model type ``falcon``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import ModelSpec, register
 
 __all__: list[str] = []
 
-# Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
-# w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
-# experts.mlp (see modeling_ptq.py).
-register(
-    ModelSpec(
-        model_type="dbrx",
-        min_transformers_version="4.57",
-        moe_spec=MoESpec(
-            block_names=("DbrxFFN",),
-            expert_linear_names=("w1_linear", "w2_linear", "v1_linear"),
-        ),
-    )
-)
+# Dense, and nothing model-specific for export. Older remote-code Falcon checkpoints
+# (RWForCausalLM) report other model types and are handled by modeling_ptq.py alone.
+register(ModelSpec(model_type="falcon", min_transformers_version="4.57"))

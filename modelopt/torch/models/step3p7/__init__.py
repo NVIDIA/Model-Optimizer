@@ -13,22 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DBRX specs (HF model type ``dbrx``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+"""Per-model specs for HF model type ``step3p7``."""
 
-__all__: list[str] = []
-
-# Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
-# w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
-# experts.mlp (see modeling_ptq.py).
-register(
-    ModelSpec(
-        model_type="dbrx",
-        min_transformers_version="4.57",
-        moe_spec=MoESpec(
-            block_names=("DbrxFFN",),
-            expert_linear_names=("w1_linear", "w2_linear", "v1_linear"),
-        ),
-    )
-)
+from . import specs

@@ -1529,7 +1529,7 @@ class TestQwen3VLMoeTextExperts:
 
     def test_registration_matches_installed_layout(self):
         """transformers>=5.12 experts must be left to the generic fused-experts wrapper."""
-        from modelopt.torch.quantization.plugins.huggingface import _QuantQwen3VLMoeTextExperts
+        from modelopt.torch.models.qwen3_vl_moe.modeling_ptq import _QuantQwen3VLMoeTextExperts
 
         registered = QuantModuleRegistry.get(self._experts_type())
         if _qwen3_vl_moe_is_new_layout():

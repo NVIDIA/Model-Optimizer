@@ -13,22 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DBRX specs (HF model type ``dbrx``)."""
+"""Step-3.5 specs (HF model type ``step3p5``)."""
 
-from ..specs import ModelSpec, MoESpec, register
+from ..specs import ModelSpec, register
 
 __all__: list[str] = []
 
-# Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
-# w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
-# experts.mlp (see modeling_ptq.py).
-register(
-    ModelSpec(
-        model_type="dbrx",
-        min_transformers_version="4.57",
-        moe_spec=MoESpec(
-            block_names=("DbrxFFN",),
-            expert_linear_names=("w1_linear", "w2_linear", "v1_linear"),
-        ),
-    )
-)
+# No MoESpec: the routed experts are expert-indexed MoELinear projections on the MoE MLP
+# itself, with no `experts` container, and are exported by the MoELinear handler rather
+# than through the MoE-block lookups. Declaring the block would make is_moe claim it and
+# send AWQ export into get_experts_list, which does not support this layout.
+register(ModelSpec(model_type="step3p5", modeling_source="remote_code"))
