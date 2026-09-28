@@ -50,6 +50,22 @@ star-import. A value shared between two model types is private and imported expl
 (`gemma4_text` reuses `gemma4`'s `_GEMMA4_MOE_SPEC`); sub-model types of one family are
 an intra-family detail, not a package API.
 
+## PTQ modeling
+
+Quantized-module wrappers and registrations that only one model needs (e.g. Llama4's fused
+BMM experts) live in `<model_type>/modeling_ptq.py`; generic
+ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
+`modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every
+`modeling_ptq` from an explicit list at its end, so add the new model type there. Leave the
+model's `__init__.py` importing only `specs`: `modeling_ptq` pulls in quantization and
+transformers, which `import modelopt.torch.models` must not.
+
+A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegistry.register`
+behind a `try`/`except ImportError`, remote-code classes via a callback added to
+`CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
+a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
+from.
+
 ## Sections
 
 A `ModelSpec` holds one attribute per section, each `None` unless the model fills it:
