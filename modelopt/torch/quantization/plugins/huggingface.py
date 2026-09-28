@@ -864,94 +864,6 @@ class _QuantDbrxExpertGLU(QuantModule):
         return self.w2_linear[expert_idx](x1)
 
 
-class _QuantQwen3VLMoeTextExperts(QuantModule):
-    """Quantized wrapper for the pre-transformers-5.12 ``Qwen3VLMoeTextExperts`` layout.
-
-    That layout stores ``gate_up_proj`` as (num_experts, hidden_size, 2*expert_dim) and runs
-    the experts through ``torch.bmm``/``@``, so it is unrolled into ``nn.Linear`` modules here.
-    transformers>=5.12 moved this module to the standard fused layout handled by
-    :class:`_QuantFusedExperts`; see the registration site below.
-    """
-
-    def _setup(self):
-        """Modify the Qwen3VLMoeTextExperts by using nn.Linear layers."""
-        from accelerate import init_empty_weights
-
-        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
-
-        def _copy_weight(module, weight):
-            module.to_empty(device=device)
-            with torch.no_grad():
-                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
-
-        # The attribute name was changed from `intermediate_size` to `intermediate_dim` in
-        # https://github.com/huggingface/transformers/commit/0642963ba13f2dae0596fe489415569e1d91fbda
-        if hasattr(self, "intermediate_size"):
-            expert_dim = self.intermediate_size
-        elif hasattr(self, "intermediate_dim"):
-            expert_dim = self.intermediate_dim
-        else:
-            raise AttributeError("Could not find intermediate dimension size in model")
-
-        with init_empty_weights():
-            gate_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            up_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_size, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            down_proj = nn.ModuleList(
-                [
-                    nn.Linear(expert_dim, self.hidden_size, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-
-        for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, :expert_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, expert_dim:].T)
-            _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
-
-        delattr(self, "gate_up_proj")
-        delattr(self, "down_proj")
-        self.gate_proj = gate_proj
-        self.up_proj = up_proj
-        self.down_proj = down_proj
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        routing_weights: torch.Tensor,
-        router_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(-1, self.hidden_size)
-        next_states = torch.zeros_like(hidden_states)
-        with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=self.num_experts)
-            expert_mask = expert_mask.permute(2, 1, 0)
-            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit:
-            with torch.no_grad():
-                _, token_idx = torch.where(expert_mask[expert_idx[0]])
-            current_state = hidden_states[token_idx]
-            gate = self.gate_proj[expert_idx](current_state)
-            up = self.up_proj[expert_idx](current_state)
-            gated_output = up * self.act_fn(gate)
-            out = self.down_proj[expert_idx](gated_output)
-            weighted_output = out * routing_weights[token_idx, expert_idx, None]
-            next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
-        next_states = next_states.view(batch_size, -1, self.hidden_size)
-
-        return next_states
-
-
 def _get_fused_expert_intermediate_dim(module):
     """Resolve the intermediate (expert) dimension from a fused expert module.
 
@@ -1422,129 +1334,10 @@ except ImportError:
     pass
 
 try:
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
-
-    # transformers>=5.12 rewrote Qwen3VLMoeTextExperts onto the standard
-    # ``@use_experts_implementation`` fused layout: ``hidden_size``/``expert_dim`` became
-    # ``hidden_dim``/``intermediate_dim``, ``gate_up_proj`` was transposed to
-    # (num_experts, 2*intermediate_dim, hidden_dim), and the forward now calls ``F.linear``
-    # twice per expert. ``_QuantQwen3VLMoeTextExperts`` only understands the older layout,
-    # so registering it against the new one crashes on ``self.hidden_size`` (nvbug 6518551).
-    # The decorator sets ``_apply_gate`` on the class; use it to detect the new layout and
-    # leave those modules to ``register_fused_experts_on_the_fly``, which claims them with
-    # the generic ``_QuantFusedExperts``. The old layout must stay explicitly registered:
-    # it is structurally indistinguishable from a generic fused-experts module, yet its
-    # forward uses ``torch.bmm``/``@`` rather than ``F.linear``, so the generic wrapper
-    # would silently quantize nothing.
-    if Qwen3VLMoeTextExperts not in QuantModuleRegistry and not hasattr(
-        Qwen3VLMoeTextExperts, "_apply_gate"
-    ):
-        QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
-            _QuantQwen3VLMoeTextExperts
-        )
-except ImportError:
-    pass
-
-try:
     from transformers.integrations.finegrained_fp8 import FP8Linear
 
     if FP8Linear not in QuantModuleRegistry:
         QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
-except ImportError:
-    pass
-
-
-class _QuantGptOssExperts(_TransposedExpertsCalibMixin, _QuantFunctionalMixin):
-    """Quantized wrapper for `transformers.GptOssExperts`.
-
-    Quantizes `gate_up_proj` and `down_proj` weights via dynamic attributes inside `quantize_weight()`.
-    Activations into `gate_up_proj` are quantized by `gate_up_proj_input_quantizer`. For `down_proj`
-    activation quantization, we intercept `torch.Tensor.__matmul__`/`torch.bmm` and quantize inputs
-    on every second call (since the first call computes `gate_up_proj` outputs and second call
-    computes `down_proj` outputs).
-    """
-
-    @staticmethod
-    def _get_quantized_weight(quantizer, module, weight):
-        # MoE weight is accessed for each expert in one forward pass. so lets cache it
-        if module._enable_weight_quantization:
-            if hasattr(quantizer, "_cached_quant_val"):
-                return getattr(quantizer, "_cached_quant_val")
-            quantizer._cached_quant_val = _transposed_quantize(weight, quantizer)
-            return quantizer._cached_quant_val
-        return weight
-
-    def _setup_for_weight_quantization(self):
-        self._register_dynamic_attribute(
-            "gate_up_proj", partial(self._get_quantized_weight, self.gate_up_proj_weight_quantizer)
-        )
-        self._register_dynamic_attribute(
-            "down_proj", partial(self._get_quantized_weight, self.down_proj_weight_quantizer)
-        )
-
-    def _setup(self):
-        assert not hasattr(self, "kernel_layer_name"), (
-            "ModelOpt quantization does not support patched forward for kernel_hub"
-        )
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizer = TensorQuantizer()
-        self.down_proj_input_quantizer = TensorQuantizer()
-        self.down_proj_weight_quantizer = TensorQuantizer()
-
-        self._register_temp_attribute("_enable_weight_quantization", False)
-        self._register_temp_attribute("_down_proj_mul", False)
-        self._setup_for_weight_quantization()
-
-    @property
-    def functionals_to_replace(self):
-        # Use torch.ops.aten to bypass Python dispatch and avoid RecursionError
-        # (torch.matmul / __matmul__ can dispatch to each other)
-        _aten_bmm = torch.ops.aten.bmm
-        _aten_matmul = torch.ops.aten.matmul
-
-        def _quantized_bmm(batch1, batch2, *, out=None):
-            batch1 = self.down_proj_input_quantizer(batch1) if self._down_proj_mul else batch1
-            self._down_proj_mul = not self._down_proj_mul  # toggle the flag
-            if out is not None:
-                return torch.ops.aten.bmm.out(batch1, batch2, out=out)
-            return _aten_bmm(batch1, batch2)
-
-        def _tensor_matmul(self_t, other):
-            self_t = self.down_proj_input_quantizer(self_t) if self._down_proj_mul else self_t
-            self._down_proj_mul = not self._down_proj_mul
-            return _aten_matmul(self_t, other)
-
-        return [
-            (torch, "bmm", _quantized_bmm),
-            (torch.Tensor, "__matmul__", _tensor_matmul),
-        ]
-
-    @contextmanager
-    def quantize_weight(self):
-        """Context in which MoE weight is quantized."""
-        self._enable_weight_quantization = True
-        try:
-            yield
-        finally:
-            for module in self.modules():
-                if isinstance(module, TensorQuantizer) and hasattr(module, "_cached_quant_val"):
-                    delattr(module, "_cached_quant_val")
-        self._enable_weight_quantization = False
-
-    def forward(
-        self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None
-    ) -> torch.Tensor:
-        """Forward method to add quantization."""
-        hidden_states = self.gate_up_proj_input_quantizer(hidden_states)
-        with self.quantize_weight():
-            return super().forward(hidden_states, router_indices, routing_weights)
-
-
-try:
-    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
-
-    if GptOssExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({GptOssExperts: "hf.GptOssExperts"})(_QuantGptOssExperts)
 except ImportError:
     pass
 
@@ -1830,8 +1623,10 @@ AutoQuantizeGradientSearcher.register_custom_support(
 # Nemotron-H's is the more specific one.
 for _model_type in (
     "falcon",
+    "gpt_oss",
     "llama4",
     "nemotron_h",
+    "qwen3_vl_moe",
 ):
     importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
 
