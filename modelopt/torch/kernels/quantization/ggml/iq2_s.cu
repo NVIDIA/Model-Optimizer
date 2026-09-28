@@ -55,8 +55,10 @@ __device__ __forceinline__ float magnitude_dot(const float *x, const float *q) {
 template <typename scalar_t>
 __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *grid,
                        const __half *scales, uint8_t *output) {
-  extern __shared__ float shared_grid[]; // kEntries * kVectorSize, then kEntries norms
-  float *grid_norm = shared_grid + kEntries * kVectorSize;
+  // The codebook and its norms take 36 KiB, the most in the family but inside the 48 KiB
+  // static shared-memory limit.
+  __shared__ float shared_grid[kEntries * kVectorSize];
+  __shared__ float grid_norm[kEntries];
   __shared__ float warp_best[kWarps * kLocalScales];
   __shared__ float group_error[kLocalScales];
   __shared__ unsigned long long warp_keys[kWarps];
@@ -195,15 +197,10 @@ at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales)
   c10::cuda::CUDAGuard guard(input.device());
   auto output = at::empty({num_blocks, kPayloadBytes}, input.options().dtype(at::kByte));
   const auto stream = c10::cuda::getCurrentCUDAStream();
-  // The 1024-entry codebook and its norms exceed the static shared limit, so they are dynamic.
-  const size_t smem = static_cast<size_t>(kEntries) * (kVectorSize + 1) * sizeof(float);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(), "iq2_s_pack", [&] {
-        auto kernel = encode<scalar_t>;
-        C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                            static_cast<int>(smem)));
-        kernel<<<static_cast<int>(num_blocks), kThreads, smem, stream>>>(
+        encode<scalar_t><<<static_cast<int>(num_blocks), kThreads, 0, stream>>>(
             input.data_ptr<scalar_t>(), num_blocks, grid.data_ptr<float>(),
             reinterpret_cast<const __half *>(scales.data_ptr<at::Half>()),
             output.data_ptr<uint8_t>());
