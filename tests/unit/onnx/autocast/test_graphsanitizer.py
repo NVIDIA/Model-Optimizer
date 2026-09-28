@@ -235,6 +235,72 @@ def test_convert_fp64_initializers():
             assert init.data_type == TensorProto.FLOAT
 
 
+def test_convert_fp64_initializers_clamps_out_of_range_values():
+    """Values FP32 cannot represent must be clamped, not cast to infinity."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])
+    fp64_max = np.finfo(np.float64).max
+
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node("Clip", ["X", "lower", "upper"], ["Y"], name="clip"),
+        ],
+        name="fp64_out_of_range",
+        inputs=[x],
+        outputs=[y],
+        initializer=[
+            numpy_helper.from_array(np.array([-fp64_max], np.float64), name="lower"),
+            numpy_helper.from_array(np.array([fp64_max], np.float64), name="upper"),
+        ],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_initializers() is True
+
+    fp32_max = np.finfo(np.float32).max
+    converted = {
+        init.name: numpy_helper.to_array(init) for init in sanitizer.model.graph.initializer
+    }
+    for name in ("lower", "upper"):
+        assert np.all(np.isfinite(converted[name])), f"{name} was cast to infinity"
+    assert converted["lower"] == -fp32_max
+    assert converted["upper"] == fp32_max
+
+
+def test_convert_fp64_nodes_clamps_out_of_range_values():
+    """A Constant node's FP64 value must be clamped the same way an initializer is."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])
+    fp64_max = np.finfo(np.float64).max
+
+    constant = helper.make_node(
+        "Constant",
+        inputs=[],
+        outputs=["big"],
+        name="big_constant",
+        value=numpy_helper.from_array(np.array([fp64_max], np.float64), name="big_value"),
+    )
+    graph = helper.make_graph(
+        nodes=[constant, helper.make_node("Mul", ["X", "big"], ["Y"], name="mul")],
+        name="fp64_constant_out_of_range",
+        inputs=[x],
+        outputs=[y],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_nodes() is True
+
+    value = next(
+        numpy_helper.to_array(attr.t)
+        for node in sanitizer.model.graph.node
+        if node.name == "big_constant"
+        for attr in node.attribute
+        if attr.name == "value"
+    )
+    assert np.all(np.isfinite(value)), "Constant value was cast to infinity"
+    assert value == np.finfo(np.float32).max
+
+
 def test_convert_fp64_io_types():
     """Test conversion of FP64 input/output types to FP32."""
     # Create inputs and outputs with FP64 types
