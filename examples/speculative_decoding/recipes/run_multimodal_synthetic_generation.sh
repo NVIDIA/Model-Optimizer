@@ -88,5 +88,5 @@ fi
 if [ "$DATASET" = "specdec_multilingual_prompt" ]; then
     bash "$SCRIPTS_PATH/distributed_generate/launch.sh" "$JOB_ID" "${BACKEND:-vllm}" "$MODEL_PATH" "$SHARD_PATH" "$OUTPUT_PATH" "$SCRIPTS_PATH" "$START_SHARD" "$JOBS_PER_NODE" "$NODE_NAMES" "${SYSTEM_PROMPT:-}"
 else
-    bash "$SCRIPTS_PATH/distributed_generate/launch_multimodal.sh" "$JOB_ID" sglang "$MODEL_PATH" "$SHARD_PATH" "$OUTPUT_PATH" "$SCRIPTS_PATH" "$START_SHARD" "$JOBS_PER_NODE" "$GENERATION_MEDIA_ROOT" "$NUM_FRAMES" "$NODE_NAMES"
+    bash "$SCRIPTS_PATH/distributed_generate/launch_multimodal.sh" "$JOB_ID" "${BACKEND:-sglang}" "$MODEL_PATH" "$SHARD_PATH" "$OUTPUT_PATH" "$SCRIPTS_PATH" "$START_SHARD" "$JOBS_PER_NODE" "$GENERATION_MEDIA_ROOT" "$NUM_FRAMES" "$NODE_NAMES"
 fi

@@ -56,15 +56,19 @@ fi
 
 IFS=',' read -r -a NODE_LIST <<< "$NODE_NAME"
 
-if [ "$BACKEND" != "sglang" ]; then
-    echo "Multimodal generation currently supports backend=sglang."
+if [ "$BACKEND" != "sglang" ] && [ "$BACKEND" != "vllm" ]; then
+    echo "Multimodal generation backend must be sglang or vllm."
     exit 1
 fi
 
 mkdir -p "$OUTPUT_PATH"
 
 # Set CONTAINER_IMAGE to a local .sqsh image to avoid pulling from the registry.
-DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
+if [ "$BACKEND" = "vllm" ]; then
+    DEFAULT_CONTAINER_IMAGE="vllm/vllm-openai:v0.27.0"
+else
+    DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
+fi
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-$DEFAULT_CONTAINER_IMAGE}"
 
 counter=$START_SHARD

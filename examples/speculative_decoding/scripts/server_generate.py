@@ -54,6 +54,12 @@ parser.add_argument(
     "--log_empty_conversations", action="store_true", help="Log empty conversations"
 )
 parser.add_argument("--system_prompt", nargs="+", type=str, default="", help="System prompt")
+parser.add_argument(
+    "--assistant_prefix",
+    type=str,
+    default="",
+    help="Restore a model-template assistant prefix omitted from API completion text.",
+)
 args = parser.parse_args()
 
 
@@ -109,6 +115,8 @@ def generate_data(messages, idx, system_prompt):
                     )
                     choice = response.choices[0]
                     response = (choice.message.content or "").strip()
+                    if response:
+                        response = args.assistant_prefix + response
                     output_messages.append(
                         {
                             "role": "assistant",

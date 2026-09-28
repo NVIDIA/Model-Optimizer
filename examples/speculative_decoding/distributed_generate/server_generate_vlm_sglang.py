@@ -428,6 +428,11 @@ def main() -> None:
     parser.add_argument("--model_name", default="model")
     parser.add_argument("--request_timeout", type=int, default=1800)
     parser.add_argument(
+        "--assistant_prefix",
+        default="",
+        help="Restore a model-template assistant prefix omitted from completion text.",
+    )
+    parser.add_argument(
         "--vision_token_format",
         choices=("qwen_vl", "none"),
         default="qwen_vl",
@@ -522,6 +527,8 @@ def main() -> None:
                 ):
                     idx, sample = future_to_meta[future]
                     answer, error = future.result()
+                    if answer:
+                        answer = args.assistant_prefix + answer
                     if error:
                         print(f"WARNING: generation failed for sample {idx}: {error[:500]}")
                     if not answer and not args.log_empty_conversations:
@@ -569,6 +576,8 @@ def main() -> None:
             zip(states, batch_meta), total=len(batch_meta), desc="Writing outputs"
         ):
             answer = _state_answer(state)
+            if answer:
+                answer = args.assistant_prefix + answer
             if not answer:
                 print(
                     "WARNING: Could not extract sgl.gen('answer') from state "

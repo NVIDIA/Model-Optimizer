@@ -22,10 +22,15 @@ JOBS_PER_NODE="$3"
 NUM_FRAMES="${4:-32}"
 SYSTEM_PROMPT="${5:-}"
 
-if [ "$BACKEND" != "sglang" ]; then
-    echo "Multimodal generation currently uses the SGLang native video client; backend must be sglang."
+if [ "$BACKEND" != "sglang" ] && [ "$BACKEND" != "vllm" ]; then
+    echo "Multimodal generation backend must be sglang or vllm."
     exit 1
 fi
+if [ "$BACKEND" = "vllm" ] && [ "${API_MODE:-openai}" != "openai" ]; then
+    echo "vLLM multimodal generation requires API_MODE=openai."
+    exit 1
+fi
+[ -z "${CONTAINER_PYTHONPATH:-}" ] || export PYTHONPATH="$CONTAINER_PYTHONPATH"
 
 if [ "${INSTALL_OPENCV_HEADLESS:-0}" = "1" ]; then
     python3 -c "import cv2" || python3 -m pip install --user opencv-python-headless
@@ -114,29 +119,43 @@ if [ "$SGLANG_TP_SIZE" -eq 1 ]; then
     for gpu in $(seq 0 $((NUM_TEMPERATURES - 1))); do
         port=$((BASE_PORT + gpu))
         SERVER_PORTS+=("$port")
-        CUDA_VISIBLE_DEVICES=$gpu \
-            python3 -m sglang.launch_server \
-            --model-path /model \
-            --served-model-name model \
-            --tp 1 \
-            --port "$port" \
-            --host 0.0.0.0 \
-            ${SGLANG_EXTRA_ARGS:-} \
-            --trust-remote-code &
+        if [ "$BACKEND" = "vllm" ]; then
+            CUDA_VISIBLE_DEVICES=$gpu vllm serve /model/ \
+                --tensor-parallel-size 1 --served-model-name model \
+                --port "$port" --host 0.0.0.0 --trust-remote-code \
+                --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
+        else
+            CUDA_VISIBLE_DEVICES=$gpu \
+                python3 -m sglang.launch_server \
+                --model-path /model \
+                --served-model-name model \
+                --tp 1 \
+                --port "$port" \
+                --host 0.0.0.0 \
+                ${SGLANG_EXTRA_ARGS:-} \
+                --trust-remote-code &
+        fi
         SERVER_PIDS+=("$!")
     done
 else
     gpu_list=$(seq -s, 0 $((SGLANG_TP_SIZE - 1)))
     SERVER_PORTS=("$BASE_PORT")
-    CUDA_VISIBLE_DEVICES=$gpu_list \
-        python3 -m sglang.launch_server \
-        --model-path /model \
-        --served-model-name model \
-        --tp "$SGLANG_TP_SIZE" \
-        --port "$BASE_PORT" \
-        --host 0.0.0.0 \
-        ${SGLANG_EXTRA_ARGS:-} \
-        --trust-remote-code &
+    if [ "$BACKEND" = "vllm" ]; then
+        CUDA_VISIBLE_DEVICES=$gpu_list vllm serve /model/ \
+            --tensor-parallel-size "$SGLANG_TP_SIZE" --served-model-name model \
+            --port "$BASE_PORT" --host 0.0.0.0 --trust-remote-code \
+            --media-io-kwargs "{\"video\":{\"num_frames\":$NUM_FRAMES}}" &
+    else
+        CUDA_VISIBLE_DEVICES=$gpu_list \
+            python3 -m sglang.launch_server \
+            --model-path /model \
+            --served-model-name model \
+            --tp "$SGLANG_TP_SIZE" \
+            --port "$BASE_PORT" \
+            --host 0.0.0.0 \
+            ${SGLANG_EXTRA_ARGS:-} \
+            --trust-remote-code &
+    fi
     SERVER_PIDS+=("$!")
 fi
 
@@ -232,6 +251,9 @@ if [ "$mpi_rank" -eq 0 ]; then
                 --log_empty_conversations
                 --url "http://localhost:$port"
             )
+            if [ -n "${ASSISTANT_PREFIX:-}" ]; then
+                cmd+=(--assistant_prefix "$ASSISTANT_PREFIX")
+            fi
 
             if [ "${OVERWRITE_OUTPUT:-0}" = "1" ]; then
                 cmd+=(--overwrite)
