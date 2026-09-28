@@ -7,6 +7,8 @@ on:
     branches: [main, release/*, feature/*]
     paths:
       - ".github/workflows/unit_tests.yml"
+      - "examples/speculative_decoding/scripts/server_generate.py"
+      - "examples/speculative_decoding/distributed_generate/sharding_utils.py"
       - "modelopt/**"
       - "noxfile.py"
       - "pyproject.toml"
@@ -46,6 +48,8 @@ jobs:
         with:
           files: |
             .github/workflows/unit_tests.yml
+            examples/speculative_decoding/scripts/server_generate.py
+            examples/speculative_decoding/distributed_generate/sharding_utils.py
             modelopt/**
             modelopt_recipes/**
             noxfile.py
