@@ -603,22 +603,27 @@ def _get_dq_consumers_ops(
     """Get all operations consuming DQ output. Handles Cast chains.
 
     Returns a list of operation nodes that consume the DQ output, handling
-    Cast chains by following them to their final consumers.
+    Cast chains by recursively following them to their final non-Cast consumers.
     """
+    def _follow_cast_chain(node: onnx.NodeProto) -> list[onnx.NodeProto]:
+        """Recursively follow Cast nodes to find non-Cast consumers."""
+        if node.op_type != "Cast":
+            return [node]
+        consumers = tensor_consumers.get(node.output[0], [])
+        if not consumers:
+            raise ValueError(f"No consumer found after Cast for {node.name}")
+        result = []
+        for consumer in consumers:
+            result.extend(_follow_cast_chain(consumer))
+        return result
+
     consumers = tensor_consumers.get(dq_node.output[0], [])
     if not consumers:
         raise ValueError(f"No consumer found for {dq_node.name}")
 
     quantized_nodes = []
     for consumer in consumers:
-        if consumer.op_type == "Cast":
-            # Follow Cast chain to find actual consumers
-            cast_consumers = tensor_consumers.get(consumer.output[0], [])
-            if not cast_consumers:
-                raise ValueError(f"No consumer found after Cast for {consumer.name}")
-            quantized_nodes.extend(cast_consumers)
-        else:
-            quantized_nodes.append(consumer)
+        quantized_nodes.extend(_follow_cast_chain(consumer))
 
     if not quantized_nodes:
         raise ValueError(f"No valid operation found for {dq_node.name}")
