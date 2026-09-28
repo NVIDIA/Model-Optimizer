@@ -18,7 +18,7 @@ As ModelOpt cannot detect these linear ops out-of-the-box, a HugggingFace plugin
 #. Try quantize the DBRX model after the plugin is implemented, feel free to follow the `hf_ptq example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq>`_.
 #. Export the quantized model with :meth:`export_hf_checkpoint <modelopt.torch.export.unified_export_hf.export_hf_checkpoint>`. If the customized model is not supported by TensorRT-LLM, add support in its PyTorch backend and adapt the HF exporter if needed. See the :doc:`unified HF export guide <../deployment/3_unified_hf>` or :doc:`contact us <../support/1_contact>` for help.
 
-The following code snippet is excerpted from ``modelopt/torch/quantization/plugins/huggingface.py``
+The following code snippet is excerpted from ``modelopt/torch/models/dbrx/modeling_ptq.py``
 
 .. code-block:: python
 
