@@ -517,6 +517,21 @@ class GraphSanitizer:
                 return value if return_array else value.item()
         return None
 
+    def _narrow_to_fp32(self, fp64_data: np.ndarray, name: str) -> np.ndarray:
+        """Converts FP64 data to FP32, clamping values that FP32 cannot represent.
+
+        A bare cast turns anything beyond the FP32 range into +/-inf, which then poisons
+        the arithmetic it feeds.
+        """
+        fp32_max = np.finfo(np.float32).max
+        if np.any(np.isfinite(fp64_data) & (np.abs(fp64_data) > fp32_max)):
+            logger.warning(
+                f"Initializer {name} contains values outside the FP32 range, "
+                f"they will be clamped to {fp32_max}."
+            )
+            fp64_data = np.clip(fp64_data, -fp32_max, fp32_max)
+        return fp64_data.astype(np.float32)
+
     def _convert_fp64_initializers(self) -> bool:
         """Convert FP64 initializers to FP32.
 
@@ -529,7 +544,7 @@ class GraphSanitizer:
             if initializer.data_type == onnx.TensorProto.DOUBLE:
                 # Convert the data to FP32
                 fp64_data = numpy_helper.to_array(initializer, base_dir=self.external_data_dir)
-                fp32_data = fp64_data.astype(np.float32)
+                fp32_data = self._narrow_to_fp32(fp64_data, initializer.name)
 
                 # Create new initializer with FP32 data
                 new_initializer = numpy_helper.from_array(fp32_data, name=initializer.name)
@@ -588,7 +603,7 @@ class GraphSanitizer:
                     if attr.name == "value" and attr.t.data_type == onnx.TensorProto.DOUBLE:
                         # Convert the tensor value to FP32
                         fp64_data = numpy_helper.to_array(attr.t, base_dir=self.external_data_dir)
-                        fp32_data = fp64_data.astype(np.float32)
+                        fp32_data = self._narrow_to_fp32(fp64_data, node.name)
                         new_tensor = numpy_helper.from_array(fp32_data)
                         attr.t.CopyFrom(new_tensor)
                         modified = True
