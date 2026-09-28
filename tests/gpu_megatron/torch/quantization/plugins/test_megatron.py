@@ -1145,6 +1145,16 @@ def _assert_te_grouped_weight_quantizer_state(model, expected_amax, expect_globa
     assert checked > 0, "no TEGrouped per-expert weight quantizer amax was checked"
 
 
+def _override_te_grouped_modelopt_tp_group(model, tp_group):
+    grouped_linears = [
+        module for module in model.modules() if isinstance(module, _QuantMegatronTEGroupedLinear)
+    ]
+    assert grouped_linears, "no quantized TEGroupedLinear found"
+    for linear in grouped_linears:
+        assert getattr(linear, "_pg_collection", None) is not None
+        linear.parallel_state.tensor_parallel_group.group = tp_group
+
+
 def test_initialize_grouped_weight_quantizer_state_for_restore():
     """Missing grouped state inherits the shape and dtype of a populated sibling."""
     source = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(
@@ -1184,6 +1194,9 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     checkpoint_path,
     rank,
     size,
+    save_etp_size=None,
+    load_etp_size=None,
+    override_modelopt_tp_group=False,
 ):
     """Round-trip TEGroupedMLP amax through a topology change."""
     num_experts = 4
@@ -1191,12 +1204,14 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     initialize_for_megatron(
         tensor_model_parallel_size=save_tp_size,
         expert_model_parallel_size=save_ep_size,
+        expert_tensor_parallel_size=save_etp_size,
         seed=SEED,
     )
 
     source = _gpt_model_provider(
         tp_size=save_tp_size,
         ep_size=save_ep_size,
+        etp_size=save_etp_size,
         hidden_size=32,
         moe_grouped_gemm=True,
         transformer_impl="transformer_engine",
@@ -1207,6 +1222,8 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
     mtq.quantize(source, copy.deepcopy(quant_cfg), forward)
+    if override_modelopt_tp_group:
+        _override_te_grouped_modelopt_tp_group(source, get_tensor_model_parallel_group())
     _set_te_grouped_weight_quantizer_state(
         source, get_expert_model_parallel_rank(), save_num_local_experts
     )
@@ -1219,11 +1236,13 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     initialize_for_megatron(
         tensor_model_parallel_size=load_tp_size,
         expert_model_parallel_size=load_ep_size,
+        expert_tensor_parallel_size=load_etp_size,
         seed=SEED,
     )
     target = _gpt_model_provider(
         tp_size=load_tp_size,
         ep_size=load_ep_size,
+        etp_size=load_etp_size,
         hidden_size=32,
         moe_grouped_gemm=True,
         transformer_impl="transformer_engine",
@@ -1232,6 +1251,8 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     target_models = [target]
     restore_sharded_modelopt_state(target_models, checkpoint_path)
     target = target_models[0]
+    if override_modelopt_tp_group:
+        _override_te_grouped_modelopt_tp_group(target, get_tensor_model_parallel_group())
     load_distributed_checkpoint(checkpoint_path, target)
     load_num_local_experts = num_experts // load_ep_size
     expected_amax = tuple(
@@ -1301,6 +1322,30 @@ def test_te_grouped_sharded_state_dict_reshard(
             quant_cfg,
             expect_global_amax,
             tmp_path,
+        )
+    )
+
+
+@pytest.mark.parametrize("override_modelopt_tp_group", [False, True])
+def test_te_grouped_sharded_state_dict_combined_tp_ep(
+    dist_workers_size_4, tmp_path, override_modelopt_tp_group
+):
+    """Round-trip grouped expert quantizer state with TP and EP both greater than one."""
+    dist_workers_size_4.run(
+        partial(
+            _test_te_grouped_sharded_state_dict_reshard_helper,
+            2,
+            2,
+            2,
+            2,
+            mtq.NVFP4_DEFAULT_CFG,
+            False,
+            tmp_path,
+            save_etp_size=1,
+            load_etp_size=1,
+            # The True case simulates child conversion without the parent MLP setup: checkpoint
+            # groups must still come from the grouped linear's MCore process-group collection.
+            override_modelopt_tp_group=override_modelopt_tp_group,
         )
     )
 
