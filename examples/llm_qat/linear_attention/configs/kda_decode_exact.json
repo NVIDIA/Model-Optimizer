@@ -1,0 +1,20 @@
+{
+  "quant_cfg": [
+    {
+      "quantizer_name": "*",
+      "enable": false
+    }
+  ],
+  "algorithm": null,
+  "linear_attention": [
+    {
+      "module_name": "*",
+      "cfg": {
+        "backend": "matmul",
+        "decode": {
+          "implementation": "triton"
+        }
+      }
+    }
+  ]
+}

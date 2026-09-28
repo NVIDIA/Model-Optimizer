@@ -147,6 +147,12 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         return model
 
     quantizer_state_dict = dict(metadata["quantizer_state"])
+    # M1 checkpoints predate prefill operand handles; newly introduced handles stay disabled.
+    for name, module in _linear_attention_modules(model).items():
+        for site_name, quantizer in module.linear_attn_sites.named_modules():
+            if isinstance(quantizer, TensorQuantizer) and not quantizer.is_enabled:
+                key = ".".join(filter(None, (name, "linear_attn_sites", site_name)))
+                quantizer_state_dict.setdefault(key, quantizer.get_modelopt_state())
     if "linear_attention" not in metadata:
         # Older checkpoints predate these disabled handles; preserve their baseline path.
         for name, module in _linear_attention_modules(model).items():

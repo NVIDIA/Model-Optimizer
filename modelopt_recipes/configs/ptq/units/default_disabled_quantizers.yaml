@@ -25,6 +25,8 @@
     enable: false
   - quantizer_name: '*kda_w_quantizer'
     enable: false
+  - quantizer_name: '*linear_attn_sites.*'
+    enable: false
   - quantizer_name: '*block_sparse_moe.gate*'
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'

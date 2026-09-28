@@ -1,0 +1,53 @@
+{
+  "quant_cfg": [
+    {
+      "quantizer_name": "*",
+      "enable": false
+    },
+    {
+      "quantizer_name": "*linear_attn_sites.*",
+      "cfg": {
+        "num_bits": [
+          2,
+          1
+        ],
+        "type": "dynamic",
+        "block_sizes": {
+          "-1": 16,
+          "type": "dynamic",
+          "scale_bits": [
+            4,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "quantizer_name": "*kda_w_quantizer",
+      "cfg": {
+        "num_bits": [
+          2,
+          1
+        ],
+        "type": "dynamic",
+        "block_sizes": {
+          "-1": 16,
+          "type": "dynamic",
+          "scale_bits": [
+            4,
+            3
+          ]
+        }
+      }
+    }
+  ],
+  "algorithm": null,
+  "linear_attention": [
+    {
+      "module_name": "model.layers.*.self_attn",
+      "cfg": {
+        "backend": "matmul"
+      }
+    }
+  ]
+}

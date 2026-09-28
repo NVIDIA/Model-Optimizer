@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.linear_attention_reference import recurrent_
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
+    LinearAttentionMatmulSites,
     matmul_gdn,
     matmul_kda,
 )
@@ -199,7 +200,9 @@ def test_explicit_packed_phase_with_empty_entries(kda, prefixes):
     function = matmul_kda if kda else matmul_gdn
     actual = function(
         *args,
+        sites=LinearAttentionMatmulSites(),
         policy=LinearAttentionConfig(backend="matmul", decode={}),
+        w_quantizer=TensorQuantizer(QuantizerAttributeConfig(enable=False)),
         prefill_lengths=prefixes,
         cu_seqlens=torch.tensor(boundaries),
         initial_state=initial,
@@ -260,7 +263,9 @@ def test_grouped_heads_transposed_state_and_empty_batch(kda, all_empty):
         backend="matmul", decode={"mode": "replay", "replay": {"window": 3}}
     )
     shared = {
+        "sites": LinearAttentionMatmulSites(),
         "policy": policy,
+        "w_quantizer": TensorQuantizer(QuantizerAttributeConfig(enable=False)),
         "state_qdq": True,
         "output_final_state": True,
     }
