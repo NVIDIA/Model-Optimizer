@@ -30,6 +30,7 @@ from _test_utils.torch.quantization.iq_llama_cpp_vectors import (
 )
 
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
+import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -41,8 +42,12 @@ FORMATS = {
     "iq1_s": (iq1_s_module, 50, 2048, 1.5625),
     "iq2_xxs": (iq2_xxs_module, 66, 256, 2.0625),
     "iq2_xs": (iq2_xs_module, 74, 512, 2.3125),
+    "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
 }
 NAMES = sorted(FORMATS)
+# The formats backend dispatch can reach. A codec can land before it is registered, so the
+# tests that go through TensorQuantizer iterate these rather than every codec above.
+DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s"}
 
@@ -211,7 +216,7 @@ def test_rejects_scalar_packed_payload(name):
         dequantize(torch.tensor(0, dtype=torch.uint8), torch.tensor([1, 256]))
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DISPATCHED)
 def test_fake_quant_has_pass_through_gradient(name):
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(num_bits=name, block_sizes={-1: 256}, backend="ggml")
@@ -265,16 +270,17 @@ def test_error_decreases_with_bit_width():
     """More bits must buy less error, or a format's scale handling is wrong."""
     generator = torch.Generator().manual_seed(7)
     weight = torch.randn((4, 1024), generator=generator)
+    ordered = sorted(DISPATCHED, key=lambda n: FORMATS[n][3])
     errors = []
-    for name in sorted(NAMES, key=lambda n: FORMATS[n][3]):
+    for name in ordered:
         quantizer = TensorQuantizer(
             QuantizerAttributeConfig(num_bits=name, block_sizes={-1: 256}, backend="ggml")
         )
         errors.append(float((quantizer(weight) - weight).square().mean()))
 
-    assert errors == sorted(errors, reverse=True), dict(zip(sorted(NAMES), errors))
+    assert errors == sorted(errors, reverse=True), dict(zip(ordered, errors))
 
 
 def test_every_registered_format_is_covered():
     """A format registered for dispatch must also be listed here, or it escapes this contract."""
-    assert sorted(IQ_FORMAT_REGISTRY) == sorted(FORMATS)
+    assert set(IQ_FORMAT_REGISTRY) <= set(FORMATS)
