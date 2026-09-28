@@ -52,8 +52,8 @@ an intra-family detail, not a package API.
 
 ## PTQ modeling
 
-Quantized-module wrappers and registrations that only one model needs (e.g. Llama4's fused
-BMM experts) live in `<model_type>/modeling_ptq.py`; generic
+Quantized-module wrappers and registrations that only one model needs (e.g. DBRX's fused
+experts, Step's expert-indexed `MoELinear`) live in `<model_type>/modeling_ptq.py`; generic
 ones (fused/sequential MoE auto-detection, attention, `FP8Linear`) stay in
 `modelopt/torch/quantization/plugins/huggingface.py`. The HF plugin imports every
 `modeling_ptq` from an explicit list at its end, so add the new model type there. Leave the
@@ -64,7 +64,8 @@ A `modeling_ptq.py` registers on import — static classes via `QuantModuleRegis
 behind a `try`/`except ImportError`, remote-code classes via a callback added to
 `CUSTOM_MODEL_PLUGINS` — and exports nothing (`__all__ = []`). Every package still has
 a `specs.py`, even when its spec only records `model_type` and where the modeling code comes
-from.
+from; a family revision sharing another type's `modeling_ptq.py` (`step3p7` uses `step3p5`'s)
+holds only `specs.py`.
 
 ## Sections
 

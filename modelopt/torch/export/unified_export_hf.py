@@ -1027,10 +1027,9 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
 
 def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
     """Quantize every module's weight in place, then rebuild the fused MoE linears."""
-    # Deferred: modelopt.torch.quantization.plugins.huggingface imports transformers at module
-    # scope, and transformers is an optional extra -- importing it here keeps
-    # ``import modelopt.torch.export`` working without it.
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    # Deferred: modelopt.torch.quantization imports modelopt.torch.export, so importing the
+    # per-model PTQ module at module scope here would risk an import cycle.
+    from modelopt.torch.models.step3p5.modeling_ptq import _reconstruct_fused_moe_linear
 
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
