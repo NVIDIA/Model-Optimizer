@@ -61,15 +61,15 @@ def compare(actual, expected, tolerance):
         )
 
 
-@pytest.fixture(scope="module", params=["disabled", "w", "state-w"])
+@pytest.fixture(scope="module", params=["disabled", "w", "state-w", "state-int8"])
 def compiled_gdn_case(request):
     """Compile only the selected BF16 forward/backward path, outside the test-call timer."""
-    state_qdq = request.param == "state-w"
-    if state_qdq and torch.cuda.get_device_capability() < (8, 9):
+    state_qdq = {"state-w": 1, "state-int8": 2}.get(request.param, 0)
+    if state_qdq == 1 and torch.cuda.get_device_capability() < (8, 9):
         pytest.skip("State QDQ needs native E4M3 conversion (SM89+)")
     quantizer = (
         TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=(0, 1, 2), type="dynamic"))
-        if request.param != "disabled"
+        if request.param in ("w", "state-w")
         else None
     )
     args, state = make_inputs()
@@ -83,7 +83,13 @@ def test_gdn_forward_and_backward(compiled_gdn_case):
     args, state, kwargs = compiled_gdn_case
     reference_args = [x.detach().float().requires_grad_() for x in args]
     reference_state = state.detach().clone().requires_grad_()
-    expected = values_and_grads(chunk_gdn_reference, reference_args, reference_state, **kwargs)
+    expected = values_and_grads(
+        chunk_gdn_reference,
+        reference_args,
+        reference_state,
+        state_format="int8" if kwargs["state_qdq"] == 2 else "fp8_e4m3",
+        **kwargs,
+    )
     actual = values_and_grads(
         chunk_gated_delta_rule, args, state, output_final_state=True, **kwargs
     )

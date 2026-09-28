@@ -1,0 +1,4 @@
+fla-core==0.5.1
+flash-linear-attention==0.5.1
+pyarrow>=15
+transformers==4.57.1

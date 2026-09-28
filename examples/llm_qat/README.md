@@ -13,6 +13,7 @@ For background on QAT and QAD and help choosing between Hugging Face, Megatron B
 | Arguments | Full CLI/YAML argument reference | \[[Link](ARGUMENTS.md)\] |
 | Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] |
+| Linear Attention | GDN/KDA recurrent-state QAT and ReplaySSM example | \[[Link](linear_attention/README.md)\] |
 | Advanced Topics | Trainer APIs, FSDP2 config, YAML options | \[[Link](#advanced-topics)\] |
 | Results | Accuracy benchmarks | \[[Link](#results)\] |
 | Resources | Extra links and references | \[[Link](#resources)\] |
