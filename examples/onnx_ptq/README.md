@@ -103,7 +103,7 @@ python image_prep.py \
     --fp16 # <Optional, if the input ONNX is in FP16 precision>
 ```
 
-> *There is no INT4-specific image-count requirement. The AWQ methods (`awq_clip`, `awq_lite`, `awq_full`) use calibration data to search scaling and weight-clipping parameters, while `rtn_dq` does not use calibration data. For AWQ, choose a representative dataset and validate the quantized model's accuracy for your model and resource constraints.*
+> *There is no INT4-specific image-count requirement. The AWQ methods use calibration data: `awq_clip` searches weight-clipping parameters, `awq_lite` searches scaling parameters, and `awq_full` searches scaling with weight clipping. `rtn_dq` does not use calibration data. For AWQ, choose a representative dataset and validate the quantized model's accuracy for your model and resource constraints.*
 
 ### Quantize ONNX Model to FP8, INT8 or INT4
 
