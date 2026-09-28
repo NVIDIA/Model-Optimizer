@@ -15,6 +15,7 @@
 
 """Support quantization for huggingface layers."""
 
+import importlib
 import inspect
 import logging
 import re
@@ -761,28 +762,6 @@ class _QuantSparseSequentialMoe(QuantModule):
         sync_moe_expert_amax(self.experts, sync_weight_amax=sync_weight_amax)
 
 
-class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
-    def _setup(self):
-        self.gate_up_proj_input_quantizer = TensorQuantizer()
-        self.gate_up_proj_weight_quantizer = TensorQuantizer()
-        self.down_proj_input_quantizer = TensorQuantizer()
-        self.down_proj_weight_quantizer = TensorQuantizer()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states.view(self.num_experts, -1, self.hidden_size)
-        gate_up = torch.bmm(
-            self.gate_up_proj_input_quantizer(hidden_states),
-            _transposed_quantize(self.gate_up_proj, self.gate_up_proj_weight_quantizer),
-        )
-        gate, up = gate_up.chunk(2, dim=-1)  # not supported for DTensors
-        next_states = torch.bmm(
-            self.down_proj_input_quantizer(up * self.act_fn(gate)),
-            _transposed_quantize(self.down_proj, self.down_proj_weight_quantizer),
-        )
-        next_states = next_states.view(-1, self.hidden_size)
-        return next_states
-
-
 # For more information on DbrxExpert, see https://github.com/huggingface/transformers/blob/dcdda532/src/transformers/models/dbrx/modeling_dbrx.py#L756
 class _QuantDbrxExperts(QuantModule):
     def _setup(self):
@@ -1419,16 +1398,6 @@ class _QuantFP8Linear(QuantModule):
 
 
 try:
-    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
-
-    if Llama4TextExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
-            _QuantLlama4TextExperts
-        )
-except ImportError:
-    pass
-
-try:
     from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
 
     if DbrxExperts not in QuantModuleRegistry:
@@ -1439,14 +1408,6 @@ try:
 
     if DbrxFFN not in QuantModuleRegistry:
         QuantModuleRegistry.register({DbrxFFN: "hf.DbrxFFN"})(_QuantDbrxFFN)
-except ImportError:
-    pass
-
-try:
-    from transformers.models.falcon.modeling_falcon import FalconLinear
-
-    if FalconLinear not in QuantModuleRegistry:
-        QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
 except ImportError:
     pass
 
@@ -1598,19 +1559,6 @@ def register_dbrx_moe_on_the_fly(model):
         # Create a QuantDbrxExpertGLU class on the fly
         if QuantModuleRegistry.get(moe_type) is None:
             QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantDbrxExpertGLU)
-
-
-def register_falcon_linears_on_the_fly(model):
-    """Register Falcon linear modules as a QUANT_MODULE.
-
-    Certain falcon models (for example, falcon 40b) use remote code, which are loaded dynamically, to build their model.
-    Therefore, we need to register the linear on the fly before quantization.
-    """
-    if type(model).__name__ in ["RWForCausalLM", "FalconForCausalLM"]:
-        linear_type = type(model.transformer.h[0].self_attention.dense)
-        # Create a QuantFalconLinear class on the fly
-        if QuantModuleRegistry.get(linear_type) is None:
-            QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
 def _has_num_experts(obj):
@@ -1795,27 +1743,9 @@ def _is_supported_hf_model(model):
     return isinstance(model, tuple(supported_models))
 
 
-def is_nemotron_h_model(model: nn.Module) -> bool:
-    return get_nemotron_h_decoder_layers(model) is not None
-
-
-def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
-    if not _is_supported_hf_model(model):
-        return None
-
-    # Custom remote-code checkpoint uses model.backbone.layers;
-    # native transformers NemotronHModel uses model.model.layers.
-    for container_attr in ("backbone", "model"):
-        container = getattr(model, container_attr, None)
-        if container is not None and hasattr(container, "layers"):
-            layers = container.layers
-            if layers and hasattr(layers[0], "block_type"):
-                return layers
-
-    return None
-
-
 def is_homogeneous_hf_model(model: nn.Module) -> bool:
+    from modelopt.torch.models.nemotron_h.modeling_ptq import is_nemotron_h_model
+
     if is_nemotron_h_model(model):
         return False
     decoder_layers = get_homogeneous_hf_decoder_layers(model)
@@ -1893,12 +1823,17 @@ AutoQuantizeGradientSearcher.register_custom_support(
     _is_param_grad_enabled_for_auto_quantize,
 )
 
-# Order matters: more specific predicates must be registered first because
-# the first matching entry wins.  Nemotron-H must precede the generic
-# homogeneous HF discoverer (which explicitly rejects Nemotron-H).
-LayerActivationCollector.register_decoder_layer_support(
-    is_nemotron_h_model, get_nemotron_h_decoder_layers
-)
+# Model-specific PTQ support lives with its model in
+# ``modelopt/torch/models/<model_type>/modeling_ptq.py`` and registers itself on import. It is
+# imported here: after the generic wrappers it builds on are defined, and before the
+# homogeneous decoder discoverer below, since the first matching discoverer wins and
+# Nemotron-H's is the more specific one.
+for _model_type in (
+    "falcon",
+    "llama4",
+    "nemotron_h",
+):
+    importlib.import_module(f"modelopt.torch.models.{_model_type}.modeling_ptq")
 
 LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
@@ -2133,7 +2068,6 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
 
 CUSTOM_MODEL_PLUGINS.update(
     [
-        register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
         register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
