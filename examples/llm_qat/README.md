@@ -14,6 +14,7 @@ For background on how QAT enables low-precision accuracy recovery, see the [QAT/
 | Background | How QAT/QAD work and when to use each | \[[Link](#background)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] | |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] | |
+| Linear Attention | GDN/KDA recurrent-state QAT and ReplaySSM example | \[[Link](linear_attention/README.md)\] | |
 | Advanced Topics | FSDP2 config, YAML options | \[[Link](#advanced-topics)\] | |
 | Results | Accuracy benchmarks | \[[Link](#results)\] | |
 | Resources | Extra links and references | \[[Link](#resources)\] | |

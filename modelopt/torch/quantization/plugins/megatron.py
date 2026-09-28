@@ -61,7 +61,7 @@ from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
-from .gated_delta_net import GatedDeltaNetStateQuantMixin
+from .gdn import GatedDeltaNetStateQuantMixin
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -1122,9 +1122,7 @@ if HAS_GDN:
 
         def validate_linear_attention(self):
             super().validate_linear_attention()
-            if self.config.context_parallel_size > 1 and (
-                self.gdn_state_quantizer.is_enabled or self.gdn_w_quantizer.is_enabled
-            ):
+            if self.config.context_parallel_size > 1 and self.linear_attention_is_enabled:
                 raise NotImplementedError("GDN QAT does not support Megatron context parallelism.")
 
 

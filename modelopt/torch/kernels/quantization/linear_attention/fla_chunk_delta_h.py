@@ -1,5 +1,5 @@
 # Adapted from: https://github.com/fla-org/flash-linear-attention/blob/516143e31fce/fla/ops/common/chunk_delta_h.py
-# Adapted with modifications (marked [ModelOpt]): optional in-kernel FP8 E4M3 fake quantization
+# Adapted with modifications (marked [ModelOpt]): optional in-kernel FP8 E4M3 / INT8 fake quantization
 # of the carried chunk state (STATE_QDQ), BV as an explicit launch argument, no fla backend
 # dispatch or config-cache autotune.
 #
@@ -42,15 +42,18 @@ from fla.utils import (
 
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
 
+from .int8 import int8_scalar_qdq
+
 # ``STATE_QDQ`` modes of the forward state kernel.
 STATE_QDQ_OFF = 0
 STATE_QDQ_FP8_DYNAMIC = 1  # FP8 E4M3, one dynamic scale per program tile ([K, BV] of one head)
+STATE_QDQ_INT8_DYNAMIC = 2
 STATE_QDQ_MAX_BLOCK_V = 128
 
 
 @triton.jit
-def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr):
-    """[ModelOpt] Dynamic FP8 E4M3 scale over the up-to-four K tiles of one program's state."""
+def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.constexpr):
+    """[ModelOpt] Dynamic scale over the up-to-four K tiles of one program's state."""
     b_amax = tl.max(tl.abs(b_h1))
     if K > 64:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h2)))
@@ -58,7 +61,18 @@ def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr):
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h3)))
     if K > 192:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h4)))
-    return tl.where(b_amax > 0, b_amax / 448.0, 1.0)
+    if STATE_QDQ == 2:
+        return tl.where(b_amax > 0, b_amax * (1.0 / 127.0), 1.0)
+    else:
+        return tl.where(b_amax > 0, b_amax / 448.0, 1.0)
+
+
+@triton.jit
+def _state_scalar_qdq(value, scale, STATE_QDQ: tl.constexpr):
+    if STATE_QDQ == 2:
+        return int8_scalar_qdq(value, scale)
+    else:
+        return fp8_scalar_qdq(value, scale)
 
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
@@ -215,23 +229,23 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 p_h0_4 = h0 + o_k4[:, None] * V + o_v[None, :]
                 m_h0_4 = m_k4[:, None] & m_v[None, :]
             b_h4 += tl.load(p_h0_4, mask=m_h0_4, other=0.0).to(tl.float32)
-        # [ModelOpt] A state read from an FP8 cache is quantized before the first chunk uses it.
-        if STATE_QDQ == 1:
+        # [ModelOpt] A state read from a quantized cache is quantized before the first chunk uses it.
+        if STATE_QDQ != 0:
             if K > 192:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 64:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
             else:
-                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K)
-            b_h1 = fp8_scalar_qdq(b_h1, b_scale)
+                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
+            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ)
             if K > 64:
-                b_h2 = fp8_scalar_qdq(b_h2, b_scale)
+                b_h2 = _state_scalar_qdq(b_h2, b_scale, STATE_QDQ)
             if K > 128:
-                b_h3 = fp8_scalar_qdq(b_h3, b_scale)
+                b_h3 = _state_scalar_qdq(b_h3, b_scale, STATE_QDQ)
             if K > 192:
-                b_h4 = fp8_scalar_qdq(b_h4, b_scale)
+                b_h4 = _state_scalar_qdq(b_h4, b_scale, STATE_QDQ)
 
     # main recurrence
     for i_t in range(NT):
@@ -386,24 +400,24 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # [ModelOpt] Fake-quantize the state carried into the next chunk (and, after the last
-        # chunk, the stored final state) to FP8 E4M3. The scale is dynamic over this program's
+        # chunk, the stored final state) to FP8 E4M3 or INT8. The scale is dynamic over this program's
         # [K, BV] tile of the head state; BV == V makes it one scale per sequence and head.
-        if STATE_QDQ == 1:
+        if STATE_QDQ != 0:
             if K > 192:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 64:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K)
+                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
             else:
-                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K)
-            b_h1 = fp8_scalar_qdq(b_h1, b_scale)
+                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
+            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ)
             if K > 64:
-                b_h2 = fp8_scalar_qdq(b_h2, b_scale)
+                b_h2 = _state_scalar_qdq(b_h2, b_scale, STATE_QDQ)
             if K > 128:
-                b_h3 = fp8_scalar_qdq(b_h3, b_scale)
+                b_h3 = _state_scalar_qdq(b_h3, b_scale, STATE_QDQ)
             if K > 192:
-                b_h4 = fp8_scalar_qdq(b_h4, b_scale)
+                b_h4 = _state_scalar_qdq(b_h4, b_scale, STATE_QDQ)
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
@@ -886,8 +900,8 @@ def state_qdq_tile_v(V: int, state_qdq: int, state_qdq_block_v: int | None) -> i
     """
     if state_qdq == STATE_QDQ_OFF:
         return 64 if check_shared_mem("ada") else 32
-    if state_qdq != STATE_QDQ_FP8_DYNAMIC:
-        raise ValueError(f"Unsupported state_qdq mode {state_qdq}; expected 0 or 1.")
+    if state_qdq not in (STATE_QDQ_FP8_DYNAMIC, STATE_QDQ_INT8_DYNAMIC):
+        raise ValueError(f"Unsupported state_qdq mode {state_qdq}; expected 0, 1, or 2.")
     BV = min(triton.next_power_of_2(V), 64) if state_qdq_block_v is None else state_qdq_block_v
     if BV < 16 or BV > STATE_QDQ_MAX_BLOCK_V or BV & (BV - 1):
         raise ValueError(

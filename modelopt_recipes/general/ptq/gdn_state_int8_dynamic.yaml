@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  gdn_state_int8_dynamic: configs/ptq/units/gdn_state_int8_dynamic
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Dynamic INT8 GDN state QDQ with 32-value Hadamard rotation during decode.
+    Prefill state remains unquantized; supply per-sequence prefix lengths through
+    linear_attention_training_phase. No calibration is required.
+quantize:
+  algorithm:
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: gdn_state_int8_dynamic
+  linear_attention:
+    - module_name: '*'
+      cfg:
+        backend: matmul
+        decode:
+          mode: token
+          state_codec: int8_hadamard32
+          prefill_state_qdq: false

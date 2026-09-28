@@ -13,10 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
+"""Signed narrow-range INT8 QDQ for recurrent-state tiles."""
 
-from .config import *
-from .decode import *
-from .decode_prefill import *
-from .kda import *
-from .prefill import *
+import triton
+import triton.language as tl
+from triton.language.extra.cuda import libdevice
+
+__all__ = []
+
+
+@triton.jit
+def int8_scalar_qdq(value, scale):
+    codes = libdevice.nearbyint(tl.div_rn(value, scale))
+    return tl.minimum(tl.maximum(codes, -127.0), 127.0) * scale
