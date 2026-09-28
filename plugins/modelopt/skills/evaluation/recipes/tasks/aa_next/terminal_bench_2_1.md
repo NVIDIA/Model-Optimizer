@@ -18,16 +18,18 @@ pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 | agent | `terminus-2` (from the playbook) |
 | `repeats` | `8` (AA / leaderboard count — don't lower for a scored run) |
 | sandbox | `ecs_fargate`, `stateful: true` (agent + verifier share one container) |
-| `sandbox.region` | match the region in `${HARBOR_ECR_REPOSITORY}` (us-east-1 with the eval-config default) |
-| `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by the `modelopttools:eval-config` skill (internal harbor ECR) |
+| `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-1}` |
+| `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by `modelopttools:eval-config`; repo name tracks the region (`harbor-<region>`) |
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
-| `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
+| `max_concurrent` / `sandbox.concurrency` | `50` (canonical, nano-class); **`15` for larger models** (upstream non-nano leaves). Keep both equal and fixed across baseline/candidate (see Sharding) |
 | timeout_strategy | `max` + `run_timeout: 14400` (ModelOpt default); use `task` for leaderboard-comparable |
 | `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) *(shared — see `references/nel-next.md`)* |
-| `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
+| `proxy.request_timeout` | `3600` — set explicitly (TB2.1 has no benchmark key for it); must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
 | `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
 | `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` *(shared — see `references/nel-next.md`)* |
 | `http_pairs_dump` | **last** in the interceptor chain — canary/diagnostic only, drop it for a scored run (unbounded error-pair retention) |
+| `proxy.model_traffic.capture_request_body` | `true`, per service *(shared — see `references/nel-next.md`)* |
+| `output.export_config.mlflow.tags` | `task_name: terminal-bench-2.1` |
 | scope | 89 tasks × `repeats: 8` |
 
 Except for the ModelOpt timeout/lifetime overrides below, these values follow
@@ -35,13 +37,14 @@ the canonical TB2.1 config — re-check it before a scored run:
 `configs/benchmarks/terminal-bench-2.1/bench.yaml` (+ `manifest.yaml`) in
 nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the image pin in
 `configs/shared/nel_next_containers.yaml`. See `references/nel-next.md` + the eval-config
-"source of truth" note. The `benchmarks:` block (drop into the example template):
+"source of truth" note. The sibling `bench_direct.yaml` is a different backend (Gym-native)
+— don't mix its values in. The `benchmarks:` block (drop into the example template):
 
 ```yaml
 benchmarks:
   - playbook: terminal_bench_2_1
     repeats: 8
-    max_concurrent: 50            # canonical; keep == sandbox.concurrency
+    max_concurrent: 50            # nano-class; LARGE models use 15. Keep == sandbox.concurrency
     solver:
       service: <svc-name>
       timeout_strategy: max       # canonical bench.yaml; use "task" for leaderboard-comparable
@@ -51,10 +54,10 @@ benchmarks:
           timeout: 3600           # per-request LLM timeout (canonical)
     sandbox:
       max_task_lifetime_sec: 21600 # 6h: allow agent execution plus setup/verification
-      region: us-east-1                       # must match the region in ${HARBOR_ECR_REPOSITORY}
+      region: ${HARBOR_ECS_REGION:-us-east-1}  # repo name below tracks it
       ecr_repository: ${HARBOR_ECR_REPOSITORY} # from eval-config (internal harbor account/region)
       concurrency: 50
-      log_stream_prefix: terminalbench21-<model>-<cluster>
+      log_stream_prefix: terminalbench-21-<model>-<framework>
 ```
 
 `cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (`0.5.0.1-harbor`) and the AWS creds

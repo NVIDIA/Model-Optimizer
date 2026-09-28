@@ -57,15 +57,7 @@ except ImportError:
     snapshot_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.mlflow import (
-    EXPERIMENT_JSON,
-    MlflowRunLogger,
-    checkpoint_run_tags,
-    resolved_recipe_texts,
-    track_run,
-)
-from modelopt.torch.utils.mlflow import add_mlflow_args as _add_mlflow_args
-from modelopt.torch.utils.mlflow import resolve_mlflow_args as _resolve_mlflow_args
+from modelopt.torch.utils.mlflow import EXPERIMENT_JSON, Tool, resolved_recipe_texts, tracked_run
 
 logger = logging.getLogger(__name__)
 
@@ -1228,103 +1220,40 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     return quant_cfg
 
 
-def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
-    """Add the MLflow tracking flags."""
-    _add_mlflow_args(
-        parser,
-        "hf_ptq",
-        tracks=(
-            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
-            "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries, and writing .experiment.json into --export_path so the checkpoint "
-            "names the run that produced it."
-        ),
-        variant_help="recipe name, or --qformat if no --recipe",
-    )
-
-
-def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    """Settle where tracking is configured from, and name the experiment."""
-    _resolve_mlflow_args(
-        args,
-        parser,
-        tool="hf_ptq",
-        model=args.pyt_ckpt_path,
-        variant=Path(args.recipe).stem if args.recipe else args.qformat,
-    )
-
-
-_MLFLOW_NON_PARAM_ARGS = frozenset(
-    {
-        "checkpoint_exported",
-        "dist_state",
-        "mlflow",
-        "mlflow_experiment",
-        "mlflow_required",
-        "mlflow_run_name",
-    }
+HF_PTQ = Tool(
+    name="hf_ptq",
+    tracks=(
+        "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+        "uploading the command, the resolved recipe, the run log and the quantization "
+        "summaries, and writing .experiment.json into --export_path so the checkpoint "
+        "names the run that produced it."
+    ),
+    variant_help="recipe name, or --qformat if no --recipe",
+    variant=lambda args: Path(args.recipe).stem if args.recipe else args.qformat,
+    model=lambda args: args.pyt_ckpt_path,
+    checkpoint=lambda args: args.export_path,
+    texts=lambda args: resolved_recipe_texts(args.recipe),
+    # Missing entries are skipped: the MoE table only exists for MoE models, and neither
+    # file is written under --no-verbose.
+    outputs=lambda args: {
+        "summary/quant_summary.txt": Path(args.export_path) / ".quant_summary.txt",
+        "summary/moe.html": Path(args.export_path) / ".moe.html",
+    },
+    # dist_state is an object rather than a setting, and checkpoint_exported is this
+    # script's own bookkeeping.
+    non_params=frozenset({"dist_state", "checkpoint_exported"}),
 )
-
-
-def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
-    """Params and start-time artifacts describing this PTQ run."""
-    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
-    # dist_state is an object, so record the one field worth searching on.
-    params["world_size"] = args.dist_state.world_size
-    return params, resolved_recipe_texts(args.recipe)
-
-
-def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
-    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
-    return MlflowRunLogger(
-        args.mlflow,
-        args.mlflow_experiment,
-        run_name=args.mlflow_run_name,
-        enabled=bool(args.mlflow) and args.dist_state.is_main,
-        required=args.mlflow_required,
-    )
-
-
-def _mlflow_describe(args: argparse.Namespace) -> dict:
-    """Everything the run uploads, gathered once -- reading the recipe twice would print a
-    second "[load_recipe] loading:" line on every tracked run."""
-    params, texts = _mlflow_run_inputs(args)
-    return {
-        "params": params,
-        "tags": _mlflow_run_tags(args),
-        "texts": texts,
-        "files": _mlflow_run_outputs(args),
-    }
 
 
 @contextmanager
 def mlflow_run(args: argparse.Namespace) -> Iterator[None]:
     """Track this invocation for the duration of the block; see
-    :func:`~modelopt.torch.utils.mlflow.track_run`."""
-    with track_run(
-        _mlflow_logger(args),
-        args.export_path,
+    :func:`~modelopt.torch.utils.mlflow.tracked_run`."""
+    with tracked_run(
+        args,
+        HF_PTQ,
         is_main=args.dist_state.is_main,
         exported=lambda: args.checkpoint_exported,
-        describe=lambda: _mlflow_describe(args),
+        world_size=args.dist_state.world_size,
     ):
         yield
-
-
-def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
-    """This run's shared join keys, from the arguments that name its input and output."""
-    return checkpoint_run_tags(args.pyt_ckpt_path, args.export_path)
-
-
-def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
-    """Summaries written by post_quantize, keyed by artifact path.
-
-    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
-    entries are skipped: the MoE table only exists for MoE models, and neither file is
-    written under ``--no-verbose``.
-    """
-    export_path = Path(args.export_path)
-    return {
-        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
-        "summary/moe.html": export_path / ".moe.html",
-    }
