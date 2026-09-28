@@ -78,3 +78,15 @@ def test_q8_0_cuda_float64_matches_pytorch_encoder():
     packed, _ = quantize_q8_0(weight.cuda())
 
     assert torch.equal(reference, packed.cpu())
+
+
+def test_q8_0_cuda_reciprocal_rounding_boundary_matches_pytorch_encoder(monkeypatch):
+    weight = torch.zeros((1, 32), device="cuda", dtype=torch.float32)
+    weight[0, :3] = torch.tensor([5207.0, 20.5, -20.5], device="cuda")
+
+    packed = _extension().q8_0_pack(weight).reshape(1, 1, 34)
+    monkeypatch.setattr(q8_0_module, "get_cuda_ext_ggml", lambda: None)
+    reference, _ = quantize_q8_0(weight)
+
+    assert torch.equal(packed, reference)
+    assert packed[0, 0, 2:5].view(torch.int8).tolist() == [127, 0, 0]
