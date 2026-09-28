@@ -12,7 +12,7 @@ Introduction
 
 Mixed-precision quantization keeps a model's most sensitive layers at FP8 or BF16 and pushes the rest to NVFP4. The quality of the result depends almost entirely on how a layer's sensitivity to quantization is measured. Current methods measure it in one of two ways. Some expand the loss with a low-order Taylor expansion [1]_ or use Hessian-trace scores such as HAWQ-V2 [2]_. Others quantize each layer on its own and record how much the loss moves. Both approaches score a layer with every other layer held at full precision, and then add the scores up to price a configuration.
 
-That last step is where they break. Quantization damage *saturates*: the loss of a heavily quantized model is finite, and each additional quantized layer costs less than it would have cost on its own. The loss of quantizing two layers together is typically well below the sum of the losses of quantizing each alone.
+That last step is where there's room to improve. Quantization damage *saturates*: the loss of a heavily quantized model is finite, and each additional quantized layer costs less than it would have cost on its own. The loss of quantizing two layers together is typically well below the sum of the losses of quantizing each alone.
 
 This post describes a saturation-aware AutoQuantize method for Model Optimizer [3]_. It models the damage of quantizing any subset of layers with a closed-form *coverage* model, recovers that model's parameters from a handful of gradient passes using Aumann–Shapley path integrals, and uses a linear program to find a quantization allocation. The allocation it returns minimizes predicted damage under a memory budget, and it comes with an estimate of how much damage that allocation will cause.
 
@@ -30,33 +30,13 @@ be the damage of quantizing the layers in :math:`S`, measured as the KL divergen
 The coverage model
 ==================
 
-Starting from some mild assumptions on how the loss from quantizing layers should accumulate, we show that :math:`f` must have a certain parametric form. Specifically, suppose damage accumulates one layer at a time according to a fixed rule,
+The one structural assumption we make is that damage is an increasing function of a *sum* of per-layer costs,
 
 .. math::
 
-   f(S \cup \{i\}) = f(S) \oplus d_i, \qquad i \notin S,
+   f(S) = g\Big(\sum_{i \in S} b_i\Big),
 
-where :math:`d_i` depends only on layer :math:`i`, and the operation :math:`\oplus` is associative, continuous, strictly increasing, and has identity :math:`0`. These are mild requirements: the order in which layers are quantized should not matter, and quantizing a more harmful layer should cause more damage. The Aczél–Ling representation theorem [4]_ [5]_ states that there is a strictly increasing generator :math:`g` with :math:`x \oplus y = g\big(g^{-1}(x) + g^{-1}(y)\big)`. It follows that
-
-.. math::
-
-   f(S) = g\Big(\sum_{i \in S} b_i\Big), \qquad b_i = g^{-1}(d_i).
-
-It follows that the marginal cost of quantizing a layer depends on the curvature of :math:`g`. Specifically,
-
-.. math::
-
-   f(S \cup \{i\}) - f(S) = g\Big(\sum_{j \in S} b_j + b_i\Big) - g\Big(\sum_{j \in S} b_j\Big) = \int_{\sum_{j \in S} b_j}^{\sum_{j \in S} b_j + b_i} g'(u)\,du .
-
-The saturating behavior of quantizing a layer is therefore a result of :math:`g'`: if :math:`g'` decreases, each layer costs less the more damage has already accumulated. Prior methods that sum sensitivities correspond to :math:`g(u) = u`, and hence no saturation.
-
-Interactions between quantized layers are also captured by :math:`g`. For instance,
-
-.. math::
-
-   f(\{i,j\}) - f(\{i\}) - f(\{j\}) = \int_0^{b_j}\!\!\int_0^{b_i} g''(s+t)\,ds\,dt \approx g''(0)\, b_i\, b_j ,
-
-assuming :math:`g''` is close to constant over the domain of integration.
+for some increasing :math:`g` with :math:`g(0) = 0`. This form is not arbitrary. If the order in which layers are quantized does not matter, and quantizing a more harmful layer always causes more damage, the Aczél–Ling representation theorem [4]_ [5]_ says damage must take this form; see [3]_ for details. Summing isolated sensitivities, as existing methods do, is the special case :math:`g(u) = u`, in which layers never interact. Any concave :math:`g` instead makes each additional layer cost less as damage accumulates, which is saturation.
 
 We use the *coverage* generator :math:`g(u) = c\,(1 - e^{-u})`, which gives
 
@@ -64,7 +44,7 @@ We use the *coverage* generator :math:`g(u) = c\,(1 - e^{-u})`, which gives
 
    f(S) = c\Big(1 - \prod_{i \in S} (1 - a_i)\Big), \qquad a_i = 1 - e^{-b_i} \in [0, 1),
 
-with a ceiling :math:`c` and a per-layer break-rate :math:`a_i`. The intuition is as follows: the loss is at most :math:`c`, and each quantized layer consumes a fixed fraction :math:`a_i` of whatever headroom remains, :math:`c - f(S \cup \{i\}) = (1 - a_i)\big(c - f(S)\big)`. A model that is already badly damaged has little headroom left, so quantizing one more layer adds little. The marginal cost of layer :math:`i` in context :math:`S` makes this explicit:
+with a ceiling :math:`c` and a per-layer break-rate :math:`a_i`. The intuition is a budget of headroom: the loss is at most :math:`c`, and each quantized layer consumes a fixed fraction :math:`a_i` of whatever headroom remains, :math:`c - f(S \cup \{i\}) = (1 - a_i)\big(c - f(S)\big)`. Taking logarithms, the costs :math:`b_i = -\log(1 - a_i)` of the layers add up, which is the sum above. A model that is already badly damaged has little headroom left, so quantizing one more layer adds little. The marginal cost of layer :math:`i` in context :math:`S` makes this explicit:
 
 .. math::
 
@@ -138,7 +118,7 @@ Results
 Lower damage at matched memory
 ==============================
 
-Table 1 compares calibration KL divergence at matched effective bits against the ModelOpt AutoQuantize gradient baseline on two MoE models. Factoring in saturation and layer interactions results in a higher-quality quantization, with up to a 37% reduction in KL to the base model.
+Table 1 compares calibration KL divergence at matched effective bits, compared with the default gradient scoring, on two MoE models. Factoring in saturation and layer interactions results in a higher-quality quantization, with up to a 37% reduction in KL to the base model.
 
 **Table 1. Calibration KL divergence (lower is better) of the allocation at each effective-bits budget, formats {NVFP4, FP8, BF16}.**
 
@@ -208,7 +188,7 @@ The scoring cost does not depend on how many configurations the solver considers
      - ~14 hours
      - 23 GB
 
-*Measured on Qwen3.6-35B-A3B with 4× NVIDIA RTX 6000 Ada GPUs, 128 samples at sequence length 512. Gradient and KL divergence rows are from the AutoQuantize post* [1]_.
+*Measured on Qwen3.6-35B-A3B with 4× NVIDIA RTX 6000 Ada GPUs, 128 samples at sequence length 512.*
 
 Usage
 *****
@@ -236,7 +216,7 @@ To search for the smallest configuration within a damage tolerance instead, drop
 Future work
 ***********
 
-**A better proxy for inference cost.** Effective bits measures memory, and memory is not speed. Realized speedup depends on the serving stack: which formats have kernels, how layers are fused, and how often each weight is read. For an MoE model decoding at small batch, a routed expert's bytes are read far less often than an attention projection's, so two configurations with equal effective bits can differ substantially in decode throughput. Replacing effective bits with measured per-layer latency, or with weight bytes read per decoded token, would let the solver optimize the quantity users actually care about. The linear program accepts any additive cost, so this is a change of inputs, not of method.
+**A better proxy for inference cost.** Effective bits measures memory, and memory is not speed. Realized speedup depends on the serving stack: which formats have kernels, how layers are fused, and how often each weight is read. For an MoE model decoding at small batch, a routed expert's bytes are read far less often than an attention projection's, so two configurations with equal effective bits can differ substantially in decode throughput. Replacing effective bits with measured per-layer latency, or with weight bytes read per decoded token, would let the solver optimize the quantity users actually care about.
 
 Conclusion
 **********
