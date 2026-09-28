@@ -57,14 +57,29 @@ from pathlib import Path
 import uvloop
 import vllm
 from packaging import version
+
+
+def _is_missing_entrypoint(error: ModuleNotFoundError, entrypoint: str) -> bool:
+    missing_module = error.name
+    return missing_module is not None and (
+        missing_module == entrypoint or entrypoint.startswith(f"{missing_module}.")
+    )
+
+
+run_server_entrypoint = "vllm.entrypoints.launchers.api_server.entry"
 try:
     from vllm.entrypoints.launchers.api_server.entry import run_server
-except ImportError:
+except ModuleNotFoundError as error:
+    if not _is_missing_entrypoint(error, run_server_entrypoint):
+        raise
     from vllm.entrypoints.openai.api_server import run_server
 
+arg_parser_entrypoint = "vllm.entrypoints.cli.serve"
 try:
     from vllm.entrypoints.cli.serve import make_arg_parser
-except ImportError:
+except ModuleNotFoundError as error:
+    if not _is_missing_entrypoint(error, arg_parser_entrypoint):
+        raise
     from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
