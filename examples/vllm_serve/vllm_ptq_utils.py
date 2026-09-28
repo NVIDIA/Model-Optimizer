@@ -65,8 +65,11 @@ def _get_calibration_block_count(
         try:
             from vllm.v1.kv_cache_interface import KpoolTailSpec, UniformTypeKVCacheSpecs
         except ImportError:
-            KpoolTailSpec = ()
-            UniformTypeKVCacheSpecs = ()
+            kpool_tail_spec_types = ()
+            uniform_kv_cache_spec_types = ()
+        else:
+            kpool_tail_spec_types = (KpoolTailSpec,)
+            uniform_kv_cache_spec_types = (UniformTypeKVCacheSpecs,)
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
             """Calculate the current vLLM warmup block reservation."""
@@ -75,10 +78,10 @@ def _get_calibration_block_count(
             # one block per block_size tokens, overflowing the one-block table.
             unwrapped_spec = (
                 kv_cache_spec.first_spec
-                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+                if isinstance(kv_cache_spec, uniform_kv_cache_spec_types)
                 else kv_cache_spec
             )
-            if isinstance(unwrapped_spec, KpoolTailSpec):
+            if isinstance(unwrapped_spec, kpool_tail_spec_types):
                 return 1
 
             # Calibration runs before model_state is initialized, so call the
@@ -170,7 +173,6 @@ def _cleanup_calibration_requests(
                 finish_error.__cause__ = execute_error
                 raise calibration_error from finish_error
             raise finish_error from execute_error
-
 
 
 def _get_unpadded_input_ids(batch: dict[str, Any]) -> list[list[int]]:
@@ -358,4 +360,3 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
             )
 
     return quant_cfg
-

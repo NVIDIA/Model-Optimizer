@@ -57,6 +57,7 @@ from pathlib import Path
 import uvloop
 import vllm
 from packaging import version
+from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 
 def _is_missing_entrypoint(error: ModuleNotFoundError, entrypoint: str) -> bool:
@@ -81,7 +82,6 @@ except ModuleNotFoundError as error:
     if not _is_missing_entrypoint(error, arg_parser_entrypoint):
         raise
     from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 vllm_version = version.parse(vllm.__version__)
 if vllm_version <= version.parse("0.11.0"):

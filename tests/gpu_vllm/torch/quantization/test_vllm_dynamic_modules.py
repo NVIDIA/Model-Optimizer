@@ -102,7 +102,6 @@ def _patch_vllm_imports(monkeypatch, modules):
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
 
-
 def test_get_unpadded_input_ids_handles_left_and_right_padding():
     module = _load_example_module("vllm_ptq_utils")
     batch = {
@@ -122,7 +121,6 @@ def test_get_unpadded_input_ids_rejects_empty_sequence():
 
     with pytest.raises(ValueError, match="empty sequence"):
         module._get_unpadded_input_ids(batch)
-
 
 
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
@@ -875,4 +873,3 @@ def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
         cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
     )
     assert float(reconfigured.v_bmm_quantizer._amax) == 96.0
-
