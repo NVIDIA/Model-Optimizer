@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# QuantizerCfgList snippet that enables dynamic NVFP4 on weight and input quantizers,
-# with Four-Over-Six (4/6) adaptive scaling on the weight quantizers only.
+# QuantizerCfgList snippet enabling NVFP4 on weight and input quantizers, with Four-Over-Six
+# (4/6) on the weights only. 4/6 needs a calibrated per-block amax, so those are static.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:

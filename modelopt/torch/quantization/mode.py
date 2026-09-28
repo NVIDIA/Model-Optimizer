@@ -37,6 +37,7 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
+    FourOverSixCalibConfig,
     GPTQCalibConfig,
     LocalHessianCalibConfig,
     LSQConfig,
@@ -61,6 +62,7 @@ from .conversion import (
 )
 from .model_calib import (
     awq,
+    four_over_six_calibrate,
     gptq,
     layerwise_calibrate,
     local_hessian_calibrate,
@@ -460,6 +462,22 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class FourOverSixCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for the NVFP4 Four-Over-Six (4/6) calibration algorithm.
+
+    See :class:`FourOverSixCalibConfig
+    <modelopt.torch.quantization.config.FourOverSixCalibConfig>`.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return FourOverSixCalibConfig
+
+    _calib_func = four_over_six_calibrate
 
 
 @CalibrateModeRegistry.register_mode

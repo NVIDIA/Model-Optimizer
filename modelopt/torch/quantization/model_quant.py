@@ -41,7 +41,7 @@ from modelopt.torch.utils import atomic_print
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
 from .algorithms import AUTO_QUANTIZE_SEARCHERS, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
-from .config import QuantizeAlgoCfgType
+from .config import QuantizeAlgoCfgType, _four_over_six_config_problems
 from .kv_cache_auto_quant import AutoQuantizeKVSearcher, get_kv_cache_auto_quantize_config
 from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -77,10 +77,12 @@ def calibrate(
     Args:
         model: A pytorch model with quantizer modules.
         algorithm: A string or dictionary specifying the calibration algorithm to use. Supported
-            algorithms are ``"max"``, ``"smoothquant"``, ``"awq_lite"``, ``"awq_full"``, and
-            ``"awq_clip"``. If a dictionary is passed, the key ``"method"`` should specify the
-            calibration algorithm to use. Other key-value pairs  in this dictionary will be passed
-            as kwargs to the algorithm.
+            algorithms are ``"max"``, ``"mse"``, ``"four_over_six"``, ``"local_hessian"``,
+            ``"nvfp4_act_headroom"``, ``"smoothquant"``, ``"awq_lite"``, ``"awq_full"``,
+            ``"awq_clip"``, ``"gptq"``, ``"svdquant"`` and ``"lsq"``. If a dictionary is passed,
+            the key ``"method"`` should specify the calibration algorithm to use. Other key-value
+            pairs in this dictionary will be passed as kwargs to the algorithm. A list runs the
+            given algorithms in sequence.
 
             An example dictionary argument:
             ``{"method": "awq_clip", "max_co_batch_size": 4096}``.
@@ -331,6 +333,9 @@ def quantize(
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
+    problems = _four_over_six_config_problems(quantize_config.quant_cfg, quantize_config.algorithm)
+    if problems:
+        raise ValueError("NVFP4 four_over_six config is inconsistent:\n  " + "\n  ".join(problems))
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
@@ -345,6 +350,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     None,
     "max",
     "mse",
+    "four_over_six",
     "local_hessian",
     "smoothquant",
     "awq_lite",
