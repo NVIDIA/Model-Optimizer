@@ -21,8 +21,12 @@ namespace {
 
 using namespace modelopt::ggml;
 
-// The Q8_0 packed payload follows the GGML definition at:
+// This CUDA encoder was independently implemented for ModelOpt. It follows the Q8_0 packed
+// payload and scalar quantization formula defined by GGML; no llama.cpp implementation code is
+// incorporated here. Format reference:
 // https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
+// Scalar-formula reference:
+// https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-quants.c
 constexpr int kQ8BlockSize = 32;
 constexpr int kPayloadBytes = kScaleBytes + kQ8BlockSize;
 constexpr float kMaxQuant = 127.0f;

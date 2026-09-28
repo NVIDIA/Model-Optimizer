@@ -348,6 +348,57 @@ def test_cuda_ext_q8_0_dequantizes_with_small_error():
     assert normalized_mse < 1e-4
 
 
+def test_cuda_ext_q8_0_input_dtype_equivalence():
+    """Exactly representable values must produce identical bytes for every accepted dtype."""
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
+    weight = torch.randint(-64, 64, (2, 32), device="cuda", generator=_generator()).float() / 16
+
+    payloads = [
+        extension.q8_0_pack(weight.to(dtype))
+        for dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16)
+    ]
+
+    for dtype, payload in zip((torch.float64, torch.float16, torch.bfloat16), payloads[1:]):
+        assert torch.equal(payloads[0], payload), f"{dtype} disagrees with float32"
+
+
+def test_cuda_ext_q8_0_nonfinite_and_float64_overflow_policy():
+    """Non-finite inputs become zero; finite float64 overflow saturates to float32."""
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
+    clean = torch.randn((2, 32), device="cuda", dtype=torch.float32, generator=_generator())
+    zeroed = clean.clone()
+    zeroed[0, 5], zeroed[0, 20], zeroed[1, 17] = 0.0, 0.0, 0.0
+    spoiled = clean.clone()
+    spoiled[0, 5], spoiled[0, 20], spoiled[1, 17] = float("nan"), float("inf"), float("-inf")
+
+    assert torch.equal(extension.q8_0_pack(spoiled), extension.q8_0_pack(zeroed))
+
+    huge = zeroed.double()
+    huge[1, 7] = 1e100
+    saturated = zeroed.double()
+    saturated[1, 7] = torch.finfo(torch.float32).max
+    huge_payload = extension.q8_0_pack(huge)
+    assert torch.equal(huge_payload, extension.q8_0_pack(saturated))
+    assert not torch.equal(huge_payload, extension.q8_0_pack(zeroed.double()))
+
+
+def test_cuda_ext_q8_0_fp16_scale_saturation_and_underflow():
+    extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
+    weight = torch.zeros((2, 32), device="cuda", dtype=torch.float32)
+    weight[0, 0] = 2 * 127 * torch.finfo(torch.float16).max
+    weight[1, 0] = 127 * 2.0**-26
+
+    packed = extension.q8_0_pack(weight).cpu()
+    scales = packed[:, :2].contiguous().view(torch.float16).float().flatten()
+    quants = packed[:, 2:].contiguous().view(torch.int8)
+    decoded = scales.unsqueeze(1) * quants.float()
+
+    assert scales.tolist() == [torch.finfo(torch.float16).max, 0.0]
+    assert quants[:, 0].tolist() == [127, 127]
+    assert decoded[0, 0].item() == torch.finfo(torch.float16).max * 127
+    assert not decoded[1].any()
+
+
 def test_cuda_ext_q8_0_rejects_invalid_input():
     extension = ext.get_cuda_ext_ggml(raise_if_failed=True)
     unsupported = torch.ones((1, 32), device="cuda").to(torch.float8_e4m3fn)
