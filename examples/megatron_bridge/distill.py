@@ -23,6 +23,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
+from pathlib import Path
 
 import torch
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
@@ -50,12 +51,23 @@ from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
+from mlflow_utils import (
+    NON_PARAMS,
+    add_mlflow_args,
+    checkpoint_marker,
+    checkpoint_name,
+    distill_run,
+    logger_kwargs,
+    record_checkpoint_provenance,
+    resolve_mlflow_args,
+)
 from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
+from modelopt.torch.utils.mlflow import Tool, masked_args
 from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
     load_modelopt_megatron_checkpoint,
@@ -65,6 +77,30 @@ from modelopt.torch.utils.plugins.mbridge import (
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
+
+DISTILL = Tool(
+    name="megatron_bridge_distill",
+    tracks=(
+        "Track this run on an MLflow server, uploading the command and the run log, and "
+        "writing .experiment.json into <output_dir>/checkpoints. Megatron-Bridge logs the "
+        "training metrics and the resolved config into the same run."
+    ),
+    variant_help="the student Megatron checkpoint's directory name, or bf16 without one",
+    variant=lambda args: (
+        checkpoint_name(args.student_megatron_path) if args.student_megatron_path else "bf16"
+    ),
+    model=lambda args: args.student_hf_path,
+    # None for --validate_only: the run writes no checkpoint to tag or point at.
+    checkpoint=lambda args: (
+        None if args.validate_only else str(Path(args.output_dir) / "checkpoints")
+    ),
+    source=lambda args: args.student_megatron_path or args.student_hf_path,
+    # Megatron-Bridge saves it, so record_checkpoint_provenance settles the pointer: only it
+    # can tell a checkpoint this run saved from the one it resumed from.
+    settles_pointer=False,
+    non_params=NON_PARAMS,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -287,7 +323,10 @@ def get_args():
         "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
         "correct for homogeneous students; unused for VLMs.",
     )
+    add_mlflow_args(parser, DISTILL, log_checkpoints=True)
+
     args = parser.parse_args()
+    resolve_mlflow_args(args, parser, DISTILL)
 
     # Sanity checks
     if not args.sft and not args.use_mock_data and not args.data_paths:
@@ -323,7 +362,7 @@ def get_args():
 
     _check_shared_vocabulary(args)
 
-    print_args(args)
+    print_args(masked_args(args))
 
     return args
 
@@ -353,7 +392,7 @@ def _tokenizer_prepends_bos(args) -> bool:
     return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace, owns_the_run: bool = True):
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
@@ -571,6 +610,9 @@ def main(args: argparse.Namespace):
             wandb_project=args.wandb_project,
             wandb_entity=args.wandb_entity,  # optional
             wandb_exp_name=args.wandb_exp_name,
+            # MLflow logging, which Megatron-Bridge drives from inside the training loop so
+            # the metrics and the resolved config are recorded too.
+            **logger_kwargs(args, DISTILL),
         ),
         tokenizer=(
             # SFT reads raw text, so it needs the model's real tokenizer; the pretraining path
@@ -607,7 +649,16 @@ def main(args: argparse.Namespace):
     )
 
     print_rank_0("\nStarting distillation...")
-    distill(config)
+    # Before training: a resumed run starts with the previous run's checkpoint in place, so
+    # only a move in this marker shows that this run saved one of its own.
+    saved_before = checkpoint_marker(args, DISTILL)
+    try:
+        distill(config)
+    finally:
+        # In a finally: when --exit_interval or --exit_duration_in_mins fires -- which is how
+        # a Slurm run usually ends -- Megatron-Bridge calls sys.exit() from inside train(),
+        # so nothing after distill() runs. The checkpoint is already saved by then.
+        record_checkpoint_provenance(args, DISTILL, saved_before=saved_before, is_main=owns_the_run)
     if args.validate_only:
         print_rank_0("\nValidation-only run done! Skipped training and checkpoint export.\n")
         return
@@ -655,7 +706,10 @@ if __name__ == "__main__":
     dist.setup()
     args = get_args()
     try:
-        main(args)
+        # Entered inside the try: opening the run is fatal by design, and the peers of a rank
+        # that exits without dist.abort() stay blocked on the first collective.
+        with distill_run(args, DISTILL) as owns_the_run:
+            main(args, owns_the_run)
     except BaseException:
         dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml
 
@@ -60,12 +60,14 @@ __all__ = [
     "default_run_name",
     "describe_run",
     "drop_experiment_json",
+    "log_active_run_experiment_json",
     "mask_tracking_uri",
     "masked_args",
     "resolve_mlflow_args",
     "resolve_tracking_uri",
     "resolved_recipe_texts",
     "run_tags",
+    "split_tracking_credentials",
     "tracked_run",
     "validate_tracking_uri",
 ]
@@ -96,7 +98,10 @@ TRACKING_URI_ENV = "MLFLOW_TRACKING_URI"
 def _experiment_json(
     tracking_uri: str, experiment_name: str, info: Any, run_name: str | None = None
 ) -> dict[str, str]:
-    """The provenance record's fields, read off the run the server returned."""
+    """The provenance record's fields, read off the run the server returned.
+
+    Shared by the two writers -- a run this process opened, and one it merely found.
+    """
     uri = _redact(tracking_uri).rstrip("/")
     experiment_id = str(info.experiment_id)
     run_id = str(info.run_id)
@@ -354,6 +359,8 @@ class MlflowRunLogger:
         self._tees: tuple | None = None
         self._file_stats: dict[str, tuple[int, int] | None] = {}
         self._start_time = 0.0
+        # The status a co-owner closed this run with, if one did; see _reattach.
+        self._closed_as: str | None = None
 
     @property
     def run_url(self) -> str:
@@ -451,7 +458,8 @@ class MlflowRunLogger:
         if not self.enabled or self._run is None:
             return
         try:
-            self._log_texts({artifact_path: text})
+            if self._reattach():
+                self._log_texts({artifact_path: text})
         except Exception as e:
             print(f"[mlflow] WARNING: could not upload {artifact_path}: {e}")
 
@@ -519,16 +527,52 @@ class MlflowRunLogger:
             return
         if status != "FINISHED":
             self._note_active_exception()
+        ours = False
         try:
-            self._log_outputs(texts, files, metrics)
+            ours = self._reattach()
+            if ours:
+                self._log_outputs(texts, files, metrics)
         except Exception as e:
             print(f"[mlflow] WARNING: could not upload run outputs: {e}")
         self._stop_capture()
+        # A co-owner's status is kept only when it reports trouble this block cannot see --
+        # Megatron-Bridge ends the run as KILLED on SIGTERM -- so a clean close elsewhere
+        # never masks a failure here, and a non-terminal status never reaches end_run.
+        if self._closed_as in ("FAILED", "KILLED"):
+            status = self._closed_as
         try:
-            self._mlflow.end_run(status=status)
+            if ours:
+                self._mlflow.end_run(status=status)
+            else:
+                # Another run owns the fluent slot, so close this one by id rather than leave
+                # it RUNNING; MLflow's atexit only terminates whatever is active.
+                from mlflow.tracking import MlflowClient
+
+                MlflowClient().set_terminated(self._run.info.run_id, status=status)
             print(f"[mlflow] {status}: {self.run_url}")
         except Exception as e:
             print(f"[mlflow] WARNING: could not close the run: {e}")
+
+    def _reattach(self) -> bool:
+        """Make this run the fluent API's target again, reporting whether it is.
+
+        A co-owner can end the run first -- Megatron-Bridge does, as ``KILLED``, on SIGTERM --
+        and a fluent call with none active opens one, so this run's log would land there. The
+        status it was closed with is remembered here, since re-attaching sets it ``RUNNING``.
+        A *different* run being active is reported rather than uploaded through.
+        """
+        active = self._mlflow.active_run()
+        if active is not None:
+            if str(active.info.run_id) == str(self._run.info.run_id):
+                return True
+            print(
+                f"[mlflow] WARNING: run {active.info.run_id} is active instead of this one, "
+                f"so {self.run_url} keeps neither its outputs nor a final status."
+            )
+            return False
+        self._closed_as = str(self._mlflow.get_run(self._run.info.run_id).info.status)
+        self._mlflow.start_run(run_id=self._run.info.run_id)
+        return True
 
     def _note_active_exception(self) -> None:
         """Append the exception being handled to the captured log.
@@ -749,6 +793,41 @@ def add_mlflow_args(parser: argparse.ArgumentParser, tool: Tool) -> None:
     )
 
 
+def split_tracking_credentials(uri: str) -> str | None:
+    """Move any ``user:token@`` out of *uri* into MLflow's own credential variables.
+
+    For a caller that hands the URI to something which *records* it -- Megatron-Bridge logs
+    its resolved config as params and writes it into the checkpoint. Masking is not an option
+    there, since the value is also what authenticates. Returns ``None`` when the credential
+    cannot be moved, so the caller can decline to record it. Variables the caller already
+    exported win.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme not in ("http", "https"):
+        # Fail closed. Without a scheme urlparse puts a "user:tok@host" in .path, where the
+        # userinfo below never sees it and the URI would be handed back with the credential
+        # still in it -- the one outcome this function exists to prevent. Callers reach this
+        # through validate_tracking_uri, which rejects the same URIs, but the precondition is
+        # not the caller's to remember.
+        return None
+    userinfo, separator, host = parsed.netloc.rpartition("@")
+    if not separator:
+        return uri
+    username, colon, password = userinfo.partition(":")
+    if not (username and colon and password):
+        # Half a credential cannot be moved: MLflow sends basic auth only when both variables
+        # are set, while requests authenticates off the URI it is given -- so the URI keeps
+        # working where it is passed through, and only a caller that *records* it is stuck.
+        return None
+    # Percent-decoded, because userinfo in a URI is percent-encoded and the variables hold
+    # the credential itself: a token containing "/" *must* be written "%2F" in the URI, and
+    # requests -- which is what authenticates when the credential is left in the URI -- has
+    # already decoded it there, so copying it across verbatim would authenticate differently.
+    os.environ.setdefault("MLFLOW_TRACKING_USERNAME", unquote(username))
+    os.environ.setdefault("MLFLOW_TRACKING_PASSWORD", unquote(password))
+    return parsed._replace(netloc=host).geturl()
+
+
 def mask_tracking_uri(uri: str | None) -> str | None:
     """Mask any ``user:token@`` a tracking URI carries, for printing.
 
@@ -807,6 +886,68 @@ def resolve_mlflow_args(
         args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
             tool.name, tool.model(args), tool.variant(args)
         )
+
+
+def log_active_run_experiment_json(checkpoint_dir: Path | str) -> bool:
+    """Record MLflow's *currently active* run as the producer of a checkpoint.
+
+    For a caller whose run is owned by something else -- Megatron-Bridge opens it for a
+    training job, on its last rank. Call it from the rank that owns the run, once the
+    checkpoint is on disk. With no run to name, any pointer already there is *removed*: the
+    weights are new, so a previous run's pointer would misname their author. Returns whether
+    a run was found, so a caller that asked for tracking can tell that from an untracked job.
+    """
+    run = None
+    try:
+        import mlflow
+
+        # last_active_run() covers a run mlflow's atexit has already closed, which is what
+        # a caller running from its own atexit or shutdown path sees.
+        run = mlflow.active_run() or mlflow.last_active_run()
+    except Exception:
+        # mlflow absent, or unusable: an untracked run reaches here too, and quietly.
+        pass
+    if run is None:
+        # Same invariant as MlflowRunLogger.log_experiment_json: after a save the pointer
+        # beside the checkpoint is this run's or absent, never a previous run's.
+        drop_experiment_json(checkpoint_dir)
+        return False
+    try:
+        # The only field that needs the server. Everything else -- the ids, the run name, and
+        # the URL built from them -- is on run.info already, and run_id is what anything
+        # resolves the run by, so a blip here costs a display name rather than the pointer.
+        experiment_name = mlflow.get_experiment(str(run.info.experiment_id)).name
+    except Exception as e:
+        print(f"[mlflow] WARNING: could not read the run's experiment name: {e}")
+        experiment_name = ""
+    try:
+        info = _experiment_json(mlflow.get_tracking_uri(), experiment_name, run.info)
+        text = json.dumps(info, indent=2) + "\n"
+    except Exception as e:
+        # Same invariant as the branch above: the weights are new, so a pointer naming an
+        # earlier run is worse than none at all.
+        print(f"[mlflow] WARNING: could not read the active run: {e}")
+        drop_experiment_json(checkpoint_dir)
+        return False
+
+    # The file beside the weights first: it is the record that travels with the checkpoint,
+    # and it must not be lost to an upload that fails. A failure here is reported on its own;
+    # the return value answers "was there a run to name", which is what the callers ask.
+    try:
+        (Path(checkpoint_dir) / EXPERIMENT_JSON).write_text(text)
+    except OSError as e:
+        print(f"[mlflow] WARNING: could not write {Path(checkpoint_dir) / EXPERIMENT_JSON}: {e}")
+
+    try:
+        # Through the client, not the fluent ``mlflow.log_text``: the fluent one resolves its
+        # target with ``_get_or_start_run()``, which on the closed-run branch above opens a
+        # second run, and its ``run_id`` argument postdates this project's mlflow floor.
+        from mlflow.tracking import MlflowClient
+
+        MlflowClient().log_text(info["run_id"], text, EXPERIMENT_JSON.removeprefix("."))
+    except Exception as e:
+        print(f"[mlflow] WARNING: could not upload {EXPERIMENT_JSON.removeprefix('.')}: {e}")
+    return True
 
 
 def drop_experiment_json(checkpoint_dir: Path | str) -> None:
