@@ -625,6 +625,38 @@ def test_clamping_fp16_initializers_out_of_range(
 
 
 @pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_underflowing_fp16_initializers_keep_their_sign(
+    model_with_multiple_consumers, use_standalone_type_inference
+):
+    """A value too small for FP16 is replaced by the smallest subnormal of the same sign."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
+
+    smallest = np.finfo(np.float16).smallest_subnormal
+    add_init_underflow = np.array([[-1e-10, 1e-10]], dtype=np.float32)
+    model.graph.initializer[1].CopyFrom(
+        numpy_helper.from_array(add_init_underflow, name="add_init")
+    )
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+    converter._convert_initializers(low_precision_nodes=["add1", "add2"], high_precision_nodes=[])
+
+    converted = next(
+        numpy_helper.to_array(init)
+        for init in converter.model.graph.initializer
+        if init.name == "add_init"
+    )
+    assert converted.dtype == np.float16
+    assert converted[0, 0] == -smallest, "a negative value must not come back positive"
+    assert converted[0, 1] == smallest
+
+
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_bf16_no_clamping_initializers_out_of_range(
     model_with_multiple_consumers, use_standalone_type_inference
 ):
