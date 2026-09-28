@@ -121,7 +121,7 @@ def test_megatron_name_remapping_exports_ggml_payload(qformat):
 
     packed_key = "model.layers.0.mlp.down_proj.weight"
     packed = exporter._state_dict[packed_key]
-    assert packed.shape == (2, 1, payload_bytes)
+    assert packed.shape == (2, linear.in_features // block_size, payload_bytes)
     assert packed.dtype == torch.uint8
     # Exact bytes against the format's own packer, as the slicing tests below check.
     _assert_iq_payload_matches(qformat, packed, linear.weight)

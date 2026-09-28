@@ -45,8 +45,8 @@ QUANTIZATION_Q8_0 = "q8_0"
 
 # Every GGML format is derived from the registry the quantization backend dispatches through, so
 # export and dispatch cannot disagree about which formats exist. A format's block geometry and
-# packer are read from GGML_FORMAT_REGISTRY directly. IQ_FORMATS remains the vector-codebook
-# subset for callers that specifically need it.
+# packer are read from GGML_FORMAT_REGISTRY directly. IQ_FORMATS remains as the compatibility
+# subset used by IQ-specific conformance tests.
 #
 # Registering a format therefore declares it exportable, and that is intended rather than a side
 # effect: fake quant is dequantize(quantize(w)), so a format cannot be dispatched without the

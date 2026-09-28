@@ -160,7 +160,7 @@ def test_uses_iq_quantization_tolerates_sequential_quantizer():
     assert not uses_iq_quantization(torch.nn.Sequential(layer))
 
 
-def test_uses_iq_quantization_sees_grouped_q8_0_quantizer():
+def test_grouped_q8_0_quantizer_is_detected_for_export():
     module = torch.nn.Module()
     module.weight0 = torch.nn.Parameter(torch.empty(256, 256))
     quantizer = TensorQuantizer()
@@ -170,6 +170,7 @@ def test_uses_iq_quantization_sees_grouped_q8_0_quantizer():
     module.weight_quantizer = GroupedQuantizer(quantizer)
 
     assert uses_iq_quantization(module)
+    assert get_quantization_format(module) == QUANTIZATION_Q8_0
 
 
 def test_iq_export_rejects_enabled_input_quantizer():

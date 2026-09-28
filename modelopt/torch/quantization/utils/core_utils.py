@@ -247,9 +247,11 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
 def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
-    Covers three layouts:
+    Covers four layouts:
 
     - standard ``nn.Linear``: ``weight`` + ``weight_quantizer``.
+    - ``TEGroupedLinear``: ``weight0..N`` + one ``GroupedQuantizer`` exposed through the
+      logical ``weight`` name.
     - custom per-weight quantizer (e.g. ``Llama4TextExperts`` with ``gate_up_proj`` +
       ``gate_up_proj_weight_quantizer``).
     - fused-experts ``nn.ModuleList`` quantizers (``_QuantFusedExperts`` with
@@ -258,6 +260,15 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     # standard: "weight" + "weight_quantizer" (singular) or "weight_quantizers" (plural)
     if getattr(module, "weight", None) is not None:
         if representative_weight_quantizer(module, "weight") is not None:
+            yield "weight"
+    elif getattr(module, "weight0", None) is not None:
+        # TEGroupedLinear has no physical ``weight`` parameter after setup, but its
+        # GroupedQuantizer is deliberately stored as ``weight_quantizer``. Yield the logical
+        # name so format and block-size discovery see the same representative quantizer used by
+        # its export path.
+        from ..nn import GroupedQuantizer
+
+        if isinstance(getattr(module, "weight_quantizer", None), GroupedQuantizer):
             yield "weight"
 
     # per-parameter custom attr names
