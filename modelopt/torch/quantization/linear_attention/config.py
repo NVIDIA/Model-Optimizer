@@ -51,7 +51,7 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
     """Explicit suffix recurrence; workload supplies per-sequence prefix lengths."""
 
     mode: Literal["token", "replay"] = ModeloptField(default="token")
-    implementation: Literal["torch"] = ModeloptField(default="torch")
+    implementation: Literal["torch", "triton"] = ModeloptField(default="torch")
     readout: Literal["working", "stored"] = ModeloptField(default="stored")
     quantize_initial: bool = ModeloptField(default=True)
     prefill_state_qdq: bool = ModeloptField(default=False)
@@ -63,6 +63,8 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
     def _validate_replay(self):
         if (self.mode == "replay") != (self.replay is not None):
             raise ValueError("replay settings must be supplied exactly when mode='replay'")
+        if self.implementation == "triton" and self.replay and self.replay.encoding != "once":
+            raise ValueError("The Triton replay candidate implements encode-once only")
         if self.state_codec == "int8_hadamard32" and self.prefill_state_qdq:
             raise ValueError(
                 "Hadamard state QDQ starts at decode handoff; disable prefill_state_qdq"

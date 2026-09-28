@@ -83,7 +83,7 @@ def test_fla_layer_qat_restore_and_optimizer(tmp_path, mode):
         policy_cfg["state"] = {"block_v": 16}
         policy_cfg["decode"] = {
             "mode": "replay" if mode.startswith("decode_replay") else "token",
-            "implementation": "torch",
+            "implementation": "triton",
         }
         if mode.startswith("decode_replay"):
             policy_cfg["decode"]["replay"] = {"window": 5}
@@ -166,7 +166,7 @@ def test_decode_phase_spans_activation_checkpoint_backward(hadamard):
                     "cfg": {
                         "backend": "matmul",
                         "decode": {
-                            "implementation": "torch",
+                            "implementation": "triton",
                             "state_codec": "int8_hadamard32" if hadamard else "tile",
                         },
                     },

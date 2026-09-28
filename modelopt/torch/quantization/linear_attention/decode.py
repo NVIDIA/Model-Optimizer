@@ -322,20 +322,106 @@ def recurrent_decode(
     carry=None,
     position=0,
     scale=None,
+    checkpoint_interval=8,
 ):
-    """Run the Torch training implementation with explicit differentiable carry."""
-    return recurrent_decode_reference(
+    """Run the selected training implementation with explicit differentiable carry.
+
+    The fused encode-once path carries the same reconstructed state incrementally
+    and exposes the anchor and encoded updates needed for continuation gradients.
+    """
+    if config.implementation == "torch":
+        return recurrent_decode_reference(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            config=config,
+            state_qdq=state_qdq,
+            state_format=state_format,
+            block_v=block_v,
+            initial_state=initial_state,
+            carry=carry,
+            position=position,
+            scale=scale,
+        )
+    carry, signature = _prepare_carry(
+        q, k, v, g, beta, config, state_qdq, block_v, initial_state, carry, position, state_format
+    )
+    if len(q) == 0:
+        return v + (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0, carry
+    if config.replay is not None and config.replay.encoding != "once":
+        raise ValueError("The fused implementation supports encode-once replay only")
+    # Keep the CPU reference importable without the optional CUDA/Triton backend.
+    from modelopt.torch.kernels.quantization.linear_attention.decode import fused_recurrence
+
+    if config.state_codec == "int8_hadamard32":
+        v = _hadamard32(v)
+    replay = config.replay is not None
+    factor_qdq = config.replay is not None and config.replay.factor_qdq
+    key = _encode(k, factor_qdq, k.shape[-1])
+    gate = _round_log_gate(g, config.decay_log_step)
+    window = config.replay.window if config.replay is not None else 1
+    result = fused_recurrence(
         q,
-        k,
+        key.values,
         v,
-        g,
+        gate,
         beta,
-        config=config,
+        carry.reconstruct(original_basis=False),
         state_qdq=state_qdq,
         state_format=state_format,
+        state_codec=config.state_codec,
         block_v=block_v,
-        initial_state=initial_state,
-        carry=carry,
-        position=position,
+        replay=replay,
+        factor_qdq=factor_qdq,
+        window=window,
+        cursor=carry.cursor,
+        read_stored=config.readout == "stored",
         scale=scale,
+        checkpoint_interval=checkpoint_interval,
+    )
+    output, final, updates, last_anchor, anchor_scales, update_scales = result
+    if config.state_codec == "int8_hadamard32":
+        output = _hadamard32(output)
+    state_format = state_format if state_qdq else "identity"
+    state_block_v = 32 if config.state_codec == "int8_hadamard32" else block_v
+    if not replay:
+        anchor = EncodedLinearAttentionTensor(
+            final,
+            anchor_scales if state_qdq else None,
+            state_format,
+            state_block_v if state_qdq else None,
+        )
+        return output, LinearAttentionCarry(
+            anchor, (), carry.position + len(q), True, signature, carry.value_basis
+        )
+    if carry.cursor + len(q) >= window:
+        anchor = EncodedLinearAttentionTensor(
+            last_anchor,
+            anchor_scales if state_qdq else None,
+            state_format,
+            state_block_v if state_qdq else None,
+        )
+        start = ((carry.cursor + len(q)) // window) * window - carry.cursor
+        entries = ()
+    else:
+        anchor, entries, start = carry.anchor, carry.entries, 0
+    additions = []
+    for t in range(start, len(q)):
+        encoded_key = EncodedLinearAttentionTensor(
+            key.values[t],
+            key.scales[t] if key.scales is not None else None,
+            key.format,
+            key.block_v,
+        )
+        encoded_update = EncodedLinearAttentionTensor(
+            updates[t],
+            update_scales[t] if factor_qdq else None,
+            "fp8_e4m3" if factor_qdq else "identity",
+            block_v if factor_qdq else None,
+        )
+        additions.append(ReplayEntry(encoded_key, encoded_update, gate[t]))
+    return output, LinearAttentionCarry(
+        anchor, (*entries, *additions), carry.position + len(q), True, signature, carry.value_basis
     )

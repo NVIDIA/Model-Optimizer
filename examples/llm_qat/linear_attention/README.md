@@ -55,8 +55,8 @@ states, so the policy must specify which computation training should emulate.
 
 `LinearAttentionConfig` holds the overall backend, chunk size, and state settings.
 Its optional `decode` field contains a `LinearAttentionDecodeConfig` for token or
-replay mode, state codec, decay approximation, and replay settings. The decode
-implementation uses Torch operations and autograd. This is one nested configuration: supplying a `decode`
+replay mode, Torch or Triton implementation, state codec, decay approximation,
+and replay settings. This is one nested configuration: supplying a `decode`
 dictionary in the recipe constructs the nested config automatically.
 
 Each `linear_attention` entry uses `module_name` to select attention layers and
@@ -101,7 +101,9 @@ mtq.quantize(gdn_model, gdn_recipe)
 
 Use the phase context shown below for each forward/backward. Importing only
 `configs/ptq/units/gdn_state_int8_dynamic` configures the quantizer without
-selecting Hadamard. Both complete recipes use the Torch decode implementation.
+selecting Hadamard. The complete GDN recipe uses the Torch implementation;
+set `gdn_recipe.linear_attention[0].cfg.decode.implementation="triton"` before
+conversion to select the fused decode implementation.
 
 ### Why training needs prefill/decode boundaries
 
@@ -293,9 +295,10 @@ the optional tile codec instead uses nearest-even rounding and FP32 scales.
 
 ## Training boundaries
 
-The Torch implementation uses autograd through initial states, chunk handoff,
-token writes, and replay refreshes. The decode recurrence runs token by token in
-Python, so long training suffixes can be slow.
+The Torch and Triton implementations support first-order QAT gradients through
+initial states, chunk handoff, token writes, and replay refreshes. Triton supports
+key dimensions up to 128 and value blocks 16/32/64/128, with checkpointed backward.
+Use the Torch implementation for higher-order differentiation.
 
 Prefill prefixes use exact chunk algebra with optional state QDQ. This example
 has no prefill GEMM QDQ or approximate inverse. FLA KDA requires `use_cache=False`;
