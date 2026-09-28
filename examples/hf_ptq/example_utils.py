@@ -892,15 +892,15 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_enc_dec(model_type) -> bool:
-    """Return whether the model_type uses encoder-decoder-style preview decode.
+def is_enc_dec(model_type: str | None) -> bool:
+    """Return whether the Hugging Face model_type is an encoder-decoder model.
 
-    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
-    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
-    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
-    decode applies).
+    These models use encoder-decoder-style preview decode (``hf_ptq.py`` does not slice off
+    the prompt prefix from ``.generate()`` output) and still export TensorRT-LLM checkpoints.
+    ``diffusion_gemma`` is structurally encoder-decoder but returns prompt+canvas concatenated,
+    so it stays OFF this list (AR-style decode applies).
     """
-    return model_type in ["t5", "bart", "whisper"]
+    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
 
 
 def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:

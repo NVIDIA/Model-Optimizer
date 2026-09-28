@@ -78,13 +78,13 @@ from modelopt.torch.export import (
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
-    get_model_type,
     has_spec_opt,
     save_expert_token_count_table,
 )
 from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -151,14 +151,16 @@ def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
 mto.enable_huggingface_checkpointing()
 
 
-def extract_and_prepare_language_model_from_vl(full_model):
+def extract_and_prepare_language_model_from_vl(
+    full_model: torch.nn.Module,
+) -> torch.nn.Module | None:
     """Extract language model from VL model and disable quantization for non-language components.
 
     Args:
         full_model: The full VLM model
 
     Returns:
-        tuple: (language_model, model_type) or (None, None) if not a VLM
+        The language model, or None if not a VLM
     """
     language_model_lineage = get_language_model_from_vl(full_model, strict=True)
     if language_model_lineage is not None:
@@ -178,10 +180,9 @@ def extract_and_prepare_language_model_from_vl(full_model):
                     mtq.quantize(module, disabled_quant_cfg, forward_loop=None)
                     memo.add(module)
 
-        model_type = get_model_type(language_model)
-        return language_model, model_type
+        return language_model
 
-    return None, None
+    return None
 
 
 class _DeviceDataLoader:
@@ -655,7 +656,9 @@ def load_model(args: argparse.Namespace):
             )
         calibration_only = True
 
-    model_type = get_model_type(full_model)
+    # The checkpoint's Hugging Face model_type. Always taken from the root model: a VLM's language
+    # model reports its own sub-config's type, which varies across transformers versions.
+    model_type = hf_model_type(full_model)
 
     if args.use_fsdp2:
         device = args.dist_state.device
@@ -713,12 +716,9 @@ def load_model(args: argparse.Namespace):
         # Plain PTQ quantizes only the language model. Recipes keep the complete VLM so their
         # quantizer rules can target vision and language components in one state.
         if args.recipe is None:
-            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                full_model
-            )
+            extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
             if extracted_lm is not None:
                 language_model = extracted_lm
-                model_type = extracted_model_type
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -739,12 +739,9 @@ def load_model(args: argparse.Namespace):
             # would leave modelopt state on the ancestors and make auto_quantize() fail with
             # "multiple modelopt states".
             if args.recipe is None:
-                extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
-                    full_model
-                )
+                extracted_lm = extract_and_prepare_language_model_from_vl(full_model)
                 if extracted_lm is not None:
                     language_model = extracted_lm
-                    model_type = extracted_model_type
 
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
@@ -863,7 +860,11 @@ def mono_quantize(
         warnings.warn("Skipping quantization: model is already quantized.")
 
 
-def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
+def assert_layerwise_export_compatible(
+    args: argparse.Namespace,
+    full_model: torch.nn.Module,
+    algorithm: str | dict | list | None,
+) -> None:
     """Refuse layerwise export before calibration starts, not after the run is paid for.
 
     Layerwise export writes each layer's shard during calibration and finishes the checkpoint
@@ -906,7 +907,7 @@ def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
         ),
         (
             "an encoder-decoder model_type (t5/bart/whisper)",
-            getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
+            is_enc_dec(hf_model_type(full_model)),
             "export_tensorrt_llm_checkpoint()",
         ),
     ):
@@ -924,16 +925,12 @@ def export_quantized(
     language_model: torch.nn.Module,
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
-    default_padding_side,
-    default_pad_token,
+    default_padding_side: str | None,
+    default_pad_token: str | None,
 ):
     # Not inference_mode: the FSDP2 path gathers full params in this context and
     # inference tensors break the subsequent state_dict() -> param.detach().
     with torch.no_grad():
-        if model_type is None:
-            print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
-            model_type = f"unknown:{type(language_model).__name__}"
-
         export_path = args.export_path
 
         # Early exit for speculative decoding checkpoints
@@ -953,7 +950,7 @@ def export_quantized(
 
         start_time = time.time()
         is_tensorrt_llm_export = (
-            model_type in ["t5", "bart", "whisper"]
+            is_enc_dec(model_type)
             or args.sparsity_fmt != "dense"
             or "int8_smoothquant" in args.qformat
         )
@@ -969,9 +966,9 @@ def export_quantized(
             # Move meta tensor back to device before exporting.
             remove_hook_from_module(language_model, recurse=True)
 
+            # The deprecated exporter detects its TensorRT-LLM decoder_type from the model class.
             export_tensorrt_llm_checkpoint(
                 language_model,
-                model_type,
                 export_dir=export_path,
                 inference_tensor_parallel=args.inference_tensor_parallel,
                 inference_pipeline_parallel=args.inference_pipeline_parallel,
@@ -1082,8 +1079,9 @@ def pre_quantize(
     # Generate preview before quantization
     if args.skip_generate:
         generated_ids_before_ptq = None
-    elif model_type == "deepseek":
-        # DeepSeek generation may go OOM, so we skip it
+    elif model_type is not None and model_type.startswith(("deepseek", "kimi_k2")):
+        # DeepSeek generation may go OOM, so we skip it. Kimi-K2 (kimi_k2) and Kimi-K2.5
+        # (kimi_k25) are DeepSeek-V3 architectures under their own model_type.
         generated_ids_before_ptq = None
     elif model_type == "nemotron_h":
         # NemotronH (SSM/Mamba hybrid) modeling code does not work with accelerate's big model inference
@@ -1117,13 +1115,13 @@ def post_quantize(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     processor: ProcessorMixin | None,
-    preview_input_ids,
-    preview_attention_mask,
-    generated_ids_before_ptq,
-    is_nemotron_vl_model,
-    first_text_speech_dataset,
-    default_padding_side,
-    default_pad_token,
+    preview_input_ids: torch.Tensor | None,
+    preview_attention_mask: torch.Tensor | None,
+    generated_ids_before_ptq: Any,
+    is_nemotron_vl_model: bool,
+    first_text_speech_dataset: str | None,
+    default_padding_side: str | None,
+    default_pad_token: str | None,
     calib_dataloader: DataLoader,
 ):
     """
@@ -1147,6 +1145,7 @@ def post_quantize(
             default_pad_token,
         )
         return
+    assert preview_input_ids is not None, "pre_quantize returns preview inputs for this path"
 
     if args.verbose and args.dist_state.is_main:
         try:
@@ -1161,7 +1160,7 @@ def post_quantize(
     generated_ids_after_ptq = None
     if generated_ids_before_ptq is None:
         pass
-    elif model_type != "llama4" and not is_nemotron_vl_model:
+    elif model_type not in ("llama4", "llama4_text") and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         # This is a best-effort sanity check: e.g. a `device_map="auto"` load that offloads
         # part of the model to CPU (seen on unified-memory single-GPU hosts) can make a

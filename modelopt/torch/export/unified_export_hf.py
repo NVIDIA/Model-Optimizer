@@ -462,7 +462,6 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
-    model_type = type(model).__name__.lower()
     model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
@@ -499,7 +498,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         # Check if this is a VL model that needs special input handling
         is_vl_model = is_multimodal_model(model)
 
-        if model_type.startswith("whisper"):
+        if model_hf_type == "whisper":
             # For Whisper models, we need to pass a fake input with the specific sequence length
             from transformers import AutoFeatureExtractor
 
@@ -508,7 +507,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        if is_vl_model and "nemotron" in model_type:
+        # Nemotron VL remote-code model_types (NemotronH_Nano_VL_V2, Llama_Nemotron_Nano_VL,
+        # nemotron_parse) are mixed-case, so match case-insensitively.
+        if is_vl_model and "nemotron" in (model_hf_type or "").lower():
             # For Nemotron VL models, run optimization on just the language model/decoder.
             # This avoids needing pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
@@ -522,7 +523,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                    f"Cannot extract language_model from Nemotron VL model (type: {model_hf_type}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )
