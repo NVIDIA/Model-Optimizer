@@ -1166,7 +1166,7 @@ def create_test_model_with_dq_transpose_matmul(
     out_features: int,
     in_features: int,
     *,
-    perm: list[int] | None = (1, 0),
+    perm: tuple[int, ...] | None = (1, 0),
     q_axis: int = 0,
     transpose: bool = True,
     declare_axis: bool = True,
@@ -1226,14 +1226,33 @@ def create_test_model_with_dq_transpose_matmul(
 
 
 class TestQdqToDqTranspose:
-    """qdq_to_dq must trace a Transpose between DequantizeLinear and its consumer."""
+    """qdq_to_dq must trace a Transpose and follow the Q/DQ pair's own quantization axis."""
 
-    # out == in is the case a naive fix gets wrong silently: the scale shape still matches
-    # the untransposed axis, so nothing raises and the weight is quantized along the wrong one.
-    @pytest.mark.parametrize(("out_features", "in_features"), [(96, 32), (32, 32)])
-    def test_dq_transpose_matmul_matches_qdq(self, out_features, in_features):
-        model = create_test_model_with_dq_transpose_matmul(out_features, in_features)
-        inputs = {"input": np.random.RandomState(11).randn(3, in_features).astype(np.float32)}
+    # Square weights are the dangerous shape: the scale length matches either axis, so a
+    # wrong axis passes validation and silently changes the model's output.
+    @pytest.mark.parametrize(
+        ("out_features", "in_features", "q_axis", "transpose", "declare_axis"),
+        [
+            (96, 32, 0, True, True),
+            (32, 32, 0, True, True),
+            (32, 32, 0, False, True),
+            (32, 32, 1, True, True),
+            (32, 32, 1, True, False),
+        ],
+    )
+    def test_conversion_matches_qdq(
+        self, out_features, in_features, q_axis, transpose, declare_axis
+    ):
+        """The DequantizeLinear left in the graph dequantizes along its own axis."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features,
+            in_features,
+            q_axis=q_axis,
+            transpose=transpose,
+            declare_axis=declare_axis,
+        )
+        rows = in_features if transpose else out_features
+        inputs = {"input": np.random.RandomState(11).randn(3, rows).astype(np.float32)}
 
         def run(m):
             return ort.InferenceSession(
@@ -1263,18 +1282,38 @@ class TestQdqToDqTranspose:
         actual = next(t for t in converted.graph.initializer if t.name == "weight")
         assert np.array_equal(numpy_helper.to_array(actual), expected)
 
-    # Square weights are the dangerous shape: the scale length matches either axis, so an
-    # axis mismatch passes validation and silently changes the model's output.
-    @pytest.mark.parametrize(
-        ("q_axis", "transpose", "declare_axis"),
-        [(0, False, True), (1, True, True), (1, True, False)],
-    )
-    def test_conversion_follows_the_source_qdq_axis(self, q_axis, transpose, declare_axis):
-        """The retained DequantizeLinear dequantizes along its axis, declared or defaulted."""
-        model = create_test_model_with_dq_transpose_matmul(
-            32, 32, q_axis=q_axis, transpose=transpose, declare_axis=declare_axis
+    def test_one_element_scale_is_not_per_axis(self):
+        """A one-element scale is broadcast over the whole weight, not indexed per axis."""
+        # A single-output-channel Conv: reading the (1,) scale as per-axis would pick the
+        # DQ's default axis 1 and reject a graph that converts fine.
+        weight = np.random.RandomState(3).randn(1, 3, 3, 3).astype(np.float32)
+        graph = helper.make_graph(
+            nodes=[
+                helper.make_node(
+                    "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q"
+                ),
+                helper.make_node(
+                    "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq"
+                ),
+                helper.make_node(
+                    "Conv", ["input", "w_dq"], ["output"], name="conv", kernel_shape=[3, 3]
+                ),
+            ],
+            name="one_element_scale",
+            inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 8, 8])],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, 6, 6])],
+            initializer=[
+                numpy_helper.from_array(weight, "weight"),
+                numpy_helper.from_array(
+                    np.array([np.abs(weight).max() / 127.0], np.float32), "w_scale"
+                ),
+                numpy_helper.from_array(np.array([0], np.int8), "w_zp"),
+            ],
         )
-        inputs = {"input": np.random.RandomState(11).randn(3, 32).astype(np.float32)}
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+        model.ir_version = 10
+        onnx.checker.check_model(model)
+        inputs = {"input": np.random.RandomState(5).randn(1, 3, 8, 8).astype(np.float32)}
 
         def run(m):
             return ort.InferenceSession(
@@ -1284,6 +1323,15 @@ class TestQdqToDqTranspose:
         expected = run(model)
         converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
         assert np.array_equal(run(converted), expected)
+
+    def test_disagreeing_qdq_axes_raise(self):
+        """Following the DQ while the Q declares another axis would change the output."""
+        model = create_test_model_with_dq_transpose_matmul(32, 32, q_axis=0, transpose=False)
+        q_node = next(node for node in model.graph.node if node.name == "w_q")
+        next(attr for attr in q_node.attribute if attr.name == "axis").i = 1
+
+        with pytest.raises(RuntimeError, match="disagrees with DequantizeLinear axis"):
+            qdq_to_dq(model)
 
 
 class TestQdqToDqValidation:

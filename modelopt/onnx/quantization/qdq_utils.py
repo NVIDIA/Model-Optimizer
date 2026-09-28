@@ -577,6 +577,11 @@ def _get_scale_and_zp(
     return scale, zp
 
 
+def _quantization_axis(node: onnx.NodeProto) -> int:
+    """Returns a Q/DQ node's quantization axis; ONNX defaults the attribute to 1."""
+    return next((attr.i for attr in node.attribute if attr.name == "axis"), 1)
+
+
 def _get_successive_consumers(
     node: onnx.NodeProto, tensor_consumers: dict[str, list[onnx.NodeProto]]
 ) -> tuple[onnx.NodeProto, onnx.NodeProto]:
@@ -666,12 +671,17 @@ def _convert_weight(
     if op_type not in axis_map:
         raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
 
-    if scale_array.ndim == 1:
-        # Per-axis: the DequantizeLinear left in the graph dequantizes along the axis it
-        # declares -- ONNX defaults that to 1 -- and that axis already indexes the stored
-        # weight, whatever the consumer's layout is. Quantize along the same one.
-        axis = (1 if dq_axis is None else dq_axis) % len(weight_shape)
+    if scale_array.size > 1:
+        # The DequantizeLinear left in the graph dequantizes along the axis it declares,
+        # and that axis indexes the stored weight whatever the consumer's layout is.
+        axis = 1 if dq_axis is None else dq_axis
+        if not -len(weight_shape) <= axis < len(weight_shape):
+            raise ValueError(
+                f"Quantization axis {axis} is out of range for weight shape {weight_shape}"
+            )
+        axis %= len(weight_shape)
     else:
+        # A single scale is broadcast over the whole weight, so only the check below cares.
         axis = axis_map[op_type]
 
     if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
@@ -768,8 +778,15 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             # Validate Q->DQ->Op pattern and get consumers
             dq_node, quantized_node = _get_successive_consumers(node, tensor_consumers)
 
-            # Convert weight
-            dq_axis = next((attr.i for attr in dq_node.attribute if attr.name == "axis"), None)
+            # Convert weight. The conversion follows the DQ and drops the Q, so a per-axis
+            # pair that disagrees on the axis would silently change the output.
+            dq_axis, q_axis = _quantization_axis(dq_node), _quantization_axis(node)
+            if int(np.prod(scale.dims)) > 1 and (
+                q_axis % weight_array.ndim != dq_axis % weight_array.ndim
+            ):
+                raise ValueError(
+                    f"QuantizeLinear axis {q_axis} disagrees with DequantizeLinear axis {dq_axis}"
+                )
             scaled = _convert_weight(weight_array, scale, zp, quantized_node, dq_axis=dq_axis)
 
             # Create and update new weight tensor
