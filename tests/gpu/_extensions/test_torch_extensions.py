@@ -339,7 +339,7 @@ def test_cuda_ext_q8_0_dequantizes_with_small_error():
     weight = torch.randn((4, 32), device="cuda", dtype=torch.bfloat16, generator=_generator())
 
     packed = extension.q8_0_pack(weight).cpu()
-    d = packed[:, :2].contiguous().view(torch.float16).float()
+    d = packed[:, :2].contiguous().view(torch.float16).float().flatten()
     quants = packed[:, 2:].contiguous().view(torch.int8).float()
     decoded = d.unsqueeze(1) * quants
     cpu_weight = weight.cpu().float()
