@@ -102,6 +102,105 @@ def _patch_vllm_imports(monkeypatch, modules):
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
 
+def _launcher_import_modules():
+    """Build isolated vLLM module stubs for launcher import compatibility tests."""
+    entrypoints = SimpleNamespace(
+        current_run_server=Mock(name="current_run_server"),
+        legacy_run_server=Mock(name="legacy_run_server"),
+        current_arg_parser=Mock(name="current_arg_parser"),
+        legacy_arg_parser=Mock(name="legacy_arg_parser"),
+    )
+    modules = {
+        "uvloop": SimpleNamespace(run=Mock()),
+        "vllm": SimpleNamespace(__version__="0.30.0"),
+        "vllm_mlflow_utils": SimpleNamespace(
+            MLFLOW_ENV_VARS=set(),
+            add_mlflow_args=Mock(),
+            resolve_mlflow_args=Mock(),
+        ),
+        "vllm.entrypoints.launchers.api_server.entry": SimpleNamespace(
+            run_server=entrypoints.current_run_server
+        ),
+        "vllm.entrypoints.openai.api_server": SimpleNamespace(
+            run_server=entrypoints.legacy_run_server
+        ),
+        "vllm.entrypoints.cli.serve": SimpleNamespace(
+            make_arg_parser=entrypoints.current_arg_parser
+        ),
+        "vllm.entrypoints.openai.cli_args": SimpleNamespace(
+            make_arg_parser=entrypoints.legacy_arg_parser
+        ),
+        "vllm.utils.argparse_utils": SimpleNamespace(FlexibleArgumentParser=Mock()),
+        "vllm.executor.ray_distributed_executor": SimpleNamespace(
+            RayDistributedExecutor=SimpleNamespace(ADDITIONAL_ENV_VARS=set())
+        ),
+    }
+    return modules, entrypoints
+
+
+@pytest.mark.parametrize(
+    ("run_server_missing", "arg_parser_missing", "uses_legacy"),
+    [
+        (None, None, False),
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.cli.serve",
+            True,
+        ),
+        ("vllm.entrypoints", "vllm.entrypoints", True),
+    ],
+    ids=("current", "legacy", "missing-parent"),
+)
+def test_vllm_serve_entrypoint_layouts(
+    monkeypatch, run_server_missing, arg_parser_missing, uses_legacy
+):
+    """Resolve current entrypoints and valid legacy fallbacks."""
+    modules, entrypoints = _launcher_import_modules()
+    if run_server_missing is not None:
+        modules["vllm.entrypoints.launchers.api_server.entry"] = ModuleNotFoundError(
+            name=run_server_missing
+        )
+    if arg_parser_missing is not None:
+        modules["vllm.entrypoints.cli.serve"] = ModuleNotFoundError(name=arg_parser_missing)
+    _patch_vllm_imports(monkeypatch, modules)
+
+    launcher = _load_example_module("vllm_serve_fakequant")
+
+    expected_run_server = (
+        entrypoints.legacy_run_server if uses_legacy else entrypoints.current_run_server
+    )
+    expected_arg_parser = (
+        entrypoints.legacy_arg_parser if uses_legacy else entrypoints.current_arg_parser
+    )
+    assert launcher.run_server is expected_run_server
+    assert launcher.make_arg_parser is expected_arg_parser
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "fallback"),
+    [
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.openai.api_server",
+        ),
+        ("vllm.entrypoints.cli.serve", "vllm.entrypoints.openai.cli_args"),
+    ],
+    ids=("run-server", "argument-parser"),
+)
+def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch, entrypoint, fallback):
+    """Do not replace a missing entrypoint dependency with a fallback import error."""
+    modules, _ = _launcher_import_modules()
+    dependency_error = ModuleNotFoundError(name="vllm_dependency")
+    modules[entrypoint] = dependency_error
+    modules[fallback] = AssertionError("fallback must not be imported")
+    _patch_vllm_imports(monkeypatch, modules)
+
+    with pytest.raises(ModuleNotFoundError) as raised:
+        _load_example_module("vllm_serve_fakequant")
+
+    assert raised.value is dependency_error
+
+
 def test_get_unpadded_input_ids_handles_left_and_right_padding():
     module = _load_example_module("vllm_ptq_utils")
     batch = {
@@ -110,6 +209,22 @@ def test_get_unpadded_input_ids_handles_left_and_right_padding():
     }
 
     assert module._get_unpadded_input_ids(batch) == [[11, 12], [21, 22]]
+
+
+def test_get_unpadded_input_ids_preserves_ragged_batches():
+    """Keep variable-length Python sequences and apply masks per sequence."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    assert module._get_unpadded_input_ids({"input_ids": [[11, 12], [21]]}) == [
+        [11, 12],
+        [21],
+    ]
+    assert module._get_unpadded_input_ids(
+        {
+            "input_ids": [[0, 11, 12], [21, 0]],
+            "attention_mask": [[0, 1, 1], [1, 0]],
+        }
+    ) == [[11, 12], [21]]
 
 
 def test_get_unpadded_input_ids_rejects_empty_sequence():
