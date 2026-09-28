@@ -37,14 +37,25 @@ def test_q8_0_zero_block_has_canonical_zero_encoding():
 
 def test_q8_0_uses_roundf_ties_away_from_zero():
     weight = torch.zeros((1, 32), dtype=torch.float32)
+    below_half = torch.nextafter(torch.tensor(0.5), torch.tensor(0.0))
     weight[0, :5] = torch.tensor([127.0, 0.5, -0.5, 1.5, -1.5])
+    weight[0, 5:7] = torch.stack((below_half, -below_half))
 
     packed, shape = quantize_q8_0(weight)
 
     assert packed[0, 0, :2].contiguous().view(torch.float16).item() == 1.0
-    assert packed[0, 0, 2:7].contiguous().view(torch.int8).tolist() == [127, 1, -1, 2, -2]
+    assert packed[0, 0, 2:9].contiguous().view(torch.int8).tolist() == [
+        127,
+        1,
+        -1,
+        2,
+        -2,
+        0,
+        0,
+    ]
     expected = weight.clone()
     expected[0, 1:5] = torch.tensor([1.0, -1.0, 2.0, -2.0])
+    expected[0, 5:7] = 0
     assert torch.equal(dequantize_q8_0(packed, shape, dtype=torch.float32), expected)
 
 

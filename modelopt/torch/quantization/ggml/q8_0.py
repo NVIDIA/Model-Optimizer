@@ -60,7 +60,12 @@ def _encode_blocks(blocks: torch.Tensor) -> torch.Tensor:
     inverse = torch.where(d_float > 0, d_float.reciprocal(), torch.zeros_like(d_float))
     normalized = x * inverse.unsqueeze(1)
     # C roundf, used by the canonical Q8_0 encoder, rounds half-way cases away from zero.
-    rounded = normalized.sign() * (normalized.abs() + 0.5).floor()
+    magnitude = normalized.abs()
+    rounded = normalized.sign() * torch.where(
+        magnitude.frac() == 0.5,
+        magnitude.floor() + 1,
+        magnitude.round(),
+    )
     quants = rounded.clamp(-_Q8_0_MAX_QUANT, _Q8_0_MAX_QUANT).to(torch.int8)
 
     packed = torch.empty((block_count, Q8_0_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
