@@ -51,6 +51,7 @@ from modelopt.torch.export.quant_utils import (
     uses_iq_quantization,
 )
 from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
     NVFP4StaticQuantizer,
     SequentialQuantizer,
     TensorQuantizer,
@@ -157,6 +158,18 @@ def test_uses_iq_quantization_tolerates_sequential_quantizer():
     assert not hasattr(layer.weight_quantizer, "num_bits")
 
     assert not uses_iq_quantization(torch.nn.Sequential(layer))
+
+
+def test_uses_iq_quantization_sees_grouped_q8_0_quantizer():
+    module = torch.nn.Module()
+    module.weight0 = torch.nn.Parameter(torch.empty(256, 256))
+    quantizer = TensorQuantizer()
+    quantizer.set_from_attribute_config(
+        {"num_bits": "q8_0", "block_sizes": {-1: 32}, "backend": "ggml"}
+    )
+    module.weight_quantizer = GroupedQuantizer(quantizer)
+
+    assert uses_iq_quantization(module)
 
 
 def test_iq_export_rejects_enabled_input_quantizer():

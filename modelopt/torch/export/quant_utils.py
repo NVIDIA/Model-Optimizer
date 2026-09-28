@@ -49,7 +49,12 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.utils import clear_cuda_cache
 
-from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import (
+    GroupedQuantizer,
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
     GGML_FORMATS,
@@ -453,12 +458,16 @@ def uses_iq_quantization(module) -> bool:
     This reads ``num_bits`` directly rather than resolving each layer's full format, so an
     unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
 
-    Known gap, shared with ``get_quantization_format``: ``weight_attr_names`` yields nothing for
-    a TEGroupedLinear, whose parameters are ``weight0..N`` while its quantizer is a single
-    ``GroupedQuantizer`` under ``weight_quantizer``. Neither function sees such a module, so an
-    experts-only GGML model reports no format at all -- not just here. Closing it belongs in
-    ``weight_attr_names``, where it affects every format, rather than in this helper.
+    A TEGroupedLinear stores its per-expert quantizers in one ``GroupedQuantizer`` rather than
+    beside its ``weight0..N`` parameters, so inspect that container directly.
     """
+    grouped_quantizer = getattr(module, "weight_quantizer", None)
+    if isinstance(grouped_quantizer, GroupedQuantizer) and any(
+        quantizer.is_enabled and getattr(quantizer, "num_bits", None) in GGML_FORMATS
+        for quantizer in grouped_quantizer
+    ):
+        return True
+
     for weight_name in weight_attr_names(module):
         weight_quantizer = representative_weight_quantizer(module, weight_name)
         # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never GGML --
