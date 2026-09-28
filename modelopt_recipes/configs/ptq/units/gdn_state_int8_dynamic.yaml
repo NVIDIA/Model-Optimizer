@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
-
-from .config import *
-from .decode import *
-from .decode_prefill import *
-from .kda import *
-from .prefill import *
+# Quantizer-only INT8 unit; general/ptq/gdn_state_int8_dynamic pairs it with Hadamard.
+# The execution policy selects state scale groups and chunk/token/replay boundaries.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      axis: [0, 1]
+      type: dynamic
+      pass_through_bwd: true
