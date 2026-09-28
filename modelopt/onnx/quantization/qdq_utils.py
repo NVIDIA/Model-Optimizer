@@ -596,20 +596,34 @@ def _get_quantization_axis(node: onnx.NodeProto) -> int:
     return axis_map[op_type]
 
 
-def _get_dq_consumer_and_op(
+def _get_dq_consumers_ops(
     dq_node: onnx.NodeProto,
     tensor_consumers: dict[str, list[onnx.NodeProto]]
-) -> onnx.NodeProto:
-    """Get operation consuming DQ output. Handles Cast chain."""
-    quantized_node = tensor_consumers.get(dq_node.output[0], [None])[0]
-    if not quantized_node:
+) -> list[onnx.NodeProto]:
+    """Get all operations consuming DQ output. Handles Cast chains.
+
+    Returns a list of operation nodes that consume the DQ output, handling
+    Cast chains by following them to their final consumers.
+    """
+    consumers = tensor_consumers.get(dq_node.output[0], [])
+    if not consumers:
         raise ValueError(f"No consumer found for {dq_node.name}")
-    if quantized_node.op_type == "Cast":
-        next_node = tensor_consumers.get(quantized_node.output[0], [None])[0]
-        if not next_node:
-            raise ValueError(f"No consumer found after Cast for {quantized_node.name}")
-        quantized_node = next_node
-    return quantized_node
+
+    quantized_nodes = []
+    for consumer in consumers:
+        if consumer.op_type == "Cast":
+            # Follow Cast chain to find actual consumers
+            cast_consumers = tensor_consumers.get(consumer.output[0], [])
+            if not cast_consumers:
+                raise ValueError(f"No consumer found after Cast for {consumer.name}")
+            quantized_nodes.extend(cast_consumers)
+        else:
+            quantized_nodes.append(consumer)
+
+    if not quantized_nodes:
+        raise ValueError(f"No valid operation found for {dq_node.name}")
+
+    return quantized_nodes
 
 
 def _get_successive_consumers(
@@ -633,8 +647,13 @@ def _get_successive_consumers(
     if not dq_node or dq_node.op_type != "DequantizeLinear":
         raise ValueError(f"Invalid consumer for {node.name}")
 
-    quantized_node = _get_dq_consumer_and_op(dq_node, tensor_consumers)
-    return dq_node, quantized_node
+    quantized_nodes = _get_dq_consumers_ops(dq_node, tensor_consumers)
+    if len(quantized_nodes) > 1:
+        raise ValueError(
+            f"Expected single consumer for DQ {dq_node.name} in single-consumer path, "
+            f"got {len(quantized_nodes)}"
+        )
+    return dq_node, quantized_nodes[0]
 
 
 def _convert_weight(
@@ -798,17 +817,21 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                         f"DequantizeLinear {dq.name} has zero-point but QuantizeLinear {node.name} does not."
                     )
 
-            # Get quantized_node for each DQ (with Cast handling)
-            quantized_nodes = [_get_dq_consumer_and_op(dq, tensor_consumers) for dq in dq_consumers]
+            # Get quantized_nodes for each DQ (with Cast handling)
+            # Each DQ may have multiple consumers (fan-out), so we get all
+            all_quantized_nodes = []
+            for dq in dq_consumers:
+                dq_quantized_nodes = _get_dq_consumers_ops(dq, tensor_consumers)
+                all_quantized_nodes.extend(dq_quantized_nodes)
 
-            # Verify axis compatibility across all branches
-            axes = {_get_quantization_axis(qn) for qn in quantized_nodes}
+            # Verify axis compatibility across ALL branches (all DQs and their consumers)
+            axes = {_get_quantization_axis(qn) for qn in all_quantized_nodes}
             if len(axes) > 1:
                 raise ValueError(f"Shared QDQ {node.name} feeds incompatible axes: {axes}")
 
             # Convert weight ONCE using first branch's quantized_node
             scale, zp = _get_scale_and_zp(node, initializers, tensor_producers)
-            quantized_node = quantized_nodes[0]
+            quantized_node = all_quantized_nodes[0]
             scaled = _convert_weight(weight_array, scale, zp, quantized_node)
 
             # Create and update new weight tensor

@@ -1185,7 +1185,7 @@ class TestQdqToDqValidation:
             num_dq: Number of DQ consumers
             dq_scale_names: List of scale names for each DQ (default: all use "scale")
             dq_zp_names: List of zero-point names for each DQ (default: all use "zp")
-            add_op_type: Operation type after DQ ("MatMul" or "Gemm")
+            add_op_type: Operation type after DQ ("MatMul", "Gemm", "MixedMatMulGemmTransB1")
         """
         if dq_scale_names is None:
             dq_scale_names = ["scale"] * num_dq
@@ -1227,8 +1227,12 @@ class TestQdqToDqValidation:
                 op_node = helper.make_node("MatMul", [input_name, dq_out], [out_name], f"matmul{i}")
             elif add_op_type == "Gemm":
                 op_node = helper.make_node("Gemm", [input_name, dq_out], [out_name], f"gemm{i}", transB=0)
-            elif add_op_type == "GemmTransB1":
-                op_node = helper.make_node("Gemm", [input_name, dq_out], [out_name], f"gemm{i}", transB=1)
+            elif add_op_type == "MixedMatMulGemmTransB1":
+                # First branch: MatMul (axis=1), Second branch: Gemm(transB=1) (axis=0)
+                if i == 0:
+                    op_node = helper.make_node("MatMul", [input_name, dq_out], [out_name], f"matmul{i}")
+                else:
+                    op_node = helper.make_node("Gemm", [input_name, dq_out], [out_name], f"gemm{i}", transB=1)
             else:
                 raise ValueError(f"Unknown add_op_type: {add_op_type}")
             nodes.append(op_node)
@@ -1276,23 +1280,23 @@ class TestQdqToDqValidation:
 
     def test_shared_qdq_matmul_gemm_transb1(self):
         """Test shared QDQ with MatMul and Gemm(transB=1) - incompatible axes."""
-        model = self._create_shared_qdq_model(num_dq=2, add_op_type="GemmTransB1")
+        model = self._create_shared_qdq_model(num_dq=2, add_op_type="MixedMatMulGemmTransB1")
 
-        with pytest.raises(ValueError, match="incompatible axes"):
+        with pytest.raises(RuntimeError, match=r"incompatible axes"):
             qdq_to_dq(model)
 
     def test_shared_qdq_scale_mismatch(self):
         """Test shared QDQ where DQs have different scales."""
         model = self._create_shared_qdq_model(num_dq=2, dq_scale_names=["scale", "scale2"])
 
-        with pytest.raises(ValueError, match=r"scale input.*differs"):
+        with pytest.raises(RuntimeError, match=r"scale input.*differs"):
             qdq_to_dq(model)
 
     def test_shared_qdq_zp_mismatch(self):
         """Test shared QDQ where DQs have different zero points."""
         model = self._create_shared_qdq_model(num_dq=2, dq_zp_names=["zp", "zp2"])
 
-        with pytest.raises(ValueError, match=r"zero-point input.*differs"):
+        with pytest.raises(RuntimeError, match=r"zero-point input.*differs"):
             qdq_to_dq(model)
 
     def test_shared_qdq_missing_zp(self):
@@ -1361,7 +1365,7 @@ class TestQdqToDqValidation:
         )
         model = helper.make_model(graph)
 
-        with pytest.raises(ValueError, match="zero-point"):
+        with pytest.raises(RuntimeError, match="zero-point"):
             qdq_to_dq(model)
 
     def test_shared_qdq_mixed_consumers(self):
@@ -1388,7 +1392,7 @@ class TestQdqToDqValidation:
         )
         model = helper.make_model(graph)
 
-        with pytest.raises(ValueError, match="non-DequantizeLinear consumers"):
+        with pytest.raises(RuntimeError, match="non-DequantizeLinear consumers"):
             qdq_to_dq(model)
 
     def test_single_consumer_regression(self):
