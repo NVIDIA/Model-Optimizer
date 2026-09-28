@@ -41,9 +41,11 @@ def _block(key):
 def _render_gate(text, limit_samples):
     # Mirrors the Jinja semantics of the single gate the template uses.
     return GATE.sub(
-        lambda m: ""
-        if limit_samples is None
-        else m.group(1).replace("{{config.params.limit_samples}}", str(limit_samples)),
+        lambda m: (
+            ""
+            if limit_samples is None
+            else m.group(1).replace("{{config.params.limit_samples}}", str(limit_samples))
+        ),
         text,
     )
 
