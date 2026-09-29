@@ -46,8 +46,9 @@ Three reverse primitives cover the conversion_mapping cases:
   ``input_scale`` are duplicated to each part (they are per-tensor and shared).
 * **Merge** — re-fuse tensors split by a conversion mapping (e.g. RADIO
   ``attention.{q,k,v}_proj`` -> ``attn.qkv``). Complete tensor groups are concatenated
-  in source-pattern order and the conversion's sub-model scope is preserved. A merge
-  with per-tensor scalar quantization state is ambiguous and triggers the safe fallback.
+  in source-pattern order and the conversion's sub-model scope is preserved. Only
+  unquantized merges are supported; any companion quantization scale triggers the
+  safe fallback because concatenating scales alone cannot preserve quantization semantics.
 
 MoE experts need only **Rename**: ModelOpt's export already expands the fused,
 stacked in-memory experts (``experts.gate_up_proj`` of shape ``[E, 2F, H]``) into
@@ -79,14 +80,13 @@ __all__ = [
 
 # Tensor leaves that belong to a single quantized linear module. A rename of the
 # parent module path applies uniformly to all of these.
-_LEAF_SUFFIXES = (
-    ".weight",
+_QUANT_STATE_SUFFIXES = (
     ".weight_scale",
     ".weight_scale_2",
     ".weight_scale_inv",
     ".input_scale",
-    ".bias",
 )
+_LEAF_SUFFIXES = (".weight", *_QUANT_STATE_SUFFIXES, ".bias")
 
 # Leaves that are per-tensor scalars (0-d) and must be *duplicated*, not split, when
 # a fused module is un-fused.
@@ -132,7 +132,7 @@ class SplitRule:
 
 @dataclass(frozen=True)
 class _MergeRule:
-    """Reverse of a ``Chunk`` conversion: concatenate a complete tensor group."""
+    """Internal reverse of ``Chunk``, retaining the live HF converter for scoped matching."""
 
     converter: Any
     dim: int
@@ -200,7 +200,8 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
     if not groups:
         raise QuantConversionUnsupportedError(
             f"merge rule for {source_patterns} matched no state-dict key "
-            f"(scope_prefix={getattr(converter, 'scope_prefix', None)!r})"
+            f"(scope_prefix={getattr(converter, 'scope_prefix', None)!r}, "
+            f"base_model_prefix={getattr(converter, 'base_model_prefix', None)!r})"
         )
 
     for target_key, sources in groups.items():
@@ -211,9 +212,14 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
             )
         source_keys = [sources[pattern] for pattern in source_patterns]
         tensors = [state_dict[key] for key in source_keys]
+        if target_key.endswith(_QUANT_STATE_SUFFIXES):
+            raise QuantConversionUnsupportedError(
+                f"cannot merge quantization state into '{target_key}'; "
+                "only unquantized tensor groups are supported"
+            )
         if any(tensor.dim() == 0 for tensor in tensors):
             raise QuantConversionUnsupportedError(
-                f"cannot merge per-tensor scalar quantization state into '{target_key}'"
+                f"cannot merge scalar tensors into '{target_key}'"
             )
         dtypes = {tensor.dtype for tensor in tensors}
         if len(dtypes) > 1:
@@ -274,6 +280,9 @@ def apply_reverse_rules(
 
     Splits and merges run on the in-memory (post-conversion) names; renames then map
     the resulting keys back to the original hub names. Renames are applied in order.
+    ``merge_rules`` is an internal hook for model-derived rules: unlike the public
+    rename/split descriptors, each rule retains a live transformers converter for
+    scoped matching. Call :func:`revert_weight_conversion_quant_aware` to derive them.
     """
     out = dict(state_dict)
     for rule in split_rules:
@@ -307,7 +316,7 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
 
 
 def build_reverse_name_mapper(model):
-    """Build a ``str -> str`` mapper that applies the quant-aware reverse *rename* rules.
+    """Build a ``str -> str`` mapper for reverse renames and unquantized merges.
 
     The exported weight tensors are reverted to the original hub names by
     :func:`revert_weight_conversion_quant_aware`, but the quantization config's module
@@ -316,15 +325,16 @@ def build_reverse_name_mapper(model):
     post-conversion namespace -- so a deployment loader matching those patterns against
     the (reverted) hub-named modules finds no match, silently loads an excluded BF16
     layer as quantized, and fails. Applying the same rename rules to those name strings
-    keeps them aligned with the weights. Only the rename rules apply (tensor transforms
-    do not have a one-to-one name mapping).
+    keeps them aligned with the weights. Merge-source names also map to the fused module
+    so exact BF16 exclusions stay aligned. Quantized merges are rejected by the weight
+    conversion; splits have no single target name and are not mapped here.
 
     Returns ``None`` when no renaming applies. Raises
     :class:`QuantConversionUnsupportedError` when the mapping can't be reversed, so the
     caller can keep the in-memory names for BOTH weights and config (mutually consistent).
     """
-    _, _, rename_rules, _ = _build_reverse_rules(model)
-    if not rename_rules:
+    _, merge_rules, rename_rules, _ = _build_reverse_rules(model)
+    if not merge_rules and not rename_rules:
         return None
     compiled = _compile_rename_rules(rename_rules)
     # The rename patterns are anchored on full weight keys and use ``.`` (any char) as a
@@ -335,6 +345,8 @@ def build_reverse_name_mapper(model):
     _sentinel = ".\x00modelopt_name_sentinel"
 
     def _apply(text: str) -> str:
+        for rule in merge_rules:
+            text, _ = rule.converter.rename_source_key(text)
         return _apply_rename_rules(text, compiled)
 
     def _map(name: str) -> str:

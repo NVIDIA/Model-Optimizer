@@ -470,7 +470,8 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
     assert not any("language_model.visual" in k for k in reverted)
 
 
-def test_scoped_radio_qkv_converter_restores_hub_layout():
+@pytest.mark.parametrize("with_renames", [False, True])
+def test_scoped_radio_qkv_converter_restores_hub_layout(with_renames):
     """RADIO Q/K/V tensors are re-fused in scope before hub-name renames run."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: optional dependency, guarded by the importorskip above.
@@ -482,7 +483,8 @@ def test_scoped_radio_qkv_converter_restores_hub_layout():
     _set_scope_attr(radio_blocks, "base_model_prefix", "model")
     projector = WeightRenaming("mlp1", "vision_projector.mlp1")
 
-    model = types.SimpleNamespace(_weight_conversions=[qkv, radio_blocks, projector])
+    conversions = [qkv, radio_blocks, projector] if with_renames else [qkv]
+    model = types.SimpleNamespace(_weight_conversions=conversions)
 
     q = torch.full((2, 3), 1.0)
     k = torch.full((2, 3), 2.0)
@@ -499,12 +501,34 @@ def test_scoped_radio_qkv_converter_restores_hub_layout():
 
     out = revert_weight_conversion_quant_aware(model, sd)
 
-    qkv_key = "model.vision_model.radio_model.model.blocks.0.attn.qkv.weight"
+    vision_prefix = "model.vision_model."
+    block_prefix = vision_prefix + ("radio_model.model.blocks" if with_renames else "encoder.layer")
+    qkv_module = block_prefix + ".0.attn.qkv"
+    qkv_key = qkv_module + ".weight"
     assert torch.equal(out[qkv_key], torch.cat((q, k, v), dim=0))
-    assert "mlp1.0.weight" in out
+    assert ("mlp1.0.weight" if with_renames else "vision_projector.mlp1.0.weight") in out
     assert out["model.language_model.layers.0.attention.q_proj.weight"] is language_q
-    assert not any("model.vision_model.encoder" in key for key in out)
-    assert not any("vision_projector.mlp1" in key for key in out)
+    if with_renames:
+        assert not any("model.vision_model.encoder" in key for key in out)
+        assert not any("vision_projector.mlp1" in key for key in out)
+
+    mapper = build_reverse_name_mapper(model)
+    assert mapper is not None
+    language_module = "model.language_model.layers.0.attention.q_proj"
+    quant = {
+        "exclude_modules": [
+            f"{vision_prefix}encoder.layer.0.attention.{part}_proj" for part in ("q", "k", "v")
+        ],
+        "quantized_layers": {language_module: {"quant_algo": "FP8"}},
+    }
+    revert_quant_config_names(quant, mapper)
+    assert quant["exclude_modules"] == [qkv_module] * 3
+    assert quant["quantized_layers"] == {language_module: {"quant_algo": "FP8"}}
+    for suffix in ("*", ".*"):
+        assert mapper(vision_prefix + "encoder.layer.0.attention.q_proj" + suffix) == (
+            qkv_module + suffix
+        )
+    assert mapper(vision_prefix + "*") == vision_prefix + "*"
 
 
 def test_radio_merge_that_matches_no_keys_raises():
@@ -512,7 +536,10 @@ def test_radio_merge_that_matches_no_keys_raises():
     model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
     state_dict = {"language_model.layers.0.weight": torch.randn(2, 2)}
 
-    with pytest.raises(QuantConversionUnsupportedError, match="matched no state-dict key"):
+    with pytest.raises(
+        QuantConversionUnsupportedError,
+        match=r"matched no state-dict key .*scope_prefix=.*base_model_prefix=",
+    ):
         revert_weight_conversion_quant_aware(model, state_dict)
 
 
@@ -527,7 +554,7 @@ def test_radio_merge_that_matches_no_keys_raises():
         (
             "input_scale",
             (torch.tensor(1.0), torch.tensor(1.0), torch.tensor(1.0)),
-            "per-tensor scalar quantization state",
+            "cannot merge quantization state",
         ),
     ],
     ids=["mixed-dtype", "scalar-quantization-state"],
@@ -542,6 +569,33 @@ def test_radio_merge_rejects_unsafe_tensor_groups(leaf, tensors, message):
 
     with pytest.raises(QuantConversionUnsupportedError, match=message):
         revert_weight_conversion_quant_aware(model, state_dict)
+
+
+@pytest.mark.parametrize(
+    "leaf", ["input_scale", "weight_scale_2", "weight_scale", "weight_scale_inv"]
+)
+@pytest.mark.parametrize("shape", [(1,), (2, 1)])
+def test_radio_merge_rejects_quantization_state_without_mutating_input(leaf, shape):
+    """One-element and blocked scales must not be concatenated into a fused module."""
+    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    state_dict = {
+        f"vision_model.encoder.layer.0.attention.{part}_proj.weight": torch.ones(2, 3)
+        for part in ("q", "k", "v")
+    }
+    state_dict.update(
+        {
+            f"vision_model.encoder.layer.0.attention.{part}_proj.{leaf}": torch.ones(shape)
+            for part in ("q", "k", "v")
+        }
+    )
+    original = {key: tensor.clone() for key, tensor in state_dict.items()}
+
+    with pytest.raises(QuantConversionUnsupportedError, match="cannot merge quantization state"):
+        revert_weight_conversion_quant_aware(model, state_dict)
+
+    assert state_dict.keys() == original.keys()
+    for key, tensor in state_dict.items():
+        torch.testing.assert_close(tensor, original[key])
 
 
 def test_radio_merge_requires_converter_rename_source_key():
