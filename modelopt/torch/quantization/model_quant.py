@@ -265,8 +265,9 @@ def _check_indexer_k_quantization_took_effect(model: nn.Module, config: Quantize
         raise RuntimeError(
             "The quantization config enables indexer_k_quantizer, but no sparse-attention "
             f"indexer of this model ({', '.join(indexers)}) has an enabled one. Either the "
-            "indexer class of the installed vLLM / Megatron-Core version is not supported by "
-            "the ModelOpt indexer plugins, or a later config entry disabled the quantizer."
+            "ModelOpt indexer plugins do not support this model or the installed vLLM / "
+            "Megatron-Core version (supported models: see the configs/ptq/units/indexer_k_nvfp4 "
+            "recipe unit), or a later config entry disabled the quantizer."
         )
 
 

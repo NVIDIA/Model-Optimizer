@@ -15,7 +15,7 @@
 
 """Fake quantization of the sparse-attention indexer K cache in Megatron-Core.
 
-Covers ``DSAIndexer`` (DeepSeek-V3.2, GLM-5.x) and ``CSAIndexer`` (DeepSeek-V4).
+Covers ``CSAIndexer`` (DeepSeek-V4); GLM-5.3-Flash's k-pool indexer is not in Megatron-Core yet.
 ``indexer_k_quantizer`` fake-quantizes the key the indexer scores against, in the basis serving
 writes it into the indexer K cache. The name avoids the ``*[kv]_bmm_quantizer`` globs, so the
 KV-cache presets leave it disabled. The ModelOpt extra-state callbacks come from
@@ -34,33 +34,21 @@ from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 __all__ = []
 
 try:
-    from megatron.core.transformer.experimental_attention_variant.dsa import (
-        DSAIndexer,
-        rotate_activation,
-    )
-except ImportError:
-    DSAIndexer = rotate_activation = None
-
-try:
     from megatron.core.transformer.experimental_attention_variant.csa import CSAIndexer
-except ImportError:
-    CSAIndexer = None
+    from megatron.core.transformer.experimental_attention_variant.dsa import rotate_activation
+except ImportError:  # megatron-core without Compressed Sparse Attention
+    CSAIndexer = rotate_activation = None
 
 
 class _QuantMegatronIndexer(QuantModule):
-    """DSA / CSA lightning indexer with fake quantization of its key, the indexer K cache entry.
+    """DeepSeek-V4 CSA indexer with fake quantization of its key, the indexer K cache entry.
 
     ``indexer_k_quantizer`` is applied to the key returned by ``forward_before_topk``, which every
-    scoring path consumes, in the layout vLLM caches it for DeepSeek-V3.2/V4 and GLM-5: after norm
-    and RoPE, without Hadamard rotation, with interleaved RoPE pairs adjacent. The rotation hits q
-    and k alike, so it leaves the index scores unchanged: ``DSAIndexer`` must run with
-    ``dsa_indexer_rotate_activation`` off, and ``CSAIndexer``, which always rotates, has its key
-    rotated back around the QDQ (``rotate_activation`` is orthonormal and symmetric, so it is its
-    own inverse). ``DSAIndexer`` with ``dsa_indexer_rope_interleaved`` (GLM-5) returns the RoPE
-    dims as ``[even | odd]``; block-scaled formats (e.g. NVFP4) see the order, so the QDQ runs on
-    adjacent pairs. GLM-5.3-Flash, whose vLLM cache holds the rotated key, has no Megatron-Core
-    indexer yet. The indexer projections are TP-duplicated, so the amax only needs the DP/CP sync
-    of ``parallel_state``.
+    scoring path consumes, in the layout vLLM caches it: after norm and RoPE, without the Hadamard
+    rotation that the compressor applies. The rotation hits q and k alike, so it leaves the index
+    scores unchanged; the key is rotated back around the QDQ (``rotate_activation`` is orthonormal
+    and symmetric, so it is its own inverse). The indexer projections are TP-duplicated, so the amax
+    only needs the DP/CP sync of ``parallel_state``.
     """
 
     def _setup(self):
@@ -87,30 +75,12 @@ class _QuantMegatronIndexer(QuantModule):
         return super().forward(*args, **kwargs)
 
     def _quantize_key(self, k: torch.Tensor) -> torch.Tensor:
-        compressor = getattr(self, "compressor", None)  # CSAIndexer only
-        if compressor is None and self.config.dsa_indexer_rotate_activation:
-            raise ValueError(
-                "indexer_k_quantizer quantizes the DSA indexer key as vLLM caches it, without the "
-                "Hadamard rotation. Set dsa_indexer_rotate_activation=False: the rotation applies "
-                "to both q and k, so it does not change the index scores."
-            )
-        # CSAIndexer has no switch for its compressor's rotation: rotate the key back to the
-        # unrotated basis before the QDQ and rotate it again after.
-        rotated = compressor is not None and compressor.rotate
-        # CSAIndexer restores the adjacent pair layout itself (``mla_output_remove_interleaving``).
-        rope_split = compressor is None and getattr(
-            self.config, "dsa_indexer_rope_interleaved", False
-        )
-        rope_dim = self.qk_pos_emb_head_dim
+        # The compressor has no switch for its rotation: rotate the key back to the unrotated basis
+        # vLLM caches before the QDQ and rotate it again after.
+        rotated = self.compressor.rotate
         if rotated:  # rotate back (rotate_activation is its own inverse)
             k = rotate_activation(k)
-        if rope_split:  # [even | odd] -> adjacent pairs
-            pe, nope = k.split([rope_dim, k.shape[-1] - rope_dim], dim=-1)
-            k = torch.cat([torch.stack(pe.chunk(2, dim=-1), dim=-1).flatten(-2), nope], dim=-1)
         k = self.indexer_k_quantizer(k)
-        if rope_split:  # adjacent pairs -> [even | odd]
-            pe, nope = k.split([rope_dim, k.shape[-1] - rope_dim], dim=-1)
-            k = torch.cat([pe[..., 0::2], pe[..., 1::2], nope], dim=-1)
         if rotated:  # rotate again, back to the basis the scores use
             k = rotate_activation(k)
         return k
@@ -132,14 +102,9 @@ class _QuantMegatronIndexer(QuantModule):
 
     def modelopt_post_restore(self, prefix: str = ""):
         # The base implementation takes the first state_dict entry as device reference, which here
-        # is the CPU ``_extra_state`` byte tensor; the TP-duplicated key projection is the anchor.
+        # is the CPU ``_extra_state`` byte tensor; the TP-duplicated query projection is the anchor.
         self.indexer_k_quantizer.to(self.linear_wq_b.weight.device)
 
 
-_mcore_indexers = {
-    cls: key
-    for cls, key in ((DSAIndexer, "megatron_DSAIndexer"), (CSAIndexer, "megatron_CSAIndexer"))
-    if cls is not None
-}
-if _mcore_indexers:
-    QuantModuleRegistry.register(_mcore_indexers)(_QuantMegatronIndexer)
+if CSAIndexer is not None:
+    QuantModuleRegistry.register({CSAIndexer: "megatron_CSAIndexer"})(_QuantMegatronIndexer)

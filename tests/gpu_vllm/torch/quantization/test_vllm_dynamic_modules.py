@@ -38,10 +38,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 from _test_utils.torch.transformers_models import (
-    DeepseekV32Config,
     create_tiny_deepseek_v3_dir,
     create_tiny_deepseek_v4_config_dir,
-    create_tiny_deepseek_v32_dir,
     create_tiny_glm5_next_config_dir,
     create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
@@ -837,8 +835,7 @@ _INDEXER_K_FP8_CFG = {
 }
 
 # model -> (architecture vLLM must know, tiny checkpoint builder, extra LLM kwargs)
-_DSA_MODELS = {
-    "deepseek_v32": ("DeepseekV32ForCausalLM", create_tiny_deepseek_v32_dir, {}),
+_SPARSE_ATTN_MODELS = {
     "glm5_next": (
         "Glm5NextForCausalLM",
         create_tiny_glm5_next_config_dir,
@@ -852,14 +849,12 @@ _DSA_MODELS = {
 }
 
 
-@pytest.fixture(scope="module", params=list(_DSA_MODELS))
-def tiny_dsa_llm(request, tmp_path_factory):
-    """Tiny DeepSeek Sparse Attention models: DeepSeek-V3.2, GLM-5.3-Flash and DeepSeek-V4-Pro."""
-    arch, build, extra = _DSA_MODELS[request.param]
+@pytest.fixture(scope="module", params=list(_SPARSE_ATTN_MODELS))
+def tiny_sparse_attn_llm(request, tmp_path_factory):
+    """Tiny sparse-attention models with an indexer K cache: GLM-5.3-Flash and DeepSeek-V4-Pro."""
+    arch, build, extra = _SPARSE_ATTN_MODELS[request.param]
     if arch not in ModelRegistry.get_supported_archs():
         pytest.skip(f"this vLLM release has no {arch}")
-    if request.param == "deepseek_v32" and DeepseekV32Config is None:
-        pytest.skip("DeepSeek-V3.2 needs transformers >= 5.x")
     if not has_deep_gemm():
         pytest.skip("vLLM's sparse-attention indexer needs DeepGEMM")
     if torch.cuda.get_device_capability()[0] not in (9, 10):
@@ -1033,18 +1028,18 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
 
 
 @pytest.mark.timeout(600)  # engine boot and the DeepGEMM JIT dominate
-def test_tiny_dsa_indexer_k_quantize(tiny_dsa_llm):
+def test_tiny_sparse_attn_indexer_k_quantize(tiny_sparse_attn_llm):
     """The indexer K cache the sparse-attention kernels read holds fake-quantized keys."""
-    amaxes = tiny_dsa_llm.collective_rpc(_calibrate_and_clip_indexer_k)[0]
+    amaxes = tiny_sparse_attn_llm.collective_rpc(_calibrate_and_clip_indexer_k)[0]
     assert amaxes, "no indexer was converted"
     assert all(amax is not None and 0 < amax < float("inf") for amax in amaxes.values()), amaxes
 
     # Prefill plus decode steps that complete further pools / compression groups.
     prompts = [TokensPrompt(prompt_token_ids=list(range(1 + i, 41 + i))) for i in range(2)]
     params = SamplingParams(max_tokens=12, ignore_eos=True, temperature=0.0, detokenize=False)
-    tiny_dsa_llm.generate(prompts, params)
+    tiny_sparse_attn_llm.generate(prompts, params)
 
-    for name, (rows, max_over_clip) in tiny_dsa_llm.collective_rpc(_indexer_k_rows_written)[
+    for name, (rows, max_over_clip) in tiny_sparse_attn_llm.collective_rpc(_indexer_k_rows_written)[
         0
     ].items():
         assert rows > 0, f"{name}: the serving step wrote no indexer cache rows"

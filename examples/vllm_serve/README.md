@@ -193,10 +193,10 @@ QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fa
 
 ## Fake-quantize the sparse-attention indexer K cache
 
-Sparse-attention models (DeepSeek-V3.2, DeepSeek-V4, GLM-5.x, GLM-5.3-Flash) keep a
-separate lightning-indexer key cache next to the attention KV cache. Its fake quantizer is
-`indexer_k_quantizer` on the indexer module; the KV-cache presets (`*[kv]_bmm_quantizer`) leave
-it disabled, so enable it by importing the `configs/ptq/units/indexer_k_nvfp4` unit into a recipe.
+The sparse-attention models DeepSeek-V4 and GLM-5.3-Flash keep a separate indexer key cache next
+to the attention KV cache. Its fake quantizer is `indexer_k_quantizer` on the indexer module; the
+KV-cache presets (`*[kv]_bmm_quantizer`) leave it disabled, so enable it by importing the
+`configs/ptq/units/indexer_k_nvfp4` unit into a recipe.
 For example, `indexer_k_nvfp4_only.yaml` quantizes the indexer key cache alone (weights,
 activations and the attention KV cache stay unquantized):
 
@@ -225,16 +225,14 @@ that recipe's `quant_cfg`.
 
 Notes:
 
-- Where vLLM computes the indexer key inside a fused kernel (DeepSeek-V3.2 and GLM-5 on
-  vLLM >= 0.28, DeepSeek-V4, GLM-5.3-Flash), the FP8 entries the kernel wrote are read back,
-  fake-quantized and re-stored. The QDQ input therefore carries the FP8 rounding of the cache
-  (at most 2^-4 relative). DeepSeek-V3.2 and GLM-5 on older vLLM releases fake-quantize the
-  bf16 key directly.
+- vLLM computes the indexer key inside fused kernels that write it to the FP8 cache, so the
+  entries each step wrote are read back, fake-quantized and re-stored. The QDQ input therefore
+  carries the FP8 rounding of the cache (at most 2^-4 relative).
 - The read-back requires vLLM's FP8 indexer cache, the default (`indexer_kv_dtype` in the
   attention config); enabling the quantizer with DeepSeek-V4's MXFP4 indexer cache
   (`indexer_kv_dtype="mxfp4"`) is rejected.
-- vLLM caches the DeepSeek-V3.2, DeepSeek-V4 and GLM-5 indexer key without a Hadamard rotation,
-  and the GLM-5.3-Flash pooled key after one, so the fake quantization applies in that basis.
+- vLLM caches the DeepSeek-V4 indexer key without a Hadamard rotation and the GLM-5.3-Flash
+  pooled key after one, so the fake quantization applies in that basis.
 
 ## Serve a model with sparse attention in vLLM
 

@@ -15,8 +15,7 @@
 
 """Fake quantization of the sparse-attention indexer K cache in vLLM.
 
-Covers the DSA indexers of DeepSeek-V3.2 and GLM-5.x, the CSA indexer of DeepSeek-V4 and the
-k-pool indexer of GLM-5.3-Flash.
+Covers the CSA indexer of DeepSeek-V4 and the k-pool indexer of GLM-5.3-Flash.
 
 ``indexer_k_quantizer`` fake-quantizes the tensor the serving kernel quantizes into the indexer K
 cache. Where vLLM only materializes that key inside a fused kernel that already wrote FP8 to the
@@ -39,20 +38,8 @@ from .vllm import create_parallel_state
 
 __all__ = []
 
-try:
-    # The release that moved the K quantize+insert behind ``Indexer.indexer_op``.
-    importlib.import_module("vllm.model_executor.layers.sparse_attn_indexer")
-    from vllm.model_executor.models.deepseek_v2 import Indexer as VllmDeepseekV2Indexer
-except ImportError:
-    VllmDeepseekV2Indexer = None
-
-# NotImplementedError: these packages reject unsupported platforms (XPU) in their __init__.
-try:
-    from vllm.models.deepseek_v32.attention import DeepseekV32Attention as VllmDeepseekV32Attention
-    from vllm.models.deepseek_v32.attention import DeepseekV32Indexer as VllmDeepseekV32Indexer
-except (ImportError, NotImplementedError):
-    VllmDeepseekV32Attention = VllmDeepseekV32Indexer = None
-
+# NotImplementedError: some vLLM model packages reject unsupported platforms at import
+# (e.g. glm5next on XPU).
 try:
     from vllm.models.deepseek_v4.attention import DeepseekV4Indexer as VllmDeepseekV4Indexer
 except (ImportError, NotImplementedError):
@@ -160,12 +147,6 @@ def _get_arg(args: tuple, kwargs: dict, name: str, pos: int):
     return kwargs[name] if name in kwargs else args[pos]
 
 
-def _set_arg(args: tuple, kwargs: dict, name: str, pos: int, value) -> tuple[tuple, dict]:
-    if name in kwargs:
-        return args, {**kwargs, name: value}
-    return (*args[:pos], value, *args[pos + 1 :]), kwargs
-
-
 class _QuantVLLMIndexerBase(QuantModule):
     """Owner of ``indexer_k_quantizer`` for one vLLM indexer layout."""
 
@@ -179,81 +160,6 @@ class _QuantVLLMIndexerBase(QuantModule):
         # (``MLAModules(indexer=...)``), so ``replace_quant_module`` visits the indexer twice and
         # would otherwise try to convert it a second time (inconsistent MRO).
         return super().forward(*args, **kwargs)
-
-
-class _QuantVLLMIndexerOpIndexer(_QuantVLLMIndexerBase):
-    """DeepSeek-V3.2 / GLM-5 ``Indexer`` whose forward hands the bf16 key to ``indexer_op``.
-
-    ``indexer_op`` (``SparseAttnIndexer(hidden_states, q_quant, k, weights)``) quantizes ``k`` to
-    FP8 and inserts it into the indexer K cache, so the key is fake-quantized right before that
-    call.
-    """
-
-    def _setup(self):
-        super()._setup()
-        self.indexer_op.register_forward_pre_hook(self._quantize_k, with_kwargs=True)
-
-    def _quantize_k(self, module, args, kwargs):
-        k = _get_arg(args, kwargs, "k", 2)
-        if k is None:
-            return None
-        return _set_arg(args, kwargs, "k", 2, self.indexer_k_quantizer(k))
-
-
-class _QuantVLLMDeepseekV32Attention(QuantModule):
-    """Applies ``indexer.indexer_k_quantizer`` to the fused DeepSeek-V3.2 / GLM-5 attention.
-
-    ``forward`` writes the FP8 key into the indexer cache inside ``fused_norm_rope``, so the entries
-    written for this step are re-quantized before ``_sparse_indexer_and_attn`` scores them. Under
-    prefill context parallelism (vLLM >= 0.28) the bf16 key is handed to that method instead and
-    fake-quantized directly. The quantizer lives on ``self.indexer`` (``_QuantVLLMIndexerBase``).
-    """
-
-    def _setup(self):
-        self.parallel_state = create_parallel_state()
-        try:
-            self._index_k_pos = _native_positional_index(
-                self, "_sparse_indexer_and_attn", "index_k"
-            )
-        except ValueError:  # vLLM 0.27 opt-in layout: the cache is always written by the kernel
-            self._index_k_pos = None
-
-    def forward(self, *args, **kwargs):
-        # Keeps the converted class from matching the registry again, see _QuantVLLMIndexerBase.
-        return super().forward(*args, **kwargs)
-
-    def _indexer_k_quantizer(self) -> TensorQuantizer | None:
-        if self.indexer is None or self.skip_topk:
-            return None
-        quantizer = getattr(self.indexer, "indexer_k_quantizer", None)
-        return quantizer if quantizer is not None and quantizer.is_enabled else None
-
-    def _sparse_indexer_and_attn(self, *args, **kwargs):
-        quantizer = self._indexer_k_quantizer()
-        if quantizer is not None:
-            index_k = None
-            if self._index_k_pos is not None:
-                index_k = _get_arg(args, kwargs, "index_k", self._index_k_pos)
-            if index_k is not None:
-                # Prefill context parallelism: ``fused_norm_rope`` leaves the indexer cache alone
-                # and hands over the normed, RoPE'd bf16 key, which ``sparse_attn_indexer`` then
-                # quantizes to FP8 and inserts. Fake-quantize it before that insert.
-                args, kwargs = _set_arg(
-                    args, kwargs, "index_k", self._index_k_pos, quantizer(index_k)
-                )
-            else:
-                # Otherwise (and always on the vLLM 0.27 layout) ``fused_norm_rope`` has already
-                # written this step's keys to the FP8 cache. Re-quantize only those rows, found
-                # through this step's slot mapping; rows of earlier steps were done when written.
-                forward_context = get_forward_context()
-                # The indexer cache has its own slot mapping; the kernel writes with that one.
-                slot_mapping = forward_context.slot_mapping.get(self.indexer.k_cache.prefix)
-                # Profiling runs (no attn_metadata) write nothing.
-                if forward_context.attn_metadata is not None and slot_mapping is not None:
-                    _requantize_fp8_indexer_k_cache(
-                        self.indexer.k_cache.kv_cache, slot_mapping, slot_mapping >= 0, quantizer
-                    )
-        return super()._sparse_indexer_and_attn(*args, **kwargs)
 
 
 class _QuantVLLMDeepseekV4Indexer(_QuantVLLMIndexerBase):
@@ -380,23 +286,6 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
         _glm5next_indexers.add(self)
         _install_kpool_cache_hooks(self.kpool_ops)
 
-
-if VllmDeepseekV2Indexer is not None:
-    QuantModuleRegistry.register({VllmDeepseekV2Indexer: "vllm_DeepseekV2Indexer"})(
-        _QuantVLLMIndexerOpIndexer
-    )
-
-# ``vllm.models.deepseek_v32`` (default for DeepSeek-V3.2 / GLM-5 on vLLM >= 0.28, opt-in before)
-# never calls its indexer's forward: the attention writes the cache in ``fused_norm_rope``.
-if VllmDeepseekV32Attention is not None and hasattr(
-    VllmDeepseekV32Attention, "_sparse_indexer_and_attn"
-):
-    QuantModuleRegistry.register({VllmDeepseekV32Indexer: "vllm_DeepseekV32Indexer"})(
-        _QuantVLLMIndexerBase
-    )
-    QuantModuleRegistry.register({VllmDeepseekV32Attention: "vllm_DeepseekV32Attention"})(
-        _QuantVLLMDeepseekV32Attention
-    )
 
 if VllmDeepseekV4Indexer is not None:
     QuantModuleRegistry.register({VllmDeepseekV4Indexer: "vllm_DeepseekV4Indexer"})(

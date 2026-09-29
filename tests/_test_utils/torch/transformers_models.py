@@ -54,12 +54,6 @@ from transformers import (
 
 import modelopt.torch.opt as mto
 
-# DeepSeek-V3.2 (sparse attention with a lightning indexer) is transformers >= 5.x only.
-try:
-    from transformers import DeepseekV32Config
-except ImportError:
-    DeepseekV32Config = None
-
 SEED = 1234
 
 TINY_TOKENIZER_PATH = Path(__file__).parent / "tokenizer"
@@ -640,58 +634,6 @@ def create_tiny_deepseek_v3_dir(
     return _create_tiny_llm_dir(
         Path(tmp_path) / "tiny_deepseek_v3",
         get_tiny_deepseek_v3,
-        with_tokenizer=with_tokenizer,
-        **config_kwargs,
-    )
-
-
-##### DEEPSEEK V3.2 #####
-def get_tiny_deepseek_v32(**config_kwargs) -> PreTrainedModel:
-    """Tiny DeepSeek-V3.2: MLA + MoE plus a lightning indexer on every layer.
-
-    Attention and indexer shapes are the real GLM-5 ones (64 heads, latent 512 + RoPE 64, indexer
-    head 128 with 64 heads, top-k 512) because vLLM's sparse-attention kernels only accept those.
-    """
-    assert DeepseekV32Config is not None, "DeepSeek-V3.2 requires transformers >= 5.x"
-    set_seed(SEED)
-    kwargs = {
-        "dtype": torch.bfloat16,
-        "vocab_size": 128,
-        "hidden_size": 128,
-        "intermediate_size": 256,
-        "moe_intermediate_size": 64,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 64,
-        "num_key_value_heads": 64,
-        "n_routed_experts": 4,
-        "num_experts_per_tok": 2,
-        "n_shared_experts": 1,
-        "first_k_dense_replace": 0,
-        "kv_lora_rank": 512,
-        "q_lora_rank": 32,
-        "qk_rope_head_dim": 64,
-        "qk_nope_head_dim": 128,
-        "v_head_dim": 128,
-        "max_position_embeddings": 128,
-        "topk_method": "noaux_tc",
-        "n_group": 1,
-        "topk_group": 1,
-        "index_topk": 512,
-        "index_head_dim": 128,
-        "index_n_heads": 64,
-    }
-    kwargs.update(config_kwargs)
-    cfg = DeepseekV32Config(**kwargs)
-    cfg.topk_method = kwargs["topk_method"]
-    return AutoModelForCausalLM.from_config(cfg)
-
-
-def create_tiny_deepseek_v32_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
-) -> Path:
-    return _create_tiny_llm_dir(
-        Path(tmp_path) / "tiny_deepseek_v32",
-        get_tiny_deepseek_v32,
         with_tokenizer=with_tokenizer,
         **config_kwargs,
     )

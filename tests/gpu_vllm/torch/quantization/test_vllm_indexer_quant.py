@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake quantization of the DSA lightning-indexer K cache in the vLLM plugin.
+"""Fake quantization of the sparse-attention indexer K cache in the vLLM plugin.
 
 Covers the FP8 cache read-back/re-quantization shared by the fused indexer layouts and the wiring
 of each layout adapter on stand-in modules, without booting an ``LLM`` (see
-``test_vllm_dynamic_modules.py`` for the end-to-end DeepSeek-V3.2 run).
+``test_vllm_dynamic_modules.py`` for the end-to-end DeepSeek-V4 and GLM-5.3-Flash runs).
 """
 
 import weakref
@@ -134,179 +134,29 @@ def test_requantize_fp8_indexer_k_cache_honors_valid_mask(written_cache):
     _assert_requantized(before, kv_cache, torch.tensor([9]), _fp8_quantizer(amax=2.0))
 
 
-class _IndexerOp(torch.nn.Module):
-    def forward(self, hidden_states, q_quant, k, weights):
-        return k
+class _NativeSharedIndexer(torch.nn.Module):
+    """Stand-in for an indexer that both the attention and vLLM's MLA wrapper hold."""
 
-
-class _NativeIndexerOpIndexer(torch.nn.Module):
-    """Stand-in for ``deepseek_v2.Indexer``: forward ends in ``self.indexer_op(..., k, ...)``."""
-
-    def __init__(self):
-        super().__init__()
-        self.indexer_op = _IndexerOp()
-
-    def forward(self, hidden_states, qr, positions, rotary_emb):
-        return self.indexer_op(hidden_states, qr, positions, rotary_emb)
-
-
-class _TestIndexerOpIndexer(vllm_indexer._QuantVLLMIndexerOpIndexer, _NativeIndexerOpIndexer):
-    pass
-
-
-def test_indexer_op_prehook_quantizes_k(parallel_state_stub):
-    indexer = _TestIndexerOpIndexer.convert(_NativeIndexerOpIndexer())
-    quantizer = indexer.indexer_k_quantizer = _fp8_quantizer(amax=2.0)
-
-    assert set(dict(indexer.named_children())) == {"indexer_op", "indexer_k_quantizer"}
-    k = torch.full((2, HEAD_DIM), 5.0, dtype=torch.bfloat16)
-    assert torch.equal(indexer(None, None, k, None), quantizer(k))  # positional k
-    assert torch.equal(indexer.indexer_op(None, None, k=k, weights=None), quantizer(k))
-    assert indexer.indexer_op(None, None, None, None) is None  # DeepSeek-V4 passes k=None
-    quantizer.disable()
-    assert indexer(None, None, k, None) is k
+    def forward(self, x):
+        return x
 
 
 def test_indexer_shared_by_two_parents_is_converted_once(parallel_state_stub):
     """vLLM's MLA wrapper holds the attention's indexer too, so conversion reaches it twice."""
-    QuantModuleRegistry.register({_NativeIndexerOpIndexer: "test_shared_indexer"})(
-        vllm_indexer._QuantVLLMIndexerOpIndexer
+    QuantModuleRegistry.register({_NativeSharedIndexer: "test_shared_indexer"})(
+        vllm_indexer._QuantVLLMIndexerBase
     )
     try:
-        indexer = _NativeIndexerOpIndexer()
+        indexer = _NativeSharedIndexer()
         attention = torch.nn.Module()
         attention.indexer = indexer
         attention.mla_attn = torch.nn.Module()
         attention.mla_attn.indexer = indexer
         mtq.replace_quant_module(attention)
     finally:
-        QuantModuleRegistry.unregister(_NativeIndexerOpIndexer)
+        QuantModuleRegistry.unregister(_NativeSharedIndexer)
     assert attention.indexer is attention.mla_attn.indexer
-    assert isinstance(attention.indexer, vllm_indexer._QuantVLLMIndexerOpIndexer)
-
-
-class _NativeV32Attention(torch.nn.Module):
-    """Stand-in for the fused ``DeepseekV32Attention`` (vLLM >= 0.28)."""
-
-    def __init__(self, indexer):
-        super().__init__()
-        self.indexer = indexer
-        self.skip_topk = False
-        self.layer_name = "layer0"
-        self.calls = []
-
-    def _sparse_indexer_and_attn(
-        self,
-        positions,
-        q_c,
-        q_nope,
-        q_pe,
-        index_q_fp8,
-        index_k,
-        index_weights_out,
-        kv_c,
-        k_pe,
-        ql_nope,
-        mqa_q,
-        output,
-    ):
-        self.calls.append(index_k)
-
-
-class _NativeV32AttentionOptIn(_NativeV32Attention):
-    """The vLLM 0.27 opt-in fused layout: no ``index_k`` argument, the kernel always writes the cache."""
-
-    def _sparse_indexer_and_attn(self, q_c, index_q_fp8, index_weights_out, ql_nope, mqa_q, output):
-        self.calls.append(None)
-
-
-class _TestV32Attention(vllm_indexer._QuantVLLMDeepseekV32Attention, _NativeV32Attention):
-    pass
-
-
-class _TestV32AttentionOptIn(vllm_indexer._QuantVLLMDeepseekV32Attention, _NativeV32AttentionOptIn):
-    pass
-
-
-def _v32_args(index_k=None):
-    """Positional arguments of the fused-attention call with ``index_k`` at its real position (5)."""
-    args = [None] * 12
-    args[5] = index_k
-    return args
-
-
-_V32_ARGS = _v32_args()
-
-
-_V32_INDEXER_CACHE = "layer0.indexer.k_cache"
-
-
-def _v32_indexer(kv_cache, quantizer):
-    return SimpleNamespace(
-        indexer_k_quantizer=quantizer,
-        k_cache=SimpleNamespace(kv_cache=kv_cache, prefix=_V32_INDEXER_CACHE),
-    )
-
-
-def _v32_slot_mapping(indexer_slots):
-    """The indexer cache has its own slot mapping; the MLA layer's differs so a mix-up shows."""
-    mla_slots = torch.where(indexer_slots >= 0, indexer_slots + 1, indexer_slots)
-    return {"layer0": mla_slots, _V32_INDEXER_CACHE: indexer_slots}
-
-
-def test_deepseek_v32_attention_requantizes_written_keys(
-    parallel_state_stub, written_cache, monkeypatch
-):
-    kv_cache, slot_mapping = written_cache
-    before = kv_cache.clone()
-    quantizer = _fp8_quantizer(amax=2.0)
-    attention = _TestV32Attention.convert(_NativeV32Attention(_v32_indexer(kv_cache, quantizer)))
-    context = SimpleNamespace(attn_metadata={}, slot_mapping=_v32_slot_mapping(slot_mapping))
-    monkeypatch.setattr(vllm_indexer, "get_forward_context", lambda: context)
-
-    # Fused path: fused_norm_rope already wrote the FP8 entries at the indexer cache's slots.
-    attention._sparse_indexer_and_attn(*_V32_ARGS)
-    _assert_requantized(before, kv_cache, slot_mapping, quantizer)
-    assert attention.calls == [None]
-
-    # Profiling run (no attn_metadata) writes nothing and must not touch the cache.
-    snapshot = kv_cache.clone()
-    context.attn_metadata = None
-    attention._sparse_indexer_and_attn(*_V32_ARGS)
-    assert torch.equal(kv_cache, snapshot)
-
-    # Prefill context parallelism hands the bf16 key over instead; it is fake-quantized directly.
-    k = torch.full((2, HEAD_DIM), 5.0, dtype=torch.bfloat16)
-    attention._sparse_indexer_and_attn(*_v32_args(k))
-    assert torch.equal(attention.calls[-1], quantizer(k))
-
-    # Disabled quantizer and index-share layers leave everything alone.
-    quantizer.disable()
-    context.attn_metadata = {}
-    attention._sparse_indexer_and_attn(*_v32_args(k))
-    assert attention.calls[-1] is k
-    quantizer.enable()
-    attention.skip_topk = True
-    attention._sparse_indexer_and_attn(*_v32_args(k))
-    assert attention.calls[-1] is k
-
-
-def test_deepseek_v32_opt_in_layout_always_reads_back(
-    parallel_state_stub, written_cache, monkeypatch
-):
-    kv_cache, slot_mapping = written_cache
-    before = kv_cache.clone()
-    quantizer = _fp8_quantizer(amax=2.0)
-    attention = _TestV32AttentionOptIn.convert(
-        _NativeV32AttentionOptIn(_v32_indexer(kv_cache, quantizer))
-    )
-    context = SimpleNamespace(attn_metadata={}, slot_mapping=_v32_slot_mapping(slot_mapping))
-    monkeypatch.setattr(vllm_indexer, "get_forward_context", lambda: context)
-
-    attention._sparse_indexer_and_attn(*([None] * 6))
-
-    _assert_requantized(before, kv_cache, slot_mapping, quantizer)
-    assert attention.calls == [None]
+    assert isinstance(attention.indexer, vllm_indexer._QuantVLLMIndexerBase)
 
 
 class _NativeV4Indexer(torch.nn.Module):

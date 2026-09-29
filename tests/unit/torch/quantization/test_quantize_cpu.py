@@ -626,7 +626,7 @@ def test_skip_weight_quant_check_env_var_bypasses_the_guard():
 
 
 class _ToyIndexer(torch.nn.Module):
-    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``DSAIndexer``)."""
+    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
 
     def __init__(self):
         super().__init__()
