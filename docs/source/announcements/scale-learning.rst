@@ -7,7 +7,6 @@ Scale Learning: Training NVFP4 Block Scales to Recover Accuracy
 :Date: September 16, 2026
 :Tags: scale-learning, quantization, nvfp4, qad, modelopt
 
-.. role:: scale-learning-result(strong)
 .. role:: table-header-note
 
 How we set scales in blockwise quantization plays an important role in
@@ -17,13 +16,13 @@ optimal per-block scales through a training loop.
 
 There are two types of scale learning: scale-only learning and full parameter
 scale learning. In scale-only learning, we train only scales and leave weights
-frozen. We can think of this as an enhancement of scale setting methods based on
-search like MSE or Local-Hessian, where we use scale setting to initialize
+frozen. We can think of this as an enhancement of scale setting methods based
+on search like MSE or Local-Hessian, where we use scale setting to initialize
 scales, and then run scale-only learning to further optimize them.
 
 In full parameter scale learning, we co-train scales and weights together. This
-can serve as an enhancement of traditional Quantization-Aware Distillation (QAD)
-with additional trainable parameters.
+can serve as an enhancement of traditional Quantization-Aware Distillation
+(QAD) with additional trainable parameters.
 
 
 How Scale Learning Works
@@ -31,10 +30,11 @@ How Scale Learning Works
 
 The idea of scale learning is to make the NVFP4 per-block scales trainable. We
 need to be able to compute the gradient of a loss function :math:`L` with
-respect to a per-block scale :math:`s` via backpropagation. We use the usual QAT
-approach, where we do fake-quantization in the forward pass and backpropagate
-with straight-through estimators. During a forward pass, instead of a weight
-:math:`x` we use a fake-quantized weight :math:`\tilde{x}`, given by
+respect to a per-block scale :math:`s` via backpropagation. We use the usual
+QAT approach, where we do fake-quantization in the forward pass and
+backpropagate with straight-through estimators. During a forward pass,
+instead of a weight :math:`x` we use a fake-quantized weight
+:math:`\tilde{x}`, given by
 
 .. math::
 
@@ -75,8 +75,8 @@ then yields
      \end{cases}
 
 This is the general idea, although it is slightly more complicated since the
-scale :math:`s` is also quantized (to FP8), so we have to apply straight-through
-estimators there as well.
+scale :math:`s` is also quantized (to FP8), so we have to apply
+straight-through estimators there as well.
 
 We also have a version of scale learning with "dual scales", where during fake
 quantization the scale we divide by (the "pre-scale") and the scale we later
@@ -130,12 +130,12 @@ Scale-only learning can significantly improve accuracy of NVFP4 quantized
 Nemotron 3.5 Lightning. In this example, the PTQ recipe is W4A4 routed experts
 and W8A8 attention and Mamba cache, using MSE for scale setting.
 
-After PTQ, we run scale-only QAD. Plotting the train and validation loss, we see
-stable convergence:
+After PTQ, we run scale-only QAD. Plotting the train and validation loss, we
+see stable convergence:
 
 .. image:: assets/W4A4-scale-only-loss.png
-   :alt: Train and validation KL loss falling from 0.090 at iteration 0 to about
-         0.045 by iteration 175 during W4A4 scale-only learning
+   :alt: Train and validation KL loss falling from 0.090 at iteration 0 to
+         about 0.045 by iteration 175 during W4A4 scale-only learning
    :width: 100%
 
 Table 1 compares scale-only learning against the PTQ baseline on Nemotron 3.5
@@ -185,14 +185,15 @@ In general, we have found that scale-only learning is a highly useful technique
 and outperforms traditional scale setting methods and recovers more accuracy,
 across a variety of models and contexts. It improves accuracy more consistently
 than QAD, which can cause regressions on benchmarks as the weights shift during
-training. Full parameter scale learning can outperform ordinary QAD (i.e. with
-frozen scales) for many models, but doesn't work for all models.
+training. Full parameter scale learning can outperform ordinary QAD (i.e.
+with frozen scales) for many models in our experiments, but doesn't work for
+all models.
 
-A higher learning rate is needed for scales: we recommend 1e-4. A smaller number
-of steps (sometimes just 50) is needed for scale-only learning to converge
-compared to QAT/QAD. Dual scales sometimes outperforms tied scales, but for
-other models can cause distribution shift where tied scales improves accuracy:
-neither is universally better.
+A higher learning rate is needed for scales: we recommend 1e-4. A smaller
+number of steps (sometimes just 50) is needed for scale-only learning to
+converge compared to QAT/QAD. Dual scales sometimes outperforms tied scales,
+but for other models can cause distribution shift where tied scales improves
+accuracy: neither is universally better.
 
 
 Using Scale Learning
@@ -202,8 +203,8 @@ Scale learning is a training-time algorithm: the scales are learnt during
 QAT/QAD, so these recipes are not usable as calibration-only PTQ.
 
 After scales are learnt, there is no deployment cost -- learned scales are
-folded into the exported checkpoint and are the same FP8 block scales the format
-already carries, so the deployed graph is unchanged.
+folded into the exported checkpoint and are the same FP8 block scales the
+format already carries, so the deployed graph is unchanged.
 
 To use it in your own configuration, set the ``algorithm`` field:
 
@@ -275,8 +276,8 @@ Next steps
 
 Current Model-Optimizer scale learning implementation only applies to NVFP4
 per-block weight scales. In the future, we can apply the idea of scale learning
-to global weight scales, or (global) input activation scales. There is potential
-to optimize these through training as well.
+to global weight scales, or (global) input activation scales. There is
+potential to optimize these through training as well.
 
 
 .. _scale-learning-references:
@@ -286,7 +287,9 @@ References
 
 .. [1] E. Alvarez, O. Almog, E. Chung, S. Layton, D. Stosic, R. Krashinsky,
    and K. Aubrey. `Introducing NVFP4 for Efficient and Accurate Low-Precision
-   Inference <https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/>`_.
+   Inference <https://developer.nvidia.com/blog/
+   introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/>`_.
    NVIDIA Technical Blog, 2025.
-.. [2] S. K. Esser, J. L. McKinstry, D. Bablani, R. Appuswamy, and D. S. Modha.
-   `Learned Step Size Quantization <https://arxiv.org/abs/1902.08153>`_. ICLR, 2020.
+.. [2] S. K. Esser, J. L. McKinstry, D. Bablani, R. Appuswamy, and D. S.
+   Modha. `Learned Step Size Quantization
+   <https://arxiv.org/abs/1902.08153>`_. ICLR, 2020.
