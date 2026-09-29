@@ -15,6 +15,7 @@
 """Utility functions for model type detection and classification."""
 
 import warnings
+from contextlib import contextmanager
 
 import torch.nn as nn
 
@@ -78,6 +79,28 @@ __all__ = [
     "get_model_type",
     "is_multimodal_model",
 ]
+
+
+@contextmanager
+def _release_exported_tensors(root: nn.Module):
+    """Drop what the export pass adds to ``root``, once the block has persisted it.
+
+    The handlers register scale buffers on existing sub-modules and attach per-expert holder
+    modules. Neither an accelerate offload window nor an FSDP2 reshard reclaims those, so a
+    caller that runs the pass once per unit accumulates them. An export that raises releases
+    nothing, leaving the unit intact to be inspected.
+    """
+    before = {name: (set(mod._modules), set(mod._buffers)) for name, mod in root.named_modules()}
+
+    yield
+
+    # list(): deleting a child mutates the _modules dict the traversal walks.
+    for name, module in list(root.named_modules()):
+        children_before, buffers_before = before.get(name, (set(), set()))
+        for child_name in set(module._modules) - children_before:
+            delattr(module, child_name)
+        for buf_name in set(module._buffers) - buffers_before:
+            module._buffers[buf_name] = None
 
 
 def get_model_type(model):

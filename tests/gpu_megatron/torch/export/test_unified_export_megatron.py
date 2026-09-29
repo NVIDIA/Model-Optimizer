@@ -43,11 +43,12 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditional
 
 import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
+from modelopt.torch.export.quant_format import IQ_FORMATS
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.ggml import dequantize_iq1_s, dequantize_iq2_xs, quantize_iq2_xs
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
@@ -89,12 +90,17 @@ def _verify_model_quant_config(
             assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
-@pytest.mark.parametrize(
-    ("qformat", "payload_bytes", "dequantize"),
-    [("iq1_s", 50, dequantize_iq1_s), ("iq2_xs", 74, dequantize_iq2_xs)],
-)
-def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequantize):
+# Every IQ format the exporter accepts. Only the list of formats comes from the export
+# tables; each test resolves what it expects from the codec module itself, so a wrong entry
+# in IQ_FORMAT_REGISTRY cannot make both sides of an assertion agree.
+IQ_FORMAT_NAMES = sorted(IQ_FORMATS)
+
+
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_name_remapping_exports_iq_payload(qformat):
     """Megatron export writes the same scale-free IQ representation as HF export."""
+    payload_bytes = getattr(ggml, f"{qformat.upper()}_BLOCK_BYTES")
+    dequantize = getattr(ggml, f"dequantize_{qformat}")
     linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
@@ -112,20 +118,23 @@ def test_megatron_name_remapping_exports_iq_payload(qformat, payload_bytes, dequ
     exporter._name_remapping(linear, "model.layers.0.mlp.down_proj.")
 
     packed_key = "model.layers.0.mlp.down_proj.weight"
-    assert exporter._state_dict[packed_key].shape == (2, 1, payload_bytes)
-    assert exporter._state_dict[packed_key].dtype == torch.uint8
-    logical_shape = torch.tensor(
-        [
-            *exporter._state_dict[packed_key].shape[:-2],
-            exporter._state_dict[packed_key].shape[-2] * 256,
-        ]
+    packed = exporter._state_dict[packed_key]
+    assert packed.shape == (2, 1, payload_bytes)
+    assert packed.dtype == torch.uint8
+    # Exact bytes against the format's own packer, as the slicing tests below check.
+    _assert_iq_payload_matches(qformat, packed, linear.weight)
+    # And the payload decodes to exactly what the fake quantizer reconstructs. Compare with the
+    # decoded reference, not the fake-quant forward: that returns the straight-through form
+    # a + (r - a), which in bf16 differs from r by up to one ULP of a -- enough to fail a
+    # relative tolerance wherever r is small next to a, as IQ1_S's grid near zero often is.
+    logical_shape = torch.tensor([*packed.shape[:-2], packed.shape[-2] * 256])
+    reference, _ = getattr(ggml, f"quantize_{qformat}")(linear.weight)
+    torch.testing.assert_close(
+        dequantize(packed, logical_shape, dtype=torch.bfloat16),
+        dequantize(reference, logical_shape, dtype=torch.bfloat16),
+        rtol=0,
+        atol=0,
     )
-    reconstructed = dequantize(
-        exporter._state_dict[packed_key],
-        logical_shape,
-        dtype=torch.bfloat16,
-    )
-    torch.testing.assert_close(reconstructed, linear.weight_quantizer(linear.weight))
     assert exporter.layer_config_dict == {
         "model.layers.0.mlp.down_proj.quantization": qformat,
         "model.layers.0.mlp.down_proj.awq_block_size": 256,
@@ -167,28 +176,30 @@ def _make_iq_weight(rows):
     return torch.linspace(-1, 1, rows * 256, dtype=torch.float32).reshape(rows, 256).bfloat16()
 
 
-def _assert_iq2_payload_matches(packed, logical_weight):
-    expected, _ = quantize_iq2_xs(logical_weight)
+def _assert_iq_payload_matches(qformat, packed, logical_weight):
+    expected, _ = getattr(ggml, f"quantize_{qformat}")(logical_weight)
     torch.testing.assert_close(packed, expected.cpu(), rtol=0, atol=0)
 
 
-def test_megatron_gated_mlp_slicing_exports_iq_payloads():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_gated_mlp_slicing_exports_iq_payloads(qformat):
     weight = _make_iq_weight(8)
     module = SimpleNamespace(config=SimpleNamespace(ffn_hidden_size=4))
     exporter = _make_iq_exporter()
-    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, qformat, 256)
 
     exporter._gated_mlp_slicing(module, "model.layers.0.mlp.")
 
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mlp.gate_proj.weight"], weight[:4]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mlp.gate_proj.weight"], weight[:4]
     )
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mlp.up_proj.weight"], weight[4:]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mlp.up_proj.weight"], weight[4:]
     )
 
 
-def test_megatron_grouped_mlp_slicing_exports_iq_payloads():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_grouped_mlp_slicing_exports_iq_payloads(qformat):
     weight = _make_iq_weight(8)
     module = SimpleNamespace(
         num_gemms=1,
@@ -199,7 +210,7 @@ def test_megatron_grouped_mlp_slicing_exports_iq_payloads():
     exporter = _make_iq_exporter()
     exporter._get_quantized_state = lambda *a, **k: (
         {"weight": module.weight},
-        "iq2_xs",
+        qformat,
         256,
     )
 
@@ -210,15 +221,16 @@ def test_megatron_grouped_mlp_slicing_exports_iq_payloads():
         up_proj_name="up_proj",
     )
 
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mlp.experts.0.gate_proj.weight"], weight[:4]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mlp.experts.0.gate_proj.weight"], weight[:4]
     )
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mlp.experts.0.up_proj.weight"], weight[4:]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mlp.experts.0.up_proj.weight"], weight[4:]
     )
 
 
-def test_megatron_qkv_slicing_exports_iq_payloads():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_qkv_slicing_exports_iq_payloads(qformat):
     weight = _make_iq_weight(8)
     module = SimpleNamespace(
         config=SimpleNamespace(
@@ -230,7 +242,7 @@ def test_megatron_qkv_slicing_exports_iq_payloads():
         )
     )
     exporter = _make_iq_exporter()
-    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, qformat, 256)
 
     exporter._qkv_slicing(module, "model.layers.0.self_attn.")
 
@@ -241,13 +253,15 @@ def test_megatron_qkv_slicing_exports_iq_payloads():
         "v_proj": reshaped[3].reshape(2, 256),
     }
     for projection, logical_weight in expected.items():
-        _assert_iq2_payload_matches(
+        _assert_iq_payload_matches(
+            qformat,
             exporter._state_dict[f"model.layers.0.self_attn.{projection}.weight"],
             logical_weight,
         )
 
 
-def test_megatron_gated_delta_net_slicing_exports_iq_payloads():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_gated_delta_net_slicing_exports_iq_payloads(qformat):
     weight = _make_iq_weight(12)
     module = SimpleNamespace(
         in_proj=object(),
@@ -255,15 +269,15 @@ def test_megatron_gated_delta_net_slicing_exports_iq_payloads():
         in_proj_split_sections=(2, 2, 2, 2, 2, 2),
     )
     exporter = _make_iq_exporter()
-    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, "iq2_xs", 256)
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, qformat, 256)
 
     exporter._gated_delta_net_slicing(module, "model.layers.0.mixer.")
 
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mixer.in_proj_qkv.weight"], weight[:6]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mixer.in_proj_qkv.weight"], weight[:6]
     )
-    _assert_iq2_payload_matches(
-        exporter._state_dict["model.layers.0.mixer.in_proj_z.weight"], weight[6:8]
+    _assert_iq_payload_matches(
+        qformat, exporter._state_dict["model.layers.0.mixer.in_proj_z.weight"], weight[6:8]
     )
     torch.testing.assert_close(
         exporter._state_dict["model.layers.0.mixer.in_proj_b.weight"], weight[8:10]
@@ -273,7 +287,7 @@ def test_megatron_gated_delta_net_slicing_exports_iq_payloads():
     )
 
 
-@pytest.mark.parametrize("qformat", ["iq1_s", "iq2_xs"])
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
 def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
     exporter = _make_iq_exporter()
@@ -287,8 +301,9 @@ def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     assert exporter._state_dict == {}
 
 
-def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader():
-    experts = _make_iq_experts("iq2_xs", "linear_fc1", bias=True)
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader(qformat):
+    experts = _make_iq_experts(qformat, "linear_fc1", bias=True)
     exporter = _make_iq_exporter()
 
     with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
@@ -300,12 +315,13 @@ def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader():
     assert exporter._state_dict == {}
 
 
-def test_megatron_iq_export_rejects_tensor_parallelism():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_iq_export_rejects_tensor_parallelism(qformat):
     """IQ packing is intentionally limited to complete TP=1 weights."""
     linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
-            num_bits="iq2_xs",
+            num_bits=qformat,
             block_sizes={-1: 256},
             backend="ggml",
         )
@@ -324,7 +340,8 @@ def test_megatron_iq_export_rejects_tensor_parallelism():
         exporter.save_pretrained("unused", "unused")
 
 
-def test_megatron_iq_export_rejects_pipeline_parallelism():
+@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
+def test_megatron_iq_export_rejects_pipeline_parallelism(qformat):
     """IQ packing requires PP=1 so the fused-MoE rejection reaches every rank.
 
     The rejection raises from inside the per-expert loops, so a stage owning no expert would
@@ -334,7 +351,7 @@ def test_megatron_iq_export_rejects_pipeline_parallelism():
     linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
-            num_bits="iq2_xs",
+            num_bits=qformat,
             block_sizes={-1: 256},
             backend="ggml",
         )

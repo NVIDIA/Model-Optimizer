@@ -31,9 +31,9 @@ from typing import Any
 
 import torch
 import transformers
-import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
     AutoConfig,
@@ -45,7 +45,7 @@ from transformers import (
     ProcessorMixin,
 )
 
-from modelopt.recipe import load_recipe
+from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
@@ -59,11 +59,7 @@ except ImportError:
     snapshot_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.mlflow import (
-    MlflowRunLogger,
-    default_experiment_name,
-    validate_tracking_uri,
-)
+from modelopt.torch.utils.mlflow import EXPERIMENT_JSON, Tool, resolved_recipe_texts, tracked_run
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +101,8 @@ _HF_PTQ_WEIGHT_FILE_PATTERNS = (
     "*.tgz",
     "*.zip",
 )
-# Dotted like the other sidecars hf_ptq drops in the export directory, so it is ignored by
-# from_pretrained and does not look like part of the model.
-_EXPERIMENT_JSON = ".experiment.json"
 _HF_PTQ_EXPORT_OWNED_FILES = {
-    _EXPERIMENT_JSON,
+    EXPERIMENT_JSON,
     "config.json",
     "hf_quant_config.json",
     "quant_config.json",
@@ -1083,6 +1076,90 @@ def save_processor_config(args, export_path) -> None:
         print("This is normal for some VLM architectures that don't use AutoProcessor")
 
 
+def _prepare_quant_cfg(
+    args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
+) -> dict[str, Any]:
+    """Apply shared checkpoint-local adjustments to a PTQ configuration."""
+    # Resolve the real export directory before resolve_checkpoint_dir hashes the config; otherwise
+    # distinct --export_path values containing the placeholder would share one checkpoint path.
+    if args.layerwise_export:
+        assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
+        quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
+        print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+        # Shards are resumable only while the manifest naming their resume point remains beside
+        # them; default the calibration checkpoint directory accordingly.
+        quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
+        if moved:
+            print(
+                "Layerwise checkpoint_dir co-located with the export path so a resumed run "
+                "finds its manifest next to the shards it must not overwrite."
+            )
+
+    if needs_checkpoint_path_update(quant_cfg):
+        quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+        print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
+
+    if args.cast_mxfp4_to_nvfp4:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        force_weight_quantizers_static(quant_cfg["quant_cfg"])
+    return quant_cfg
+
+
+def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
+    """Refuse layerwise export before calibration starts, not after the run is paid for.
+
+    Layerwise export writes each layer's shard during calibration and finishes the checkpoint
+    in finalize() afterwards, so anything that would rewrite or contradict that checkpoint has
+    to be caught here -- once calibration begins, the user has already paid for the whole run.
+    """
+    block = layerwise_export_block(algorithm)
+    if block is not None:
+        entries = algorithm if isinstance(algorithm, list) else [algorithm]
+        owner = next(e for e in entries if isinstance(e, dict) and e.get("layerwise") is block)
+        if not owner.get("method"):
+            raise NotImplementedError(
+                "layerwise.export_dir needs a calibration method: without one there is no "
+                "per-layer pass to write the shards, so the export would find nothing. Set "
+                "algorithm.method, or export without layerwise.export_dir."
+            )
+
+    if has_spec_opt(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support speculative-decoding models: "
+            "export_speculative_decoding() would write a second checkpoint over the same "
+            "--export_path."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        raise NotImplementedError(
+            "layerwise.export_dir is not compatible with --cast_mxfp4_to_nvfp4: the cast "
+            "rewrites weights after calibration, by which point every shard is written."
+        )
+
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
+    for flag, value, exporter in (
+        ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
+        ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+        (
+            "an encoder-decoder model_type (t5/bart/whisper)",
+            getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+    ):
+        if value:
+            raise NotImplementedError(
+                f"layerwise.export_dir is not compatible with {flag}: {exporter} would write a "
+                "second checkpoint over the same --export_path that layerwise calibration "
+                "already populated."
+            )
+
+
 def _layerwise_blocks(algorithm) -> list[dict]:
     """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
     entries = algorithm if isinstance(algorithm, list) else [algorithm]
@@ -1229,198 +1306,40 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     return quant_cfg
 
 
-def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
-    """Add the MLflow tracking flags."""
-    parser.add_argument(
-        "--mlflow",
-        default=None,
-        help=(
-            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
-            "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries, and writing .experiment.json into --export_path so the checkpoint "
-            "names the run that produced it. MLflow's own $MLFLOW_TRACKING_URI enables "
-            "tracking without this flag, which overrides it. A URI taken from the "
-            "environment is best-effort: if it is unusable the run warns and continues "
-            "untracked."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_experiment",
-        default=None,
-        help=(
-            "MLflow experiment name. Default: "
-            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_run_name",
-        default=None,
-        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
-    )
-
-
-def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    """Settle where tracking is configured from, and name the experiment."""
-    # MLflow's own variable enables tracking on its own; --mlflow overrides it. Only the
-    # flag is a deliberate request, so only the flag is fatal when the URI is unusable: the
-    # variable is commonly exported for unrelated tooling and must not fail a quantization.
-    args.mlflow_required = args.mlflow is not None
-    args.mlflow = args.mlflow or os.environ.get("MLFLOW_TRACKING_URI") or None
-    if args.mlflow:
-        try:
-            args.mlflow = validate_tracking_uri(args.mlflow)
-        except ValueError as e:
-            if args.mlflow_required:
-                parser.error(f"--mlflow: {e}")
-            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
-            args.mlflow = None
-        else:
-            args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
-                "hf_ptq",
-                args.pyt_ckpt_path,
-                Path(args.recipe).stem if args.recipe else args.qformat,
-            )
-
-
-_MLFLOW_NON_PARAM_ARGS = frozenset(
-    {
-        "checkpoint_exported",
-        "dist_state",
-        "mlflow",
-        "mlflow_experiment",
-        "mlflow_required",
-        "mlflow_run_name",
-    }
+HF_PTQ = Tool(
+    name="hf_ptq",
+    tracks=(
+        "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+        "uploading the command, the resolved recipe, the run log and the quantization "
+        "summaries, and writing .experiment.json into --export_path so the checkpoint "
+        "names the run that produced it."
+    ),
+    variant_help="recipe name, or --qformat if no --recipe",
+    variant=lambda args: Path(args.recipe).stem if args.recipe else args.qformat,
+    model=lambda args: args.pyt_ckpt_path,
+    checkpoint=lambda args: args.export_path,
+    texts=lambda args: resolved_recipe_texts(args.recipe),
+    # Missing entries are skipped: the MoE table only exists for MoE models, and neither
+    # file is written under --no-verbose.
+    outputs=lambda args: {
+        "summary/quant_summary.txt": Path(args.export_path) / ".quant_summary.txt",
+        "summary/moe.html": Path(args.export_path) / ".moe.html",
+    },
+    # dist_state is an object rather than a setting, and checkpoint_exported is this
+    # script's own bookkeeping.
+    non_params=frozenset({"dist_state", "checkpoint_exported"}),
 )
-
-
-def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
-    """Params and start-time artifacts describing this PTQ run."""
-    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
-    # dist_state is an object, so record the one field worth searching on.
-    params["world_size"] = args.dist_state.world_size
-    texts = {}
-    if args.recipe:
-        # The resolved recipe, not the source file: a recipe may be a directory or use
-        # $imports, and only the resolved form is self-contained.
-        resolved = load_recipe(args.recipe).model_dump(mode="json")
-        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
-    return params, texts
-
-
-def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
-    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
-    return MlflowRunLogger(
-        args.mlflow,
-        args.mlflow_experiment,
-        run_name=args.mlflow_run_name,
-        enabled=bool(args.mlflow) and args.dist_state.is_main,
-        required=args.mlflow_required,
-    )
 
 
 @contextmanager
 def mlflow_run(args: argparse.Namespace) -> Iterator[None]:
-    """Track this invocation for the duration of the block, and keep the checkpoint's
-    provenance pointer honest whether or not the run is tracked."""
-    logger = _mlflow_logger(args)
-    export_path = Path(args.export_path)
-    if not logger.enabled:
-        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        try:
-            yield
-        finally:
-            _drop_inherited_experiment_json(args, export_path)
-        return
-    params, texts = _mlflow_run_inputs(args)
-    with logger.track(
-        params=params,
-        tags=_mlflow_run_tags(args),
-        texts=texts,
-        files=_mlflow_run_outputs(args),
+    """Track this invocation for the duration of the block; see
+    :func:`~modelopt.torch.utils.mlflow.tracked_run`."""
+    with tracked_run(
+        args,
+        HF_PTQ,
+        is_main=args.dist_state.is_main,
+        exported=lambda: args.checkpoint_exported,
+        world_size=args.dist_state.world_size,
     ):
-        try:
-            yield
-        finally:
-            _log_experiment_json(logger, args, export_path)
-
-
-def _log_experiment_json(
-    logger: MlflowRunLogger, args: argparse.Namespace, export_path: Path
-) -> None:
-    """Record which MLflow run produced this checkpoint, in the checkpoint and on the server.
-
-    The tags point from the run to the checkpoint it wrote; this file is the reverse, so a
-    checkpoint found on disk can be traced back to the run that quantized it without
-    searching the server.
-
-    The artifact goes up for any run that opened, so a failure is traceable from the server
-    side. The local copy is written only once ``export_quantized`` has returned, because the
-    file claims authorship of the checkpoint sitting next to it: ``--export_path`` existing
-    proves nothing, since ``print_quant_summary`` creates it before quantization and the
-    directory may hold a valid checkpoint from an earlier attempt whose weights this run
-    never touched.
-
-    There is nothing to record at all when the run never opened, which a URI taken from the
-    environment reaches by design: it disables tracking from inside the block rather than
-    failing the quantization.
-    """
-    info = logger.run_info
-    if not info:
-        return
-    text = json.dumps(info, indent=2) + "\n"
-    logger.log_text(_EXPERIMENT_JSON.removeprefix("."), text)
-    if not args.checkpoint_exported:
-        return
-    try:
-        (export_path / _EXPERIMENT_JSON).write_text(text)
-    except OSError as e:
-        print(f"[mlflow] WARNING: could not write {export_path / _EXPERIMENT_JSON}: {e}")
-
-
-def _drop_inherited_experiment_json(args: argparse.Namespace, export_path: Path) -> None:
-    """Remove a pointer an untracked export would otherwise inherit.
-
-    A fresh checkpoint written into a reused ``--export_path`` would keep the previous run's
-    pointer, and one quantized from a tracked source checkpoint could be handed that
-    source's pointer. Either way the file would name a run that did not produce these
-    weights. Only a completed export clears it; a failed run leaves whatever checkpoint was
-    already there, pointer included.
-    """
-    if not args.checkpoint_exported or not args.dist_state.is_main:
-        return
-    stale = export_path / _EXPERIMENT_JSON
-    try:
-        stale.unlink(missing_ok=True)
-    except OSError as e:
-        print(f"Warning: could not remove stale {stale}: {e}")
-
-
-def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
-    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
-    checkpoint it produced can be found together on one tracking server.
-
-    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
-    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
-    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
-    which is useless as a join key.
-    """
-    return {
-        "model": Path(args.pyt_ckpt_path).name,
-        "checkpoint_path": str(Path(args.export_path).resolve()),
-        "source_checkpoint_path": args.pyt_ckpt_path,
-    }
-
-
-def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
-    """Summaries written by post_quantize, keyed by artifact path.
-
-    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
-    entries are skipped: the MoE table only exists for MoE models, and neither file is
-    written under ``--no-verbose``.
-    """
-    export_path = Path(args.export_path)
-    return {
-        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
-        "summary/moe.html": export_path / ".moe.html",
-    }
+        yield

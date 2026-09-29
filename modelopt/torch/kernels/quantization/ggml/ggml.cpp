@@ -23,6 +23,8 @@
 
 at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid);
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
+at::Tensor q8_0_pack_cuda(at::Tensor input);
 
 namespace {
 
@@ -53,6 +55,29 @@ at::Tensor iq2_xs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   return iq2_xs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
 }
 
+at::Tensor iq2_xxs_pack(at::Tensor input, at::Tensor grid, at::Tensor scales) {
+  TORCH_CHECK(input.is_cuda(), "IQ2_XXS packing requires a CUDA input");
+  TORCH_CHECK(grid.is_cuda(), "IQ2_XXS packing requires a CUDA grid");
+  TORCH_CHECK(scales.is_cuda(), "IQ2_XXS packing requires CUDA scales");
+  modelopt::ggml::check_pack_inputs("IQ2_XXS", input, grid, modelopt::ggml::kIq2xxsEntries);
+  const auto num_blocks = input.numel() / modelopt::ggml::kBlockSize;
+  TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
+                  scales.numel() == num_blocks,
+              "scales must be float16 [numel / 256]");
+  // Same rule as IQ2_XS: these bits become the block scale verbatim, and a negative or non-finite
+  // one packs cleanly while decoding to garbage.
+  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
+              "scales must be finite and non-negative");
+  TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
+  return iq2_xxs_pack_cuda(input.contiguous(), grid.contiguous(), scales.contiguous());
+}
+
+at::Tensor q8_0_pack(at::Tensor input) {
+  TORCH_CHECK(input.is_cuda(), "Q8_0 packing requires a CUDA input");
+  modelopt::ggml::check_scalar_pack_input("Q8_0", input, 32);
+  return q8_0_pack_cuda(input.contiguous());
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -69,4 +94,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "Returns uint8 [numel / 256, 74] on the input device. Non-finite input elements are "
              "treated as zero during packing, and finite elements outside the float32 range "
              "saturate.");
+  module.def("iq2_xxs_pack", &iq2_xxs_pack,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 256. The grid must be float32 [256, 8] holding "
+             "non-negative codebook magnitudes, and scales must be finite non-negative float16 "
+             "[numel / 256]. "
+             "Returns uint8 [numel / 256, 66] on the input device. Non-finite input elements are "
+             "treated as zero during packing, and finite elements outside the float32 range "
+             "saturate.");
+  module.def("q8_0_pack", &q8_0_pack,
+             "Pack a non-empty float32, float64, float16, or bfloat16 CUDA tensor whose innermost "
+             "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "
+             "Non-finite input elements are treated as zero during packing, and finite elements "
+             "outside the float32 range saturate.");
 }

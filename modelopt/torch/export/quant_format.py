@@ -19,6 +19,8 @@ Backend-specific names live with their backend: the TensorRT-LLM checkpoint layo
 constants, for example, are in :mod:`modelopt.torch.export.trtllm.model_config`.
 """
 
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+
 QUANTIZATION_NONE = None
 QUANTIZATION_FP8 = "fp8"
 QUANTIZATION_INT8_SQ = "int8_sq"
@@ -37,16 +39,26 @@ QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
 QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
 QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
 QUANTIZATION_IQ1_S = "iq1_s"
+QUANTIZATION_IQ2_XXS = "iq2_xxs"
 QUANTIZATION_IQ2_XS = "iq2_xs"
+
+# Every GGML IQ format, derived from the registry the quantization backend dispatches through, so
+# export and dispatch cannot disagree about which formats exist. They share the weight-only,
+# 256-value-block, per-module-scale shape, so export treats them as one family. A format's block
+# geometry and packer are read from IQ_FORMAT_REGISTRY directly.
+#
+# Registering a format therefore declares it exportable, and that is intended rather than a side
+# effect: fake quant is dequantize(quantize(w)), so a format cannot be dispatched without the
+# packer and block geometry that are all export reads.
+IQ_FORMATS = frozenset(IQ_FORMAT_REGISTRY)
+
 
 # Formats whose scales are purely per-module, so export never merges them across the q/k/v
 # and gate/up groups that share an input. Every other format unifies input_amax (and, for
 # NVFP4, weight_scale_2) across such a group, which only a whole-model forward can discover.
-FUSION_FREE_FORMATS = frozenset(
+FUSION_FREE_FORMATS = IQ_FORMATS | frozenset(
     {
         QUANTIZATION_FP8,
-        QUANTIZATION_IQ1_S,
-        QUANTIZATION_IQ2_XS,
         QUANTIZATION_NONE,
         QUANTIZATION_FP8_PB_REAL,
     }

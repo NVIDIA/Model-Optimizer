@@ -876,12 +876,13 @@ if HAS_TE:
                 quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
 
         def _expert_parallel_groups(self):
-            """Return the (ep, expt_dp) process groups used to place fused experts globally."""
+            """Return ``(ep_group, expt_tp_group, expt_dp_group)`` for fused experts."""
             pg_collection = getattr(self, "_pg_collection", None)
             if pg_collection is not None:
-                return pg_collection.ep, pg_collection.expt_dp
+                return pg_collection.ep, pg_collection.expt_tp, pg_collection.expt_dp
             return (
                 mcore_parallel.get_expert_model_parallel_group(),
+                mcore_parallel.get_expert_tensor_parallel_group(),
                 mcore_parallel.get_expert_data_parallel_group(),
             )
 
@@ -924,6 +925,7 @@ if HAS_TE:
             # Channel shard axes (per real key); _global_amax stays un-sharded along channels but
             # still rides with the expert identity below.
             shard_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+            ep_group, expt_tp_group, expt_dp_group = self._expert_parallel_groups()
 
             # Split per-expert weight_quantizer.{i}.* from shared (input/output) quantizer buffers.
             expert_re = re.compile(r"^weight_quantizer\.(\d+)\.(.+)$")
@@ -936,7 +938,10 @@ if HAS_TE:
                 else:
                     shared_state[k] = v
 
-            # Shared quantizer buffers: replicated across experts, plain base offsets.
+            # Shared quantizer buffers have no expert identity in their keys or offsets. Keep the
+            # dense TP/DP defaults so replica IDs distinguish EP ranks; using expt_tp/expt_dp here
+            # would collide across EP ranks. Expert-axis sharding would require an EP-aware
+            # replica ID in addition to the expert process groups.
             shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
             sharded_state_dict.update(
                 make_sharded_tensors_for_checkpoint(
@@ -945,10 +950,8 @@ if HAS_TE:
             )
 
             # Per-expert amax: assign the same global expert identity the weights use.
-            ep_group, expt_dp_group = self._expert_parallel_groups()
             num_global_experts = get_pg_size(ep_group) * self.num_gemms
             local_expert_indices_offset = get_pg_rank(ep_group) * self.num_gemms
-            edp_replica_id = get_pg_rank(expt_dp_group)
             ep_axis = len(sharded_offsets)
             for gemm_idx, subs in enumerate(per_expert_subs):
                 if not subs:
@@ -970,16 +973,18 @@ if HAS_TE:
                     if axis is not None
                 }
                 sub_sd = make_sharded_tensors_for_checkpoint(
-                    expert_state, "", expert_axis, new_sharded_offsets
+                    expert_state,
+                    "",
+                    expert_axis,
+                    new_sharded_offsets,
+                    tp_group=expt_tp_group,
+                    dp_cp_group=expt_dp_group,
                 )
                 # Rewrite each ShardedTensor.key to carry the global expert identity (dict keys,
                 # which map to the local buffers on restore, are left untouched).
                 replace_prefix_for_sharding(sub_sd, f"{gemm_idx}.", expert_prefix)
                 for sub, _, _ in subs:
                     sh_ten = sub_sd[f"{gemm_idx}.weight_quantizer.{sub}"]
-                    replica_id = sh_ten.replica_id
-                    if len(replica_id) == 3:
-                        sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
                     sharded_state_dict[f"{prefix}weight_quantizer.{gemm_idx}.{sub}"] = sh_ten
             return sharded_state_dict
 

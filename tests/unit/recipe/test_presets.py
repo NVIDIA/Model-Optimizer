@@ -38,6 +38,8 @@ from modelopt.torch.quantization.ggml import (
     IQ1_S_EFFECTIVE_BITS,
     IQ2_XS_BLOCK_SIZE,
     IQ2_XS_EFFECTIVE_BITS,
+    IQ2_XXS_BLOCK_SIZE,
+    IQ2_XXS_EFFECTIVE_BITS,
 )
 
 
@@ -135,6 +137,7 @@ def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
     ("qformat", "block_size", "effective_bits"),
     [
         ("iq1_s", IQ1_S_BLOCK_SIZE, IQ1_S_EFFECTIVE_BITS),
+        ("iq2_xxs", IQ2_XXS_BLOCK_SIZE, IQ2_XXS_EFFECTIVE_BITS),
         ("iq2_xs", IQ2_XS_BLOCK_SIZE, IQ2_XS_EFFECTIVE_BITS),
     ],
 )

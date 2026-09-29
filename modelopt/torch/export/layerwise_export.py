@@ -36,7 +36,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCol
 from modelopt.torch.utils import distributed as dist
 
 from .layer_utils import sync_moe_gate_up_amax
-from .model_utils import TiedWeightMap, get_language_model_from_vl
+from .model_utils import TiedWeightMap, _release_exported_tensors, get_language_model_from_vl
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
 from .quant_format import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import (
@@ -309,16 +309,19 @@ class LayerwiseExporter:
         )
         self._unify_shared_quantization_params(layer_module, layer_inputs)
 
-        for sub_name, sub_mod in layer_module.named_modules():
-            full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
-            _dispatch_export_handler(full_name, sub_mod, self._ctx)
-        _reconstruct_fused_moe_linear(layer_module)
+        # The shard on disk is the artifact once this block closes; nothing reads the
+        # layer again.
+        with _release_exported_tensors(layer_module):
+            for sub_name, sub_mod in layer_module.named_modules():
+                full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
+                _dispatch_export_handler(full_name, sub_mod, self._ctx)
+            _reconstruct_fused_moe_linear(layer_module)
 
-        prefix = f"{layer_name}." if layer_name else ""
-        for key, tensor in layer_module.state_dict().items():
-            self._collect(tensors, prefix + key, tensor)
+            prefix = f"{layer_name}." if layer_name else ""
+            for key, tensor in layer_module.state_dict().items():
+                self._collect(tensors, prefix + key, tensor)
 
-        save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
+            save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
 
     def _unify_shared_quantization_params(
         self, layer_module: nn.Module, layer_inputs: list | None
