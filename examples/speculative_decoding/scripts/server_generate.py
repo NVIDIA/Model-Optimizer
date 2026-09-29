@@ -93,6 +93,10 @@ class RejectedConversationError(ValueError):
     """A conversation cannot be generated with the current input and request settings."""
 
 
+class RetryableConversationError(RuntimeError):
+    """A generation failure may succeed when the conversation is retried on resume."""
+
+
 def generate_data(sample, idx, system_prompt):
     """Generate a complete conversation, retaining reasoning and marking truncated responses."""
     try:
@@ -132,6 +136,11 @@ def generate_data(sample, idx, system_prompt):
                 if role == "system":
                     if not system_prompt:
                         output_messages.append({"role": "system", "content": content})
+                    else:
+                        print(
+                            f"Warning: conversation {idx}: --system_prompt overrides the input system message.",
+                            file=sys.stderr,
+                        )
                     continue
                 if role in ["assistant", "gpt"]:
                     continue
@@ -167,7 +176,12 @@ def generate_data(sample, idx, system_prompt):
                     or getattr(choice, "stop_reason", None) == "repetition_detected"
                 )
                 if not generated_message["content"] and not truncated:
-                    raise RejectedConversationError(
+                    error_type = (
+                        RetryableConversationError
+                        if args.temperature > 0
+                        else RejectedConversationError
+                    )
+                    raise error_type(
                         f"Model returned an empty final answer (finish_reason={choice.finish_reason}, "
                         f"reasoning_characters={len(reasoning or '')})."
                     )
@@ -272,7 +286,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_threads) as exec
             cause = exc.__cause__ or exc
             status = cause.status_code if isinstance(cause, APIStatusError) else None
             rejected = isinstance(cause, RejectedConversationError) or status in (400, 422)
-            transient = isinstance(cause, APIConnectionError) or (
+            transient = isinstance(cause, (APIConnectionError, RetryableConversationError)) or (
                 status is not None and (status in (408, 409, 429) or status >= 500)
             )
             fatal_error |= not (rejected or transient)

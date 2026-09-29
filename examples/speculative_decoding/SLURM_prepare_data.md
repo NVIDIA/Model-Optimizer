@@ -41,8 +41,9 @@ will retry it.
 Rerun the launch command for the same shard range and output directory to resume. Keep shard
 names and input ordering unchanged, since conversation IDs are positions within each shard.
 Completed IDs are skipped. Temporary connection, timeout, rate-limit, and server errors remain
-retryable. Unsupported tool roles or calls, empty final answers, malformed conversations, and
-HTTP 400/422 responses are recorded as rejected and skipped on ordinary resume. Inspect these
+retryable. Empty final answers are retryable at positive temperatures, but recorded as rejected
+at temperature zero. Unsupported tool roles or calls, malformed conversations, and HTTP 400/422
+responses are also recorded as rejected and skipped on ordinary resume. Inspect these
 rejections before training; they can indicate bad input or incompatible request settings.
 
 Set `RETRY_FAILED=1` when launching to retry rejected conversations after fixing their input

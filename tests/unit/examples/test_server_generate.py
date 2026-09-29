@@ -40,6 +40,7 @@ class _StatusError(Exception):
 
 
 def _response(content="answer", finish_reason="stop", stop_reason=None, **message_fields):
+    """Build only the response attributes consumed by the generator."""
     message = SimpleNamespace(
         content=content, tool_calls=None, function_call=None, **message_fields
     )
@@ -48,10 +49,12 @@ def _response(content="answer", finish_reason="stop", stop_reason=None, **messag
 
 
 def _sample(prompt):
+    """Build a user-only conversation without loading a dataset."""
     return {"messages": [{"role": "user", "content": prompt}]}
 
 
 def _read_jsonl(path):
+    """Read the generated output or journal, treating absent files as empty."""
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
@@ -160,6 +163,60 @@ def test_multi_turn_history_and_request_options(run_generator, sharegpt):
         {"finished": True},
     ]
     assert not result.failures
+
+
+@pytest.mark.parametrize("has_system_message", [False, True])
+def test_system_prompt_override_warns_only_when_replacing_input(
+    run_generator, capsys, has_system_message
+):
+    """Warn when overriding a dataset system message without exposing its contents."""
+    sample = _sample("question")
+    if has_system_message:
+        sample["messages"].insert(0, {"role": "system", "content": "dataset instructions"})
+    result = run_generator([sample], [_response()], "--system_prompt", "override instructions")
+    assert result.exit_code == 0
+    assert result.requests[0]["messages"] == [
+        {"role": "system", "content": "override instructions"},
+        {"role": "user", "content": "question"},
+    ]
+    stderr = capsys.readouterr().err
+    assert ("--system_prompt overrides the input system message" in stderr) == has_system_message
+    assert "dataset instructions" not in stderr
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+@pytest.mark.parametrize("strict", [False, True])
+def test_empty_answer_resume_depends_on_temperature(run_generator, temperature, strict):
+    """Retry sampled empty answers on ordinary resume without keeping partial conversations."""
+    samples = [
+        {"messages": [*_sample("first")["messages"], *_sample("second")["messages"]]},
+        _sample("keep me"),
+    ]
+    options = ["--temperature", str(temperature)]
+    if strict:
+        options.append("--fail_on_error")
+    first = run_generator(
+        samples,
+        [_response(), _response(content=" ", reasoning_content="no final answer"), _response()],
+        *options,
+    )
+    retryable = temperature > 0
+    assert first.exit_code == int(strict)
+    assert all(request["temperature"] == temperature for request in first.requests)
+    assert [row["conversation_id"] for row in first.rows if "conversation_id" in row] == [1]
+    assert len(first.failures) == 1
+    assert first.failures[0]["conversation_id"] == 0
+    assert first.failures[0]["retryable"] == retryable
+    assert (first.rows[-1] == {"finished": True}) == (not retryable)
+
+    responses = [_response(), _response()] if retryable else []
+    resumed = run_generator(samples, responses, *options)
+    assert resumed.exit_code == int(strict and not retryable)
+    assert len(resumed.requests) == len(responses)
+    assert [row["conversation_id"] for row in resumed.rows if "conversation_id" in row] == (
+        [1, 0] if retryable else [1]
+    )
+    assert resumed.rows[-1] == {"finished": True}
 
 
 @pytest.mark.parametrize(
@@ -301,7 +358,9 @@ def test_unsupported_role_does_not_write_partial_conversation(run_generator):
     sample = {
         "messages": [*_sample("first")["messages"], {"role": "tool", "content": "unsupported"}]
     }
-    result = run_generator([sample, _sample("success")], [_response(), _response()])
+    result = run_generator(
+        [sample, _sample("success")], [_response(), _response()], "--temperature", "0.7"
+    )
     assert result.exit_code == 0
     assert [row.get("conversation_id") for row in result.rows] == [1, None]
     assert result.failures[0]["conversation_id"] == 0
