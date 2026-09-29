@@ -34,13 +34,14 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-# One real-model run per distinct hf_ptq path. Per-format export on tiny models (int4_awq,
-# w4a8_awq_beta, int8_weight_only, nvfp4_awq_lite, ...) is covered by
+# Per-format export on tiny models (int8_weight_only, nvfp4_awq_lite, ...) is covered by
 # tests/gpu/torch/export/test_unified_hf_export_and_check_safetensors.py.
 @pytest.mark.parametrize(
     "command",
     [
         PTQCommand(quant="int8_smoothquant", kv_cache_quant="none"),
+        PTQCommand(quant="int4_awq", kv_cache_quant="none"),
+        PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
         # GGML IQ weight-only, recipe-driven: the five formats between 1.56 and 2.56 bits per
         # weight, on the MLP layers with layerwise GPTQ. These encoders require every weight's
         # input dimension to be a multiple of 256; TinyLlama's 2048 and 5632 both are.
