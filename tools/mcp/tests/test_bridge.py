@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -1070,6 +1073,62 @@ def test_submit_job_dry_run_skips_verify(monkeypatch, tmp_path):
         dry_run=True,
     )
     assert verify_called["n"] == 0  # verify_setup never invoked in dry-run
+
+
+# Fake launcher: reports how many bytes it could read from its own stdin.
+_STDIN_PROBE = (
+    "import os, sys\n"
+    "data = sys.stdin.buffer.read()\n"
+    "with open(os.environ['STDIN_PROBE_OUT'], 'w') as f:\n"
+    "    f.write(str(len(data)))\n"
+)
+
+
+@pytest.mark.parametrize(
+    "mode_kwargs",
+    [{"dry_run": True}, {"cluster_host": "cluster.example.com"}, {"hf_local": "/tmp/hf"}],
+    ids=["dry_run", "slurm", "docker"],
+)
+def test_launcher_children_do_not_inherit_server_stdin(monkeypatch, tmp_path, mode_kwargs):
+    """The launcher child must not read the MCP server's stdin (issue #2551)."""
+    yaml_dir = tmp_path / "examples"
+    yaml_dir.mkdir()
+    (yaml_dir / "config.yaml").write_text("job_name: t\npipeline: []\n")
+    probe = tmp_path / "probe.py"
+    probe.write_text(_STDIN_PROBE)
+    out = tmp_path / "stdin_bytes"
+    monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path / "nemo"))
+    monkeypatch.setenv("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "0")
+    monkeypatch.setenv("STDIN_PROBE_OUT", str(out))
+    monkeypatch.setattr(bridge, "_launcher_argv", lambda *a, **k: [sys.executable, str(probe)])
+
+    # Point this process's stdin at a pipe that already holds data, as a live MCP transport would.
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"leak\n")
+    os.close(write_fd)
+    saved_fd = os.dup(0)
+    os.dup2(read_fd, 0)
+    try:
+        bridge.submit_job_impl(
+            yaml_path="config.yaml",
+            **{"hf_local": None, "cluster_host": None, **mode_kwargs},
+            cluster_user=None,
+            identity=None,
+            job_dir=None,
+            job_name=None,
+            extra_overrides=None,
+            skip_verify=True,
+        )
+    finally:
+        os.dup2(saved_fd, 0)
+        os.close(saved_fd)
+        os.close(read_fd)
+
+    deadline = time.monotonic() + 5  # the Docker launcher is detached, so wait for its report
+    while time.monotonic() < deadline and not (out.exists() and out.read_text()):
+        time.sleep(0.05)
+    assert out.exists() and out.read_text() == "0"
 
 
 # ---------------------------------------------------------------------------
