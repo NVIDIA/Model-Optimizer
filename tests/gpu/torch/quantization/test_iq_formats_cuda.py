@@ -23,12 +23,14 @@ derives the block scale in its own kernel instead of taking a precomputed one.
 import pytest
 import torch
 
+import modelopt.torch.quantization.ggml.iq1_m as iq1_m_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml import (
+    IQ1_M_BLOCK_BYTES,
     IQ1_S_BLOCK_BYTES,
     IQ2_S_BLOCK_BYTES,
     IQ2_XS_BLOCK_BYTES,
@@ -39,6 +41,7 @@ from modelopt.torch.quantization.ggml import (
 # module, packer name, per-block payload size, whether the packer takes precomputed scales
 FORMATS = {
     "iq1_s": (iq1_s_module, "iq1_s_pack", IQ1_S_BLOCK_BYTES, False),
+    "iq1_m": (iq1_m_module, "iq1_m_pack", IQ1_M_BLOCK_BYTES, True),
     "iq2_xxs": (iq2_xxs_module, "iq2_xxs_pack", IQ2_XXS_BLOCK_BYTES, True),
     "iq2_xs": (iq2_xs_module, "iq2_xs_pack", IQ2_XS_BLOCK_BYTES, True),
     "iq2_s": (iq2_s_module, "iq2_s_pack", IQ2_S_BLOCK_BYTES, True),

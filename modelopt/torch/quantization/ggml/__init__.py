@@ -17,6 +17,8 @@
 
 # Importing the backend installs its TensorQuantizer dispatch entry.
 from . import backend as _backend
+from .iq1_m import *
+from .iq1_m import __all__ as _iq1_m_all
 from .iq1_s import *
 from .iq1_s import __all__ as _iq1_s_all
 from .iq2_s import *
@@ -28,6 +30,7 @@ from .iq2_xxs import __all__ as _iq2_xxs_all
 from .registry import IQ_FORMAT_REGISTRY, IQFormat
 
 __all__ = [  # noqa: PLE0604
+    *_iq1_m_all,
     *_iq1_s_all,
     *_iq2_s_all,
     *_iq2_xs_all,

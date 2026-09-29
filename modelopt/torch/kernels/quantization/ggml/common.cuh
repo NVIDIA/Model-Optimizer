@@ -109,6 +109,46 @@ __device__ __forceinline__ float clamped_quant_error(float xnorm, float dot, flo
   return fmaxf(fmaf(scale * scale, qnorm, fmaf(-2.0f * scale, dot, xnorm)), 0.0f);
 }
 
+// The IQ1 kernels approximate each 8-value vector by scale * (q + delta), with q from the ternary
+// grid and delta = +/- 1/8. The three helpers below are theirs.
+
+// Loads one 8-value vector with its squared norm and its sum.
+template <typename scalar_t>
+__device__ __forceinline__ void load_vector(const scalar_t *source, float (&x)[kVectorSize],
+                                            float &xnorm, float &xsum) {
+  xnorm = 0.0f;
+  xsum = 0.0f;
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j) {
+    x[j] = load_float(source + j);
+    xnorm = fmaf(x[j], x[j], xnorm);
+    xsum += x[j];
+  }
+}
+
+// Accumulates x . q, |q|^2 and sum(q) for one codebook vector.
+__device__ __forceinline__ void grid_terms(const float *x, const float *q, float &dot, float &qnorm,
+                                           float &qsum) {
+  dot = 0.0f;
+  qnorm = 0.0f;
+  qsum = 0.0f;
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j) {
+    dot = fmaf(x[j], q[j], dot);
+    qnorm = fmaf(q[j], q[j], qnorm);
+    qsum += q[j];
+  }
+}
+
+// Squared error of approximating x by scale * (q + delta): the offset shifts the dot and norm
+// that grid_terms computed for q alone.
+__device__ __forceinline__ float shifted_error(float xnorm, float xsum, float dot, float qnorm,
+                                               float qsum, float scale, float delta) {
+  const float shifted_dot = dot + delta * xsum;
+  const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
+  return clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale);
+}
+
 // Orders candidates by error first and codebook index second, so the lowest index wins a tie --
 // the rule the PyTorch reference encoder applies.
 __device__ __forceinline__ unsigned long long error_key(float error, int entry) {

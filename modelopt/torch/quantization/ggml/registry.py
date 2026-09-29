@@ -16,6 +16,7 @@
 """The GGML IQ formats, listed once for backend dispatch and export."""
 
 from .common import IQFormat
+from .iq1_m import IQ1_M_FORMAT
 from .iq1_s import IQ1_S_FORMAT
 from .iq2_s import IQ2_S_FORMAT
 from .iq2_xs import IQ2_XS_FORMAT
@@ -30,5 +31,6 @@ __all__ = ["IQ_FORMAT_REGISTRY", "IQFormat"]
 # It is an explicit list rather than formats registering themselves on import, so its contents
 # never depend on which modules happen to have been imported first.
 IQ_FORMAT_REGISTRY: dict[str, IQFormat] = {
-    fmt.name: fmt for fmt in (IQ1_S_FORMAT, IQ2_XXS_FORMAT, IQ2_XS_FORMAT, IQ2_S_FORMAT)
+    fmt.name: fmt
+    for fmt in (IQ1_S_FORMAT, IQ1_M_FORMAT, IQ2_XXS_FORMAT, IQ2_XS_FORMAT, IQ2_S_FORMAT)
 }
