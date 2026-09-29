@@ -293,38 +293,44 @@ def test_convert_fp64_initializers_preserves_infinity():
     assert converted[2] == np.finfo(np.float32).max
 
 
-def test_convert_fp64_nodes_clamps_out_of_range_values():
-    """A Constant node's FP64 value must be clamped the same way an initializer is."""
+@pytest.mark.parametrize("op_type", ["Constant", "ConstantOfShape"])
+def test_convert_fp64_nodes_clamps_out_of_range_values(op_type):
+    """A node's FP64 value attribute must be clamped the same way an initializer is."""
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])
-    fp64_max = np.finfo(np.float64).max
-
-    constant = helper.make_node(
-        "Constant",
-        inputs=[],
-        outputs=["big"],
-        name="big_constant",
-        value=numpy_helper.from_array(np.array([fp64_max], np.float64), name="big_value"),
+    value = numpy_helper.from_array(
+        np.array([np.finfo(np.float64).max], np.float64), name="big_value"
     )
+
+    initializer = []
+    if op_type == "ConstantOfShape":
+        producer = helper.make_node(
+            "ConstantOfShape", ["shape"], ["big"], name="big_node", value=value
+        )
+        initializer.append(numpy_helper.from_array(np.array([2], dtype=np.int64), name="shape"))
+    else:
+        producer = helper.make_node("Constant", [], ["big"], name="big_node", value=value)
+
     graph = helper.make_graph(
-        nodes=[constant, helper.make_node("Mul", ["X", "big"], ["Y"], name="mul")],
-        name="fp64_constant_out_of_range",
+        nodes=[producer, helper.make_node("Mul", ["X", "big"], ["Y"], name="mul")],
+        name="fp64_node_out_of_range",
         inputs=[x],
         outputs=[y],
+        initializer=initializer,
     )
     sanitizer = GraphSanitizer(helper.make_model(graph))
 
     assert sanitizer._convert_fp64_nodes() is True
 
-    value = next(
+    converted = next(
         numpy_helper.to_array(attr.t)
         for node in sanitizer.model.graph.node
-        if node.name == "big_constant"
+        if node.name == "big_node"
         for attr in node.attribute
         if attr.name == "value"
     )
-    assert np.all(np.isfinite(value)), "Constant value was cast to infinity"
-    assert value == np.finfo(np.float32).max
+    assert np.all(np.isfinite(converted)), f"{op_type} value was cast to infinity"
+    assert converted == np.finfo(np.float32).max
 
 
 def test_convert_fp64_io_types():
