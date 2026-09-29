@@ -29,6 +29,7 @@ from _test_utils.torch.quantization.iq_llama_cpp_vectors import (
     packed_blocks,
 )
 
+import modelopt.torch.quantization.ggml.iq1_m as iq1_m_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
 import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
@@ -40,6 +41,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 # name -> (module, packed bytes per block, codebook entries, bits per weight)
 FORMATS = {
     "iq1_s": (iq1_s_module, 50, 2048, 1.5625),
+    "iq1_m": (iq1_m_module, 56, 2048, 1.75),
     "iq2_xxs": (iq2_xxs_module, 66, 256, 2.0625),
     "iq2_xs": (iq2_xs_module, 74, 512, 2.3125),
     "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
@@ -49,7 +51,7 @@ NAMES = sorted(FORMATS)
 # tests that go through TensorQuantizer iterate these rather than every codec above.
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
-TERNARY = {"iq1_s"}
+TERNARY = {"iq1_s", "iq1_m"}
 
 
 def _parts(name):
@@ -83,9 +85,11 @@ def test_canonical_grid(name):
 @pytest.mark.parametrize("name", NAMES)
 def test_grid_normalizes_unindexed_cuda_device(monkeypatch, name):
     module, _, _, grid_fn, _, _, _ = _parts(name)
+    # IQ1_M shares the IQ1_S cache, being the same table.
+    cache_owner = iq1_s_module if name == "iq1_m" else module
     cached = torch.empty(0)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
-    monkeypatch.setitem(module._GRID_CACHE, torch.device("cuda", 7), cached)
+    monkeypatch.setitem(cache_owner._GRID_CACHE, torch.device("cuda", 7), cached)
 
     assert grid_fn("cuda") is cached
 
