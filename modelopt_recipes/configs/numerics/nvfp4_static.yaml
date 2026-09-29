@@ -21,3 +21,5 @@ block_sizes:
   -1: 16
   type: static
   scale_bits: e4m3
+# Four value bits plus one FP8 scale per 16-element block.
+effective_bits: 4.5
