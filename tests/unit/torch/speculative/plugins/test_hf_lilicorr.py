@@ -320,7 +320,9 @@ class TestLiLiCorrForward:
     @pytest.mark.parametrize("w_cal", [0.0, 0.5])
     def test_calibration_enters_the_loss_with_its_weight(self, w_cal):
         """Off by default and an exact no-op at 0; otherwise one more absolute term."""
-        model = _converted(dflash_lilicorr_w_cal=w_cal)
+        # Every token is a candidate, so the ground truth is always in the lattice and the
+        # term has supervised slots to be positive on.
+        model = _converted(topk=VOCAB_SIZE, dflash_lilicorr_w_cal=w_cal)
         model.train()
         metrics = model(**_make_batch(model.dflash_config.vocab_size)).lilicorr_metrics
         assert metrics["lilicorr_w_cal"] == w_cal

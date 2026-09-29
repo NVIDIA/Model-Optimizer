@@ -90,7 +90,7 @@ Changelog
 
 **Bug Fixes**
 
-- Fix DFlash conversion on a NoPE target whose config declares ``rope_theta`` without setting it: the draft keeps its own RoPE base instead of inheriting ``None``, which failed when the draft's rotary embedding was built.
+- Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
 - Fix shared ONNX export metadata and Diffusers attention policy: every ``NVFP4QuantExporter`` post-process now upgrades the default-domain opset to at least 23, all FP8 custom-op exports re-run ONNX shape/type inference after setting output metadata, and quantized SDPA derives FP8 MHA enablement from the live Q/K/V quantizers instead of honoring a caller-set ``_disable_fp8_mha`` attribute.
 - Fix ONNX FP16 conversion failing to preserve public output types when type inference changes a graph output declaration before output casts are inserted.
