@@ -15,6 +15,7 @@
 """End-to-end test for Quantization Aware Distillation (QAD): quantize + distill + export."""
 
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -32,11 +33,19 @@ from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
 )
 
+# The fix ships in the nemo:26.10 container.
+# TODO(Megatron-Bridge#6243): drop this probe once the minimum Megatron-Bridge carries it.
 try:
     from megatron.bridge.training.gpt_step import _keep_full_position_ids_for_cp  # noqa: F401
 
     HAS_MROPE_CP_FIX = True
 except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
+    warnings.warn(
+        "Megatron-Bridge lacks the mrope context-parallel fix (NVIDIA-NeMo/Megatron-Bridge#6243, shipping "
+        "in nemo:26.10), so the VLM QAD case runs at cp_size=1 and does not cover context parallelism. "
+        "If the installed Megatron-Bridge should carry the fix, this probe is stale.",
+        stacklevel=1,
+    )
     HAS_MROPE_CP_FIX = False
 
 
