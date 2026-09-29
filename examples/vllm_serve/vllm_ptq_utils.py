@@ -175,62 +175,27 @@ def _cleanup_calibration_requests(
             raise finish_error from execute_error
 
 
-def _to_sequence_tensors(values: Any, name: str) -> list[torch.Tensor]:
-    """Normalize a tensor or Python batch into one CPU tensor per sequence."""
-    if torch.is_tensor(values):
-        values = values.detach().cpu()
-        if values.ndim == 1:
-            return [values]
-        if values.ndim == 2:
-            return list(values)
-        raise ValueError(
-            f"Calibration {name} must have shape [batch, sequence], got {values.shape}."
-        )
-
-    values = list(values)
-    if values and torch.as_tensor(values[0]).ndim == 0:
-        values = [values]
-
-    sequences = [torch.as_tensor(sequence).detach().cpu() for sequence in values]
-    if any(sequence.ndim != 1 for sequence in sequences):
-        shapes = [sequence.shape for sequence in sequences]
-        raise ValueError(
-            f"Calibration {name} must contain one-dimensional sequences, got {shapes}."
-        )
-    return sequences
-
-
-def _get_unpadded_input_ids(batch: dict[str, Any]) -> list[list[int]]:
-    """Remove tokenizer padding before constructing vLLM scheduler requests."""
-    input_ids = _to_sequence_tensors(batch["input_ids"], "input_ids")
-
-    attention_mask = batch.get("attention_mask")
-    if attention_mask is None:
-        sequences = [ids.tolist() for ids in input_ids]
-    else:
-        attention_masks = _to_sequence_tensors(attention_mask, "attention_mask")
-        shapes_match = len(attention_masks) == len(input_ids) and all(
-            mask.shape == ids.shape for ids, mask in zip(input_ids, attention_masks, strict=True)
-        )
-        if not shapes_match:
-            raise ValueError("Calibration attention_mask must match input_ids per-sequence shapes.")
-        sequences = [
-            ids[mask.to(dtype=torch.bool)].tolist()
-            for ids, mask in zip(input_ids, attention_masks, strict=True)
-        ]
-
-    if not sequences or any(not sequence for sequence in sequences):
-        raise ValueError("Calibration input contains an empty sequence after removing padding.")
-    return sequences
-
-
 def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], None]:
     """Create a calibration loop backed by the vLLM worker scheduler."""
 
     def calibrate_loop(model: Any) -> None:
         """Calibrate the model with batches submitted through the scheduler."""
         for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
-            input_ids_list_batch = _get_unpadded_input_ids(batch)
+            input_ids_batch = batch["input_ids"]
+
+            # Convert to list of flat token id lists (one per sequence in batch)
+            if torch.is_tensor(input_ids_batch):
+                input_ids_batch = input_ids_batch.cpu()
+                # Handle both [batch_size, seq_len] and [seq_len]
+                if input_ids_batch.dim() == 1:
+                    input_ids_batch = input_ids_batch.unsqueeze(0)
+                input_ids_list_batch = [seq.tolist() for seq in input_ids_batch]
+            else:
+                input_ids_list_batch = [
+                    list(seq) if not isinstance(seq, list) else seq for seq in input_ids_batch
+                ]
+                if input_ids_list_batch and isinstance(input_ids_list_batch[0], int):
+                    input_ids_list_batch = [input_ids_list_batch]
 
             num_groups = len(self.model_runner.kv_cache_config.kv_cache_groups)
             block_ids_batch, new_block_ids_to_zero = _allocate_calibration_blocks(

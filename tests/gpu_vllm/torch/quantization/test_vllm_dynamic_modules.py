@@ -201,43 +201,6 @@ def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch, entrypoi
     assert raised.value is dependency_error
 
 
-def test_get_unpadded_input_ids_handles_left_and_right_padding():
-    module = _load_example_module("vllm_ptq_utils")
-    batch = {
-        "input_ids": torch.tensor([[0, 0, 11, 12], [21, 22, 0, 0]]),
-        "attention_mask": torch.tensor([[0, 0, 1, 1], [1, 1, 0, 0]]),
-    }
-
-    assert module._get_unpadded_input_ids(batch) == [[11, 12], [21, 22]]
-
-
-def test_get_unpadded_input_ids_preserves_ragged_batches():
-    """Keep variable-length Python sequences and apply masks per sequence."""
-    module = _load_example_module("vllm_ptq_utils")
-
-    assert module._get_unpadded_input_ids({"input_ids": [[11, 12], [21]]}) == [
-        [11, 12],
-        [21],
-    ]
-    assert module._get_unpadded_input_ids(
-        {
-            "input_ids": [[0, 11, 12], [21, 0]],
-            "attention_mask": [[0, 1, 1], [1, 0]],
-        }
-    ) == [[11, 12], [21]]
-
-
-def test_get_unpadded_input_ids_rejects_empty_sequence():
-    module = _load_example_module("vllm_ptq_utils")
-    batch = {
-        "input_ids": torch.tensor([[0, 0]]),
-        "attention_mask": torch.tensor([[0, 0]]),
-    }
-
-    with pytest.raises(ValueError, match="empty sequence"):
-        module._get_unpadded_input_ids(batch)
-
-
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
     """The current vLLM adapter must forward every warmup reservation argument."""
     module = _load_example_module("vllm_ptq_utils")
