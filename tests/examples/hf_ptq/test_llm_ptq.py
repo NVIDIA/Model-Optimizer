@@ -51,8 +51,9 @@ def test_ptq_mixtral(command):
         PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
         # Q8_0 has 32-value blocks and needs no calibration forward pass.
         PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
-        # Default KV cache (fp8_cast); fp8 and nvfp4 are also deployed with TRT-LLM
+        # fp8 and nvfp4 checkpoints are also deployed with TRT-LLM
         PTQCommand(quant="fp8", min_sm=89),
+        PTQCommand(quant="fp8", kv_cache_quant="none", min_sm=89),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="mxfp8", min_sm=100),
         # Calibrated KV cache
@@ -60,7 +61,7 @@ def test_ptq_mixtral(command):
         # AutoQuantize recipe; KV via --kv_cache_quant fallback
         PTQCommand(
             recipe="general/auto_quantize/nvfp4_fp8_at_5p4bits",
-            kv_cache_quant="fp8",
+            kv_cache_quant="nvfp4",
             calib_batch_size=4,
         ),
         # multi_gpu
