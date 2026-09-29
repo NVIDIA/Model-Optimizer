@@ -267,6 +267,32 @@ def test_convert_fp64_initializers_clamps_out_of_range_values():
     assert converted["upper"] == fp32_max
 
 
+def test_convert_fp64_initializers_preserves_infinity():
+    """An infinity the model already held is not a value FP32 cannot represent."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3])
+    # An oversized finite value alongside the infinities must not drag them down with it.
+    values = np.array([np.inf, -np.inf, np.finfo(np.float64).max], dtype=np.float64)
+
+    graph = helper.make_graph(
+        nodes=[helper.make_node("Mul", ["X", "mixed"], ["Y"], name="mul")],
+        name="fp64_with_infinity",
+        inputs=[x],
+        outputs=[y],
+        initializer=[numpy_helper.from_array(values, name="mixed")],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_initializers() is True
+
+    converted = numpy_helper.to_array(
+        next(init for init in sanitizer.model.graph.initializer if init.name == "mixed")
+    )
+    assert converted[0] == np.inf
+    assert converted[1] == -np.inf
+    assert converted[2] == np.finfo(np.float32).max
+
+
 def test_convert_fp64_nodes_clamps_out_of_range_values():
     """A Constant node's FP64 value must be clamped the same way an initializer is."""
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
