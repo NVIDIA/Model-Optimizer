@@ -518,18 +518,20 @@ class GraphSanitizer:
         return None
 
     def _narrow_to_fp32(self, fp64_data: np.ndarray, name: str) -> np.ndarray:
-        """Converts FP64 data to FP32, clamping values that FP32 cannot represent.
+        """Converts FP64 data to FP32, clamping finite values that FP32 cannot represent.
 
-        A bare cast turns anything beyond the FP32 range into +/-inf, which then poisons
-        the arithmetic it feeds.
+        A bare cast turns a finite value beyond the FP32 range into +/-inf, which then
+        poisons the arithmetic it feeds. An infinity the model already held is left alone,
+        since narrowing it is not this function's decision to make.
         """
         fp32_max = np.finfo(np.float32).max
-        if np.any(np.isfinite(fp64_data) & (np.abs(fp64_data) > fp32_max)):
+        out_of_range = np.isfinite(fp64_data) & (np.abs(fp64_data) > fp32_max)
+        if np.any(out_of_range):
             logger.warning(
-                f"Initializer {name} contains values outside the FP32 range, "
+                f"Tensor {name} contains values outside the FP32 range, "
                 f"they will be clamped to {fp32_max}."
             )
-            fp64_data = np.clip(fp64_data, -fp32_max, fp32_max)
+            fp64_data = np.where(out_of_range, np.copysign(fp32_max, fp64_data), fp64_data)
         return fp64_data.astype(np.float32)
 
     def _convert_fp64_initializers(self) -> bool:
@@ -603,7 +605,9 @@ class GraphSanitizer:
                     if attr.name == "value" and attr.t.data_type == onnx.TensorProto.DOUBLE:
                         # Convert the tensor value to FP32
                         fp64_data = numpy_helper.to_array(attr.t, base_dir=self.external_data_dir)
-                        fp32_data = self._narrow_to_fp32(fp64_data, node.name)
+                        fp32_data = self._narrow_to_fp32(
+                            fp64_data, node.output[0] if node.output else node.name
+                        )
                         new_tensor = numpy_helper.from_array(fp32_data)
                         attr.t.CopyFrom(new_tensor)
                         modified = True
