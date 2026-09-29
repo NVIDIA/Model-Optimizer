@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Fixed Nemotron-H MTP policy: NVFP4 W4A4 MoE projections and FP8 attention KV-cache BMMs.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
+
+algorithm: max
+quant_cfg:
+  - quantizer_name: "*"
+    enable: false
+  - quantizer_name: "*mtp.layers.1.mixer.experts.*weight_quantizer"
+    enable: true
+    cfg: {$import: nvfp4}
+  - quantizer_name: "*mtp.layers.1.mixer.experts.*input_quantizer"
+    enable: true
+    cfg: {$import: nvfp4}
+  - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*weight_quantizer"
+    enable: true
+    cfg: {$import: nvfp4}
+  - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*input_quantizer"
+    enable: true
+    cfg: {$import: nvfp4}
+  - quantizer_name: "*mtp.layers.0.*[kv]_bmm_quantizer"
+    enable: true
+    cfg: {$import: fp8}
