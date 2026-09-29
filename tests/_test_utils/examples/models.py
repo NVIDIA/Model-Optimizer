@@ -23,11 +23,6 @@ def _select_path(remote_id: str, local_id: str) -> str:
     return remote_id
 
 
-BART_PATH = _select_path(
-    remote_id="facebook/bart-large-cnn",
-    local_id="bart-large-cnn",
-)
-
 T5_PATH = _select_path(
     remote_id="google-t5/t5-small",
     local_id="t5-small",
