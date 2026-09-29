@@ -239,64 +239,48 @@ _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-_COMPILE_MARKER_PATHS = (
-    (),
-    ("model",),
-    ("language_model",),
-    ("model", "model"),
-    ("language_model", "model"),
-)
-
-
-def _resolve_compile_target(model):
-    """Return the nearest model that owns vLLM's do_not_compile marker."""
-    for path in _COMPILE_MARKER_PATHS:
-        target = model
-        for attr in path:
-            target = getattr(target, attr, None)
-            if target is None:
-                break
-        else:
-            if hasattr(target, "do_not_compile"):
-                return target
-    return None
+def _iter_compile_targets(model):
+    """Yield every module in the model tree that exposes vLLM's compile marker."""
+    modules = getattr(model, "modules", None)
+    candidates = modules() if callable(modules) else (model,)
+    yield from (candidate for candidate in candidates if hasattr(candidate, "do_not_compile"))
 
 
 @contextmanager
 def disable_compilation(model):
-    """Temporarily disable vLLM compilation for a model.
+    """Temporarily disable every vLLM compile wrapper in a model tree.
 
     Args:
-        model: The model to disable compilation for.
+        model: The model whose compile wrappers should be disabled.
     """
-    target = _resolve_compile_target(model)
-    if target is None:
-        target = getattr(model, "model", None)
-        if target is None:
-            language_model = getattr(model, "language_model", None)
-            target = getattr(language_model, "model", None)
-        if target is None:
-            raise ValueError("Model does not have a model or language_model.model attribute")
+    targets = tuple(_iter_compile_targets(model))
+    if not targets:
         warnings.warn(
-            f"{type(target).__name__} does not expose vLLM's 'do_not_compile' marker, so "
-            "ModelOpt cannot dynamically disable torch.compile during calibration. This is "
-            "harmless when vLLM is already running in eager mode (for example, with "
+            f"{type(model).__name__} has no modules exposing vLLM's 'do_not_compile' marker, "
+            "so ModelOpt cannot dynamically disable torch.compile during calibration. This "
+            "is harmless when vLLM is already running in eager mode (for example, with "
             "--enforce-eager or CompilationMode.NONE). Otherwise, calibration may enter a "
             "compiled path; rerun with --enforce-eager or add vLLM compile-wrapper support "
             "for this model.",
             stacklevel=2,
         )
+        yield
+        return
 
-    had_do_not_compile = "do_not_compile" in vars(target)
-    previous_do_not_compile = getattr(target, "do_not_compile", None)
-    target.do_not_compile = True
+    states = []
     try:
+        for target in targets:
+            had_do_not_compile = "do_not_compile" in vars(target)
+            previous_do_not_compile = target.do_not_compile
+            states.append((target, had_do_not_compile, previous_do_not_compile))
+            target.do_not_compile = True
         yield
     finally:
-        if had_do_not_compile:
-            target.do_not_compile = previous_do_not_compile
-        else:
-            vars(target).pop("do_not_compile", None)
+        for target, had_do_not_compile, previous_do_not_compile in reversed(states):
+            if had_do_not_compile:
+                target.do_not_compile = previous_do_not_compile
+            else:
+                vars(target).pop("do_not_compile", None)
 
 
 # vLLM Attention stores ``device``/``dtype`` as plain attrs; ``dtype`` may be a string

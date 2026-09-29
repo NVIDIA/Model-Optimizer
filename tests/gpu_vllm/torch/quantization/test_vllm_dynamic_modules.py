@@ -620,44 +620,38 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
     assert attention.v_bmm_quantizer.call_count == 2
 
 
-def test_disable_compilation_warns_when_marker_is_missing():
-    """A non-compile-wrapped VLM remains supported, but the no-op risk is visible."""
-    inner_model = SimpleNamespace()
-    model = SimpleNamespace(language_model=SimpleNamespace(model=inner_model))
+def test_disable_compilation_warns_without_installing_marker():
+    """A non-compile-wrapped model remains unchanged while the no-op risk is visible."""
+    model = torch.nn.Module()
 
     with pytest.warns(UserWarning, match="rerun with --enforce-eager"), disable_compilation(model):
-        assert inner_model.do_not_compile is True
+        assert not hasattr(model, "do_not_compile")
 
-    assert not hasattr(inner_model, "do_not_compile")
-
-
-def test_disable_compilation_prefers_outer_marker():
-    """An outer compile wrapper takes precedence over an unmarked inner model."""
-    inner_model = SimpleNamespace()
-    model = SimpleNamespace(do_not_compile=False, model=inner_model)
-
-    with disable_compilation(model):
-        assert model.do_not_compile is True
-        assert not hasattr(inner_model, "do_not_compile")
-
-    assert model.do_not_compile is False
+    assert not hasattr(model, "do_not_compile")
 
 
-def test_disable_compilation_restores_class_marker_after_error():
-    """Cleanup restores a class marker without masking an error from the context body."""
+def test_disable_compilation_updates_all_markers_and_restores_after_error():
+    """Every language and vision compile wrapper is restored after an exceptional exit."""
 
-    class CompileWrappedModel:
+    class CompileWrappedModule(torch.nn.Module):
         do_not_compile = False
 
-    inner_model = CompileWrappedModel()
-    model = SimpleNamespace(model=inner_model)
+    model = CompileWrappedModule()
+    model.do_not_compile = False
+    model.vision_model = CompileWrappedModule()
+    model.vision_model.do_not_compile = True
+    model.language_model = CompileWrappedModule()
 
     with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
-        assert inner_model.do_not_compile is True
+        assert model.do_not_compile is True
+        assert model.vision_model.do_not_compile is True
+        assert model.language_model.do_not_compile is True
         raise RuntimeError("quantization failed")
 
-    assert inner_model.do_not_compile is False
-    assert "do_not_compile" not in vars(inner_model)
+    assert model.do_not_compile is False
+    assert model.vision_model.do_not_compile is True
+    assert model.language_model.do_not_compile is False
+    assert "do_not_compile" not in vars(model.language_model)
 
 
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
