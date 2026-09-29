@@ -56,25 +56,31 @@ constexpr int kIq2xxsEntries = 256;
 constexpr int kThreads = 256;
 constexpr int kWarps = kThreads / 32;
 
-// Validates the packing contract every IQ format shares. Called from the pybind wrapper on the
-// caller's tensors and again from the CUDA entry point on the materialized contiguous tensors, so
-// the enforced rule and the message it reports are written once.
-inline void check_pack_inputs(const char *format, const at::Tensor &input, const at::Tensor &grid,
-                              int64_t entries) {
+// Validates the scalar-input contract shared by the vector-codebook and scalar GGML packers.
+inline void check_scalar_pack_input(const char *format, const at::Tensor &input,
+                                    int64_t block_size) {
   const auto input_type = input.scalar_type();
   TORCH_CHECK(input_type == at::kFloat || input_type == at::kDouble || input_type == at::kHalf ||
                   input_type == at::kBFloat16,
               format, " packing supports float32, float64, float16, and bfloat16 inputs");
   TORCH_CHECK(input.numel() > 0, "input must be non-empty");
-  TORCH_CHECK(input.dim() > 0 && input.size(-1) % kBlockSize == 0,
-              "input's innermost dimension must be a multiple of ", kBlockSize,
+  TORCH_CHECK(input.dim() > 0 && input.size(-1) % block_size == 0,
+              "input's innermost dimension must be a multiple of ", block_size,
               " so blocks do not straddle rows");
+  TORCH_CHECK(input.numel() / block_size <= std::numeric_limits<int>::max(), format,
+              " CUDA grid is too large");
+}
+
+// Validates the codebook contract every IQ format shares. Called from the pybind wrapper on the
+// caller's tensors and again from the CUDA entry point on the materialized contiguous tensors, so
+// the enforced rule and the message it reports are written once.
+inline void check_pack_inputs(const char *format, const at::Tensor &input, const at::Tensor &grid,
+                              int64_t entries) {
+  check_scalar_pack_input(format, input, kBlockSize);
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == entries &&
                   grid.size(1) == kVectorSize,
               "grid must be float32 [", entries, ", ", kVectorSize, "]");
   TORCH_CHECK(input.get_device() == grid.get_device(), "input and grid must share a device");
-  TORCH_CHECK(input.numel() / kBlockSize <= std::numeric_limits<int>::max(), format,
-              " CUDA grid is too large");
 }
 
 #ifdef __CUDACC__
