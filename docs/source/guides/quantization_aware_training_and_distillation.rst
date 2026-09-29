@@ -12,19 +12,56 @@ deployment.
 QAT versus QAD
 ==============
 
-QAT is standard supervised fine-tuning of a quantized model. It uses the usual
-cross-entropy (CE) loss against labeled data while the quantized forward pass lets
-the weights adapt to quantization error. Use QAT to adapt a quantized model to a
-task or dataset.
+**Quantization Aware Training (QAT)** inserts simulated quantization operations
+into the model graph and then fine-tunes the model so its weights learn to
+compensate for quantization error. During training, quantization scales are frozen
+while weights are updated. QAT is a general technique — it learns from labeled
+data on a quantized model.
 
-QAD uses knowledge distillation: a frozen BF16 teacher guides the quantized student
-with a logit-level KL-divergence loss. Use QAD after PTQ to recover accuracy lost
-specifically to quantization. It requires the teacher during training and therefore
-uses more memory and compute than QAT.
+Training uses the usual cross-entropy (CE) loss against labeled data.
+
+**Quantization Aware Distillation (QAD)** is a special case of QAT that uses a
+teacher model (typically the original unquantized model) to guide the quantized
+student via a distillation loss. QAD is a **pure accuracy recovery technique** —
+its goal is to recover accuracy lost from quantization, not to teach the model a
+new task.
+
+A frozen BF16 teacher guides the quantized student with a logit-level
+KL-divergence loss. QAD requires the teacher during training and therefore uses
+more memory and compute than QAT.
 
 In both cases, start from a PTQ checkpoint and retain its quantization configuration
-during training. Choose QAT for task adaptation; choose QAD for quantization-accuracy
-recovery.
+during training.
+
+When to Use QAT vs QAD
+=====================
+
+.. list-table::
+   :header-rows: 1
+   :stub-columns: 1
+   :widths: 20 40 40
+
+   * -
+     - QAT (without distillation)
+     - QAD (with distillation)
+   * - What it does
+     - Fine-tunes a quantized model on labeled data
+     - Recovers quantization accuracy using the original model as teacher
+   * - When to use
+     - The model is already quantized and you want to fine-tune it for a
+       **new task** (e.g., fine-tuning a `GPT-OSS
+       <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/gpt-oss>`_
+       quantized checkpoint)
+     - You want the **best possible accuracy recovery** after quantization
+   * - Recommended workflow
+     - Start from a quantized checkpoint, fine-tune with task-specific data
+     - Full-precision fine-tuning first, then QAD to recover quantization loss
+
+**QAD is Model Optimizer's recommended strategy for accuracy recovery after
+quantization.** In our experiments, full-precision fine-tuning followed by QAD
+delivers the best accuracy, especially at aggressive quantization levels (e.g.,
+NVFP4). The optimal balance between QAT and QAD for a given model and task is an
+active area of research.
 
 QAD rationale
 =============
@@ -35,9 +72,10 @@ quantization, especially for models that have passed through multi-stage
 post-training such as SFT, RL, or model merging. The teacher signal makes recovery
 more robust when training-data quality or coverage is limited.
 
-For broader background, see `How Quantization-Aware Training Enables Low-Precision
-Accuracy Recovery
-<https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_. The
+To learn more, read the `QAT/QAD blog post
+<https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_.
+
+The
 `Nemotron 3.5 Lightning QAD blog
 <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
 discusses the PTQ-to-QAD-to-export workflow and its scale-handling considerations.
