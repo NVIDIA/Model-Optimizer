@@ -52,6 +52,17 @@ NAMES = sorted(FORMATS)
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
+# name -> (largest representable magnitude, scale anchor at peak-to-RMS 1, 4, 8 and 16), where the
+# anchor is d * native max / amax. IQ1_S is flat; IQ1_M rises with peak-to-RMS and the IQ2 formats
+# fall with it, each clamped at both ends. Written out rather than read from the modules, so a
+# changed constant fails here.
+ANCHORS = {
+    "iq1_s": (15 * 1.125, (0.61, 0.61, 0.61, 0.61)),
+    "iq1_m": (15 * 1.125, (0.65, 0.72, 0.86, 0.95)),
+    "iq2_xxs": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+    "iq2_xs": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+    "iq2_s": (43 * 31 / 8, (0.92, 0.86, 0.72, 0.65)),
+}
 
 
 def _parts(name):
@@ -242,6 +253,25 @@ def test_search_is_independent_of_default_dtype(name):
         assert torch.equal(quantize(weight)[0], expected)
     finally:
         torch.set_default_dtype(torch.float32)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_scale_anchor_follows_peak_to_rms(name):
+    """The predicted block scale must follow the format's anchor, through both clamps.
+
+    The anchor is an encoder choice: it changes quality without touching the layout, so no
+    round-trip or conformance test would notice it drifting. k equal unit spikes among 256 zeros
+    have a peak-to-RMS of exactly 16 / sqrt(k).
+    """
+    native_max, anchors = ANCHORS[name]
+    blocks = torch.zeros(4, 256)
+    for row, spikes in enumerate((256, 16, 4, 1)):
+        blocks[row, :spikes] = 1.0
+    d = getattr(FORMATS[name][0], f"_predict_{name}_scales")(blocks)
+
+    assert d.dtype == torch.float16
+    # rtol covers the FP16 rounding of d, under 0.1%; a flat 0.61 anchor misses IQ1_M by 6% or more.
+    torch.testing.assert_close(d.float() * native_max, torch.tensor(anchors), rtol=2**-10, atol=0)
 
 
 @pytest.mark.parametrize("name", formats())

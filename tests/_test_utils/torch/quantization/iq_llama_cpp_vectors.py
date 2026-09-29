@@ -18,7 +18,8 @@
 Each entry holds packed block bytes lifted verbatim from
 unsloth/Qwen3.8-27B-GGUF (Qwen3.8-27B-UD-IQ1_S.gguf) together with the values
 llama.cpp's own dequantize_row_* produces for them, computed from
-ggml-quants.c revision 9b05354ec6fb58b4e665e9a39ebc40285c015638.
+ggml-quants.c revision 9b05354ec6fb58b4e665e9a39ebc40285c015638. The checkpoint
+is published under Apache-2.0, as is Qwen/Qwen3.8-27B, the model it quantizes.
 
 These pin our decoders against bytes we did not produce. A decoder that drifts
 from the GGML layout -- a mis-set high bit, a swapped scale nibble, a sign
