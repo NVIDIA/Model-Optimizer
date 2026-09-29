@@ -222,10 +222,22 @@ class TestLiLiCorrValidation:
         with pytest.raises(ValueError, match="dflash_lilicorr_margin"):
             _converted(variant="margin", margin=0.0)
 
-    def test_offline_rejected(self):
-        """The distractor penalty needs a target model, which offline mode does not have."""
-        with pytest.raises(ValueError, match="requires online training"):
-            _converted(dflash_offline=True)
+    @pytest.mark.parametrize(
+        ("weights", "needs_logits"),
+        [
+            ({}, True),
+            ({"dflash_lilicorr_w_pen": 0.0}, False),
+            ({"dflash_lilicorr_w_pen": 0.0, "dflash_lilicorr_w_cal": 0.5}, True),
+        ],
+        ids=["penalty", "no_target_terms", "calibration_only"],
+    )
+    def test_offline_reconstructs_target_logits_only_when_needed(self, weights, needs_logits):
+        """Offline converts; target logits are rebuilt only for terms that read them."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        # Set by the offline loader, which a directly constructed model never went through.
+        model.config.num_orig_hidden_layers = model.config.num_hidden_layers
+        mtsp.convert(model, [("dflash", _get_lilicorr_config(dflash_offline=True, **weights))])
+        assert model._needs_base_logits is needs_logits
 
     def test_topk_above_vocab_rejected(self):
         """The lattice cannot be wider than the vocabulary."""
@@ -304,6 +316,53 @@ class TestLiLiCorrForward:
         model.train()
         metrics = model(**_make_batch(model.dflash_config.vocab_size)).lilicorr_metrics
         assert metrics["lilicorr_penalty"] > 0.0
+
+    @pytest.mark.parametrize("w_cal", [0.0, 0.5])
+    def test_calibration_enters_the_loss_with_its_weight(self, w_cal):
+        """Off by default and an exact no-op at 0; otherwise one more absolute term."""
+        model = _converted(dflash_lilicorr_w_cal=w_cal)
+        model.train()
+        metrics = model(**_make_batch(model.dflash_config.vocab_size)).lilicorr_metrics
+        assert metrics["lilicorr_w_cal"] == w_cal
+        assert (metrics["lilicorr_calibration"] > 0.0) is (w_cal > 0.0)
+        weights = VARIANTS["base"]
+        assert metrics["lilicorr_loss"] == pytest.approx(
+            weights["w_ce"] * metrics["lilicorr_ce"]
+            + weights["w_pen"] * metrics["lilicorr_penalty"]
+            + w_cal * metrics["lilicorr_calibration"],
+            abs=1e-5,
+        )
+
+    def test_calibration_loss_is_minimal_when_the_head_matches_the_target(self):
+        """Zero gradient when the reranker's candidate distribution already matches the target's."""
+        model = _converted(dflash_lilicorr_w_cal=0.5)
+        torch.manual_seed(0)
+        num_slots = BLOCK_SIZE - 1
+        target_logits = torch.randn(1, SEQ_LEN, VOCAB_SIZE)
+        candidate_ids = torch.stack(
+            [torch.randperm(VOCAB_SIZE)[:CANDIDATE_TOPK] for _ in range(2 * num_slots)]
+        ).view(2, num_slots, CANDIDATE_TOPK)
+        inputs = {
+            "candidate_ids": candidate_ids,
+            "anchor_positions": torch.tensor([[0, BLOCK_SIZE]]),
+            "target_logits": target_logits,
+        }
+        at_target = model._candidate_target_logits(**inputs, requested_by="test")
+
+        def grad_at(potentials):
+            potentials = potentials.clone().requires_grad_(True)
+            supervised = torch.ones(2, num_slots)
+            model._calibration_loss(
+                node_potentials=list(potentials.unbind(1)),
+                supervised=supervised,
+                denominator=supervised.sum(),
+                **inputs,
+            ).backward()
+            return potentials.grad
+
+        # A per-slot shift leaves the softmax, and so the optimum, unchanged.
+        assert grad_at(at_target + 3.0).abs().max() < 1e-6
+        assert grad_at(torch.zeros_like(at_target)).abs().max() > 1e-3
 
     @pytest.mark.parametrize(
         ("kwargs", "degenerate"),
