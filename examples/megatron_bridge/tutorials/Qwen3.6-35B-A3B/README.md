@@ -244,9 +244,10 @@ Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidi
 > it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
 > the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
 > mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
-> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept —
-> that is why the other five configs omit them. To set them on an `ns_*` task, inject them through
-> the adapter's `params_to_add` instead.
+> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept.
+> On an `ns_*` task they go through the adapter's `params_to_add` instead — the other five configs
+> still omit them, deliberately, so they reproduce the table above; see **Output length** below
+> for when `presence_penalty` helps and when it is pure cost.
 
 > [!IMPORTANT]
 > Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]` with no spread. GPQA is the deliberate exception.
@@ -332,7 +333,9 @@ The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outsi
 | **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 1,674 → 1,476 |
 | **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 2,340 → 1,316 |
 
-Accuracy is neutral — the deltas span −0.59 to +0.89, which is run-to-run noise in both directions — and generation gets 12-44% faster.
+Accuracy is neutral — the deltas span −0.59 to +0.89, which is run-to-run noise in both directions. Note what that implies: ~94 recovered zeros on the QAD row is up to +3.5 pp of mechanical headroom, and none of it materialised, so the sub-steps that stop looping still fail their tests. The win is cost, not accuracy — generation gets 12-44% faster.
+
+The shipped `eval_configs/scicode.yaml` deliberately leaves it out so it reproduces the results table above; add it under `adapter_config.params_to_add` to get the right-hand column.
 
 **Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged while making generation **4.2× slower** — pure cost. Use it where runaway generation actually occurs; do not make it a global default.
 
