@@ -26,11 +26,13 @@ import triton.language as tl
 
 from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
-from ..common.nvfp4_quant import nvfp4_scalar_quant
+from ..common.nvfp4_quant import fp4_round_magnitude, nvfp4_scalar_quant
 
 __all__ = [
     "compute_fp4_scales",
     "fp4_dequantize",
+    "lsq_fp4_fake_quant_backward",
+    "lsq_fp4_fake_quant_forward",
     "static_blockwise_fp4_cast",
     "static_blockwise_fp4_fake_quant",
 ]
@@ -398,3 +400,104 @@ def static_blockwise_fp4_cast(
         )
 
     return y_flat.view_as(x)
+
+
+@triton.jit
+def _lsq_fp4_load(x_ptr, s_pre_ptr, N_ROWS, N_COLS, ROWS: tl.constexpr, COLS: tl.constexpr):
+    rows = tl.program_id(axis=0).to(tl.int64) * ROWS + tl.arange(0, ROWS)
+    cols = tl.arange(0, COLS)
+    row_mask = rows < N_ROWS
+    mask = row_mask[:, None] & (cols < N_COLS)[None, :]
+    idx = rows[:, None] * N_COLS + cols[None, :]
+    s_pre = tl.load(s_pre_ptr + rows, mask=row_mask, other=1.0)
+    x = tl.load(x_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    # div_rn matches the eager IEEE division bit for bit.
+    x_scaled = tl.math.div_rn(x, s_pre[:, None])
+    q = fp4_round_magnitude(tl.abs(x_scaled))
+    return rows, row_mask, idx, mask, s_pre, x_scaled, tl.where(x_scaled >= 0, q, -q)
+
+
+@triton.jit
+def lsq_fp4_fake_quant_fwd_kernel(
+    x_ptr,
+    s_pre_ptr,
+    s_post_ptr,
+    y_ptr,
+    N_ROWS,
+    N_COLS,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    rows, row_mask, idx, mask, _, _, q = _lsq_fp4_load(x_ptr, s_pre_ptr, N_ROWS, N_COLS, ROWS, COLS)
+    s_post = tl.load(s_post_ptr + rows, mask=row_mask, other=0.0)
+    tl.store(y_ptr + idx, (q * s_post[:, None]).to(OUT_DTYPE), mask=mask)
+
+
+@triton.jit
+def lsq_fp4_fake_quant_bwd_kernel(
+    g_ptr,
+    x_ptr,
+    s_pre_ptr,
+    s_post_ptr,
+    gx_ptr,
+    gs_pre_ptr,
+    gs_post_ptr,
+    N_ROWS,
+    N_COLS,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    rows, row_mask, idx, mask, s_pre, x_scaled, q = _lsq_fp4_load(
+        x_ptr, s_pre_ptr, N_ROWS, N_COLS, ROWS, COLS
+    )
+    s_post = tl.load(s_post_ptr + rows, mask=row_mask, other=0.0)
+    g = tl.load(g_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    # STE through the FP4 cast, clipped at |x / s_pre| <= 6.
+    g_scaled = tl.where(tl.abs(x_scaled) <= 6.0, g * s_post[:, None], 0.0)
+    tl.store(gx_ptr + idx, tl.math.div_rn(g_scaled, s_pre[:, None]).to(OUT_DTYPE), mask=mask)
+    tl.store(gs_post_ptr + rows, tl.sum(g * q, axis=1), mask=row_mask)
+    tl.store(gs_pre_ptr + rows, -tl.sum(g_scaled * x_scaled, axis=1) / s_pre, mask=row_mask)
+
+
+def _lsq_fp4_launch_args(x: torch.Tensor):
+    n_rows, n_cols = x.shape
+    cols = triton.next_power_of_2(n_cols)
+    rows = max(1, 1024 // cols)
+    return (triton.cdiv(n_rows, rows),), n_rows, n_cols, rows, cols
+
+
+def lsq_fp4_fake_quant_forward(x, s_pre, s_post):
+    """``cast_fp4(x / s_pre) * s_post`` with ``x`` [num_blocks, block_size], fp32 scales."""
+    y = torch.empty_like(x)
+    grid, n_rows, n_cols, rows, cols = _lsq_fp4_launch_args(x)
+    with torch.cuda.device(x.device):
+        lsq_fp4_fake_quant_fwd_kernel[grid](
+            x, s_pre, s_post, y, n_rows, n_cols, rows, cols, _torch_dtype_to_tl(x.dtype)
+        )
+    return y
+
+
+def lsq_fp4_fake_quant_backward(grad, x, s_pre, s_post):
+    """Gradients of :func:`lsq_fp4_fake_quant_forward` w.r.t. ``x``, ``s_pre`` and ``s_post``."""
+    grad_x = torch.empty_like(x)
+    grad_s_pre = torch.empty_like(s_pre)
+    grad_s_post = torch.empty_like(s_post)
+    grid, n_rows, n_cols, rows, cols = _lsq_fp4_launch_args(x)
+    with torch.cuda.device(x.device):
+        lsq_fp4_fake_quant_bwd_kernel[grid](
+            grad.contiguous(),
+            x,
+            s_pre,
+            s_post,
+            grad_x,
+            grad_s_pre,
+            grad_s_post,
+            n_rows,
+            n_cols,
+            rows,
+            cols,
+            _torch_dtype_to_tl(x.dtype),
+        )
+    return grad_x, grad_s_pre, grad_s_post

@@ -24,7 +24,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     StaticBlockScaleQuantizer,
     TensorQuantizer,
 )
-from modelopt.torch.quantization.tensor_quant import fp4_cast_ste
+from modelopt.torch.quantization.tensor_quant import fp4_cast_ste, lsq_fp4_fake_quant
 
 NVFP4_LSQ_POST_MSE_CFG = {
     "quant_cfg": {
@@ -196,3 +196,29 @@ def test_lsq_fp4_cast_ste():
     assert y.shape == x_padded.shape
     y.sum().backward()
     assert x_padded.grad is not None
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("block_size", [16, 24])
+def test_lsq_fp4_fused_matches_eager(dtype, block_size):
+    torch.manual_seed(0)
+    x = (torch.randn(1000, block_size, device="cuda") * 3).to(dtype)
+    s_pre = torch.rand(1000, device="cuda") + 0.2
+    s_post = torch.rand(1000, device="cuda") + 0.2
+    grad = torch.randn(1000, block_size, device="cuda").to(dtype)
+
+    def run(fn):
+        leaves = [t.clone().requires_grad_(True) for t in (x, s_pre, s_post)]
+        out = fn(*leaves)
+        out.backward(grad)
+        return out, *(t.grad for t in leaves)
+
+    def eager(x, s_pre, s_post):
+        w = fp4_cast_ste(x.float() / s_pre.view(-1, 1))
+        return (w * s_post.view(-1, 1)).to(x.dtype)
+
+    out, *grads = run(lsq_fp4_fake_quant)
+    ref_out, *ref_grads = run(eager)
+    assert torch.equal(out, ref_out)
+    for g, ref in zip(grads, ref_grads):
+        torch.testing.assert_close(g, ref, rtol=1e-5, atol=1e-5)

@@ -669,6 +669,25 @@ class FP4CastSTEFunction(Function):
         return grad, None
 
 
+class LSQFP4FakeQuantFunction(Function):
+    """Fused LSQ NVFP4 fake quant ``cast_fp4(x / s_pre) * s_post`` with STE backward.
+
+    Saves only ``x`` and the per-block scales; the backward recomputes the cast.
+    """
+
+    @staticmethod
+    def forward(ctx, x, scale_pre, scale_post):
+        """Forward pass. ``x`` is [num_blocks, block_size]; scales are fp32 [num_blocks]."""
+        x = x.contiguous()
+        ctx.save_for_backward(x, scale_pre, scale_post)
+        return triton_kernel.lsq_fp4_fake_quant_forward(x, scale_pre, scale_post)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Backward pass: STE with clip mask at ``|x / scale_pre| <= 6.0``."""
+        return triton_kernel.lsq_fp4_fake_quant_backward(grad_outputs, *ctx.saved_tensors)
+
+
 class IntCastSTEFunction(Function):
     """Integer quantization cast with STE backward, analogous to FP4CastSTEFunction."""
 
@@ -704,4 +723,5 @@ scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
 fp4_cast_ste = FP4CastSTEFunction.apply
+lsq_fp4_fake_quant = LSQFP4FakeQuantFunction.apply
 int_cast_ste = IntCastSTEFunction.apply
