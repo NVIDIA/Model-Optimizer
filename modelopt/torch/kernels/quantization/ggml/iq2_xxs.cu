@@ -213,6 +213,22 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
   }
 }
 
+// Vector v is entry byte v % 4 of record v / 4, whose uint32 holds the four vectors' 7-bit sign
+// indices and, in its top nibble, the record's local scale.
+struct Decoder {
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    const uint8_t *record = block + kCodeOffset + kRecordBytes * (vector / kVectorsPerGroup);
+    const uint32_t aux = load_u32(record + kVectorsPerGroup);
+    const int slot = vector % kVectorsPerGroup;
+    const float d = half_bits_to_float(load_u16(block + kScaleOffset));
+    const float scale =
+        __fmul_rn(__fmul_rn(d, __fadd_rn(0.5f, static_cast<float>(aux >> 28))), 0.25f);
+    signed_scaled(grid + record[slot] * kVectorSize, with_parity_bit((aux >> (7 * slot)) & 0x7F),
+                  scale, values);
+  }
+};
+
 } // namespace
 
 at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
@@ -237,4 +253,8 @@ at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scale
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return output;
+}
+
+at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Decoder, kPayloadBytes, kEntries>("IQ2_XXS", packed, grid, dtype);
 }

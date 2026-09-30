@@ -86,7 +86,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
     build as a single extension: ``iq1_s_pack(input, grid)``,
     ``iq2_xs_pack(input, grid, scales)``, ``iq2_xxs_pack(input, grid, scales)``,
     ``iq2_s_pack(input, grid, scales)``, ``iq1_m_pack(input, grid, scales)``, and
-    ``q8_0_pack(input)``.
+    ``q8_0_pack(input)``. Each IQ format also has ``<format>_unpack(payload, grid, dtype)``.
     """
     if not hasattr(get_cuda_ext_ggml, "extension") or (
         raise_if_failed and get_cuda_ext_ggml.extension is None

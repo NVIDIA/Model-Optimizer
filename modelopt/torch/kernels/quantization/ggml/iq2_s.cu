@@ -183,6 +183,21 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
     payload[kLocalScaleOffset + tid] = locals[2 * tid] | (locals[2 * tid + 1] << 4);
 }
 
+// Vector v is low byte v plus two high bits from byte v / 4 of the high array, with its own full
+// sign mask. Its local scale is nibble (v / 2) % 2 of byte v / 4 in the trailing scale array.
+struct Decoder {
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    const uint32_t entry = block[kLowOffset + vector] |
+                           (((block[kHighOffset + vector / 4] >> (2 * (vector % 4))) & 0x3) << 8);
+    const uint32_t local =
+        (block[kLocalScaleOffset + vector / 4] >> (4 * ((vector / 2) % 2))) & 0xF;
+    const float d = half_bits_to_float(load_u16(block + kScaleOffset));
+    const float scale = __fmul_rn(__fmul_rn(d, __fadd_rn(0.5f, static_cast<float>(local))), 0.25f);
+    signed_scaled(grid + entry * kVectorSize, block[kSignOffset + vector], scale, values);
+  }
+};
+
 } // namespace
 
 at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
@@ -207,4 +222,8 @@ at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales)
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return output;
+}
+
+at::Tensor iq2_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Decoder, kPayloadBytes, kEntries>("IQ2_S", packed, grid, dtype);
 }
