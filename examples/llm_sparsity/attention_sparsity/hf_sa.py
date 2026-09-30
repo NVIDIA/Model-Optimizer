@@ -27,7 +27,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
-from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_CALIB_SPARSE24,
@@ -146,14 +146,18 @@ def main(args):
     np.random.seed(RAND_SEED)
     launch_memory_monitor()
 
-    print(f"Loading model: {args.pyt_ckpt_path}")
+    # --pyt_ckpt_path stays as given. Later steps read the local copy of the whole checkpoint in
+    # hf_model_path, since exporters read the source's files from local disk only; hf_model_name is
+    # the Hub ID, or None for a local path.
+    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.pyt_ckpt_path)
+    print(f"Loading model: {args.hf_model_path}")
 
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.pyt_ckpt_path, attn_implementation="eager", dtype="auto", device_map="auto"
+        args.hf_model_path, attn_implementation="eager", dtype="auto", device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.hf_model_path)
 
     # Set pad token if not set
     if tokenizer.pad_token is None:
@@ -232,10 +236,11 @@ def main(args):
         export_dir = Path(args.export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
 
+        # The export copies the source tokenizer files unchanged; the pad token set above is only
+        # for generation here.
         with torch.inference_mode():
             export_hf_checkpoint(model, export_dir=export_dir)
 
-        tokenizer.save_pretrained(export_dir)
         print(f"Model exported successfully to: {export_dir}")
 
 
