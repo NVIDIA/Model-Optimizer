@@ -43,7 +43,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as _dist
 
-from .model_utils import get_export_units
+from .model_utils import _release_exported_tensors, get_export_units
 from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
@@ -453,7 +453,10 @@ def _export_transformers_checkpoint_streaming(
     for layer_name, layer_module in model.named_modules():
         if id(layer_module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(layer_module, model, names, writeback=False):
+        with (
+            enable_weight_access_and_writeback(layer_module, model, names, writeback=False),
+            _release_exported_tensors(layer_module),
+        ):
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -465,34 +468,6 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
-            # Release GPU tensors added by export handlers before hook.post_forward
-            # runs, to prevent cross-layer accumulation on disk-offloaded models.
-            #
-            # Two categories accumulate without explicit cleanup:
-            #
-            # 1. CUDA *buffers* on any sub-module (weight_scale, weight_scale_2,
-            #    input_scale): AlignDevicesHook.post_forward uses offload_buffers=False
-            #    by default, so it never offloads buffers.  Pre-existing buffers in
-            #    disk-offloaded layers live on CPU, so any CUDA buffer encountered here
-            #    was registered by the export handlers and is safe to drop.
-            #
-            # 2. CUDA *parameters* on modules WITHOUT _hf_hook: _export_fused_experts
-            #    creates fresh nn.Module objects (one per expert x projection) and adds
-            #    them to the layer via add_module() *after* weight_access_and_writeback
-            #    captured its materialized list.  hook.post_forward never visits these
-            #    new modules, so their packed NVFP4 weight parameters (~5 GB per MoE
-            #    layer) stay live on GPU.  Modules WITH _hf_hook are original model
-            #    modules whose parameters hook.post_forward will meta-ify; leave those
-            #    alone.
-            for sub_mod in layer_module.modules():
-                for buf_name in list(sub_mod._buffers):
-                    buf = sub_mod._buffers[buf_name]
-                    if buf is not None and buf.device.type == "cuda":
-                        sub_mod._buffers[buf_name] = None
-                if not hasattr(sub_mod, "_hf_hook"):
-                    for param_name, param in list(sub_mod._parameters.items()):
-                        if param is not None and param.device.type == "cuda":
-                            sub_mod._parameters[param_name] = None
         torch.cuda.empty_cache()
 
     # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,

@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
+from modelopt.torch.export.model_utils import _release_exported_tensors
 from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -481,24 +482,29 @@ class TestExportFusedExperts:
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
         converted = model.moe.experts
 
-        _export_fused_experts(converted, torch.float16)
+        with _release_exported_tensors(converted):
+            _export_fused_experts(converted, torch.float16)
 
-        # Verify per-expert submodules exist
+            # Verify per-expert submodules exist
+            for idx in range(NUM_EXPERTS):
+                expert_mod = getattr(converted, str(idx), None)
+                assert expert_mod is not None, f"Missing expert submodule {idx}"
+                assert hasattr(expert_mod, "gate_proj"), f"Expert {idx} missing gate_proj"
+                assert hasattr(expert_mod, "up_proj"), f"Expert {idx} missing up_proj"
+                assert hasattr(expert_mod, "down_proj"), f"Expert {idx} missing down_proj"
+
+                assert expert_mod.gate_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
+                assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
+                assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
+
+            # Verify fused params are removed
+            assert not hasattr(converted, "gate_up_proj")
+            assert not hasattr(converted, "down_proj")
+            assert not hasattr(converted, "gate_up_proj_weight_quantizers")
+
+        # Leaving the block releases the holders; nothing else can free them.
         for idx in range(NUM_EXPERTS):
-            expert_mod = getattr(converted, str(idx), None)
-            assert expert_mod is not None, f"Missing expert submodule {idx}"
-            assert hasattr(expert_mod, "gate_proj"), f"Expert {idx} missing gate_proj"
-            assert hasattr(expert_mod, "up_proj"), f"Expert {idx} missing up_proj"
-            assert hasattr(expert_mod, "down_proj"), f"Expert {idx} missing down_proj"
-
-            assert expert_mod.gate_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
-            assert expert_mod.up_proj.weight.shape == (INTERMEDIATE_DIM, HIDDEN_DIM)
-            assert expert_mod.down_proj.weight.shape == (HIDDEN_DIM, INTERMEDIATE_DIM)
-
-        # Verify fused params are removed
-        assert not hasattr(converted, "gate_up_proj")
-        assert not hasattr(converted, "down_proj")
-        assert not hasattr(converted, "gate_up_proj_weight_quantizers")
+            assert not hasattr(converted, str(idx)), f"Expert submodule {idx} survived release"
 
         self._cleanup_registry(expert_type)
 

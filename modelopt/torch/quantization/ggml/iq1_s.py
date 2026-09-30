@@ -38,7 +38,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    fake_quantize_with_cache,
+    IQFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -235,22 +235,17 @@ def dequantize_iq1_s(
     return decoded.reshape(shape)
 
 
-def iq1_s_fake_quant(
-    inputs: torch.Tensor,
-    quantizer,
-    *,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
-    decode_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
-) -> torch.Tensor:
-    """IQ1_S weight backend for TensorQuantizer, with pass-through backward."""
-    if getattr(quantizer, "num_bits", None) != "iq1_s":
-        raise ValueError("The ggml IQ1_S backend requires num_bits='iq1_s'")
-    return fake_quantize_with_cache(
-        inputs,
-        quantizer,
-        format_name="iq1_s",
-        block_chunk_size=block_chunk_size,
-        decode_chunk_size=decode_chunk_size,
-        quantize=quantize_iq1_s,
-        dequantize=dequantize_iq1_s,
-    )
+IQ1_S_FORMAT = IQFormat(
+    name="iq1_s",
+    block_size=IQ1_S_BLOCK_SIZE,
+    block_bytes=IQ1_S_BLOCK_BYTES,
+    quantize=quantize_iq1_s,
+    dequantize=dequantize_iq1_s,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq1_s and
+# dequantize_iq1_s when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+iq1_s_fake_quant = IQ1_S_FORMAT.fake_quant

@@ -102,6 +102,105 @@ def _patch_vllm_imports(monkeypatch, modules):
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
 
+def _launcher_import_modules():
+    """Build isolated vLLM module stubs for launcher import compatibility tests."""
+    entrypoints = SimpleNamespace(
+        current_run_server=Mock(name="current_run_server"),
+        legacy_run_server=Mock(name="legacy_run_server"),
+        current_arg_parser=Mock(name="current_arg_parser"),
+        legacy_arg_parser=Mock(name="legacy_arg_parser"),
+    )
+    modules = {
+        "uvloop": SimpleNamespace(run=Mock()),
+        "vllm": SimpleNamespace(__version__="0.30.0"),
+        "vllm_mlflow_utils": SimpleNamespace(
+            MLFLOW_ENV_VARS=set(),
+            add_mlflow_args=Mock(),
+            resolve_mlflow_args=Mock(),
+        ),
+        "vllm.entrypoints.launchers.api_server.entry": SimpleNamespace(
+            run_server=entrypoints.current_run_server
+        ),
+        "vllm.entrypoints.openai.api_server": SimpleNamespace(
+            run_server=entrypoints.legacy_run_server
+        ),
+        "vllm.entrypoints.cli.serve": SimpleNamespace(
+            make_arg_parser=entrypoints.current_arg_parser
+        ),
+        "vllm.entrypoints.openai.cli_args": SimpleNamespace(
+            make_arg_parser=entrypoints.legacy_arg_parser
+        ),
+        "vllm.utils.argparse_utils": SimpleNamespace(FlexibleArgumentParser=Mock()),
+        "vllm.executor.ray_distributed_executor": SimpleNamespace(
+            RayDistributedExecutor=SimpleNamespace(ADDITIONAL_ENV_VARS=set())
+        ),
+    }
+    return modules, entrypoints
+
+
+@pytest.mark.parametrize(
+    ("run_server_missing", "arg_parser_missing", "uses_legacy"),
+    [
+        (None, None, False),
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.cli.serve",
+            True,
+        ),
+        ("vllm.entrypoints", "vllm.entrypoints", True),
+    ],
+    ids=("current", "legacy", "missing-parent"),
+)
+def test_vllm_serve_entrypoint_layouts(
+    monkeypatch, run_server_missing, arg_parser_missing, uses_legacy
+):
+    """Resolve current entrypoints and valid legacy fallbacks."""
+    modules, entrypoints = _launcher_import_modules()
+    if run_server_missing is not None:
+        modules["vllm.entrypoints.launchers.api_server.entry"] = ModuleNotFoundError(
+            name=run_server_missing
+        )
+    if arg_parser_missing is not None:
+        modules["vllm.entrypoints.cli.serve"] = ModuleNotFoundError(name=arg_parser_missing)
+    _patch_vllm_imports(monkeypatch, modules)
+
+    launcher = _load_example_module("vllm_serve_fakequant")
+
+    expected_run_server = (
+        entrypoints.legacy_run_server if uses_legacy else entrypoints.current_run_server
+    )
+    expected_arg_parser = (
+        entrypoints.legacy_arg_parser if uses_legacy else entrypoints.current_arg_parser
+    )
+    assert launcher.run_server is expected_run_server
+    assert launcher.make_arg_parser is expected_arg_parser
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "fallback"),
+    [
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.openai.api_server",
+        ),
+        ("vllm.entrypoints.cli.serve", "vllm.entrypoints.openai.cli_args"),
+    ],
+    ids=("run-server", "argument-parser"),
+)
+def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch, entrypoint, fallback):
+    """Do not replace a missing entrypoint dependency with a fallback import error."""
+    modules, _ = _launcher_import_modules()
+    dependency_error = ModuleNotFoundError(name="vllm_dependency")
+    modules[entrypoint] = dependency_error
+    modules[fallback] = AssertionError("fallback must not be imported")
+    _patch_vllm_imports(monkeypatch, modules)
+
+    with pytest.raises(ModuleNotFoundError) as raised:
+        _load_example_module("vllm_serve_fakequant")
+
+    assert raised.value is dependency_error
+
+
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
     """The current vLLM adapter must forward every warmup reservation argument."""
     module = _load_example_module("vllm_ptq_utils")
@@ -127,6 +226,42 @@ def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatc
         max_model_len=2048,
         max_encoder_len=0,
     )
+
+
+def test_get_calibration_block_count_reserves_one_kpool_tail_block(monkeypatch):
+    """Kpool's circular tail cache owns exactly one physical block per request."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class KpoolTailSpec:
+        pass
+
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, first_spec):
+            self.first_spec = first_spec
+
+    reserved_block_count = Mock(return_value=32)
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": SimpleNamespace(
+                _reserved_block_count=reserved_block_count
+            ),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                KpoolTailSpec=KpoolTailSpec,
+                UniformTypeKVCacheSpecs=UniformTypeKVCacheSpecs,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        max_model_len=1024,
+    )
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, KpoolTailSpec()) == 1
+    assert block_count(128, UniformTypeKVCacheSpecs(KpoolTailSpec())) == 1
+    reserved_block_count.assert_not_called()
 
 
 def test_get_calibration_block_count_uses_vllm_026_reservation_policy(monkeypatch):
@@ -446,6 +581,40 @@ def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
     assert attention.q_bmm_quantizer.call_count == 1
     assert attention.k_bmm_quantizer.call_count == 3
     assert attention.v_bmm_quantizer.call_count == 2
+
+
+def test_disable_compilation_warns_without_installing_marker():
+    """A non-compile-wrapped model remains unchanged while the no-op risk is visible."""
+    model = torch.nn.Module()
+
+    with pytest.warns(UserWarning, match="rerun with --enforce-eager"), disable_compilation(model):
+        assert not hasattr(model, "do_not_compile")
+
+    assert not hasattr(model, "do_not_compile")
+
+
+def test_disable_compilation_updates_all_markers_and_restores_after_error():
+    """Every language and vision compile wrapper is restored after an exceptional exit."""
+
+    class CompileWrappedModule(torch.nn.Module):
+        do_not_compile = False
+
+    model = CompileWrappedModule()
+    model.do_not_compile = False
+    model.vision_model = CompileWrappedModule()
+    model.vision_model.do_not_compile = True
+    model.language_model = CompileWrappedModule()
+
+    with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
+        assert model.do_not_compile is True
+        assert model.vision_model.do_not_compile is True
+        assert model.language_model.do_not_compile is True
+        raise RuntimeError("quantization failed")
+
+    assert model.do_not_compile is False
+    assert model.vision_model.do_not_compile is True
+    assert model.language_model.do_not_compile is False
+    assert "do_not_compile" not in vars(model.language_model)
 
 
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():

@@ -18,8 +18,7 @@
 import torch
 
 from ..nn.modules.tensor_quantizer import register_quant_backend
-from .iq1_s import iq1_s_fake_quant
-from .iq2_xs import iq2_xs_fake_quant
+from .registry import IQ_FORMAT_REGISTRY
 
 
 def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
@@ -29,11 +28,13 @@ def ggml_fake_quant(inputs: torch.Tensor, quantizer) -> torch.Tensor:
     unknown_args = set(extra_args) - {"block_chunk_size", "decode_chunk_size"}
     if unknown_args:
         raise ValueError(f"Unsupported ggml backend_extra_args: {sorted(unknown_args)}")
-    if num_bits == "iq1_s":
-        return iq1_s_fake_quant(inputs, quantizer, **extra_args)
-    if num_bits == "iq2_xs":
-        return iq2_xs_fake_quant(inputs, quantizer, **extra_args)
-    raise ValueError("The ggml backend requires num_bits='iq1_s' or 'iq2_xs'")
+    # num_bits arrives untyped from the quantizer and is a tuple for scalar formats,
+    # so narrow before the lookup rather than relying on the dict to reject it.
+    iq_format = IQ_FORMAT_REGISTRY.get(num_bits) if isinstance(num_bits, str) else None
+    if iq_format is None:
+        supported = ", ".join(repr(name) for name in sorted(IQ_FORMAT_REGISTRY))
+        raise ValueError(f"The ggml backend requires num_bits in ({supported})")
+    return iq_format.fake_quant(inputs, quantizer, **extra_args)
 
 
 register_quant_backend("ggml", ggml_fake_quant)
