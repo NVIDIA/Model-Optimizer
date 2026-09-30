@@ -34,7 +34,7 @@ In both cases, start from a PTQ checkpoint and retain its quantization configura
 during training.
 
 When to Use QAT vs QAD
-=====================
+======================
 
 .. list-table::
    :header-rows: 1
