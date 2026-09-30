@@ -31,7 +31,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   task_1:
     script: common/eagle3/train_eagle.sh
@@ -49,7 +49,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 8
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   task_2:
     script: common/specdec_bench/quick_check.sh
@@ -62,7 +62,7 @@ pipeline:
       - --ep_size 1
       - --speculative_algorithm EAGLE3
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
-      - --concurrency 1
+      - --concurrency 32
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:

@@ -38,6 +38,7 @@ def get_ds_config(zero_stage: int = 3):
         "zero_optimization": {"stage": zero_stage},  # Restore Stage 3
         "fp16": {"enabled": False},
         "bf16": {"enabled": False},
+        "gradient_clipping": 0.0,
     }
 
 

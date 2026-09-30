@@ -17,8 +17,10 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+import modelopt.torch.quantization.qtensor.nvfp4_tensor as nvfp4_tensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
     NVFP4QTensor,
     _cast_per_block_scale_to_fp8,
@@ -26,6 +28,21 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import (
 
 _FP8_E4M3FN_MIN = 2**-9  # 0.001953125 — smallest positive FP8 E4M3FN subnormal
 _FP8_E4M3FN_MAX = 448.0
+
+
+@pytest.mark.parametrize("try_tensorrt", [False, True])
+def test_cpu_quantize_does_not_probe_cuda(monkeypatch, try_tensorrt):
+    """The optional TRT-LLM path must not query GPU capability for a CPU tensor."""
+
+    def fail_if_called():
+        pytest.fail("fp4_compatible() was called for CPU quantization")
+
+    monkeypatch.setattr(nvfp4_tensor, "fp4_compatible", fail_if_called)
+    weight = torch.randn(2, 16, dtype=torch.bfloat16)
+
+    quantized, _, _ = NVFP4QTensor.quantize(weight, block_size=16, try_tensorrt=try_tensorrt)
+
+    assert quantized._quantized_data.shape == (2, 8)
 
 
 class TestNVFP4ScaleClamping:

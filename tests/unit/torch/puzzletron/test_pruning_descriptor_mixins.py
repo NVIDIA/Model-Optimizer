@@ -15,7 +15,7 @@
 
 """Tests for model-descriptor pruning mixin registries.
 
-Bypass child initialization resolves pruning behavior by descriptor key. These
+Child-checkpoint initialization resolves pruning behavior by descriptor key. These
 tests pin the public keys and layer prefixes that external configs depend on,
 without instantiating full transformer models.
 """

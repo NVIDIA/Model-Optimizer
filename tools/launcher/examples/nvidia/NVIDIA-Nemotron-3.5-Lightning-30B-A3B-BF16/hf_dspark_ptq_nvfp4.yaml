@@ -1,0 +1,88 @@
+# Calibration-free NVFP4 PTQ of the DSpark drafter for Nemotron-3.5-Lightning-30B-A3B.
+#
+# Same pipeline as examples/Qwen/Qwen3-8B/hf_dspark_ptq_nvfp4.yaml, against a hybrid
+# Mamba-MoE target and the published DSpark drafter. Quantizes weight-only to NVFP4,
+# then measures acceptance length so the cost is visible. No calibration data needed:
+# every scale comes from the weights.
+#
+# 2-step pipeline:
+#   task_0: Quantize the drafter (CPU-only, well under a minute for this 0.97B draft)
+#   task_1: Benchmark acceptance length on MT-Bench via vLLM
+#
+# Usage:
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/hf_dspark_ptq_nvfp4.yaml --yes
+
+job_name: Nemotron-3.5-Lightning-30B-A3B_DSpark_PTQ_nvfp4
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    draft_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark
+
+  # Step 1: Quantize. w4a16_nvfp4 keeps activations in bf16; use --qformat nvfp4
+  # for weight+activation (fixed input_scale 1.0).
+  #
+  # The q/k/v exclusions are mandatory, not a tuning choice: DFlash-family
+  # drafters build their fused context-KV projection by reading qkv_proj.weight
+  # raw, which cannot be a packed tensor. o_proj and the MLP still quantize.
+  # `fc` is optional -- quantizing it saves ~4% more size for ~1.3% AL on this
+  # model (4.2334 vs 4.2899); add '*fc*' to keep it in bf16.
+  #
+  # This drafter has has_lm_head=false (it shares the target's), so
+  # --quantize_lm_head does not apply. embed_tokens is 37% of the checkpoint but
+  # is excluded by default: it is an nn.Embedding the drafter inherits.
+  task_0:
+    script: common/specdec/quantize_drafter.sh
+    args:
+      - --qformat w4a16_nvfp4
+      - --export_path /scratchspace/export_quantized
+      - --exclude '*q_proj*' '*k_proj*' '*v_proj*' '*qkv_proj*'
+    environment:
+      - DRAFTER_CKPT: <<global_vars.draft_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
+
+  # Step 2: Acceptance length on MT-Bench. Compare against the same run with
+  # --draft_model_dir <<global_vars.draft_model>> to see what quantization cost.
+  #
+  # This target is a hybrid Mamba-MoE model, so it differs from the Qwen3 example
+  # in three ways. It needs TP8. Startup is dominated by Mamba2 kernel warmup
+  # (~6 min before the engine is ready), not weight loading. And it needs the
+  # mamba engine settings from the model card (runtime_params below): without
+  # them the first draft token is rejected ~88% of the time and acceptance length
+  # collapses from ~4.3 to ~1.5, while every later position stays normal -- so it
+  # looks like a bad drafter rather than a serving misconfiguration.
+  task_1:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/export_quantized
+      # DSPARK reads --block_size, not --draft_length; must match the drafter's
+      # block_size, which is 8 for this checkpoint.
+      - --block_size 8
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 8
+      - --ep_size 1
+      - --speculative_algorithm DSPARK
+      - --trust_remote_code
+      - --temperature 0
+      - --runtime_params modules/Model-Optimizer/tools/launcher/examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/engine_args.json
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 8
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # The model card sets this on every Nemotron-3.5 serve command.
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:nightly

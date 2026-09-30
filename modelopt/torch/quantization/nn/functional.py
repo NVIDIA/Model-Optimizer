@@ -73,26 +73,6 @@ class ClipFunction(Function):
 clip = ClipFunction.apply
 
 
-class FastHadamardTransform(Function):
-    """The fast Hadamard transform.
-
-    This only works for inputs.shape[-1] == power of 2.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs):
-        """Hadamard forward."""
-        assert utils.is_pow2(inputs.shape[-1]), (
-            "Fast hadamard only works for inputs.shape[-1] == power of 2."
-        )
-        return fast_hadamard_transform.hadamard_transform(inputs)  # type: ignore[name-defined]
-
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        """Hadamard backward."""
-        return fast_hadamard_transform.hadamard_transform(grad_outputs)  # type: ignore[name-defined]
-
-
 def _largest_pow2_divisor(n: int) -> int:
     """Return the largest power of 2 that divides n."""
     return n & (-n)
@@ -130,35 +110,29 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
     if rotate_fp32:
         inputs = inputs.to(torch.float32)
 
-    if block_size is None and utils.is_pow2(dim):
-        # Full-dimension FHT (original behavior)
-        outputs = FastHadamardTransform.apply(inputs) / torch.sqrt(
-            torch.tensor(dim, dtype=torch.float32)
-        )
-    else:
-        # Block-granular RHT
-        if block_size is None:
+    # Full-dimension FHT is just block-granular RHT with block_size == dim.
+    if block_size is None:
+        if utils.is_pow2(dim):
+            block_size = dim
+        else:
             block_size = _largest_pow2_divisor(dim)
             if block_size < 2:
                 raise RuntimeError(
                     f"Block RHT: dimension {dim} has no power-of-2 divisor >= 2. "
                     "Set rotate.block_size explicitly (e.g. 128) or use a dimension divisible by a power of 2."
                 )
-        if not utils.is_pow2(block_size):
-            raise ValueError(f"Block RHT: block_size must be power of 2, got {block_size}.")
-        if dim % block_size != 0:
-            raise RuntimeError(
-                f"Block RHT: inputs.shape[-1]={dim} is not divisible by block_size={block_size}. "
-                f"Use a block_size that divides {dim} (e.g. {_largest_pow2_divisor(dim)})."
-            )
-        n_blocks = dim // block_size
-        # Reshape to (..., n_blocks, block_size)
-        flat = inputs.reshape(-1, dim)
-        blocks = flat.reshape(-1, n_blocks, block_size)
-        # Apply FHT per block (last dim)
-        rotated = FastHadamardTransform.apply(blocks) / torch.sqrt(
-            torch.tensor(block_size, dtype=torch.float32)
+    if not utils.is_pow2(block_size):
+        raise ValueError(f"Block RHT: block_size must be power of 2, got {block_size}.")
+    if dim % block_size != 0:
+        raise RuntimeError(
+            f"Block RHT: inputs.shape[-1]={dim} is not divisible by block_size={block_size}. "
+            f"Use a block_size that divides {dim} (e.g. {_largest_pow2_divisor(dim)})."
         )
-        outputs = rotated.reshape(inputs.shape)
+
+    # hadamard_transform is autograd-aware and fuses the normalization scale into the kernel.
+    rotated = fast_hadamard_transform.hadamard_transform(  # type: ignore[name-defined]
+        inputs.reshape(-1, dim // block_size, block_size).contiguous(), scale=block_size**-0.5
+    )
+    outputs = rotated.reshape(inputs.shape)
 
     return outputs.to(dtype) if rotate_fp32 else outputs

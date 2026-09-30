@@ -20,6 +20,8 @@ import torch
 from modelopt.onnx.quantization.quant_utils import (
     compute_e8m0,
     get_amax,
+    get_weights_scaling_factor,
+    get_weights_scaling_factor_2,
     pack_float32_to_4bit_cpp_based,
     pack_float32_to_4bit_optimized,
     pack_weights_to_int4,  # Add this import
@@ -30,6 +32,31 @@ def _validate_results(expected_values, observed_values):
     assert len(expected_values) == len(observed_values), "length-mismatch"
     for i in range(len(expected_values)):
         assert expected_values[i] == observed_values[i], "data-mismatch"
+
+
+def test_nvfp4_scaling_factors_use_single_fp32_division():
+    weight = np.zeros((2, 16), dtype=np.float32)
+    weight[:, 0] = [2.24609375, 2.515625]
+
+    per_tensor_scale = get_weights_scaling_factor_2(weight)
+    assert per_tensor_scale.view(np.uint32) == 0x3A755555
+    np.testing.assert_array_equal(
+        get_weights_scaling_factor(weight, 16, per_tensor_scale),
+        np.array([[400.0], [448.0]], dtype=np.float32),
+    )
+
+
+def test_nvfp4_scaling_factors_handle_zero_and_nonfinite_amax():
+    weight = np.zeros((2, 16), dtype=np.float32)
+    per_tensor_scale = get_weights_scaling_factor_2(weight)
+    assert per_tensor_scale == 1.0
+    np.testing.assert_array_equal(
+        get_weights_scaling_factor(weight, 16, per_tensor_scale),
+        np.ones((2, 1), dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="must be finite"):
+        get_weights_scaling_factor_2(np.array([np.inf], dtype=np.float32))
 
 
 def test_pack_float32_to_4bit_utils():

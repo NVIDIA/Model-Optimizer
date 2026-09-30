@@ -69,7 +69,6 @@ validate_model_and_extract_token_probs({model_name=})
         val_dataloader=val_dataloader,
     )
     if dist.is_last_process():
-        output_dir = output_dir if (output_dir is not None) else args.bypass_dir
         extra_payload = extra_payload if (extra_payload is not None) else dict()
         write_results(output_dir, model_name, args, {**losses, **extra_payload})
     return hidden_states_per_batch

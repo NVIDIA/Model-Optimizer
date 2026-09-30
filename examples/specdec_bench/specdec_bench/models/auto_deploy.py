@@ -93,6 +93,8 @@ def create_auto_deploy_model(model_path: str, max_concurrent_requests: int, kwar
         )
     elif speculative_algorithm == "NONE":
         specdec = None
+    elif speculative_algorithm == "DSPARK":
+        raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
 
     max_num_tokens = kwargs.get("max_num_tokens", 8192)
 

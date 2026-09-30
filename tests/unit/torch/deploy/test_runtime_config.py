@@ -42,5 +42,5 @@ def test_invalid_device(invalid_deployment, error_msg) -> None:
     ],
 )
 def test_accelerator_not_found(invalid_deployment) -> None:
-    with pytest.raises(AssertionError, match=".*\\('accelerator', 'GPU'\\): .*"):
+    with pytest.raises(AssertionError, match=r".*\('accelerator', 'GPU'\): .*"):
         sanitize_deployment_config(invalid_deployment)

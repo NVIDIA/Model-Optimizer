@@ -1,0 +1,1306 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import argparse
+import dataclasses
+import getpass
+import io
+import json
+import logging
+import os
+import sys
+from types import SimpleNamespace
+
+import pytest
+import yaml
+from _test_utils.mlflow import FakeMlflow, clean_env  # noqa: F401
+
+import modelopt
+from modelopt.torch.utils.logging import TeeStream
+from modelopt.torch.utils.mlflow import (
+    EXPERIMENT_JSON,
+    MlflowRunLogger,
+    Tool,
+    _git_sha,
+    _redact_argv,
+    add_mlflow_args,
+    command_text,
+    default_experiment_name,
+    drop_experiment_json,
+    log_active_run_experiment_json,
+    mask_tracking_uri,
+    masked_args,
+    resolve_mlflow_args,
+    resolved_recipe_texts,
+    run_tags,
+    split_tracking_credentials,
+    tracked_run,
+    validate_tracking_uri,
+)
+
+URI = "https://mlflow.example.com"
+# Fake credentials for the redaction tests. TruffleHog's URI detector flags any
+# scheme://user:pass@host, so the marker sits on the definitions; these tests exist
+# precisely to prove such credentials are masked.
+CREDS_URI = "https://user:tok@mlflow.example.com"  # trufflehog:ignore
+SHORT_CREDS_URI = "https://u:tok@host"  # trufflehog:ignore
+
+
+def _install_foreign(monkeypatch, fake):
+    """Register *fake* as both ``mlflow`` and the ``mlflow.tracking`` the client comes from."""
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setitem(
+        sys.modules, "mlflow.tracking", SimpleNamespace(MlflowClient=fake._client())
+    )
+    return fake
+
+
+def _unreachable(fake):
+    """Make MLflow's own first request fail, the way a dead server does."""
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake.set_experiment = explode
+    return fake
+
+
+def _logger(**kwargs):
+    kwargs.setdefault("experiment_name", "tester/hf_ptq/model-nvfp4")
+    return MlflowRunLogger(URI, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        (f"{URI}/", URI),
+        (URI, URI),
+        ("http://localhost:5000", "http://localhost:5000"),
+        ("https://host/mlflow/", "https://host/mlflow"),
+    ],
+)
+def test_validate_tracking_uri_accepts_http_servers(uri, expected):
+    assert validate_tracking_uri(uri) == expected
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "",  # no URI given and no MLFLOW_TRACKING_URI
+        "mlflow.example.com",  # missing scheme
+        "/local/mlruns",  # local path
+        "file:///local/mlruns",  # unsupported backend
+        "sqlite:///mlflow.db",
+        "https://",  # no host
+    ],
+)
+def test_validate_tracking_uri_rejects_non_servers(uri):
+    with pytest.raises(ValueError):
+        validate_tracking_uri(uri)
+
+
+def test_missing_scheme_is_the_only_case_that_suggests_https():
+    """Suggesting https://sqlite:///... for a URI that already has a scheme is nonsense."""
+    with pytest.raises(ValueError, match=r"Did you mean https://mlflow\.example\.com\?"):
+        validate_tracking_uri("mlflow.example.com")
+    with pytest.raises(ValueError) as excinfo:
+        validate_tracking_uri("sqlite:///mlflow.db")
+    assert "Did you mean" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("model", "variant", "expected"),
+    [
+        # Local directory with a trailing slash.
+        (
+            "/models/Llama-3.3-70B-Instruct/",
+            "nvfp4_default-kv_fp8_cast",
+            "tester/hf_ptq/Llama-3.3-70B-Instruct-nvfp4_default-kv_fp8_cast",
+        ),
+        # A Hugging Face id collapses to its basename.
+        ("nvidia/Llama-3.3-70B-Instruct", "tuned", "tester/hf_ptq/Llama-3.3-70B-Instruct-tuned"),
+        ("openai/gpt-oss-20b", "nvfp4", "tester/hf_ptq/gpt-oss-20b-nvfp4"),
+        # Version dots survive; other unsafe characters do not.
+        ("/models/Qwen3.6-35B-A3B", "nvfp4", "tester/hf_ptq/Qwen3.6-35B-A3B-nvfp4"),
+        ("/models/my model!", "nvfp4,fp8", "tester/hf_ptq/my_model-nvfp4_fp8"),
+    ],
+)
+def test_default_experiment_name(model, variant, expected):
+    assert default_experiment_name("hf_ptq", model, variant) == expected
+
+
+def test_default_experiment_name_takes_an_explicit_user_and_tool():
+    assert default_experiment_name("llm_eval", "/m/Qwen3-0.6B", "mmlu", user="alice") == (
+        "alice/llm_eval/Qwen3-0.6B-mmlu"
+    )
+
+
+def test_default_experiment_name_survives_unusable_username(monkeypatch):
+    """A container without a passwd entry for the uid must not break the run."""
+    monkeypatch.setattr(getpass, "getuser", lambda: (_ for _ in ()).throw(OSError))
+    assert default_experiment_name("hf_ptq", "/m/Qwen3-0.6B", "nvfp4") == (
+        "unknown/hf_ptq/Qwen3-0.6B-nvfp4"
+    )
+
+
+def test_default_experiment_name_stays_storable():
+    """SQL-backed stores keep experiment names in a VARCHAR(256) column."""
+    name = default_experiment_name("t" * 150, "/m/" + "m" * 150, "v" * 150, user="u" * 150)
+
+    assert len(name) <= 250
+
+
+def test_tee_stream_writes_to_both_and_delegates():
+    original, sink = io.StringIO(), io.StringIO()
+    tee = TeeStream(original, sink)
+
+    print("hello", file=tee)
+    tee.flush()
+
+    assert original.getvalue() == "hello\n"
+    assert sink.getvalue() == "hello\n"
+    # Progress bars check isatty(); it must report the real stream, not the tee.
+    assert tee.isatty() == original.isatty()
+
+
+def test_tee_stream_does_not_recurse_on_its_own_attributes():
+    """Delegating _stream/_sink when they are unset would recurse until the stack blows."""
+    tee = TeeStream.__new__(TeeStream)  # never ran __init__, so both are missing
+
+    with pytest.raises(AttributeError):
+        tee._stream
+
+
+def test_tee_stream_tolerates_a_closed_sink():
+    """Handlers registered after start keep the tee; writes must not raise once it is closed."""
+    original, sink = io.StringIO(), io.StringIO()
+    tee = TeeStream(original, sink)
+    sink.close()
+
+    tee.write("after close")
+    tee.flush()
+
+    assert original.getvalue() == "after close"
+
+
+def test_logger_is_inert_when_disabled(monkeypatch):
+    """Disabled means nothing is imported, captured or uploaded."""
+    monkeypatch.setitem(sys.modules, "mlflow", None)
+    logger = _logger(enabled=False)
+    stdout = sys.stdout
+
+    logger.start(params={"model": "x"})
+    assert sys.stdout is stdout
+    assert logger.run_url == ""
+    logger.finish("FINISHED")
+
+
+def test_logger_logs_inputs_and_outputs(fake_mlflow, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--pyt_ckpt_path", "/models/Qwen3-0.6B"])
+    (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers found in model\n")
+    logger = _logger(run_name="unit-test")
+
+    logger.start(
+        params={"model": "/models/Qwen3-0.6B", "qformat": "nvfp4"},
+        tags={"extra": "value"},
+        texts={"recipe/resolved_recipe.yaml": "metadata:\n  recipe_type: ptq\n"},
+    )
+    try:
+        assert fake_mlflow.tracking_uri == URI
+        assert fake_mlflow.experiment == "tester/hf_ptq/model-nvfp4"
+        assert fake_mlflow.run_name == "unit-test"
+        assert logger.run_url == f"{URI}/#/experiments/7/runs/deadbeef"
+    finally:
+        logger.finish(
+            "FINISHED",
+            files={
+                "summary/quant_summary.txt": tmp_path / ".quant_summary.txt",
+                "summary/moe.html": tmp_path / ".moe.html",  # absent: must be skipped
+            },
+        )
+
+    assert fake_mlflow.params == {"model": "/models/Qwen3-0.6B", "qformat": "nvfp4"}
+    assert fake_mlflow.tags["extra"] == "value"
+    assert fake_mlflow.tags["user"] == "tester"
+
+    command = fake_mlflow.texts["command.txt"]
+    assert "hf_ptq.py --pyt_ckpt_path /models/Qwen3-0.6B" in command
+    assert "torchrun" not in command
+    assert "recipe_type: ptq" in fake_mlflow.texts["recipe/resolved_recipe.yaml"]
+
+    # The ModelOpt version travels with the run as an artifact, not only as a tag.
+    version = fake_mlflow.texts["version.txt"]
+    assert version.strip() == modelopt.__version__ and version.endswith("\n")
+    assert fake_mlflow.tags["modelopt_version"] == modelopt.__version__
+
+    # The log keeps its name; the summary is renamed out of its dotfile form.
+    assert fake_mlflow.artifacts["hf_ptq.log"][0] == "logs"
+    assert fake_mlflow.artifacts["quant_summary.txt"][0] == "summary"
+    assert "moe.html" not in fake_mlflow.artifacts
+    assert "total_time_s" in fake_mlflow.metrics
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_run_name_defaults_to_the_utc_timestamp(fake_mlflow):
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    assert len(fake_mlflow.run_name) == 15 and fake_mlflow.run_name[8] == "-"
+
+
+def test_run_info_identifies_the_run_on_the_server(fake_mlflow, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger(run_name="unit-test")
+
+    assert logger.run_info == {}
+    with logger.track():
+        assert logger.run_info == {
+            "tracking_uri": URI,
+            "experiment_name": "tester/hf_ptq/model-nvfp4",
+            "experiment_id": "7",
+            "run_id": "deadbeef",
+            "run_name": "unit-test",
+            "run_url": f"{URI}/#/experiments/7/runs/deadbeef",
+        }
+
+
+def test_run_info_reports_the_defaulted_run_name(fake_mlflow, monkeypatch):
+    """The name is settled when the run opens, so it is not left blank here."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+
+    with logger.track():
+        assert logger.run_info["run_name"] == fake_mlflow.run_name
+
+
+def test_run_info_reports_the_name_the_server_returned(fake_mlflow, monkeypatch):
+    """MLflow can resolve a run other than the one asked for -- resuming $MLFLOW_RUN_ID, say
+    -- so the identity is read off what came back, not off what was requested."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    fake_mlflow.server_run_name = "resumed-run"
+    logger = _logger(run_name="requested-run")
+
+    with logger.track():
+        assert logger.run_info["run_name"] == "resumed-run"
+
+
+def test_run_info_masks_credentials(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = MlflowRunLogger(CREDS_URI, "tester/hf_ptq/model-nvfp4")
+
+    with logger.track():
+        assert logger.run_info["tracking_uri"] == "https://***@mlflow.example.com"
+
+
+def test_command_flags_the_invisible_torchrun_wrapper(fake_mlflow, monkeypatch):
+    """Under torchrun, sys.argv is the worker's, so the launcher must be called out."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--use_fsdp2"])
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    command = fake_mlflow.texts["command.txt"]
+    assert "hf_ptq.py --use_fsdp2" in command
+    assert "WORLD_SIZE=8" in command and "not part of sys.argv" in command
+
+
+def test_command_can_record_another_processs_invocation(monkeypatch):
+    """A worker's own sys.argv is spawn plumbing, so the caller can supply the real one."""
+    monkeypatch.setattr(sys, "argv", ["-c", "from multiprocessing.spawn import spawn_main"])
+
+    command = command_text(["vllm_serve_fakequant.py", "/ckpts/model", "--api-key", "sk-secret"])
+
+    assert "vllm_serve_fakequant.py /ckpts/model" in command
+    assert "sk-secret" not in command
+    assert "spawn_main" not in command
+
+
+def test_log_text_uploads_while_the_run_is_open(fake_mlflow):
+    """For a value settled midway through, which a later crash would otherwise lose."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    uploaded_before_finish = fake_mlflow.texts.get("recipe/quant_cfg.yaml")
+
+    logger.finish("FAILED")
+    assert uploaded_before_finish == "quant_cfg: {}\n"
+
+
+def test_log_text_is_inert_outside_an_open_run(fake_mlflow):
+    logger = _logger(enabled=False)
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    logger = _logger()  # enabled, but never started
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    assert fake_mlflow.texts == {}
+
+
+def test_log_text_never_raises_when_the_upload_fails(fake_mlflow, capsys):
+    """Losing one artifact must not take down the quantization that produced it."""
+    logger = _logger()
+    logger.start()
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.log_text = explode
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    logger.finish("FINISHED")
+
+    assert "could not upload recipe/quant_cfg.yaml" in capsys.readouterr().out
+
+
+def test_capture_includes_preconfigured_library_logging(fake_mlflow, monkeypatch):
+    """transformers/huggingface_hub bind sys.stderr at import, long before capture starts."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    library_logger = logging.getLogger("test_preconfigured_library")
+    handler = logging.StreamHandler(sys.stderr)
+    library_logger.addHandler(handler)
+    logger = _logger()
+
+    try:
+        logger.start()
+        log_path = logger._log_path
+        library_logger.warning("Rate limited. Waiting 169.0s before retry")
+        captured = log_path.read_text()
+        logger.finish("FINISHED")
+    finally:
+        library_logger.removeHandler(handler)
+
+    assert "Rate limited" in captured
+    # The handler must be handed back its own stream, or later logging writes to a closed file.
+    assert handler.stream is sys.stderr
+
+
+def test_capture_hands_back_handlers_bound_during_the_run(fake_mlflow, monkeypatch):
+    """A library imported mid-run binds sys.stderr -- which is the tee at that point. Restoring
+    only the handlers seen at start would leave it writing to a closed file forever."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+    late = logging.getLogger("test_bound_during_run")
+
+    logger.start()
+    handler = logging.StreamHandler(sys.stderr)  # sys.stderr is the tee here
+    late.addHandler(handler)
+    try:
+        logger.finish("FINISHED")
+        assert handler.stream is sys.stderr
+        assert not isinstance(handler.stream, TeeStream)
+        late.warning("after the run")  # must not raise on a closed sink
+    finally:
+        late.removeHandler(handler)
+
+
+def test_logger_restores_streams_and_reports_failure(fake_mlflow, monkeypatch):
+    """A failed run is still recorded, with its log attached."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+    stdout, stderr = sys.stdout, sys.stderr
+
+    logger.start()
+    print("calibrating")
+    logger.finish("FAILED")
+
+    assert sys.stdout is stdout and sys.stderr is stderr
+    assert fake_mlflow.status == "FAILED"
+    assert fake_mlflow.artifacts["hf_ptq.log"][0] == "logs"
+
+
+def test_logger_never_raises_when_the_server_dies_mid_run(fake_mlflow, capsys):
+    logger = _logger()
+    logger.start()
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("server gone")
+
+    fake_mlflow.log_artifact = explode
+    logger.finish("FINISHED")
+
+    assert not isinstance(sys.stdout, TeeStream)
+    # A swallowed upload failure must still be visible, or the run looks complete.
+    assert "server gone" in capsys.readouterr().out
+
+
+def test_start_is_idempotent(fake_mlflow):
+    """A second start would install a second tee and orphan the first temp directory."""
+    logger = _logger(run_name="first")
+    logger.start()
+    fake_mlflow.run_name = "clobbered"
+
+    logger.start()
+
+    assert fake_mlflow.run_name == "clobbered"  # no second start_run
+    assert isinstance(sys.stdout, TeeStream) and not isinstance(sys.stdout._stream, TeeStream)
+    logger.finish("FINISHED")
+
+
+def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
+    """Opening the run is the readiness check -- MLflow's own request, so it honours the
+    client's TLS and retry configuration instead of a parallel probe that would not."""
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
+    logger = _logger()
+    stdout = sys.stdout
+
+    with pytest.raises(ConnectionError, match="no route to host"):
+        logger.start()
+
+    # The capture must be torn down so the failure is readable on the console.
+    assert sys.stdout is stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # A secret-looking option masks the value that follows it.
+        (["--hf_token", "hf_abc123"], ["--hf_token", "***"]),
+        (["--api-key=abc123"], ["--api-key=***"]),
+        (["--password", "hunter2", "--verbose"], ["--password", "***", "--verbose"]),
+        # Credentials embedded in a URI are masked wherever they appear.
+        (
+            ["--mlflow", CREDS_URI],
+            ["--mlflow", "https://***@mlflow.example.com"],
+        ),
+        # Ordinary arguments are untouched, including values that merely contain the word.
+        # A secret value can itself start with "-".
+        (["--hf_token", "-secret"], ["--hf_token", "***"]),
+        (["--dataset", "token_data"], ["--dataset", "token_data"]),
+        (["--pyt_ckpt_path", "/models/Qwen3-0.6B"], ["--pyt_ckpt_path", "/models/Qwen3-0.6B"]),
+    ],
+)
+def test_redact_argv_masks_credentials(argv, expected):
+    assert _redact_argv(argv) == expected
+
+
+def test_command_artifact_carries_no_secrets(fake_mlflow, monkeypatch):
+    """argv reaches the server as command.txt, so secrets in it must not."""
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", SHORT_CREDS_URI]
+    )
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    command = fake_mlflow.texts["command.txt"]
+    assert "run.py" in command and "--hf_token" in command
+    for secret in ("hf_abc123", "u:tok"):
+        assert secret not in command
+
+
+def test_params_and_run_url_mask_credentials(monkeypatch):
+    """A credential-bearing tracking URI is usable, but must not be echoed or uploaded."""
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setattr(sys, "argv", ["run.py"])
+    logger = MlflowRunLogger(CREDS_URI, "tester/hf_ptq/m-nvfp4", run_name="masked")
+
+    logger.start(params={"hf_token": "secret", "endpoint": "https://u:p@host", "qformat": "nvfp4"})
+    url = logger.run_url
+    logger.finish("FINISHED")
+
+    assert fake.params == {"hf_token": "***", "endpoint": "https://***@host", "qformat": "nvfp4"}
+    assert "tok" not in url and "https://***@mlflow.example.com" in url
+    # The real URI is still what talks to the server.
+    assert fake.tracking_uri == CREDS_URI
+
+
+def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):
+    """If logging the inputs fails, the run would otherwise sit in RUNNING forever."""
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("network blip")
+
+    fake.log_params = explode
+    logger = _logger()
+    stdout = sys.stdout
+
+    with pytest.raises(RuntimeError, match="network blip"):
+        logger.start(params={"model": "x"})
+
+    assert fake.status == "FAILED"
+    assert sys.stdout is stdout
+    # finish() is now inert: the caller never got a logger to call it on anyway.
+    logger.finish("FINISHED")
+    assert fake.status == "FAILED"
+
+
+def test_git_sha_is_read_without_a_subprocess():
+    """Bandit forbids the subprocess call this used to make; it reads .git directly now."""
+    sha = _git_sha()
+
+    assert sha == "unknown" or (1 <= len(sha) <= 9 and all(c in "0123456789abcdef" for c in sha))
+    assert "subprocess" not in dir(sys.modules["modelopt.torch.utils.mlflow"])
+
+
+@pytest.mark.parametrize("in_worktree", [False, True])
+def test_git_sha_resolves_in_a_checkout_and_a_worktree(tmp_path, monkeypatch, in_worktree):
+    """A worktree's .git is a *file* pointing at the real git dir, and its refs live in the
+    main checkout -- a directory-only reader silently reports "unknown" for every worktree."""
+    main = tmp_path / "repo" / ".git"
+    (main / "refs" / "heads").mkdir(parents=True)
+    (main / "refs" / "heads" / "main").write_text("a" * 40 + "\n")
+
+    if in_worktree:
+        checkout = tmp_path / "wt"
+        wt_git = main / "worktrees" / "wt"
+        wt_git.mkdir(parents=True)
+        (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+        (wt_git / "commondir").write_text("../..\n")
+        checkout.mkdir()
+        (checkout / ".git").write_text(f"gitdir: {wt_git}\n")
+    else:
+        checkout = main.parent
+        (main / "HEAD").write_text("ref: refs/heads/main\n")
+
+    # _git_sha locates .git relative to the module file, three parents up.
+    fake_module = checkout / "modelopt" / "torch" / "utils" / "mlflow.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.touch()
+    monkeypatch.setattr("modelopt.torch.utils.mlflow.__file__", str(fake_module))
+
+    assert _git_sha() == "a" * 9
+
+
+def test_git_sha_handles_a_detached_head(tmp_path, monkeypatch):
+    git_dir = tmp_path / "repo" / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("b" * 40 + "\n")
+    fake_module = tmp_path / "repo" / "modelopt" / "torch" / "utils" / "mlflow.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.touch()
+    monkeypatch.setattr("modelopt.torch.utils.mlflow.__file__", str(fake_module))
+
+    assert _git_sha() == "b" * 9
+
+
+def test_track_closes_the_run_with_the_right_status(fake_mlflow, monkeypatch):
+    """Mirrors mlflow.start_run(): the block's outcome decides the status."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+
+    with _logger().track(params={"qformat": "nvfp4"}):
+        pass
+
+    assert fake_mlflow.status == "FINISHED"
+    assert fake_mlflow.params == {"qformat": "nvfp4"}
+
+
+@pytest.mark.parametrize(
+    ("code", "status"), [(0, "FINISHED"), (None, "FINISHED"), (1, "FAILED"), (2, "FAILED")]
+)
+def test_a_block_that_exits_cleanly_is_a_finished_run(fake_mlflow, code, status):
+    """A script that ends by calling sys.exit() rather than returning -- Megatron-Bridge does,
+    from inside its training loop -- finished if it exited cleanly. Before this shared exit
+    path, every SystemExit reached the bare ``finally`` and was recorded as FAILED."""
+    with pytest.raises(SystemExit), _logger().track():
+        raise SystemExit(code)
+
+    assert fake_mlflow.status == status
+
+
+def test_track_marks_a_raising_block_failed(fake_mlflow, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    stdout = sys.stdout
+
+    summary = {"summary/quant_summary.txt": tmp_path / ".quant_summary.txt"}
+    with (
+        pytest.raises(RuntimeError, match="calibration exploded"),
+        _logger().track(files=summary),
+    ):
+        # post_quantize writes the summary during the run, so the test must too.
+        (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers\n")
+        raise RuntimeError("calibration exploded")
+
+    assert fake_mlflow.status == "FAILED"
+    assert sys.stdout is stdout
+    # The outputs named upfront are still uploaded, and the traceback is in the log.
+    assert fake_mlflow.artifacts["quant_summary.txt"][0] == "summary"
+    assert "RuntimeError: calibration exploded" in fake_mlflow.artifacts["hf_ptq.log"][1]
+
+
+def test_failed_run_uploads_the_traceback(fake_mlflow, monkeypatch):
+    """finish() runs from the caller's finally, before the interpreter prints the traceback,
+    so without help the log stops at the last line the script printed."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+    logger.start()
+    print("calibrating")
+
+    try:
+        raise RuntimeError("calibration exploded")
+    except RuntimeError:
+        logger.finish("FAILED")
+
+    log = fake_mlflow.artifacts["hf_ptq.log"][1]
+    assert "calibrating" in log
+    assert "Traceback (most recent call last)" in log
+    assert "RuntimeError: calibration exploded" in log
+
+
+def test_successful_run_uploads_no_traceback(fake_mlflow, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    assert "Traceback" not in fake_mlflow.artifacts["hf_ptq.log"][1]
+
+
+def test_only_files_this_run_produced_are_uploaded(fake_mlflow, tmp_path, monkeypatch):
+    """An export directory is reused across attempts. A run that crashes before writing its
+    summary must not upload the previous run's file as though it were its own."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    stale = tmp_path / ".quant_summary.txt"
+    stale.write_text("from a previous run\n")
+    fresh = tmp_path / ".moe.html"
+    logger = _logger()
+
+    outputs = {"summary/quant_summary.txt": stale, "summary/moe.html": fresh}
+    logger.start(files=outputs)
+    fresh.write_text("<html>written by this run</html>")  # produced during the run
+    logger.finish("FAILED", files=outputs)
+
+    uploaded = list(fake_mlflow.artifacts)
+    assert "moe.html" in uploaded
+    assert "quant_summary.txt" not in uploaded
+
+
+def test_stale_check_survives_unnormalized_string_paths(fake_mlflow, tmp_path, monkeypatch):
+    """files accepts str as well as Path, and "./out/x" is the same file as "out/x" but not
+    the same string -- keying the snapshot on the raw value would miss and upload it anyway."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "out").mkdir()
+    stale = tmp_path / "out" / ".quant_summary.txt"
+    stale.write_text("from a previous run\n")
+    outputs = {"summary/quant_summary.txt": "./out/.quant_summary.txt"}
+    logger = _logger()
+
+    logger.start(files=outputs)
+    logger.finish("FAILED", files=outputs)
+
+    assert "quant_summary.txt" not in fake_mlflow.artifacts
+
+
+def test_optional_tracking_warns_and_continues_when_the_server_is_unreachable(monkeypatch, capsys):
+    """A URI inferred from the environment must not be able to fail the job it is watching."""
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
+    logger = _logger(required=False)
+    stdout = sys.stdout
+
+    logger.start(params={"model": "x"})  # must not raise
+    logger.finish("FINISHED")
+
+    assert logger.enabled is False
+    assert sys.stdout is stdout
+    assert "tracking disabled" in capsys.readouterr().out
+
+
+def test_required_tracking_still_raises(monkeypatch):
+    """An explicit request is different: a broken server should fail loudly."""
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
+
+    with pytest.raises(ConnectionError, match="no route to host"):
+        _logger(required=True).start()
+
+
+# --- the CLI surface the example scripts share -----------------------------------------
+
+
+_TOOL = Tool(
+    name="hf_ptq",
+    tracks="Track this run on an MLflow server (e.g. https://<your-mlflow-server>/).",
+    variant_help="recipe name",
+    variant=lambda args: "nvfp4",
+    model=lambda args: "/models/Qwen3-0.6B",
+    checkpoint=lambda args: "/exports/out",
+)
+
+
+def _parser():
+    parser = argparse.ArgumentParser()
+    add_mlflow_args(parser, _TOOL)
+    return parser
+
+
+def _resolved(argv, parser=None):
+    parser = parser or _parser()
+    args = parser.parse_args(argv)
+    resolve_mlflow_args(args, parser, _TOOL)
+    return args
+
+
+def test_the_flag_names_the_experiment_and_normalizes_the_uri():
+    args = _resolved(["--mlflow", f"{URI}/"])
+
+    assert args.mlflow == URI
+    assert args.mlflow_required is True
+    assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-nvfp4"
+
+
+def test_an_explicit_experiment_is_left_alone():
+    args = _resolved(["--mlflow", URI, "--mlflow_experiment", "team/sweep"])
+
+    assert args.mlflow_experiment == "team/sweep"
+
+
+def test_the_flag_overrides_the_environment(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://other.example.com")
+
+    assert _resolved(["--mlflow", URI]).mlflow == URI
+
+
+def test_a_bad_uri_is_fatal_only_when_it_was_asked_for(monkeypatch):
+    """The variable is commonly exported for unrelated tooling, so it must not fail a job
+    that never asked to be tracked -- unlike an explicit --mlflow."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///local/mlruns")
+
+    with pytest.warns(UserWarning, match="continuing untracked"):
+        assert _resolved([]).mlflow is None
+
+    with pytest.raises(SystemExit):
+        _resolved(["--mlflow", "file:///local/mlruns"])
+
+
+def test_an_explicit_empty_uri_warns_and_falls_back(monkeypatch):
+    """``--mlflow "$UNSET_VAR"`` is a wrapper script whose variable did not resolve. It names
+    no server, so it must not be treated as a deliberate request that can fail the job --
+    but it must not pass silently either."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)
+
+    with pytest.warns(UserWarning, match="empty value"):
+        args = _resolved(["--mlflow", ""])
+
+    assert args.mlflow == URI
+    assert args.mlflow_required is False  # so an unusable environment URI still cannot fail it
+
+
+def test_an_explicit_empty_uri_runs_untracked_with_no_environment(monkeypatch):
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+
+    with pytest.warns(UserWarning, match="empty value"):
+        args = _resolved(["--mlflow", ""])
+
+    assert args.mlflow is None
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        (CREDS_URI, "https://***@mlflow.example.com"),
+        (URI, URI),
+        (None, None),
+    ],
+    ids=["credentials", "plain", "unset"],
+)
+def test_mask_tracking_uri_hides_credentials_for_printing(uri, expected):
+    """A caller that prints the URI itself has to mask what command.txt and run_url mask."""
+    assert mask_tracking_uri(uri) == expected
+
+
+# --- the provenance pointer a checkpoint carries ---------------------------------------
+
+
+def test_experiment_json_is_uploaded_and_written_beside_the_checkpoint(fake_mlflow, tmp_path):
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(tmp_path)
+    logger.finish("FINISHED")
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "deadbeef"
+    assert written["experiment_name"] == "tester/hf_ptq/model-nvfp4"
+    # Uploaded without the leading dot, which is awkward to browse in the MLflow UI.
+    assert json.loads(fake_mlflow.texts["experiment.json"]) == written
+
+
+def test_experiment_json_uploads_without_claiming_a_checkpoint(fake_mlflow, tmp_path):
+    """A run whose export never completed stays traceable from the server, but nothing on
+    disk may name it as the author of whatever checkpoint is sitting there."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(None)
+    logger.finish("FAILED")
+
+    assert "experiment.json" in fake_mlflow.texts
+    assert not (tmp_path / EXPERIMENT_JSON).exists()
+
+
+def test_a_run_that_never_opened_clears_the_pointer_instead_of_writing_one(tmp_path):
+    """After a completed export the pointer is this run's or absent -- never a previous
+    run's, which would name a run that did not write these weights."""
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    MlflowRunLogger(URI, "e", enabled=False).log_experiment_json(tmp_path)
+
+    assert not stale.exists()
+
+
+def test_a_run_that_never_opened_leaves_an_unexported_checkpoint_alone(tmp_path):
+    """No checkpoint_dir means nothing was exported, so whatever is there keeps its own."""
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    MlflowRunLogger(URI, "e", enabled=False).log_experiment_json(None)
+
+    assert stale.exists()
+
+
+def test_optional_tracking_that_dies_mid_flight_clears_the_pointer(monkeypatch, tmp_path):
+    """The reachable-looking URI took the caller down the tracked path, so its untracked
+    cleanup never ran; start() then disabled itself. The pointer still has to go."""
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+    logger = _logger(required=False)
+
+    logger.start()  # disables itself rather than raising
+    logger.log_experiment_json(tmp_path)
+    logger.finish("FINISHED")
+
+    assert logger.enabled is False
+    assert not stale.exists()
+
+
+def test_an_unwritable_checkpoint_dir_warns_instead_of_failing_the_run(
+    fake_mlflow, tmp_path, capsys
+):
+    """The weights are already on disk; losing the pointer must not fail the job."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_experiment_json(tmp_path / "does-not-exist")
+    logger.finish("FINISHED")
+
+    assert "could not write" in capsys.readouterr().out
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_dropping_the_pointer_is_idempotent(tmp_path):
+    (tmp_path / EXPERIMENT_JSON).write_text('{"run_id": "stale"}')
+
+    drop_experiment_json(tmp_path)
+    drop_experiment_json(tmp_path)  # nothing left to remove, and no error
+
+    assert not (tmp_path / EXPERIMENT_JSON).exists()
+
+
+# --- the pieces every checkpoint-producing run shares -----------------------------------
+
+
+def _tool(model="/models/Qwen3-0.6B", checkpoint="/exports/out", source=None):
+    """A Tool that names just what the tags read."""
+    return Tool(
+        name="demo",
+        tracks="Track it.",
+        variant_help="v",
+        variant=lambda args: "v1",
+        model=lambda args: model,
+        checkpoint=lambda args: checkpoint,
+        source=(lambda args: source) if source is not None else None,
+    )
+
+
+def test_resolved_recipe_texts_carry_a_self_contained_recipe():
+    texts = resolved_recipe_texts("general/ptq/nvfp4_default-kv_fp8_cast")
+
+    recipe = yaml.safe_load(texts["recipe/resolved_recipe.yaml"])
+    assert recipe["metadata"]["recipe_type"] == "ptq"
+    assert recipe["quantize"]["quant_cfg"]  # $imports expanded, so it stands alone
+
+
+@pytest.mark.parametrize("recipe", [None, ""], ids=["unset", "empty"])
+def test_resolved_recipe_texts_are_empty_without_a_recipe(recipe):
+    assert resolved_recipe_texts(recipe) == {}
+
+
+def test_masked_args_masks_the_uri_and_nothing_else():
+    args = argparse.Namespace(mlflow=CREDS_URI, export_path="/out", calib_size=512)
+
+    printed = masked_args(args)
+
+    assert printed.mlflow == "https://***@mlflow.example.com"
+    assert (printed.export_path, printed.calib_size) == ("/out", 512)
+    assert args.mlflow == CREDS_URI  # the caller's namespace is untouched
+
+
+def _run_args(tracked=True):
+    """The namespace tracked_run reads its destination from."""
+    return argparse.Namespace(
+        mlflow=URI if tracked else None,
+        mlflow_experiment="tester/hf_ptq/model-nvfp4",
+        mlflow_run_name=None,
+        mlflow_required=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exported", "is_main", "survives"),
+    [(True, True, False), (True, False, True), (False, True, True)],
+    ids=["exported-main-drops", "exported-other-rank-leaves", "not-exported-leaves"],
+)
+def test_untracked_run_clears_only_what_it_replaced(tmp_path, exported, is_main, survives):
+    """The pointer is dropped exactly when this rank wrote a fresh checkpoint over it."""
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    with tracked_run(
+        _run_args(tracked=False),
+        _tool(checkpoint=tmp_path),
+        is_main=is_main,
+        exported=lambda: exported,
+    ):
+        pass
+
+    assert stale.exists() is survives
+
+
+def test_untracked_run_does_not_gather_what_it_will_not_upload(monkeypatch, tmp_path):
+    """Gathering can re-read a recipe, which an untracked run must not pay for."""
+    calls = []
+    monkeypatch.setattr(
+        sys.modules[tracked_run.__module__], "describe_run", lambda a, t, w=1: calls.append(1) or {}
+    )
+
+    with tracked_run(
+        _run_args(tracked=False), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: False
+    ):
+        pass
+
+    assert calls == []
+
+
+def test_tracked_run_records_the_pointer_and_closes(fake_mlflow, tmp_path):
+    args = _run_args()
+    args.model_for_params = "m"
+
+    with tracked_run(args, _tool(checkpoint=tmp_path), is_main=True, exported=lambda: True):
+        pass
+
+    assert json.loads((tmp_path / EXPERIMENT_JSON).read_text())["run_id"] == "deadbeef"
+    assert fake_mlflow.params["model_for_params"] == "m"
+    assert fake_mlflow.status == "FINISHED"
+
+
+def test_exported_is_read_on_the_way_out(fake_mlflow, tmp_path):
+    """The flag is flipped by the work inside the block, so reading it up front would
+    record the state before the checkpoint existed."""
+    state = {"exported": False}
+
+    with tracked_run(
+        _run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: state["exported"]
+    ):
+        state["exported"] = True
+
+    assert (tmp_path / EXPERIMENT_JSON).exists()
+
+
+@pytest.mark.parametrize("raises", ["exported", "metrics"])
+def test_a_callback_that_raises_does_not_cost_the_run_its_close(fake_mlflow, tmp_path, raises):
+    """Both report what the run did, so a run that failed early may never have stashed what
+    they read. Raising from the exit path would run *instead of* finish(), leaving the run
+    RUNNING on the server and stdout still pointed at the capture tee."""
+
+    def boom(*_):
+        raise AttributeError("'Namespace' object has no attribute 'prune_score'")
+
+    tool = _tool(checkpoint=tmp_path)
+    if raises == "metrics":
+        tool = dataclasses.replace(tool, metrics=boom)
+
+    with tracked_run(
+        _run_args(), tool, is_main=True, exported=boom if raises == "exported" else (lambda: True)
+    ):
+        pass
+
+    assert fake_mlflow.status == "FINISHED"
+    assert not isinstance(sys.stdout, TeeStream)
+
+
+def test_a_tool_that_settles_no_pointer_leaves_the_directory_alone(fake_mlflow, tmp_path):
+    """For a script that points each of several checkpoints at the run itself: tracked_run
+    must neither write the pointer nor clear one it did not replace."""
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+    tool = dataclasses.replace(_tool(checkpoint=tmp_path), settles_pointer=False)
+
+    with tracked_run(_run_args(), tool, is_main=True, exported=lambda: True):
+        pass
+
+    assert json.loads(stale.read_text())["run_id"] == "an-earlier-run"
+
+
+def test_a_failed_tracked_run_leaves_no_pointer_but_is_still_recorded(fake_mlflow, tmp_path):
+    with (
+        pytest.raises(RuntimeError),
+        tracked_run(_run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: False),
+    ):
+        raise RuntimeError("calibration blew up")
+
+    assert not (tmp_path / EXPERIMENT_JSON).exists()
+    assert json.loads(fake_mlflow.texts["experiment.json"])["run_id"] == "deadbeef"
+    assert fake_mlflow.status == "FAILED"
+
+
+# --- pointing a checkpoint at a run this process did not open ---------------------------
+
+
+class ForeignMlflow:
+    """A run opened by another library -- Megatron-Bridge's LoggerConfig, in practice.
+
+    ``start_run`` raises: nothing here may open a run of its own, which is what the fluent
+    ``mlflow.log_text`` would do once the foreign run has been closed.
+    """
+
+    def __init__(self, run=True, ended=False):
+        self.texts = {}
+        self.logged_to = None
+        self._ended = ended
+        self._run = (
+            SimpleNamespace(
+                info=SimpleNamespace(experiment_id="9", run_id="cafe", run_name="qad-1")
+            )
+            if run
+            else None
+        )
+
+    def active_run(self):
+        return None if self._ended else self._run
+
+    def last_active_run(self):
+        return self._run
+
+    def get_tracking_uri(self):
+        return f"{URI}/"
+
+    def get_experiment(self, experiment_id):
+        return SimpleNamespace(name="tester/megatron_bridge_distill/Qwen3-0.6B-nvfp4")
+
+    def log_text(self, text, artifact_file):
+        # The 2.9 floor's signature: no run_id. Reaching this at all is the bug.
+        raise AssertionError("the fluent log_text would resolve (and open) a run of its own")
+
+    def start_run(self, *args, **kwargs):
+        raise AssertionError("recording a foreign run must not open a run of its own")
+
+    def _client(self):
+        fake = self
+
+        class Client:
+            def log_text(self, run_id, text, artifact_file):
+                fake.logged_to = run_id
+                fake.texts[artifact_file] = text
+
+        return Client
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["still-open", "already-closed"])
+def test_the_active_run_can_claim_a_checkpoint(monkeypatch, tmp_path, ended):
+    """A training job's run is opened by Megatron-Bridge, but its checkpoint still has to
+    name it, in the same format a run we opened ourselves would write -- and Megatron-Bridge
+    exits from inside its training loop, so this is reached after atexit closed the run."""
+    fake = _install_foreign(monkeypatch, ForeignMlflow(ended=ended))
+
+    log_active_run_experiment_json(tmp_path)
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "cafe"
+    assert written["run_name"] == "qad-1"
+    assert written["experiment_name"] == "tester/megatron_bridge_distill/Qwen3-0.6B-nvfp4"
+    assert written["run_url"] == f"{URI}/#/experiments/9/runs/cafe"
+    assert json.loads(fake.texts["experiment.json"]) == written
+    assert fake.logged_to == "cafe"  # uploaded to the foreign run, not a new one
+
+
+def test_no_run_to_record_clears_the_pointer_quietly(monkeypatch, tmp_path, capsys):
+    """An untracked job reaches this too. It saved these weights, so a pointer inherited
+    from an earlier run must go -- and an absent mlflow is not worth warning about."""
+    monkeypatch.setitem(sys.modules, "mlflow", None)  # import mlflow -> ImportError
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    assert log_active_run_experiment_json(tmp_path) is False
+
+    assert not stale.exists()
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_a_server_blip_costs_the_display_name_not_the_pointer(monkeypatch, tmp_path, capsys):
+    """Only the experiment name needs the server; the ids are on run.info already, and
+    run_id is what anything resolves the run by."""
+    fake = ForeignMlflow()
+    fake.get_experiment = lambda experiment_id: 1 / 0
+    _install_foreign(monkeypatch, fake)
+
+    assert log_active_run_experiment_json(tmp_path) is True
+
+    written = json.loads((tmp_path / EXPERIMENT_JSON).read_text())
+    assert written["run_id"] == "cafe"
+    assert written["experiment_name"] == ""
+    assert written["run_url"].endswith("/#/experiments/9/runs/cafe")
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_a_failed_upload_still_leaves_the_pointer_on_disk(monkeypatch, tmp_path, capsys):
+    """The file beside the weights is what travels with the checkpoint. An upload that
+    fails -- an mlflow too old for the call, a server that went away -- must not cost it."""
+    fake = ForeignMlflow()
+
+    class Exploding:
+        def log_text(self, *args, **kwargs):
+            raise TypeError("log_text() got an unexpected keyword argument")
+
+    fake._client = lambda: Exploding
+    _install_foreign(monkeypatch, fake)
+
+    log_active_run_experiment_json(tmp_path)
+
+    assert json.loads((tmp_path / EXPERIMENT_JSON).read_text())["run_id"] == "cafe"
+    assert "WARNING" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("relative", [True, False], ids=["relative", "absolute"])
+def test_a_source_path_joins_whatever_the_caller_typed(monkeypatch, tmp_path, relative):
+    """The previous stage tagged its output resolved, so a relative source must match it."""
+    produced = tmp_path / "ptq"
+    produced.mkdir()
+    monkeypatch.chdir(tmp_path)
+    source = "ptq" if relative else str(produced)
+
+    upstream = run_tags(argparse.Namespace(), _tool(model="/models/m", checkpoint=produced))
+    downstream = run_tags(argparse.Namespace(), _tool(checkpoint=tmp_path / "qad", source=source))
+
+    assert downstream["source_checkpoint_path"] == upstream["checkpoint_path"]
+
+
+def test_a_hub_model_id_is_not_mistaken_for_a_path():
+    """``org/name`` names no directory, so resolving it would invent one under the cwd."""
+    tags = run_tags(argparse.Namespace(), _tool(model="Qwen/Qwen3-8B", checkpoint="/out"))
+
+    assert tags["source_checkpoint_path"] == "Qwen/Qwen3-8B"
+    assert tags["model"] == "Qwen3-8B"
+
+
+def test_a_run_closed_by_a_co_owner_keeps_the_outputs_and_the_status(fake_mlflow, tmp_path):
+    """The sequence a preempted distillation goes through: Megatron-Bridge shares the run and
+    ends it as KILLED from its SIGTERM handler, then exits from inside train(). Everything the
+    close path uploads -- the pointer artifact first, before the log -- has to reach that run
+    rather than a second one, and the status it was closed with says more than ours."""
+    with tracked_run(_run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: True):
+        fake_mlflow.end_run(status="KILLED")  # the co-owner, from its signal handler
+
+    assert fake_mlflow.strays == 0  # re-attached, rather than opening a run of its own
+    assert fake_mlflow.resumed == "deadbeef"
+    assert json.loads(fake_mlflow.texts["experiment.json"])["run_id"] == "deadbeef"
+    assert "total_time_s" in fake_mlflow.metrics
+    assert fake_mlflow.status == "KILLED"
+
+
+def test_outputs_are_never_uploaded_into_a_run_this_one_does_not_own(fake_mlflow, capsys):
+    """The design rests on Megatron-Bridge joining the active run rather than opening its
+    own. If that ever stops holding, uploading would put this run's log in someone else's and
+    close it with this block's status, which is worse than the stray run it guards against."""
+    logger = _logger()
+    logger.start()
+    fake_mlflow._run = SimpleNamespace(info=SimpleNamespace(run_id="someone-else"))
+
+    logger.finish("FINISHED")
+
+    assert fake_mlflow.metrics == {}  # nothing of this run's went into the other one
+    assert fake_mlflow.status is None  # and the other one is still open
+    assert "is active instead of this one" in capsys.readouterr().out
+
+
+def test_a_clean_close_elsewhere_does_not_mask_this_block_s_failure(fake_mlflow, tmp_path):
+    """Only a co-owner's *abnormal* status is kept. Otherwise a component that ended the run
+    on its way out would report a run that crashed here as FINISHED."""
+    with (
+        pytest.raises(RuntimeError),
+        tracked_run(_run_args(), _tool(checkpoint=tmp_path), is_main=True, exported=lambda: False),
+    ):
+        fake_mlflow.end_run(status="FINISHED")
+        raise RuntimeError("export blew up")
+
+    assert fake_mlflow.strays == 0
+    assert fake_mlflow.status == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("uri", "stripped", "username", "password"),
+    [
+        (CREDS_URI, URI, "user", "tok"),
+        (URI, URI, None, None),
+        # Percent-encoded userinfo: requests decodes what it finds in a URI, so this must too,
+        # or the two paths authenticate as different users.
+        ("https://al%3Ace:tok%2Fen@mlflow.example.com", URI, "al:ce", "tok/en"),
+        # MLflow sends basic auth only with both variables set, so half a credential has
+        # nowhere to go; the caller is told rather than handed a URI it would record from.
+        ("https://tok@mlflow.example.com", None, None, None),
+        ("https://:tok@mlflow.example.com", None, None, None),
+        # urlparse reads "user:" as the scheme and leaves the credential in .path, where the
+        # userinfo check never sees it -- so this fails closed rather than returning it.
+        ("user:tok@mlflow.example.com", None, None, None),
+    ],
+    ids=["pair", "none", "percent-encoded", "no-password", "no-username", "no-scheme"],
+)  # trufflehog:ignore
+def test_credentials_move_out_of_the_uri_into_mlflows_own_variables(
+    uri, stripped, username, password
+):
+    """A caller handing the URI to something that records it cannot mask the credential --
+    the value is also what authenticates -- so it moves where MLflow reads it from."""
+    assert split_tracking_credentials(uri) == stripped
+    assert os.environ.get("MLFLOW_TRACKING_USERNAME") == username
+    assert os.environ.get("MLFLOW_TRACKING_PASSWORD") == password
+
+
+def test_credentials_the_caller_exported_win(monkeypatch):
+    """Those were set deliberately; a URI is the fallback, not an override."""
+    monkeypatch.setenv("MLFLOW_TRACKING_USERNAME", "from-the-environment")
+
+    split_tracking_credentials(CREDS_URI)
+
+    assert os.environ["MLFLOW_TRACKING_USERNAME"] == "from-the-environment"
+
+
+def test_an_unreadable_run_clears_the_pointer_rather_than_leaving_a_wrong_one(
+    monkeypatch, tmp_path, capsys
+):
+    """A resumed run starts with the previous run's pointer in place and has already proven
+    it saved. If the server goes away before we can name our own run, a stale pointer would
+    be a wrong answer rather than no answer."""
+    fake = ForeignMlflow()
+    # run.info itself unusable, so not even the ids can be recorded.
+    fake._run = SimpleNamespace(info=None)
+    _install_foreign(monkeypatch, fake)
+    stale = tmp_path / EXPERIMENT_JSON
+    stale.write_text('{"run_id": "an-earlier-run"}')
+
+    assert log_active_run_experiment_json(tmp_path) is False
+
+    assert not stale.exists()
+    assert "WARNING" in capsys.readouterr().out

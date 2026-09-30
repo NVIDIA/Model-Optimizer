@@ -1,0 +1,11 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+fsdp_config:
+  fsdp_version: 2
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: MiniMaxM2DecoderLayer,DFlashModule
+  fsdp_sharding_strategy: HYBRID_SHARD
+  fsdp_use_orig_params: true
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_cpu_ram_efficient_loading: true

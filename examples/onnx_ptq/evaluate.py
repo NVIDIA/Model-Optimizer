@@ -72,6 +72,12 @@ def main():
     parser.add_argument(
         "--results_path", type=str, default=None, help="Save the results to the specified path"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for DataLoader shuffle to ensure reproducible sampling",
+    )
 
     args = parser.parse_args()
     deployment = {
@@ -104,6 +110,7 @@ def main():
         batch_size=args.batch_size,
         num_examples=args.eval_data_size,
         dataset_path=args.imagenet_path,
+        seed=args.seed,
     )
     print(f"The top1 accuracy of the model is {top1_accuracy}%")
     print(f"The top5 accuracy of the model is {top5_accuracy}%")

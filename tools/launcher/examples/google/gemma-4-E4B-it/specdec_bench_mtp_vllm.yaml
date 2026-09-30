@@ -1,13 +1,13 @@
 # SPEED-bench MTP speculative-decoding run for gemma-4-E4B-it via vLLM.
 #
 # Gemma 4 MTP support landed in vLLM PR vllm-project/vllm#41745 (2026-05-06)
-# and is in ``vllm/vllm-openai:v0.22.1`` (and later). Gemma 4 MTP uses a
-# separate assistant model passed via ``--draft_model_dir``; vLLM
-# auto-detects Gemma 4 from the assistant and does NOT take a ``method``
-# key in ``speculative_config``. The wrapper at
-# ``examples/specdec_bench/specdec_bench/models/vllm.py`` routes to the
-# assistant-model config shape when ``--speculative_algorithm MTP`` is
-# paired with ``--draft_model_dir``.
+# and is in the Gemma-specific vLLM image. Gemma 4 MTP uses a
+# separate assistant model passed via ``--draft_model_dir``. The wrapper at
+# ``examples/specdec_bench/specdec_bench/models/vllm.py`` emits
+# ``method=mtp`` plus the assistant model for this family.
+#
+# Use ``vllm/vllm-openai:gemma`` for this family; generic vLLM images can
+# fail Gemma 4 MTP startup or long-context throughput runs.
 #
 # Assistant model: ``google/gemma-4-E4B-it-assistant`` (public, ungated).
 #
@@ -52,7 +52,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: vllm/vllm-openai:v0.22.1
+      container: vllm/vllm-openai:gemma
 
   # task_1: SPEED throughput_32k split
   task_1:
@@ -80,4 +80,4 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: vllm/vllm-openai:v0.22.1
+      container: vllm/vllm-openai:gemma

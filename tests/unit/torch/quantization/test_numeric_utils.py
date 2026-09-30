@@ -15,6 +15,8 @@
 """Unit tests for ``modelopt.torch.quantization.utils.numeric_utils`` — the
 closed-form MXFP4 -> NVFP4 cast numerics."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -159,3 +161,39 @@ def test_e2m1_magnitude_table_cached_per_device():
     t2 = nu._e2m1_magnitude_table(torch.device("cpu"))
     assert t1 is t2  # cached: same object
     assert t1.tolist() == nu._E2M1_MAGNITUDE
+
+
+# ----------- fp8_max_for_normalization -------------------------------------
+def test_fp8_max_for_normalization_default():
+    """Without four_over_six, normalization max is the full E4M3 range (448)."""
+    q = SimpleNamespace(block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)})
+    assert nu.fp8_max_for_normalization(q) == nu.E4M3_MAX
+
+
+def test_fp8_max_for_normalization_four_over_six():
+    """With four_over_six enabled, normalization max is 256 (4/6 mode)."""
+    q = SimpleNamespace(
+        block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3), "four_over_six": True}
+    )
+    assert nu.fp8_max_for_normalization(q) == nu.E4M3_MAX_46
+
+
+def test_fp8_max_for_normalization_missing_block_sizes():
+    """Missing or None block_sizes should fall back to the default E4M3 max."""
+    assert nu.fp8_max_for_normalization(SimpleNamespace(block_sizes=None)) == nu.E4M3_MAX
+    assert nu.fp8_max_for_normalization(SimpleNamespace()) == nu.E4M3_MAX
+
+
+@pytest.mark.parametrize(
+    ("four_over_six", "expected"),
+    [
+        (False, nu.E4M3_MAX),
+        (True, nu.E4M3_MAX_46),
+        (0, nu.E4M3_MAX),
+        (1, nu.E4M3_MAX_46),
+    ],
+)
+def test_fp8_max_for_normalization_truthy_flag(four_over_six, expected):
+    """four_over_six is coerced with bool(); only truthy values select 256."""
+    q = SimpleNamespace(block_sizes={"four_over_six": four_over_six})
+    assert nu.fp8_max_for_normalization(q) == expected

@@ -22,10 +22,11 @@ from _test_utils.import_helper import skip_if_no_libcudnn, skip_if_no_tensorrt
 from _test_utils.onnx.autocast.utils import _assert_tensors_are_fp16
 from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
+import modelopt.onnx.trt_utils as trt_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.quantization.quantize import quantize
-from modelopt.onnx.trt_utils import load_onnx_model
+from modelopt.onnx.trt_utils import get_custom_layers, load_onnx_model
 
 skip_if_no_libcudnn()
 skip_if_no_tensorrt()
@@ -148,6 +149,39 @@ def test_trt_plugin_quantization_int4_awq(tmp_path):
         # The custom op must still be present (not dropped) in the quantized model.
         graph = gs.import_onnx(onnx.load(output_onnx_path))
         assert any(n.op == "CustomSkipLayerNormPluginDynamic" for n in graph.nodes)
+
+
+def test_get_custom_layers_file_backed_matches_in_memory(tmp_path, monkeypatch):
+    """Over-limit in-memory ModelProto must yield the same metadata as the file path.
+
+    Regression for the large-ModelProto false-success bug: TensorRT's in-memory
+    ``parser.parse(bytes)`` silently returns an empty network (0 layers/0 tensors) for
+    models at/above the protobuf 2 GiB limit. ``get_custom_layers`` now routes over-limit
+    models through a temporary external-data file and ``parse_from_file()``. This test
+    forces the file-backed path on a small custom-op model and asserts the result matches
+    both the in-memory fast path and the file-path baseline.
+    """
+
+    model = _create_test_model_trt()
+    onnx_path = os.path.join(tmp_path, "model_with_trt_plugin_file_backed.onnx")
+    onnx.save_model(model, onnx_path)
+
+    # Baseline: string path -> parse_from_file.
+    path_layers, path_tensors = get_custom_layers(onnx_path, trt_plugins=None)
+    assert path_layers == ["custom_skip_ln_0"]
+    assert path_tensors
+
+    # In-memory fast path (small model, below the protobuf limit).
+    mem_layers, mem_tensors = get_custom_layers(model, trt_plugins=None)
+    assert mem_layers == path_layers
+    assert set(mem_tensors) == set(path_tensors)
+
+    # Force the over-limit routing: the ModelProto is serialized to a temporary
+    # external-data file and parsed via parse_from_file, matching the baseline.
+    monkeypatch.setattr(trt_utils, "_requires_file_backed_parse", lambda _model: True)
+    fb_layers, fb_tensors = get_custom_layers(model, trt_plugins=None)
+    assert fb_layers == path_layers
+    assert set(fb_tensors) == set(path_tensors)
 
 
 def test_trt_plugin_autocast(tmp_path):

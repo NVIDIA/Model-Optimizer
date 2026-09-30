@@ -20,7 +20,7 @@ Covers the integration-critical metadata translation done in
 
 * ``query_start_loc``       -> ``b_start_loc`` / ``b_seq_len``
 * ``seq_lens``              -> ``b_seq_len_k``
-* ``kv_cache.unbind(0)``    -> key_cache / value_cache (axis order)
+* backend-declared K/V axis -> key_cache / value_cache
 * ``k_cache.shape[1]``      -> ``page_size``
 
 Asserted against a contiguous reference call to the underlying Triton kernel.
@@ -33,7 +33,7 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
+from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention as triton_attention
@@ -46,11 +46,19 @@ _ACTIVE_PREFILL_SPARSE_KW = {
 }
 
 
-def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
-    """Scatter contiguous K/V into a paged KV cache stacked as [2, ...].
+def _make_backend_paged_cache(k_cache, v_cache):
+    layout = vllm_plugin._flash_attention_kv_cache_layout()
+    if layout == "kv-first":
+        return torch.stack([k_cache, v_cache], dim=0)
+    if layout == "blocks-first":
+        return torch.stack([k_cache, v_cache], dim=1)
+    return torch.cat([k_cache, v_cache], dim=-1).transpose(1, 2)
 
-    Returns a single ``kv_cache`` tensor (matching vLLM's layout that
-    ``ModelOptSparseAttentionImpl`` consumes via ``kv_cache.unbind(0)``).
+
+def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size):
+    """Scatter contiguous K/V into the installed vLLM paged-cache layout.
+
+    Returns a single ``kv_cache`` tensor with the backend-declared K/V axis.
     """
     batch = b_seq_len.shape[0]
     device, dtype = k.device, k.dtype
@@ -76,14 +84,13 @@ def _make_paged_cache(k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page
             v_cache[g, :n] = v[start + ts : start + te]
             g += 1
 
-    # Stack on a new leading axis so kv_cache.unbind(0) recovers (k_cache, v_cache).
-    kv_cache = torch.stack([k_cache, v_cache], dim=0)
+    kv_cache = _make_backend_paged_cache(k_cache, v_cache)
     return kv_cache, block_table
 
 
 def _make_impl(num_heads, head_dim, num_kv_heads):
     """Construct ModelOptSparseAttentionImpl with minimal valid kwargs."""
-    return ModelOptSparseAttentionImpl(
+    return vllm_plugin.ModelOptSparseAttentionImpl(
         num_heads=num_heads,
         head_size=head_dim,
         scale=1.0 / (head_dim**0.5),
@@ -132,7 +139,7 @@ class TestModelOptSparseAttentionImpl:
             **_ACTIVE_PREFILL_SPARSE_KW,
         )
 
-        # Build paged kv_cache shaped [2, num_blocks, page_size, num_kv_heads, head_dim].
+        # Build the paged cache using the installed backend's K/V axis.
         kv_cache, block_table = _make_paged_cache(
             k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size
         )
@@ -174,7 +181,8 @@ class TestModelOptSparseAttentionImpl:
             block_table=torch.zeros(1, 1, device="cuda", dtype=torch.int32),
         )
         q = torch.zeros(4, 2, 64, device="cuda", dtype=torch.float16)
-        kv_cache = torch.zeros(2, 1, 16, 2, 64, device="cuda", dtype=torch.float16)
+        k_cache = torch.zeros(1, 16, 2, 64, device="cuda", dtype=torch.float16)
+        kv_cache = _make_backend_paged_cache(k_cache, torch.zeros_like(k_cache))
         out = impl.forward(
             layer=None,
             query=q,
@@ -346,8 +354,7 @@ class TestModelOptSparseAttentionImpl:
         kv_cache, block_table = _make_paged_cache(
             k, v, b_start_loc, b_seq_len, num_kv_heads, head_dim, page_size
         )
-        # Sanity: kv_cache axis 1 is page_size.
-        assert kv_cache.shape == (2, seq_len // page_size, page_size, num_kv_heads, head_dim)
+        assert kv_cache.shape[2] == page_size
 
         attn_metadata = SimpleNamespace(
             num_actual_tokens=seq_len,

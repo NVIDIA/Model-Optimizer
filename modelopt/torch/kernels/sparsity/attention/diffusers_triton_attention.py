@@ -164,7 +164,7 @@ def _diffusers_triton_attention(
     calib_mode = getattr(_thread_local, "calibration_mode", False)
     if calib_mode:
         trials = getattr(_thread_local, "threshold_trials", None)
-        from modelopt.torch.kernels.common.attention import attention_calibrate
+        from .calibrate import attention_calibrate
 
         if trials and attention_calibrate is not None:
             o, counters = attention_calibrate(q, k, v, **kw, threshold_trials=trials)

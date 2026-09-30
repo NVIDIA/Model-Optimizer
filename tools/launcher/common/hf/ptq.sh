@@ -64,7 +64,7 @@ fi
 
 # --- Step 2: Run huggingface_example.sh ---
 script_dir="$(dirname "$(readlink -f "$0")")"
-HF_EXAMPLE="${script_dir}/../../modules/Model-Optimizer/examples/llm_ptq/scripts/huggingface_example.sh"
+HF_EXAMPLE="${script_dir}/../../modules/Model-Optimizer/examples/hf_ptq/scripts/huggingface_example.sh"
 
 echo "Running huggingface_example.sh --model $LOCAL_DIR --trust_remote_code ${PTQ_ARGS[*]}"
 exec bash "$HF_EXAMPLE" --model "$LOCAL_DIR" --trust_remote_code "${PTQ_ARGS[@]}"

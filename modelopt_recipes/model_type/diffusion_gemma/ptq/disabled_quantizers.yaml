@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# QuantizerCfgList snippet of disabled quantizers for DiffusionGemma. Splices
+# in the standard ``default_disabled_quantizers`` exclusions and appends the
+# DiffusionGemma-specific self-conditioning network so that text-only PTQ
+# calibration data doesn't trip on its uncalibrated TensorQuantizers (export
+# would otherwise crash with "AttributeError: 'TensorQuantizer' object has no
+# attribute '_amax'"). Recipes that import this should NOT also import
+# ``default_disabled_quantizers``.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+---
+  - $import: default_disabled_quantizers
+  - quantizer_name: '*self_conditioning*'
+    enable: false

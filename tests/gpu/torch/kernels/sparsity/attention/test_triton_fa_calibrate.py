@@ -30,7 +30,8 @@ from conftest import make_qkv, make_varlen_meta
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.kernels.common.attention import attention, attention_calibrate
+    from modelopt.torch.kernels.common.attention import attention
+    from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
@@ -355,11 +356,16 @@ class TestBackwardWithSparsity:
     """Backward pass with skip-softmax (covers _attn_bwd_dq / _attn_bwd_dkdv)."""
 
     def test_backward_with_skip_softmax(self):
-        """Backward pass runs without error when skip-softmax is active."""
+        """Backward pass runs without error when skip-softmax is active.
+
+        fp16 rather than fp32: active skip launches require the fixed 128x128
+        calibration tile, which fp32 inputs cannot compile on ~100KB-shared-
+        memory GPUs (such configurations are rejected by design).
+        """
         seq_len, num_heads, head_dim = 128, 4, 64
         scale = 1.0 / (head_dim**0.5)
         torch.manual_seed(7)
-        q, k, v = make_qkv(seq_len, num_heads, num_heads, head_dim, dtype=torch.float32)
+        q, k, v = make_qkv(seq_len, num_heads, num_heads, head_dim, dtype=torch.float16)
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)

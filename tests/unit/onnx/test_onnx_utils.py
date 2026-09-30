@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import sys
+from unittest.mock import Mock
 
 import numpy as np
 import onnx
@@ -28,11 +30,13 @@ from onnx.helper import (
     make_tensor_value_info,
 )
 
+import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.trt_utils import load_onnx_model
 from modelopt.onnx.utils import (
     clear_stale_value_info,
     get_input_names_from_bytes,
     get_output_names_from_bytes,
+    infer_types,
     randomize_weights_onnx_bytes,
     remove_node_training_mode,
     remove_weights_data,
@@ -53,6 +57,190 @@ def test_validate_onnx(onnx_bytes):
 def test_save_onnx(tmp_path):
     save_onnx_bytes_to_dir(b"test_onnx_bytes", tmp_path, "test")
     assert os.path.exists(os.path.join(tmp_path, "test.onnx"))
+
+
+def _make_external_initializer(
+    name: str, location: str = "missing-shared-data.bin"
+) -> onnx.TensorProto:
+    initializer = onnx.TensorProto(name=name, data_type=onnx.TensorProto.FLOAT, dims=[1])
+    initializer.data_location = onnx.TensorProto.EXTERNAL
+    for key, value in [
+        ("location", location),
+        ("offset", "0"),
+        ("length", "4"),
+    ]:
+        entry = initializer.external_data.add()
+        entry.key = key
+        entry.value = value
+    return initializer
+
+
+def test_duplicate_shared_constants_preserves_and_materializes_external_data(tmp_path):
+    external_values = np.array([3.25], dtype=np.float32)
+    external_data_path = tmp_path / "shared.bin"
+    external_data_path.write_bytes(external_values.tobytes())
+    shared = _make_external_initializer("shared", external_data_path.name)
+    collision = make_tensor("shared_1", onnx.TensorProto.FLOAT, [1], [0.0])
+    sparse_collision = onnx.helper.make_sparse_tensor(
+        make_tensor("shared_2", onnx.TensorProto.FLOAT, [1], [0.0]),
+        make_tensor("", onnx.TensorProto.INT64, [1], [0]),
+        [1],
+    )
+    nodes = [
+        make_node("Add", ["input", "shared"], ["intermediate"]),
+        make_node("Add", ["intermediate", "shared"], ["output"]),
+    ]
+    graph = make_graph(
+        nodes,
+        "shared_external_initializer",
+        [
+            make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+        ],
+        [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
+        initializer=[shared, collision],
+    )
+    graph.sparse_initializer.append(sparse_collision)
+    model = make_model(graph)
+
+    result, modified = onnx_utils.duplicate_shared_constants(model)
+
+    assert result is model
+    assert modified
+    duplicated_names = ("shared_3", "shared_4")
+    assert [node.input[1] for node in result.graph.node] == list(duplicated_names)
+    initializers = {initializer.name: initializer for initializer in result.graph.initializer}
+    assert set(initializers) == {"shared_1", *duplicated_names}
+    assert result.graph.sparse_initializer[0].values.name == "shared_2"
+    assert {graph_input.name for graph_input in result.graph.input} == {"input"}
+    for name in duplicated_names:
+        initializer = initializers[name]
+        assert initializer.data_location == onnx.TensorProto.EXTERNAL
+        assert [(entry.key, entry.value) for entry in initializer.external_data] == [
+            ("location", "shared.bin"),
+            ("offset", "0"),
+            ("length", "4"),
+        ]
+        assert not initializer.HasField("raw_data")
+
+    onnx.external_data_helper.load_external_data_for_model(result, str(tmp_path))
+    for name in duplicated_names:
+        np.testing.assert_array_equal(
+            onnx.numpy_helper.to_array(initializers[name]), external_values
+        )
+
+
+def test_duplicate_shared_constants_fast_path_returns_original_model():
+    shared = _make_external_initializer("single_use")
+    graph = make_graph(
+        [make_node("Add", ["input", "single_use"], ["output"])],
+        "single_external_initializer",
+        [make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])],
+        [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
+        initializer=[shared],
+    )
+    model = make_model(graph)
+    serialized_model = model.SerializeToString()
+
+    result, modified = onnx_utils.duplicate_shared_constants(model)
+
+    assert result is model
+    assert not modified
+    assert result.SerializeToString() == serialized_model
+
+
+def test_duplicate_shared_constants_retains_initializer_captured_by_subgraphs():
+    def make_branch(name):
+        output = make_tensor_value_info("branch_output", onnx.TensorProto.FLOAT, [1])
+        return make_graph([make_node("Identity", ["shared"], [output.name])], name, [], [output])
+
+    shared = make_tensor("shared", onnx.TensorProto.FLOAT, [1], [1.0])
+    nodes = [
+        make_node("Add", ["input", "shared"], ["left"]),
+        make_node("Add", ["input", "shared"], ["right"]),
+        make_node(
+            "If",
+            ["condition"],
+            ["branch_value"],
+            then_branch=make_branch("then_branch"),
+            else_branch=make_branch("else_branch"),
+        ),
+        make_node("Sum", ["left", "right", "branch_value"], ["output"]),
+    ]
+    graph = make_graph(
+        nodes,
+        "captured_initializer",
+        [
+            make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("condition", onnx.TensorProto.BOOL, []),
+            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+        ],
+        [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
+        initializer=[shared],
+    )
+    model = make_model(graph, opset_imports=[make_opsetid("", 17)])
+
+    result, modified = onnx_utils.duplicate_shared_constants(model)
+
+    assert modified
+    assert [node.input[1] for node in result.graph.node[:2]] == ["shared_1", "shared_2"]
+    assert {initializer.name for initializer in result.graph.initializer} == {
+        "shared",
+        "shared_1",
+        "shared_2",
+    }
+    assert "shared" in {graph_input.name for graph_input in result.graph.input}
+    onnx.checker.check_model(result)
+
+
+def test_duplicate_shared_constants_retains_initializer_exposed_as_graph_output():
+    shared = make_tensor("shared", onnx.TensorProto.FLOAT, [1], [1.0])
+    graph = make_graph(
+        [
+            make_node("Add", ["input", "shared"], ["left"]),
+            make_node("Add", ["input", "shared"], ["right"]),
+        ],
+        "initializer_graph_output",
+        [make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])],
+        [
+            make_tensor_value_info("left", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("right", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+        ],
+        initializer=[shared],
+    )
+    model = make_model(graph)
+
+    result, modified = onnx_utils.duplicate_shared_constants(model)
+
+    assert modified
+    assert [node.input[1] for node in result.graph.node] == ["shared_1", "shared_2"]
+    assert {initializer.name for initializer in result.graph.initializer} == {
+        "shared",
+        "shared_1",
+        "shared_2",
+    }
+    assert [output.name for output in result.graph.output] == ["left", "right", "shared"]
+    onnx.checker.check_model(result)
+
+
+@pytest.mark.parametrize(
+    ("model_size", "expected"),
+    [
+        (1, False),
+        (onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b""), False),
+        (onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b"") + 1, True),
+        (0, True),
+        (ValueError("model size unavailable"), True),
+    ],
+)
+def test_is_model_too_large_for_protobuf(model_size, expected):
+    model = Mock()
+    if isinstance(model_size, Exception):
+        model.ByteSize.side_effect = model_size
+    else:
+        model.ByteSize.return_value = model_size
+    assert onnx_utils.is_model_too_large_for_protobuf(model) is expected
 
 
 def make_onnx_model_for_matmul_op():
@@ -364,3 +552,94 @@ def test_clear_stale_value_info(output_elem_type, with_value_info, expected_coun
     assert model.graph.output[0].type.tensor_type.elem_type == onnx.TensorProto.FLOAT
     assert len(model.graph.value_info) == 0
     assert count == expected_count
+
+
+def _make_matmul_model(output_shape):
+    """Build an X[3,4] @ W[4,5] -> Y model with Y declared using ``output_shape``."""
+    weights = make_tensor("W", onnx.TensorProto.FLOAT, [4, 5], np.zeros(20, dtype=np.float32))
+    nodes = [make_node("MatMul", ["X", "W"], ["Y"], name="matmul")]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [3, 4])]
+    outputs = [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, output_shape)]
+    graph = make_graph(nodes, "matmul_graph", inputs, outputs, initializer=[weights])
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_clear_stale_value_info_reconciles_stale_rank0_output():
+    # Y is really rank-2 [3, 5] but the model declares it as a rank-0 scalar (stale
+    # metadata typical of weakly-typed exports). This is the rank-(N)-vs-(0) class of
+    # conflict that crashes downstream shape inference (NVBug 6058907).
+    model = _make_matmul_model(output_shape=[])
+    assert len(model.graph.output[0].type.tensor_type.shape.dim) == 0  # stale rank-0
+
+    clear_stale_value_info(model)
+
+    out_type = model.graph.output[0].type.tensor_type
+    assert out_type.HasField("shape")  # shape field must remain (onnx.checker requires it)
+    assert [d.dim_value for d in out_type.shape.dim] == [3, 5]  # reconciled to the real shape
+    onnx.checker.check_model(model)
+
+
+def test_clear_stale_value_info_preserves_valid_output_shape():
+    # A correct output shape must be left untouched (no-op for healthy models).
+    model = _make_matmul_model(output_shape=[3, 5])
+
+    clear_stale_value_info(model)
+
+    out_type = model.graph.output[0].type.tensor_type
+    assert [d.dim_value for d in out_type.shape.dim] == [3, 5]
+
+
+def _make_dynamic_dim_model():
+    """Build an X[batch,4] -> Relu -> Y[my_batch,4] model (output declares a different dim_param)."""
+    nodes = [make_node("Relu", ["X"], ["Y"], name="relu")]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, ["batch", 4])]
+    outputs = [make_tensor_value_info("Y", onnx.TensorProto.FLOAT, ["my_batch", 4])]
+    graph = make_graph(nodes, "dyn_graph", inputs, outputs)
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_clear_stale_value_info_preserves_dynamic_dim_names():
+    # A healthy output with a named dynamic dim must not be rewritten just because
+    # symbolic shape inference re-derives a different dim_param. Y is declared with
+    # "my_batch" while the graph would infer "batch" from the input: same rank, no
+    # concrete-dim conflict, so the declaration (incl. its dim_param) must be preserved.
+    model = _make_dynamic_dim_model()
+
+    clear_stale_value_info(model)
+
+    out_dims = model.graph.output[0].type.tensor_type.shape.dim
+    assert [d.dim_param or d.dim_value for d in out_dims] == ["my_batch", 4]
+    onnx.checker.check_model(model)
+
+
+def _make_topk_overflow_model():
+    """Build a model whose TopK ``k`` (5) exceeds the static axis dim (3).
+
+    ONNX shape inference raises "Axis has less than the requested k elements" on this
+    model (the same failure class seen in NVBug 6058907), while standalone type
+    inference can still derive the output types (values float, indices int64).
+    """
+    k = make_tensor("k", onnx.TensorProto.INT64, [1], [5])
+    nodes = [
+        make_node("TopK", ["X", "k"], ["vals", "inds"], axis=1, name="topk"),
+        make_node("Cast", ["inds"], ["out"], to=onnx.TensorProto.FLOAT, name="cast_inds"),
+    ]
+    inputs = [make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 3])]
+    outputs = [make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5])]
+    graph = make_graph(nodes, "topk_overflow", inputs, outputs, initializer=[k])
+    return make_model(graph, producer_name="modelopt test", opset_imports=[make_opsetid("", 17)])
+
+
+def test_infer_types_falls_back_to_standalone_when_onnx_fails():
+    # ONNX shape inference cannot resolve this model's TopK. With strict_mode=True it raises
+    # (instead of silently leaving the TopK outputs untyped), so infer_types catches the
+    # error and falls back to standalone type inference, which still types every tensor.
+    model = _make_topk_overflow_model()
+
+    inferred = infer_types(model, strict_mode=True)
+
+    value_info_types = {vi.name: vi.type.tensor_type.elem_type for vi in inferred.graph.value_info}
+    output_types = {o.name: o.type.tensor_type.elem_type for o in inferred.graph.output}
+    assert value_info_types.get("vals") == onnx.TensorProto.FLOAT
+    assert value_info_types.get("inds") == onnx.TensorProto.INT64  # TopK indices
+    assert output_types.get("out") == onnx.TensorProto.FLOAT

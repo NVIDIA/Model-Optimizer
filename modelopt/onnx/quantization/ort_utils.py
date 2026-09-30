@@ -26,6 +26,7 @@ import subprocess  # nosec B404
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, distribution
 
 import onnxruntime as ort
@@ -35,7 +36,7 @@ from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
-from modelopt.onnx.quantization.ort_patching import patch_ort_modules
+from modelopt.onnx.quantization.ort_patching import _configure_session_providers, patch_ort_modules
 
 
 def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
@@ -180,6 +181,10 @@ def _load_extra_cudnn_dlls():
     This scans the nvidia-cudnn bin directory and loads any cudnn*.dll not already
     loaded in the process.
     """
+    # Fix github code quality test failure
+    if sys.platform != "win32":
+        return
+
     import ctypes
     import ctypes.wintypes
 
@@ -195,7 +200,7 @@ def _load_extra_cudnn_dlls():
         logger.debug("No cudnn*.dll files found in %s", cudnn_bin_dir)
         return
 
-    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW  # type: ignore[attr-defined]
+    get_module_handle_w = ctypes.windll.kernel32.GetModuleHandleW
     get_module_handle_w.argtypes = [ctypes.wintypes.LPCWSTR]
     get_module_handle_w.restype = ctypes.wintypes.HMODULE
 
@@ -314,30 +319,82 @@ def _check_for_nv_tensorrt_rtx_libs():
     return found
 
 
-def _prepare_ep_list(calibration_eps: list[str]):
+def _prepare_ep_list(
+    calibration_eps: list[str],
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
+):
     """Prepares the EP list for ORT from the given user input."""
     logger.debug(f"Preparing execution providers list from: {calibration_eps}")
+    if input_shapes_profile is not None:
+        assert len(input_shapes_profile) == len(calibration_eps), (
+            "Number of calibration EPs and number of input-shapes-profile don't match"
+        )
+
+    def _append_provider(
+        providers: list[str | tuple[str, dict]],
+        ep_index: int,
+        provider_name: str,
+        provider_options: dict | None = None,
+    ) -> None:
+        if not isinstance(provider_name, str):
+            raise TypeError("provider_name must be a string")
+        if provider_options is not None and not isinstance(provider_options, dict):
+            raise TypeError("provider_options must be a dictionary")
+
+        profile = input_shapes_profile[ep_index] if input_shapes_profile is not None else {}
+        options = dict(provider_options or {})
+        options.update(profile)
+        providers.append((provider_name, options) if options else provider_name)
+
     providers: list[str | tuple[str, dict]] = []
-    for ep in calibration_eps:
+    for i, ep in enumerate(calibration_eps):
         if "cuda" in ep:
             try:
                 _check_for_libcudnn()
                 device_id = int(ep.split(":")[1]) if ":" in ep else 0
-                providers.append(("CUDAExecutionProvider", {"device_id": device_id}))
+                _append_provider(providers, i, "CUDAExecutionProvider", {"device_id": device_id})
                 logger.debug(f"Added CUDA EP with device_id: {device_id}")
             except Exception as e:
                 logger.warning(f"Failed to enable ORT with CUDA EP: '{e}'")
         elif "dml" in ep:
             device_id = int(ep.split(":")[1]) if ":" in ep else 0
-            providers.append(("DmlExecutionProvider", {"device_id": device_id}))
+            _append_provider(providers, i, "DmlExecutionProvider", {"device_id": device_id})
             logger.debug(f"Added DML EP with device_id: {device_id}")
         elif "cpu" in ep:
-            providers.append("CPUExecutionProvider")
+            _append_provider(providers, i, "CPUExecutionProvider")
             logger.debug("Added CPU EP")
-        elif "NvTensorRtRtx" in ep:
+        elif ep == "NvTensorRtRtx":
+            if trt_rtx_backend == "abi":
+                try:
+                    trt_rtx_ep = import_module("onnxruntime_ep_nv_tensorrt_rtx")
+                except ImportError as e:
+                    raise ImportError(
+                        "TensorRT-RTX ABI was requested, but "
+                        "onnxruntime-ep-nv-tensorrt-rtx-cu13 is not installed."
+                    ) from e
+
+                ep_name = trt_rtx_ep.get_ep_name()  # "nv_tensorrt_rtx"
+                ep_devices = [
+                    device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                ]
+                if not ep_devices:
+                    ort.register_execution_provider_library(ep_name, trt_rtx_ep.get_library_path())
+                    logger.debug(f"Registered TensorRT-RTX ABI EP: {ep_name}")
+                    ep_devices = [
+                        device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                    ]
+                if not ep_devices:
+                    raise RuntimeError(f"No devices found for TensorRT-RTX ABI EP {ep_name!r}")
+                _append_provider(providers, i, ep_name)
+                logger.debug(f"Added TensorRT-RTX ABI EP: {ep_name}")
+                continue
+            if trt_rtx_backend != "legacy":
+                logger.error(f"Unrecognized trt-rtx backend: {trt_rtx_backend}")
+                raise NotImplementedError(f"Trt-rtx backend {trt_rtx_backend} not recognized!")
             try:
                 _check_for_nv_tensorrt_rtx_libs()
-                providers.append("NvTensorRTRTXExecutionProvider")
+                _append_provider(providers, i, "NvTensorRTRTXExecutionProvider")
                 logger.debug("Added NvTensorRtRtx EP")
             except Exception as e:
                 logger.warning(f"Failed to enable ORT with NvTensorRtRtx EP: '{e}'")
@@ -345,7 +402,7 @@ def _prepare_ep_list(calibration_eps: list[str]):
             try:
                 _check_for_tensorrt()
                 _check_for_libcudnn()
-                providers.append("TensorrtExecutionProvider")
+                _append_provider(providers, i, "TensorrtExecutionProvider")
                 logger.debug("Added TensorRT EP")
             except Exception as e:
                 logger.warning(f"Failed to enable ORT with TensorRT EP: '{e}'")
@@ -420,13 +477,111 @@ def update_trt_ep_support(
     return trt_plugins
 
 
+def create_input_shapes_profile(
+    model_id: str, calibration_eps: list[str], trust_remote_code: bool = False
+) -> list[dict[str, str]]:
+    """Create per-EP input shape profiles from a Hugging Face config.
+
+    ``model_id`` can be a Hugging Face model ID, local config directory, or local
+    ``config.json`` path.
+    The returned list matches ``calibration_eps`` order. EPs that do not use input shape
+    profiles receive an empty dictionary.
+    """
+    from transformers import AutoConfig
+
+    def empty_profiles() -> list[dict[str, str]]:
+        return [{} for _ in calibration_eps]
+
+    def warn_and_return_empty(reason: str) -> list[dict[str, str]]:
+        logger.warning(
+            f"Could not create input shape profiles from model_id={model_id!r}: {reason}. "
+            "Falling back to empty input shape profiles. Some TensorRT/NvTensorRtRtx EP "
+            "versions can infer shapes automatically; if session creation fails, pass "
+            "input_shapes_profile manually."
+        )
+        return empty_profiles()
+
+    def get_config_attr(config, aliases: list[str], field_name: str):
+        for alias in aliases:
+            value = getattr(config, alias, None)
+            if value is not None:
+                return value
+        raise ValueError(
+            f"missing required config field for {field_name}; tried aliases: {', '.join(aliases)}"
+        )
+
+    try:
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    except Exception as exc:
+        return warn_and_return_empty(str(exc))
+
+    try:
+        num_attention_heads = get_config_attr(
+            config, ["num_attention_heads", "n_head", "num_heads"], "num_attention_heads"
+        )
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            hidden_size = get_config_attr(
+                config, ["hidden_size", "n_embd", "d_model"], "hidden_size"
+            )
+            head_dim = hidden_size // num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None) or num_attention_heads
+        num_layers = get_config_attr(
+            config, ["num_hidden_layers", "n_layer", "num_layers"], "num_hidden_layers"
+        )
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError) as exc:
+        return warn_and_return_empty(str(exc))
+
+    def make_shapes(batch_size: int, seq_len: int, past_seq_len: int) -> str:
+        shapes = [f"input_ids:{batch_size}x{seq_len}", f"attention_mask:{batch_size}x{seq_len}"]
+        for layer_idx in range(num_layers):
+            shapes.extend(
+                [
+                    f"past_key_values.{layer_idx}.key:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}",
+                    f"past_key_values.{layer_idx}.value:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}",
+                ]
+            )
+        return ",".join(shapes)
+
+    min_shapes = make_shapes(batch_size=1, seq_len=1, past_seq_len=0)
+    opt_shapes = make_shapes(batch_size=1, seq_len=512, past_seq_len=512)
+    max_shapes = make_shapes(batch_size=1, seq_len=1024, past_seq_len=1024)
+
+    profiles: list[dict[str, str]] = []
+    for ep in calibration_eps:
+        if "NvTensorRtRtx" in ep:
+            profiles.append(
+                {
+                    "nv_profile_min_shapes": min_shapes,
+                    "nv_profile_opt_shapes": opt_shapes,
+                    "nv_profile_max_shapes": max_shapes,
+                }
+            )
+        elif ep == "trt":
+            profiles.append(
+                {
+                    "trt_profile_min_shapes": min_shapes,
+                    "trt_profile_opt_shapes": opt_shapes,
+                    "trt_profile_max_shapes": max_shapes,
+                }
+            )
+        else:
+            profiles.append({})
+
+    return profiles
+
+
 def create_inference_session(
     onnx_path_or_model: str | bytes,
     calibration_eps: list[str],
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ):
     """Create an ORT InferenceSession."""
     logger.info("Creating ORT InferenceSession")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     if input_shapes_profile is not None:
@@ -445,13 +600,13 @@ def create_inference_session(
                     logger.debug(
                         f"Input-Shapes-Profile: EP: {calibration_eps[i]}, key: {k}, value: {v}"
                     )
-    providers = _prepare_ep_list(calibration_eps)
+    providers = _prepare_ep_list(calibration_eps, input_shapes_profile, trt_rtx_backend)
     logger.debug(f"Creating session with providers: {providers}")
+    provider_kwargs = _configure_session_providers(sess_options, providers, trt_rtx_backend)
     return ort.InferenceSession(
         onnx_path_or_model,
         sess_options=sess_options,
-        providers=providers,
-        provider_options=None if input_shapes_profile is None else input_shapes_profile,
+        **provider_kwargs,
     )
 
 
@@ -482,9 +637,15 @@ def configure_ort(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     op_types_needing_output_quant: list[str] | None = None,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    trt_rtx_backend: str = "legacy",
 ):
     """Configure and patches ORT to support ModelOpt ONNX quantization."""
     logger.info("Configuring ORT for ModelOpt ONNX quantization")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+    if calibration_eps is None:
+        calibration_eps = ["cpu", "cuda:0", "trt"]
 
     # Register custom QDQ operators
     logger.debug("Registering custom QDQ operators")
@@ -538,6 +699,8 @@ def configure_ort(
     ]
     if trt_extra_plugin_lib_paths is not None:
         trt_extra_plugin_lib_paths = ";".join(trt_extra_plugin_lib_paths)
+    execution_providers = _prepare_ep_list(calibration_eps, input_shapes_profile, trt_rtx_backend)
+
     trt_guided_options = {
         "QuantizeBias": False,
         "ActivationSymmetric": True,
@@ -554,7 +717,8 @@ def configure_ort(
             True
         ),
         "TrtExtraPluginLibraryPaths": trt_extra_plugin_lib_paths,
-        "ExecutionProviders": _prepare_ep_list(calibration_eps),  # type: ignore[arg-type]
+        "ExecutionProviders": execution_providers,
+        "TrtRtxBackend": trt_rtx_backend,
     }
 
     quantizable_op_types = get_quantizable_op_types(op_types_to_quantize)

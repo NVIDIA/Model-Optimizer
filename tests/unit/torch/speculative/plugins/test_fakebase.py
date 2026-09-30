@@ -24,7 +24,7 @@ import torch
 pytest.importorskip("transformers")
 import transformers
 
-from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseConfig, FakeBaseModel
 from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 _HIDDEN_SIZE = 16
@@ -51,6 +51,8 @@ def fake_checkpoint(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        # model_type "llama" is in the final-norm whitelist, so FakeBaseModel requires the norm.
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     shard = tmp_path / "model-00001-of-00001.safetensors"
     safetensors.torch.save_file(tensors, shard)
@@ -75,6 +77,7 @@ def test_fakebase_single_file_no_index(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
     model = FakeBaseModel.from_source(str(tmp_path))
@@ -87,7 +90,10 @@ def test_fakebase_tied_embeddings_falls_back_to_embed(tmp_path, fake_config):
     FakeBaseModel must reuse ``embed_tokens`` for both."""
     fake_config.tie_word_embeddings = True
     weight = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE)
-    safetensors.torch.save_file({"embed_tokens.weight": weight}, tmp_path / "model.safetensors")
+    safetensors.torch.save_file(
+        {"embed_tokens.weight": weight, "norm.weight": torch.ones(_HIDDEN_SIZE)},
+        tmp_path / "model.safetensors",
+    )
     model = FakeBaseModel.from_source(str(tmp_path))
     torch.testing.assert_close(model.lm_head.weight, weight)
     torch.testing.assert_close(model.embed_tokens.weight, weight)
@@ -128,3 +134,110 @@ def test_load_vlm_or_llm_offline_zero_layers(monkeypatch):
     model = load_vlm_or_llm("fake-model", use_offline_training=True, use_fake_base=False)
     assert captured_kwargs.get("num_hidden_layers") == 0
     assert model.config.num_orig_hidden_layers == 4
+
+
+def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
+    """Transformers 5 loads VLMs through AutoModelForImageTextToText."""
+    cfg = transformers.PretrainedConfig()
+    cfg.model_type = "qwen3_vl"
+    cfg.text_config = object()
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+
+    captured = {}
+
+    class _FakeVLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return object()
+
+    # ``transformers`` exposes auto classes lazily, so deleting this attribute
+    # lets its module-level ``__getattr__`` recreate the legacy class.  An
+    # explicit ``None`` models its absence and reliably exercises the v5
+    # fallback.
+    monkeypatch.setattr(transformers, "AutoModelForVision2Seq", None, raising=False)
+    monkeypatch.setattr(transformers, "AutoModelForImageTextToText", _FakeVLM)
+
+    assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
+    assert captured["args"] == ("qwen3-vl",)
+    assert captured["kwargs"]["torch_dtype"] == "auto"
+
+
+class TestFakeBaseRopeTheta:
+    """The RoPE base has to survive the fake base, whichever shape the target stores it in.
+
+    The draft injects the target's KV, so a mismatched base trains and exports without
+    complaint and only misbehaves at serve time.
+    """
+
+    def test_from_source_carries_a_transformers_5_base_theta(self, tmp_path, monkeypatch):
+        """The seam, not the reader.
+
+        Reading rope_theta correctly is the exporter's ``_get_rope_theta`` and is tested
+        there. What is pinned here is that this call site uses it: a plain
+        ``getattr(base_cfg, "rope_theta")`` reads None from a transformers 5 config and
+        silently builds a draft with no RoPE base at all.
+        """
+        base_cfg = transformers.PretrainedConfig(
+            model_type="llama",
+            hidden_size=_HIDDEN_SIZE,
+            vocab_size=_VOCAB_SIZE,
+            num_hidden_layers=2,
+            max_position_embeddings=128,
+            tie_word_embeddings=False,
+            rope_parameters={"rope_theta": 1000000.0},
+        )
+        monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: base_cfg)
+        tensors = {
+            "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+            "norm.weight": torch.ones(_HIDDEN_SIZE),
+        }
+        shard = tmp_path / "model-00001-of-00001.safetensors"
+        safetensors.torch.save_file(tensors, shard)
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": dict.fromkeys(tensors, shard.name)})
+        )
+
+        model = FakeBaseModel.from_source(str(tmp_path))
+
+        assert model.config.rope_theta == 1000000.0
+        assert model.config.rope_parameters == {"rope_theta": 1000000.0, "rope_type": "default"}
+
+    def test_config_publishes_both_shapes(self):
+        """Consumers that prefer the dict must find it on a fake base too."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=1000000.0)
+        assert config.rope_theta == 1000000.0
+        assert config.rope_parameters == {"rope_theta": 1000000.0, "rope_type": "default"}
+
+    def test_config_drives_a_transformers_rotary_embedding(self):
+        """The published dict has to satisfy transformers, not just carry the number.
+
+        This class is also the class the EAGLE draft config is built from, so the dict
+        reaches `LlamaRotaryEmbedding`, which indexes ``rope_parameters["rope_type"]``
+        unconditionally.
+        """
+        from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+
+        config = FakeBaseConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=128,
+            rope_theta=1000000.0,
+        )
+        config.head_dim = 16
+
+        rotary = LlamaRotaryEmbedding(config=config)
+        cos, sin = rotary(torch.zeros(1, 4, 64), torch.arange(4).unsqueeze(0))
+
+        assert rotary.rope_type == "default"
+        assert cos.shape == (1, 4, 16)
+
+    def test_unknown_theta_publishes_no_dict(self):
+        """An absent base must stay absent rather than become a wrong default."""
+        config = FakeBaseConfig(num_hidden_layers=2, hidden_size=32, rope_theta=None)
+        assert config.rope_theta is None
+        assert not getattr(config, "rope_parameters", None)

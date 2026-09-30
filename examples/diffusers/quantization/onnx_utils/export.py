@@ -51,8 +51,6 @@ from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
 from modelopt.torch.utils import torch_to
 
-from .fp8_onnx_graphsurgeon import convert_zp_fp8
-
 MODEL_ID_TO_DYNAMIC_AXES = {
     "sdxl-1.0": {
         "sample": {0: "batch_size", 1: "num_channels", 2: "height", 3: "width"},
@@ -122,18 +120,6 @@ def flux_convert_rope_weight_type(onnx_graph):
         if node.op == "Einsum":
             node.inputs[1].dtype = "float32"
     return gs.export_onnx(graph)
-
-
-def generate_fp8_scales(backbone):
-    # temporary solution due to a known bug in torch.onnx._dynamo_export
-    for _, module in backbone.named_modules():
-        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)) and (
-            hasattr(module.input_quantizer, "_amax") and module.input_quantizer is not None
-        ):
-            module.input_quantizer._num_bits = 8
-            module.weight_quantizer._num_bits = 8
-            module.input_quantizer._amax = module.input_quantizer._amax * (127 / 448.0)
-            module.weight_quantizer._amax = module.weight_quantizer._amax * (127 / 448.0)
 
 
 def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1):
@@ -417,9 +403,9 @@ def get_io_shapes(model_id, onnx_load_path, trt_dynamic_shapes):
     if onnx_load_path != "":
         if model_id in ["sdxl-1.0", "sdxl-turbo"]:
             output_name = "latent"
-        elif model_id in ["sd3-medium"]:
+        elif model_id == "sd3-medium":
             output_name = "sample"
-        elif model_id in ["sd3.5-medium"]:
+        elif model_id == "sd3.5-medium":
             output_name = "out_hidden_states"
         elif model_id in ["flux-dev", "flux-schnell"]:
             output_name = "output"
@@ -469,7 +455,6 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     tmp_subfolder = tempfile.mkdtemp(prefix="myapp_")
     tmp_output = Path(f"{tmp_subfolder}/{model_file_name}")
     q_output = Path(f"{onnx_dir}/{model_file_name}")
-
     quantizer_context = (
         configure_linear_module_onnx_quantizers(backbone) if precision == "fp4" else nullcontext()
     )
@@ -499,7 +484,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         if model_name == "flux-dev":
             input_names.append("guidance")
         output_names = ["latent"]
-    elif model_name in ["ltx-video-dev"]:
+    elif model_name == "ltx-video-dev":
         input_names = [
             "hidden_states",
             "encoder_hidden_states",
@@ -508,7 +493,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
             "video_coords",
         ]
         output_names = ["latent"]
-    elif model_name in ["wan2.2-t2v-14b"]:
+    elif model_name == "wan2.2-t2v-14b":
         input_names = [
             "hidden_states",
             "timestep",
@@ -536,16 +521,8 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         )
     print(f"Saved at {tmp_output}")
     onnx_model = onnx.load(str(tmp_output), load_external_data=True)
-    if precision == "fp8":
-        if not model_name.startswith("flux"):
-            graph = gs.import_onnx(onnx_model)
-            graph.cleanup().toposort()
-            onnx_model = gs.export_onnx(graph)
-            onnx_model = convert_zp_fp8(onnx_model)
-            graph = gs.import_onnx(onnx_model)
-            onnx_model = gs.export_onnx(graph.cleanup())
-        else:
-            flux_convert_rope_weight_type(onnx_model)
+    if precision == "fp8" and model_name.startswith("flux"):
+        onnx_model = flux_convert_rope_weight_type(onnx_model)
     if precision == "fp4":
         onnx_model = NVFP4QuantExporter.process_model(onnx_model)
     save_onnx(onnx_model, q_output)

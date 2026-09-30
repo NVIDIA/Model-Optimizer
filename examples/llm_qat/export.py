@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import modelopt.torch.opt as mto
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
+from modelopt.torch.opt.conversion import ModeloptStateManager, restore_from_modelopt_state
 from modelopt.torch.quantization.utils import set_quantizer_state_dict
 from modelopt.torch.utils import print_rank_0
 
@@ -48,8 +48,11 @@ def get_model(
     # Load model
     model = AutoModelForCausalLM.from_pretrained(ckpt_path, device_map=device_map)
 
-    # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this
-    if hasattr(model, "peft_config"):
+    # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this.
+    # For QLoRA the base checkpoint is quantized, so from_pretrained already restored the state.
+    # Skipping is safe only because QATTrainer writes modelopt_state_train.pth at trainer init,
+    # from that same base state.
+    if hasattr(model, "peft_config") and not ModeloptStateManager.is_converted(model):
         modelopt_state = mto.load_modelopt_state(f"{ckpt_path}/modelopt_state_train.pth")
         restore_from_modelopt_state(model, modelopt_state)
         print_rank_0("Restored modelopt state")

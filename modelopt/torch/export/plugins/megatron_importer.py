@@ -51,6 +51,33 @@ with import_plugin("megatron"):
     has_mcore = True
 
 
+class _MambaConv1dCompat(torch.nn.Module):
+    """Expose the mixer's raw ``conv1d_weight`` / ``conv1d_bias`` as legacy Conv1d state_dict keys."""
+
+    def __init__(self, mixer):
+        super().__init__()
+        self.weight = mixer.conv1d_weight
+        self.bias = mixer.conv1d_bias
+
+
+def _get_mamba_conv1d(mixer):
+    """Return the mixer's conv as a module.
+
+    nemo:26.06 and earlier keep a ``conv1d`` module; Megatron-LM PR #4899 replaced it with raw
+    ``conv1d_weight`` / ``conv1d_bias`` parameters, which are wrapped to keep the same keys.
+    """
+    conv1d = getattr(mixer, "conv1d", None)
+    if conv1d is not None:
+        return conv1d
+
+    if hasattr(mixer, "conv1d_weight") and hasattr(mixer, "conv1d_bias"):
+        return _MambaConv1dCompat(mixer)
+
+    raise AttributeError(
+        "MambaMixer does not have `conv1d` or `conv1d_weight`/`conv1d_bias` fields."
+    )
+
+
 class GPTModelImporter:
     """Megatron Core GPTModel HuggingFace Importer.
 
@@ -304,10 +331,10 @@ class GPTModelImporter:
         state_dict = module.state_dict()
 
         assert module.num_gemms == num_local_experts, (
-            "num_gemms must be equal to num_local_experts in TEGroupedMLP"
+            "num_gemms must be equal to num_local_experts in TEGroupedLinear"
         )
         # init_expert_id is the global index of this rank's first local expert.
-        # TEGroupedMLP stores weights as weight0..weight{num_local-1} locally, so we
+        # TEGroupedLinear stores weights as weight0..weight{num_local-1} locally, so we
         # map global expert_id -> local slot (expert_id - init_expert_id).
         for local_id in range(num_local_experts):
             global_expert_id = init_expert_id + local_id
@@ -561,7 +588,7 @@ class GPTModelImporter:
         self.rules["A_log"](layer.mixer.A_log, layer_id)
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
-        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
@@ -720,7 +747,7 @@ class GPTModelImporter:
                 elif get_expert_tensor_parallel_world_size() > 1:
                     # ETP supports for packed MoE
                     # ETP is not supported for gpt-oss model
-                    if self.arch in ["GptOssForCausalLM"]:
+                    if self.arch == "GptOssForCausalLM":
                         raise ValueError("ETP is not supported for gpt-oss model")
                     self.rules["local_experts.linear_fc1_etp"](
                         layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
@@ -836,6 +863,8 @@ class GPTModelImporter:
                         )
 
                     layer_id += 1
+
+                self.rules["mtp.final_layernorm"](mtp.final_layernorm, layer_id - 1)
             else:  # non-repeated MTP
                 # MTP is the last layer in DeepSeek V3/R1
                 layer_id += 1

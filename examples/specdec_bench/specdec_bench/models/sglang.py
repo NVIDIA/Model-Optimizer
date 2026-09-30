@@ -49,6 +49,8 @@ class SGLANGModel(Model):
             speculative_algorithm = "LOOKAHEAD"
         elif speculative_algorithm == "NONE":
             speculative_algorithm = None
+        elif speculative_algorithm == "DSPARK":
+            raise NotImplementedError("DSPARK is only supported by --engine VLLM.")
 
         engine_kwargs = {
             "model_path": model_dir,

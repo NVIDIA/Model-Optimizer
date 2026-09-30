@@ -35,6 +35,9 @@ from core import (
     SandboxTask,
     SandboxTask0,
     SandboxTask1,
+    SandboxTask2,
+    SandboxTask3,
+    SandboxTask4,
     create_task_from_yaml,
     get_default_env,
     register_factory,
@@ -185,14 +188,26 @@ class TestSetSlurmConfigType:
             host: str = "test"
 
         set_slurm_config_type(MockSlurmConfig)
-        assert SandboxTask.__annotations__["slurm_config"] is MockSlurmConfig
-        assert SandboxTask.__dataclass_fields__["slurm_config"].type is MockSlurmConfig
+        for task_cls in (
+            SandboxTask,
+            SandboxTask0,
+            SandboxTask1,
+            SandboxTask2,
+            SandboxTask3,
+            SandboxTask4,
+        ):
+            assert task_cls.__annotations__["slurm_config"] is MockSlurmConfig
+            assert task_cls.__dataclass_fields__["slurm_config"].type is MockSlurmConfig
+            assert task_cls.__init__.__annotations__["slurm_config"] is MockSlurmConfig
 
 
 class TestGetDefaultEnv:
     """Tests for get_default_env utility."""
 
-    def test_default_title(self):
+    def test_default_title(self, monkeypatch):
+        # get_default_env honors HF_HOME / TRITON_CACHE_DIR overrides, so isolate the ambient env.
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
         slurm_env, local_env = get_default_env()
         assert slurm_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert slurm_env["HF_HOME"] == "/cicd/hf-cache"
@@ -201,7 +216,9 @@ class TestGetDefaultEnv:
         assert local_env["TRITON_CACHE_DIR"] == "/cicd/triton-cache"
         assert "LAUNCH_SCRIPT" not in local_env
 
-    def test_custom_title(self):
+    def test_custom_title(self, monkeypatch):
+        monkeypatch.delenv("HF_HOME", raising=False)
+        monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
         slurm_env, local_env = get_default_env("modelopt")
         assert slurm_env["TRITON_CACHE_DIR"] == "/modelopt/triton-cache"
         assert slurm_env["HF_HOME"] == "/modelopt/hf-cache"

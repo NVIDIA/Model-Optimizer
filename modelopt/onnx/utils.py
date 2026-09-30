@@ -18,9 +18,9 @@
 import copy
 import io
 import os
+import sys
 import tempfile
 import uuid
-from collections import defaultdict
 from typing import Any
 
 import numpy as np
@@ -527,50 +527,114 @@ def name_onnx_nodes(graph: onnx.GraphProto) -> bool:
 
 def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelProto, bool]:
     """Duplicate constant tensors if they are shared."""
-    graph = gs.import_onnx(onnx_model)
-    name_dict = defaultdict(lambda: 0)
+    graph = onnx_model.graph
+    initializers = {initializer.name: initializer for initializer in graph.initializer}
+    use_counts = dict.fromkeys(initializers, 0)
+    for node in graph.node:
+        for input_name in node.input:
+            if input_name in use_counts:
+                use_counts[input_name] += 1
 
-    def _get_unique_name(old_name):
-        name_dict[old_name] += 1
-        return old_name + "_" + str(name_dict[old_name])
+    shared_names = {name for name, count in use_counts.items() if count > 1}
+    if not shared_names:
+        return onnx_model, False
 
-    # Get tensors with shared constant inputs
-    tensors = []
-    for node in graph.nodes:
-        for inp_idx, tensor in enumerate(node.inputs):
-            # constant is shared across multiple nodes
-            if isinstance(tensor, Constant) and len(tensor.outputs) > 1:
-                tensors.append({"tensor": tensor, "inp_node": node, "inp_idx": inp_idx})
+    used_names = set(initializers)
+    used_names.update(
+        sparse_initializer.values.name for sparse_initializer in graph.sparse_initializer
+    )
+    for value_info in list(graph.input) + list(graph.output) + list(graph.value_info):
+        used_names.add(value_info.name)
+    for node in graph.node:
+        used_names.update(name for name in node.input if name)
+        used_names.update(name for name in node.output if name)
 
-    # Duplicate shared tensors
-    for tensor_dict in tensors:
-        tensor = tensor_dict["tensor"]
-        new_tensor = Constant(
-            name=_get_unique_name(tensor.name),
-            values=tensor.values,
+    def _get_nested_graphs(node: onnx.NodeProto):
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                yield attribute.g
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                yield from attribute.graphs
+
+    def _find_captured_names(nested_graph: onnx.GraphProto, outer_names: set[str]) -> set[str]:
+        local_names = {value_info.name for value_info in nested_graph.input}
+        local_names.update(initializer.name for initializer in nested_graph.initializer)
+        local_names.update(
+            sparse_initializer.values.name for sparse_initializer in nested_graph.sparse_initializer
         )
-        tensor_dict["inp_node"].inputs[tensor_dict["inp_idx"]] = new_tensor
+        for nested_node in nested_graph.node:
+            local_names.update(name for name in nested_node.output if name)
 
-    onnx_model = gs.export_onnx(graph)
-    is_modified = bool(tensors)
-    return onnx_model, is_modified
+        visible_outer_names = outer_names - local_names
+        captured_names = {
+            output.name for output in nested_graph.output if output.name in visible_outer_names
+        }
+        for nested_node in nested_graph.node:
+            captured_names.update(
+                input_name for input_name in nested_node.input if input_name in visible_outer_names
+            )
+            for child_graph in _get_nested_graphs(nested_node):
+                captured_names.update(_find_captured_names(child_graph, visible_outer_names))
+        return captured_names
+
+    captured_names = set()
+    for node in graph.node:
+        for nested_graph in _get_nested_graphs(node):
+            captured_names.update(_find_captured_names(nested_graph, shared_names))
+
+    next_suffix: dict[str, int] = {}
+
+    def _get_unique_name(old_name: str) -> str:
+        suffix = next_suffix.get(old_name, 1)
+        new_name = f"{old_name}_{suffix}"
+        while new_name in used_names:
+            suffix += 1
+            new_name = f"{old_name}_{suffix}"
+        next_suffix[old_name] = suffix + 1
+        used_names.add(new_name)
+        return new_name
+
+    for node in graph.node:
+        for input_index, input_name in enumerate(node.input):
+            if input_name not in shared_names:
+                continue
+
+            duplicated_initializer = graph.initializer.add()
+            duplicated_initializer.CopyFrom(initializers[input_name])
+            duplicated_initializer.name = _get_unique_name(input_name)
+            node.input[input_index] = duplicated_initializer.name
+
+    retained_names = captured_names | {
+        output.name for output in graph.output if output.name in shared_names
+    }
+    removed_initializer_names = shared_names - retained_names
+    for initializer in initializers.values():
+        if initializer.name in removed_initializer_names:
+            graph.initializer.remove(initializer)
+    for graph_input in list(graph.input):
+        if graph_input.name in removed_initializer_names:
+            graph.input.remove(graph_input)
+
+    return onnx_model, True
 
 
-def check_model(model: onnx.ModelProto) -> None:
-    """Checks if the given model is valid."""
-    save_as_external_data = False
+def is_model_too_large_for_protobuf(model: onnx.ModelProto) -> bool:
+    """Return whether a model cannot safely use an in-memory protobuf API."""
     try:
         model_size = model.ByteSize()
     except Exception as e:
         logger.warning(
             "Failed to compute model size with ByteSize (%s). Using external data path.", e
         )
-        save_as_external_data = True
-    else:
-        if model_size <= 0 or model_size > (2 * (1024**3)):
-            save_as_external_data = True
+        return True
 
-    if save_as_external_data:
+    max_model_size = onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b"")
+    return model_size <= 0 or model_size > max_model_size
+
+
+def check_model(model: onnx.ModelProto) -> None:
+    """Checks if the given model is valid."""
+    if is_model_too_large_for_protobuf(model):
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
@@ -1171,19 +1235,7 @@ def infer_types_verification(model: onnx.ModelProto) -> onnx.ModelProto:
 
 def infer_shapes(model: onnx.ModelProto, **kwargs):
     """Infers shapes of the onnx graph, handles large models."""
-    save_as_external_data = False
-    try:
-        model_size = model.ByteSize()
-    except Exception as e:
-        logger.warning(
-            "Failed to compute model size with ByteSize (%s). Using external data path.", e
-        )
-        save_as_external_data = True
-    else:
-        if model_size <= 0 or model_size > (2 * (1024**3)):
-            save_as_external_data = True
-
-    if save_as_external_data:
+    if is_model_too_large_for_protobuf(model):
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
@@ -1205,19 +1257,32 @@ def infer_types(
     When use_standalone_type_inference is True, uses a standalone type inference implementation
     that only infers types. Otherwise, uses ONNX's infer_shapes which infers both types and shapes.
 
+    ONNX's ``infer_shapes`` can fail on weakly-typed models -- with ``strict_mode=True`` it raises
+    on an op it cannot resolve (e.g. a ``TopK`` whose axis it resolves to a stale dimension)
+    instead of silently leaving that node's outputs untyped. On any shape-inference failure this
+    falls back to the standalone type inferencer, which derives types from operator schemas
+    regardless of shapes, so downstream type lookups (e.g. in AutoCast) do not fail. Callers that
+    need a fully typed graph should pass ``strict_mode=True`` so incomplete inference surfaces as
+    an exception that triggers the fallback.
+
     Args:
         model: ONNX model to infer types/shapes for.
         use_standalone_type_inference: If True, use standalone type inference (_infer_types_only).
                                        If False, use ONNX's shape inference (infer_shapes).
-        **kwargs: Additional arguments passed to infer_shapes when not using standalone type inference.
+        **kwargs: Additional arguments passed to infer_shapes when not using standalone type
+            inference (e.g. ``strict_mode``, ``check_type``, ``data_prop``).
 
     Returns:
         onnx.ModelProto: Model with inferred types (and shapes if not using standalone type inference).
     """
     if use_standalone_type_inference:
         return _infer_types_only(model)
-    else:
+
+    try:
         return infer_shapes(model, **kwargs)
+    except Exception as e:
+        logger.debug("ONNX shape inference failed (%s); using standalone type inference.", e)
+        return _infer_types_only(model)
 
 
 def onnx_type_str_to_enum(dtype: str) -> int:
@@ -1489,7 +1554,9 @@ def _is_foldable_constant_cast_pattern(model: onnx.ModelProto, node: onnx.NodePr
     return False
 
 
-def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.NodeProto) -> None:
+def _convert_constant_values(
+    onnx_model: onnx.ModelProto, constant_node: onnx.NodeProto, cast_node: onnx.NodeProto
+) -> None:
     """Convert the Constant node's values to the Cast node's target type."""
     cast_to_type = get_cast_to_type(cast_node)
     for attr in constant_node.attribute:
@@ -1516,7 +1583,35 @@ def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.Node
                 new_tensor = onnx.numpy_helper.from_array(new_array, attr.t.name)
 
             attr.t.CopyFrom(new_tensor)
+            if not _sync_value_info_elem_type(
+                onnx_model.graph, constant_node.output[0], cast_to_type
+            ):
+                onnx_model.graph.value_info.append(
+                    onnx.helper.make_tensor_value_info(
+                        constant_node.output[0], cast_to_type, list(new_tensor.dims)
+                    )
+                )
             break
+
+
+def _sync_value_info_elem_type(graph: onnx.GraphProto, tensor_name: str, elem_type: int) -> bool:
+    """Synchronize declarations for a tensor whose producer dtype changed."""
+    updated = False
+    for value_info in list(graph.value_info) + list(graph.input) + list(graph.output):
+        if value_info.name == tensor_name and value_info.type.HasField("tensor_type"):
+            value_info.type.tensor_type.elem_type = elem_type
+            updated = True
+
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                updated = _sync_value_info_elem_type(attr.g, tensor_name, elem_type) or updated
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    updated = (
+                        _sync_value_info_elem_type(subgraph, tensor_name, elem_type) or updated
+                    )
+    return updated
 
 
 def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
@@ -1557,7 +1652,7 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 cast_producers = get_producer_nodes(onnx_model, node.input[0])
                 assert len(cast_producers) == 1 and cast_producers[0].op_type == "Constant"
                 constant_producer = cast_producers[0]
-                _convert_constant_values(constant_producer, node)
+                _convert_constant_values(onnx_model, constant_producer, node)
                 _bypass_cast_node(onnx_model, node)
                 logger.debug(f"Found foldable Constant->Cast pattern, removing {node.name}")
 
@@ -1862,21 +1957,121 @@ def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> 
     return model
 
 
-def clear_stale_value_info(model: onnx.ModelProto) -> int:
-    """Clear stale type metadata that would otherwise trip ORT's type checker.
+def _reconcile_stale_output_shapes(model: onnx.ModelProto) -> int:
+    """Re-derive stale ``graph.output`` shapes from the operator graph.
 
-    Walks every ``Cast`` node and forces the ``elem_type`` of any
-    ``graph.output`` entry produced by that Cast to match the Cast's ``to``
-    attribute (the spec-defined contract for a Cast's output dtype). Then
-    clears ``value_info`` so ORT/shape-inference re-derives intermediate-tensor
-    types from the operator graph during session setup -- except entries for
-    outputs of ``trt.plugins`` custom-op nodes, whose types ORT cannot infer.
+    Weakly-typed models (e.g. exported from TensorFlow) can declare an output rank
+    that conflicts with the graph topology -- most commonly a leftover rank-0
+    (scalar) annotation on a tensor that is really rank-2+. Such a stale rank poisons
+    downstream shape inference: ORT fails while augmenting the model for INT8
+    calibration (``axis must be in [-rank, rank-1]. Input rank was 0``), and
+    ``onnx.shape_inference`` with ``strict_mode=True`` raises ``Inferred shape and
+    existing shape differ in rank`` during fp16 autocast.
+
+    Strategy: snapshot the declared output shapes, clear them, and re-derive them from
+    the operator graph -- preferring ORT's symbolic shape inference (it resolves ops
+    such as ``TopK`` that ONNX's static inference gives up on) and falling back to the
+    size-aware ``infer_shapes`` wrapper. A declared shape is only overwritten when it is
+    genuinely stale -- a rank mismatch (the rank-0-vs-rank-N bug) or a conflicting
+    concrete dimension. Outputs that merely differ in symbolic ``dim_param`` names (e.g.
+    a re-derived ``unk__0`` vs a declared ``batch``) keep their original declaration, so
+    healthy models -- including dynamic batch/sequence dims -- are left untouched. A
+    graph output is never left without a shape (``onnx.checker`` requires the field).
+
+    Args:
+        model: Loaded in-memory onnx ModelProto, ideally with ``value_info`` already
+            cleared so re-inference derives shapes from the operator graph.
+
+    Returns:
+        Number of graph outputs whose shape was changed.
+    """
+    outputs = model.graph.output
+    if not outputs:
+        return 0
+
+    def _outputs_with_shapes(m: onnx.ModelProto) -> dict[str, onnx.TensorShapeProto]:
+        return {
+            o.name: o.type.tensor_type.shape
+            for o in m.graph.output
+            if o.type.tensor_type.HasField("shape")
+        }
+
+    def _is_stale(declared: onnx.TensorShapeProto | None, inferred: onnx.TensorShapeProto | None):
+        # Only treat a declaration as stale when inference contradicts it: a different
+        # rank, or a concrete dim that disagrees with an inferred concrete dim. A missing
+        # declaration is "stale" (adopt whatever was inferred); a missing inference is not
+        # (keep the declaration). Symbolic dim_param renames are intentionally ignored.
+        if inferred is None:
+            return False
+        if declared is None:
+            return True
+        if len(declared.dim) != len(inferred.dim):
+            return True
+        return any(
+            d.HasField("dim_value") and i.HasField("dim_value") and d.dim_value != i.dim_value
+            for d, i in zip(declared.dim, inferred.dim)
+        )
+
+    # Snapshot declared shapes, then clear them so re-inference starts from the
+    # topology instead of being biased by the stale annotations.
+    declared: dict[str, onnx.TensorShapeProto | None] = {}
+    for o in outputs:
+        tt = o.type.tensor_type
+        if tt.HasField("shape"):
+            snapshot = onnx.TensorShapeProto()
+            snapshot.CopyFrom(tt.shape)
+            declared[o.name] = snapshot
+        else:
+            declared[o.name] = None
+        tt.ClearField("shape")
+
+    # Re-derive output shapes from the cleared model (neither inference call mutates it):
+    # prefer ORT symbolic shape inference, then fall back to the size-aware infer_shapes
+    # wrapper if it is unavailable or yields nothing.
+    inferred: dict[str, onnx.TensorShapeProto] = {}
+    try:
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+
+        inferred = _outputs_with_shapes(SymbolicShapeInference.infer_shapes(model, auto_merge=True))
+    except Exception as e:
+        logger.debug("Symbolic shape inference unavailable/failed: %s", e)
+    if not inferred:
+        try:
+            inferred = _outputs_with_shapes(infer_shapes(model, strict_mode=False, data_prop=True))
+        except Exception as e:
+            logger.debug("ONNX shape inference for output reconciliation failed: %s", e)
+
+    changed = 0
+    for o in outputs:
+        decl = declared[o.name]
+        inf = inferred.get(o.name)
+        # Adopt the inferred shape only when the declaration is genuinely stale; otherwise
+        # restore the declared shape (never leaving a graph output shapeless).
+        if _is_stale(decl, inf):
+            o.type.tensor_type.shape.CopyFrom(inf)
+            changed += 1
+        elif decl is not None:
+            o.type.tensor_type.shape.CopyFrom(decl)
+    return changed
+
+
+def clear_stale_value_info(model: onnx.ModelProto) -> int:
+    """Clear stale type/shape metadata that would otherwise trip ORT's type checker.
+
+    Walks every ``Cast`` node and forces the ``elem_type`` of any ``graph.output``
+    entry produced by that Cast to match the Cast's ``to`` attribute (the spec-defined
+    contract for a Cast's output dtype). Clears ``value_info`` so ORT/shape-inference
+    re-derives intermediate-tensor types from the operator graph during session setup
+    -- except entries for outputs of ``trt.plugins`` custom-op nodes, whose types ORT
+    cannot infer. Finally, reconciles stale ``graph.output`` *shapes* (e.g. a leftover
+    rank-0 scalar on a tensor that is really rank-2+) which would otherwise propagate a
+    wrong rank into downstream shape inference.
 
     Args:
         model: Loaded in-memory onnx ModelProto.
 
     Returns:
-        Number of Cast outputs reconciled plus value_info entries cleared.
+        Total number of entries reconciled or cleared.
     """
     cast_to_by_output = {
         node.output[0]: get_cast_to_type(node)
@@ -1901,4 +2096,95 @@ def clear_stale_value_info(model: onnx.ModelProto) -> int:
     if n_cleared:
         del model.graph.value_info[:]
         model.graph.value_info.extend(preserved)
-    return fixed_outputs + n_cleared
+
+    # Reconcile output shapes after value_info is cleared so the re-inference inside
+    # the helper derives shapes cleanly from the operator graph.
+    fixed_shapes = _reconcile_stale_output_shapes(model)
+
+    return fixed_outputs + fixed_shapes + n_cleared
+
+
+def topologically_sort_graph_nodes(graph: onnx.GraphProto) -> None:
+    """Stable-sort graph nodes so tensor producers precede consumers.
+
+    Unlike GraphSurgeon topological sorting, this operates directly on GraphProto
+    nodes and does not import/export tensor metadata that may include ONNX enum
+    dtypes such as BF16, which can be misinterpreted as NumPy dtypes during
+    conversion.
+    """
+
+    def get_graph_outer_scope_inputs(subgraph: onnx.GraphProto) -> set[str]:
+        local_names = {
+            value.name for value in (*subgraph.input, *subgraph.initializer) if value.name
+        }
+        local_names.update(output_name for node in subgraph.node for output_name in node.output)
+
+        outer_scope_inputs = set()
+        for node in subgraph.node:
+            outer_scope_inputs.update(
+                input_name
+                for input_name in node.input
+                if input_name and input_name not in local_names
+            )
+            for attr in node.attribute:
+                graphs = []
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    graphs.append(attr.g)
+                elif attr.type == onnx.AttributeProto.GRAPHS:
+                    graphs.extend(attr.graphs)
+
+                for nested_graph in graphs:
+                    outer_scope_inputs.update(
+                        input_name
+                        for input_name in get_graph_outer_scope_inputs(nested_graph)
+                        if input_name not in local_names
+                    )
+        return outer_scope_inputs
+
+    nodes = list(graph.node)
+    producer_by_tensor: dict[str, int] = {}
+    for node_index, node in enumerate(nodes):
+        for output_name in node.output:
+            if not output_name:
+                continue
+            if output_name in producer_by_tensor:
+                raise ValueError(f"Duplicate producer for tensor {output_name!r}.")
+            producer_by_tensor[output_name] = node_index
+
+    dependencies: list[set[int]] = [set() for _ in nodes]
+    dependents: list[set[int]] = [set() for _ in nodes]
+
+    for consumer_index, node in enumerate(nodes):
+        input_names = set(node.input)
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                input_names.update(get_graph_outer_scope_inputs(attr.g))
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    input_names.update(get_graph_outer_scope_inputs(subgraph))
+
+        for input_name in input_names:
+            producer_index = producer_by_tensor.get(input_name)
+            if producer_index is None:
+                continue
+            if producer_index == consumer_index:
+                raise ValueError(f"Node {node.name!r} consumes its own output {input_name!r}.")
+            dependencies[consumer_index].add(producer_index)
+            dependents[producer_index].add(consumer_index)
+
+    ready = [node_index for node_index, dependency in enumerate(dependencies) if not dependency]
+    sorted_nodes: list[onnx.NodeProto] = []
+    while ready:
+        node_index = ready.pop(0)
+        sorted_nodes.append(nodes[node_index])
+        for dependent_index in sorted(dependents[node_index]):
+            dependencies[dependent_index].remove(node_index)
+            if not dependencies[dependent_index]:
+                ready.append(dependent_index)
+        ready.sort()
+
+    if len(sorted_nodes) != len(nodes):
+        raise ValueError("Cycle detected while sorting ONNX graph nodes.")
+
+    graph.ClearField("node")
+    graph.node.extend(sorted_nodes)

@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
+from typing import ClassVar, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
@@ -33,6 +34,11 @@ from modelopt.torch.speculative.plugins.hf_training_args import (
 
 __all__ = [
     "RECIPE_TYPE_TO_CLASS",
+    "AutoQuantizeConfig",
+    "AutoQuantizeConstraints",
+    "AutoQuantizeCost",
+    "AutoQuantizeModuleSearchSpace",
+    "ModelOptAutoQuantizeRecipe",
     "ModelOptDFlashRecipe",
     "ModelOptEagleRecipe",
     "ModelOptMedusaRecipe",
@@ -48,6 +54,7 @@ class RecipeType(str, Enum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
+    AUTO_QUANTIZE = "auto_quantize"
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
@@ -60,9 +67,16 @@ _DEFAULT_RECIPE_DESCRIPTION = "Model optimization recipe."
 class RecipeMetadataConfig(ModeloptBaseConfig):
     """YAML shape of the recipe metadata section."""
 
-    recipe_type: RecipeType = Field(
+    recipe_type: RecipeType | None = ModeloptField(
+        default=None,
         title="Recipe type",
-        description="The type of the recipe (e.g. PTQ).",
+        description="The type of the recipe (e.g. PTQ). **Deprecated** in recipe YAML: "
+        "the ``# modelopt-schema:`` comment naming the recipe's schema class already says "
+        "which kind it is -- and it is the same declaration that makes the file "
+        "``$import``-able -- so the class fills this in. Still read and still honoured, so "
+        "no existing recipe needs changing, but new recipes should leave it out -- including "
+        "in a directory-format recipe's ``metadata.yml``, which supports the same comment. "
+        "When both are present they must agree.",
     )
     description: str = ModeloptField(
         default=_DEFAULT_RECIPE_DESCRIPTION,
@@ -71,10 +85,10 @@ class RecipeMetadataConfig(ModeloptBaseConfig):
     )
 
 
-def _metadata_field(recipe_type: RecipeType):
-    """Build the metadata Pydantic field with the recipe_type baked into the default."""
+def _metadata_field():
+    """Build a metadata Pydantic field that defaults to the owning class's recipe type."""
     return ModeloptField(
-        default={"recipe_type": recipe_type, "description": _DEFAULT_RECIPE_DESCRIPTION},
+        default={"description": _DEFAULT_RECIPE_DESCRIPTION},
         title="Metadata",
         description="Recipe metadata containing the recipe type and description.",
         validate_default=True,
@@ -87,16 +101,43 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
     If a layer name matches ``"*output_layer*"``, the attributes will be replaced with ``{"enable": False}``.
     """
 
+    #: The kind of recipe this class *is*. Set on every concrete subclass; it is the
+    #: single source of truth for ``metadata.recipe_type``, which the validator below
+    #: fills in so a recipe file never has to repeat what its schema already states.
+    RECIPE_TYPE: ClassVar[RecipeType | None] = None
+
     metadata: RecipeMetadataConfig = Field(
         title="Metadata",
         description="Recipe metadata containing the recipe type and description. "
         "Required: a recipe without a ``metadata`` section is rejected so that a "
-        "missing section can't silently fall back to a default recipe type.",
+        "recipe always says what it is for.",
     )
+
+    @model_validator(mode="after")
+    def _resolve_recipe_type(self):
+        """Fill ``metadata.recipe_type`` from the schema class, or reject a mismatch.
+
+        The schema class already determines the kind, so a recipe file that declares its
+        schema needs no ``recipe_type``. One that states it anyway must state the truth --
+        a silent disagreement between the two would make the file mean different things
+        to the loader and to a reader.
+        """
+        if self.RECIPE_TYPE is None:
+            return self
+        if self.metadata.recipe_type is None:
+            self.metadata.recipe_type = self.RECIPE_TYPE
+        elif self.metadata.recipe_type != self.RECIPE_TYPE:
+            raise ValueError(
+                f"metadata.recipe_type is {self.metadata.recipe_type.value!r} but this recipe "
+                f"is a {type(self).__name__}, which is {self.RECIPE_TYPE.value!r}. Drop the "
+                "recipe_type (the schema declares it) or correct it."
+            )
+        return self
 
     @property
     def recipe_type(self) -> RecipeType:
         """Return the recipe type from metadata."""
+        assert self.metadata.recipe_type is not None, "recipe_type was not resolved"
         return self.metadata.recipe_type
 
     @property
@@ -108,12 +149,259 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.PTQ
+
     quantize: QuantizeConfig = Field(
         title="PTQ config",
         description="PTQ config containing quant_cfg and algorithm. Required: a PTQ "
         "recipe without a ``quantize`` section is rejected so that a missing section "
         "can't silently fall back to the default INT8 config.",
     )
+
+
+# Named alias so a shared layer-pattern unit (e.g. configs/auto_quantize/units/base_disabled_layers)
+# can declare ``modelopt-schema: modelopt.recipe.config.LayerPatternList`` and be spliced into a
+# ``list[str]`` field — mirrors how base_disable_all is imported into a PTQ quant_cfg list.
+LayerPatternList = list[str]
+
+
+class AutoQuantizeCost(ModeloptBaseConfig):
+    """Cost-model parameters (the ``cost`` sub-dict of ``mtq.auto_quantize`` constraints)."""
+
+    active_moe_expert_ratio: float | None = ModeloptField(
+        default=None,
+        title="Active MoE expert ratio",
+        description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
+    )
+
+    @field_validator("active_moe_expert_ratio")
+    @classmethod
+    def _validate_active_moe_expert_ratio(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 1):
+            raise ValueError(f"active_moe_expert_ratio must be in (0, 1], got {v}")
+        return v
+
+
+class AutoQuantizeConstraints(ModeloptBaseConfig):
+    """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
+
+    effective_bits: float = ModeloptField(
+        default=4.8,
+        title="Effective bits",
+        description=(
+            "Average storage-bits target for the selected cost model, in (0, 16]. Defaults to 4.8."
+        ),
+    )
+    cost_model: Literal["weight", "active_moe", "kv_cache"] = ModeloptField(
+        default="weight",
+        title="Cost model",
+        description=(
+            "'weight' counts all weights equally; 'active_moe' scales routed-expert weights; "
+            "'kv_cache' accounts for paired K/V-cache storage."
+        ),
+    )
+    cost: AutoQuantizeCost | None = ModeloptField(
+        default=None,
+        title="Cost-model parameters",
+        description="Extra cost-model parameters; omit for the 'weight' cost model.",
+    )
+
+    @field_validator("effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float) -> float:
+        if not (0 < v <= 16):
+            raise ValueError(f"effective_bits must be in (0, 16], got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_cost_settings(self):
+        if self.cost_model == "kv_cache" and self.cost is not None:
+            raise ValueError("KV-cache AutoQuant does not accept weight cost settings.")
+        return self
+
+
+class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):
+    """Candidate formats selectable for modules matching one or more name patterns."""
+
+    module_name_patterns: LayerPatternList = ModeloptField(
+        default=[],
+        title="Module name patterns",
+        description="Glob patterns matched against quantizable module names. A grouped AutoQuantize "
+        "decision must match a rule for every module in the group or for none of them.",
+        validate_default=True,
+    )
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Module candidate quantization formats",
+        description="Formats selectable for matching modules. These override the top-level "
+        "candidate_formats for the matching AutoQuantize decision group.",
+        validate_default=True,
+    )
+    allow_no_quant: bool = ModeloptField(
+        default=True,
+        title="Allow no-quant selection",
+        description="Whether BF16/no-quant is selectable for matching modules. AutoQuantize keeps "
+        "an internal no-quant baseline for sensitivity scoring and cost normalization even when "
+        "this is false.",
+    )
+
+    @field_validator("module_name_patterns")
+    @classmethod
+    def _at_least_one_module_pattern(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 module_name_pattern")
+        return v
+
+    @field_validator("candidate_formats")
+    @classmethod
+    def _at_least_one_module_candidate(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 candidate_format")
+        return v
+
+
+class AutoQuantizeConfig(ModeloptBaseConfig):
+    """Schema for the ``auto_quantize`` block of an AutoQuantize recipe."""
+
+    constraints: AutoQuantizeConstraints = Field(
+        title="Search constraints + cost model",
+        description="LP budget and cost model.",
+    )
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Candidate quantization formats",
+        description="Fallback per-layer search space for modules not matched by "
+        "module_search_spaces. Each entry is a full QuantizeConfig. BF16/no-quant is always an "
+        "implicit additional choice. Omit this field when the parent recipe supplies a fixed "
+        "quantize baseline and explicitly lists every searched family in module_search_spaces.",
+        validate_default=True,
+    )
+    module_search_spaces: list[AutoQuantizeModuleSearchSpace] = ModeloptField(
+        default=[],
+        title="Module-specific search spaces",
+        description="Optional per-module overrides for candidate formats and BF16/no-quant "
+        "selectability. Matching is performed after runtime-fusion grouping.",
+    )
+    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+        default="gradient",
+        title="Sensitivity scoring method",
+        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+    )
+    score_size: int = ModeloptField(
+        default=128,
+        title="Scoring sample count",
+        description="Number of samples used for sensitivity scoring (divided by batch_size to get "
+        "the number of mtq scoring steps). Matches the former --auto_quantize_score_size.",
+    )
+    disabled_layers: LayerPatternList = ModeloptField(
+        default=[],
+        title="Search-excluded layer patterns",
+        description="Glob patterns; matching layers are excluded from the search (kept full precision).",
+    )
+    cost_excluded_layers: LayerPatternList = ModeloptField(
+        default=[],
+        title="Cost-excluded layer patterns",
+        description="Glob patterns excluded from the bit-budget accounting (cost_weight 0) — e.g. VL "
+        "vision towers. Distinct from disabled_layers: those are removed from the search; these still "
+        "get searched but don't count toward effective_bits. The two roles overlap but are independent.",
+    )
+    kv_cache: QuantizeConfig | None = ModeloptField(
+        default=None,
+        title="KV cache config (optional)",
+        description="QuantizeConfig applied as a uniform post-step; falls back to "
+        "the --kv_cache_qformat CLI flag when omitted.",
+    )
+
+    @model_validator(mode="after")
+    def _has_search_space(self):
+        if not self.candidate_formats and not self.module_search_spaces:
+            raise ValueError(
+                "auto_quantize requires candidate_formats or at least one module_search_spaces "
+                "entry. For uniform quantization, use a PTQ recipe instead."
+            )
+        if self.constraints.cost_model == "kv_cache":
+            if self.auto_quantize_method != "kl_div":
+                raise ValueError(
+                    "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."
+                )
+            if self.module_search_spaces:
+                raise ValueError(
+                    "KV-cache AutoQuant uses one candidate space for all eligible attention "
+                    "layers; module_search_spaces is not supported."
+                )
+            if self.kv_cache is not None:
+                raise ValueError(
+                    "KV-cache AutoQuant candidate_formats replace the uniform kv_cache post-step."
+                )
+            if self.cost_excluded_layers:
+                raise ValueError(
+                    "KV-cache AutoQuant does not support cost_excluded_layers; use "
+                    "disabled_layers to exclude non-KV-cache modules from the search."
+                )
+        return self
+
+
+class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
+    """Our config class for AutoQuantize recipes."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.AUTO_QUANTIZE
+
+    metadata: RecipeMetadataConfig = _metadata_field()
+
+    quantize: QuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Fixed PTQ baseline",
+        description="Optional normal PTQ QuantizeConfig. A weight AutoQuantize stage uses it for "
+        "modules outside explicit module_search_spaces; a KV AutoQuantize stage applies it first "
+        "as the fixed GEMM weight/activation configuration.",
+    )
+
+    auto_quantize: AutoQuantizeConfig = Field(
+        title="AutoQuantize config",
+        description="AutoQuantize search configuration. Required.",
+    )
+
+    kv_auto_quantize: AutoQuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Follow-up KV-cache AutoQuantize config",
+        description="Optional KV-cache search run after the primary weight AutoQuantize search.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_fixed_and_searched_spaces(self):
+        primary_is_kv = self.auto_quantize.constraints.cost_model == "kv_cache"
+        if self.kv_auto_quantize is not None:
+            if primary_is_kv:
+                raise ValueError(
+                    "kv_auto_quantize cannot follow an auto_quantize stage that already searches "
+                    "the KV cache."
+                )
+            if self.kv_auto_quantize.constraints.cost_model != "kv_cache":
+                raise ValueError("kv_auto_quantize must use cost_model=kv_cache.")
+            if self.auto_quantize.kv_cache is not None:
+                raise ValueError(
+                    "A weight AutoQuantize stage followed by kv_auto_quantize must omit the "
+                    "uniform auto_quantize.kv_cache post-step."
+                )
+        has_fixed_baseline = self.quantize is not None
+        has_global_search = bool(self.auto_quantize.candidate_formats)
+        if not primary_is_kv and has_fixed_baseline and has_global_search:
+            raise ValueError(
+                "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "
+                "auto_quantize.candidate_formats and explicitly list searched modules under "
+                "auto_quantize.module_search_spaces."
+            )
+        if not primary_is_kv and has_fixed_baseline and not self.auto_quantize.module_search_spaces:
+            raise ValueError(
+                "An AutoQuantize recipe with a fixed quantize baseline requires at least one "
+                "auto_quantize.module_search_spaces entry."
+            )
+        if not primary_is_kv and not has_fixed_baseline and not has_global_search:
+            raise ValueError(
+                "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
+                "auto_quantize.candidate_formats for unmatched modules."
+            )
+        return self
 
 
 class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):
@@ -150,7 +438,9 @@ class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):
 class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for EAGLE speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_EAGLE)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_EAGLE
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     eagle: EagleConfig = ModeloptField(
         default=EagleConfig(),
@@ -179,7 +469,9 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
 class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for DFlash speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_DFLASH)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_DFLASH
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     dflash: DFlashConfig = ModeloptField(
         default=DFlashConfig(),
@@ -201,7 +493,9 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for Medusa speculative decoding recipes."""
 
-    metadata: RecipeMetadataConfig = _metadata_field(RecipeType.SPECULATIVE_MEDUSA)
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_MEDUSA
+
+    metadata: RecipeMetadataConfig = _metadata_field()
 
     medusa: MedusaConfig = ModeloptField(
         default=MedusaConfig(),
@@ -215,6 +509,7 @@ class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
 # uses this for typed-list ``$import`` resolution; add a new entry when introducing a recipe.
 RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.PTQ: ModelOptPTQRecipe,
+    RecipeType.AUTO_QUANTIZE: ModelOptAutoQuantizeRecipe,
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,

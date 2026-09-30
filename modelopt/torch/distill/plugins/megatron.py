@@ -39,6 +39,7 @@ from torch.nn.modules.loss import _Loss
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.config import Criterion
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 if TYPE_CHECKING:
     from megatron.core.dist_checkpointing.mapping import ShardedStateDict
@@ -412,15 +413,14 @@ class TopKLogitsKLLoss(LogitsKLLoss):
             f"top_k ({self.top_k}) is larger than total vocab size ({targets.size(-1) * tp_size})"
         )
 
-        # Divide by temperature first
-        output_teacher = targets.float() / self._temperature
-        output_student = predictions.float() / self._temperature
-
-        # Extract local Top-K
-        # We take K from each rank and then find the global Top-K of all those.
+        # Take K from each rank, then the global Top-K of those. Reduce before the fp32 cast:
+        # casting the full vocab first defeats the point. Selection is unchanged (widening is
+        # exact, temperature scaling monotonic).
         local_top_k = min(self.top_k, targets.size(-1))
-        top_teacher_vals, top_idx = torch.topk(output_teacher, local_top_k, dim=-1)
-        top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
+        top_teacher_vals, top_idx = torch.topk(targets, local_top_k, dim=-1)
+        top_student_vals = torch.gather(predictions, dim=-1, index=top_idx)
+        top_teacher_vals = top_teacher_vals.float() / self._temperature
+        top_student_vals = top_student_vals.float() / self._temperature
 
         if tp_size > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
@@ -555,6 +555,22 @@ class ProjectionLayer(MegatronModule):
 ########################################################
 
 
+def _mtp_excluded_from_quantization(model: nn.Module) -> bool:
+    """Whether the model is quantized but its MTP submodules are not.
+
+    Only then is the MTP loss pure overhead, since distillation has no quantization error to
+    recover there. Plain distillation (e.g. pruning recovery) still trains the MTP head.
+    """
+    has_mtp = model_quantized = mtp_quantized = False
+    for name, module in model.named_modules():
+        is_mtp = "mtp" in name.split(".")
+        has_mtp |= is_mtp
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
+            model_quantized = True
+            mtp_quantized |= is_mtp
+    return has_mtp and model_quantized and not mtp_quantized
+
+
 def adjust_distillation_model_for_mcore(
     model: mtd.DistillationModel, distill_cfg: DistillationConfig
 ):
@@ -568,8 +584,18 @@ def adjust_distillation_model_for_mcore(
     model.sharded_state_dict = MethodType(_sharded_state_dict, model)
 
     # Skip `lm_loss` bypassing it when training if not needed for backprop.
+    # Uses a per-forward call counter so that MTP head calls (which always precede the
+    # main LM head call in _postprocess) still receive real CE loss even when
+    # skip_lm_loss=True — only the final main-head call is zeroed.
+    # An MTP head left out of quantization is exempt from that: there is no quantization
+    # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
+    skip_mtp_loss = _mtp_excluded_from_quantization(model)
+
     def _compute_student_lm_loss(self, labels, logits) -> Tensor:
-        if distill_cfg.skip_lm_loss and self.training:
+        self._lm_loss_call_count += 1
+        mtp_num_layers = self.config.mtp_num_layers or 0
+        is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
+        if distill_cfg.skip_lm_loss and self.training and (not is_mtp_call or skip_mtp_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
         return type(self).compute_language_model_loss(self, labels, logits)
 
@@ -605,6 +631,9 @@ def adjust_distillation_model_for_mcore(
         with torch.no_grad():
             self._teacher_model.eval()
             teacher_output = self._teacher_model(*args, **kwargs)
+
+        self._lm_loss_call_count = 0  # reset loss-fn call counter for MTP tracking
+
         with self.only_student_forward():
             student_output = type(self).forward(self, *args, **kwargs)
 

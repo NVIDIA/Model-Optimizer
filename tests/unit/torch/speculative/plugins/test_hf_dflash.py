@@ -19,26 +19,34 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 """
 
 import json
+import logging
 import os
-from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
 from transformers import AutoModelForCausalLM
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
+import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
     HFDFlashModel,
+    _dpace_position_weights,
     build_target_layer_ids,
+)
+from modelopt.torch.speculative.plugins.master_weight_adamw import (
+    MasterWeightAdamW,
+    VerifyMasterWeightsCallback,
 )
 from modelopt.torch.speculative.utils import AcceptanceRateValidation
 from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator
@@ -48,32 +56,20 @@ NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
 
 
-def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
-    """Create a DFlash config for testing."""
-    config = deepcopy(DFLASH_DEFAULT_CFG["config"])
-    config["dflash_block_size"] = block_size
-    config["dflash_use_torch_compile"] = False
-    config["dflash_mask_token_id"] = 0  # use token 0 as mask for tiny model
-    config["dflash_architecture_config"] = {
-        "num_hidden_layers": num_layers,
-    }
-    return config
-
-
 class TestDFlashConvert:
     """Test DFlash model conversion."""
 
     def test_convert_creates_dflash_model(self):
         """Test that convert produces an HFDFlashModel."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert isinstance(model, HFDFlashModel)
 
     def test_convert_creates_dflash_module(self):
         """Test that convert attaches a DFlashModule."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "dflash_module")
         assert isinstance(model.dflash_module, DFlashModule)
@@ -81,7 +77,7 @@ class TestDFlashConvert:
     def test_convert_freezes_base_model(self):
         """Test that base model parameters are frozen after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         for name, param in model.named_parameters():
             if "dflash_module" not in name:
@@ -90,7 +86,7 @@ class TestDFlashConvert:
     def test_convert_dflash_module_trainable(self):
         """Test that DFlash module parameters are trainable after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         dflash_params = [(n, p) for n, p in model.named_parameters() if "dflash_module" in n]
         assert len(dflash_params) > 0
@@ -100,7 +96,7 @@ class TestDFlashConvert:
     def test_convert_sets_target_layer_ids(self):
         """Test that target layer IDs are set correctly."""
         model = get_tiny_llama(num_hidden_layers=8)
-        config = _get_dflash_config(num_layers=3)
+        config = get_dflash_config(num_layers=3)
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "target_layer_ids")
         assert len(model.target_layer_ids) == 3
@@ -110,10 +106,368 @@ class TestDFlashConvert:
     def test_convert_sets_mask_token_id(self):
         """Test that mask_token_id is set from config."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
+
+
+def test_qwen3_vl_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Only mRoPE receives a per-frame video grid on Transformers 5.3.0."""
+    original_grid = torch.tensor([[3, 4, 5], [2, 6, 7]])
+    expected_position_ids = torch.ones(3, 1, 12, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    compute_position_ids = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(
+            get_rope_index=get_rope_index,
+            compute_3d_position_ids=compute_position_ids,
+        ),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 12, dtype=torch.long),
+        attention_mask=torch.ones(1, 12, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": original_grid,
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert not compute_position_ids.called
+    assert torch.equal(original_grid, torch.tensor([[3, 4, 5], [2, 6, 7]]))
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 5], [1, 4, 5], [1, 4, 5], [1, 6, 7], [1, 6, 7]]),
+    )
+
+
+def test_qwen3_vl_moe_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Qwen3-VL family variants use the same 5.3.0 mRoPE workaround."""
+    expected_position_ids = torch.ones(3, 1, 4, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl_moe"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[2, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 4], [1, 4, 4]]),
+    )
+
+
+def test_qwen3_vl_transformers_53_patch_release_raises(monkeypatch):
+    """Avoid double expansion when a 5.3 patch backports the upstream fix."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.1")
+
+    with pytest.raises(RuntimeError, match=r"5\.3\.0 or >=5\.4\.0"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+            },
+        )
+
+
+def test_qwen3_vl_transformers_54_uses_native_position_ids(monkeypatch):
+    """Transformers 5.4+ performs the grid expansion inside get_rope_index."""
+    get_rope_index = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.4.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[1, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is None
+    assert not get_rope_index.called
+
+
+def test_qwen3_vl_transformers_530_rejects_bad_video_frame_groups(monkeypatch):
+    """Fail before mRoPE construction when processor and video-grid contracts differ."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="video frame groups"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[2, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 2, 0, 0]]),
+            },
+        )
+
+
+def test_multimodal_forward_kwargs_exclude_non_model_inputs():
+    """Do not forward Trainer or collator-only fields to Hugging Face models."""
+    pixel_values = torch.ones(1)
+    mm_token_type_ids = torch.zeros(1, 4, dtype=torch.long)
+
+    forwarded = hf_dflash._multimodal_forward_kwargs(
+        {
+            "pixel_values": pixel_values,
+            "mm_token_type_ids": mm_token_type_ids,
+            "assistant_masks": torch.ones(1, 4),
+            "loss_mask": torch.ones(1, 4),
+            "num_items_in_batch": 4,
+            "unexpected_dataset_column": "drop me",
+        }
+    )
+
+    assert set(forwarded) == {"pixel_values", "mm_token_type_ids"}
+    assert forwarded["pixel_values"] is pixel_values
+    assert forwarded["mm_token_type_ids"] is mm_token_type_ids
+
+
+def test_eval_does_not_precompute_qwen3_vl_position_ids(monkeypatch):
+    """Evaluation delegates mRoPE construction to the base model and its cache."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", get_dflash_config())])
+    precompute_position_ids = MagicMock()
+    monkeypatch.setattr(model, "_qwen3_vl_position_ids", precompute_position_ids)
+
+    model.eval()
+    model(input_ids=torch.tensor([[1, 2, 3, 4]]))
+
+    precompute_position_ids.assert_not_called()
+
+
+def test_qwen3_vl_transformers_53_position_ids_require_mm_token_types(monkeypatch):
+    """Never silently fall back to one-dimensional positions for a visual batch."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="mm_token_type_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={"image_grid_thw": torch.tensor([[1, 4, 4]])},
+        )
+
+
+def test_qwen3_vl_transformers_53_position_ids_reject_bad_mm_token_shape(monkeypatch):
+    """Keep processor-produced modality ids aligned with the padded text sequence."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="same shape as input_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "image_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.zeros(1, 11, dtype=torch.long),
+            },
+        )
+
+
+class TestDPaceWeights:
+    """Test the D-PACE position-weighting objective (arXiv:2605.18810)."""
+
+    @staticmethod
+    def _reference_weights(conf, alpha):
+        """Paper closed form computed by explicit summation (Eq.7-8).
+
+        q~_i = (1-a)q_i + a; C_m = prod_{i<=m} q~_i; w_j = sum_{m>=j} C_m.
+        Deliberately a plain double loop so it is an independent oracle for the
+        vectorized implementation under test.
+        """
+        smoothed = alpha + (1.0 - alpha) * conf
+        length = smoothed.shape[-1]
+        cum = torch.ones_like(smoothed)
+        running = torch.ones(smoothed.shape[:-1])
+        for m in range(length):
+            running = running * smoothed[..., m]
+            cum[..., m] = running
+        expected = torch.zeros_like(smoothed)
+        for j in range(length):
+            expected[..., j] = cum[..., j:].sum(dim=-1)
+        return expected
+
+    def test_weights_match_paper_formula(self):
+        """Eq.7-8, pinned both to a hand-worked value and an independent loop oracle.
+
+        conf=[0.8, 0.5], alpha=0.5 -> q~=[0.9, 0.75] -> prefix=[0.9, 0.675]
+        -> w=[0.9+0.675, 0.675]=[1.575, 0.675].
+        """
+        hand = _dpace_position_weights(torch.tensor([[0.8, 0.5]]), alpha=0.5)
+        assert torch.allclose(hand, torch.tensor([[1.575, 0.675]]), atol=1e-6)
+        conf = torch.tensor([[0.9, 0.6, 0.3, 0.8]])
+        assert torch.allclose(
+            _dpace_position_weights(conf, 0.5), self._reference_weights(conf, 0.5), atol=1e-6
+        )
+
+    def test_mask_makes_invalid_positions_noops(self):
+        """Invalid positions neither shrink the prefix product nor add to the sum."""
+        alpha = 0.5
+        conf = torch.tensor([[0.9, 0.2, 0.3, 0.8]])
+        mask = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
+        masked = _dpace_position_weights(conf, alpha, valid_mask=mask)
+        # Dropping the invalid slot entirely must give the same weights at the kept slots.
+        kept = _dpace_position_weights(conf[:, [0, 2, 3]], alpha)
+        assert torch.allclose(masked[:, [0, 2, 3]], kept, atol=1e-6)
+
+    def test_weights_are_detached(self):
+        """Weights must carry no gradient (paper Eq.9 detaches them)."""
+        conf = torch.rand(2, 3, 5, requires_grad=True)
+        weights = _dpace_position_weights(conf, 0.5)
+        assert not weights.requires_grad
+
+    def test_invalid_alpha_raises(self):
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
+
+    def test_default_objective_is_dpace(self):
+        """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        assert model.dflash_loss_objective == "dpace"
+        assert model.dflash_dpace_alpha == 0.5
+
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_dpace_alpha"] = 0.3
+        mtsp.convert(model, [("dflash", config)])
+        assert model.dflash_dpace_alpha == 0.3
+
+    def test_convert_rejects_bad_objective(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_loss_objective"] = "nope"
+        with pytest.raises(ValueError, match="dflash_loss_objective"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_convert_rejects_degenerate_alpha(self):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_dpace_alpha"] = 0.0
+        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
+            mtsp.convert(model, [("dflash", config)])
+
+    def test_convert_dpace_with_decay_factor_warns(self, caplog):
+        """dpace + a non-zero decay factor converts but warns that decay is ignored."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_loss_objective"] = "dpace"
+        config["dflash_loss_decay_factor"] = 4.0
+        with caplog.at_level(logging.WARNING):
+            mtsp.convert(model, [("dflash", config)])
+        assert any("dflash_loss_decay_factor" in r.message for r in caplog.records)
+
+
+class TestDPaceLossIntegration:
+    """Exercise the _compute_loss block-weighting branches on CPU."""
+
+    @staticmethod
+    def _make_inputs(vocab=32, seq_len=SEQ_LEN, n_blocks=2):
+        """Synthetic CPU inputs for _compute_loss (no model forward needed)."""
+        bsz = 1
+        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
+        input_ids = torch.randint(0, vocab, (bsz, seq_len))
+        anchor_positions = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
+        block_keep_mask = torch.ones(bsz, n_blocks)
+        loss_mask = torch.ones(bsz, seq_len)
+        return logits, input_ids, anchor_positions, block_keep_mask, loss_mask
+
+    def _converted_model(self, objective, **overrides):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_loss_objective"] = objective
+        config.update(overrides)
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def test_compute_loss_dpace_branch(self):
+        """Default dpace objective produces a finite loss and valid accuracy."""
+        model = self._converted_model("dpace")
+        loss, acc = model._compute_loss(*self._make_inputs())
+        assert torch.isfinite(loss).item() and loss.item() > 0
+        assert 0.0 <= acc <= 1.0
+
+    def test_compute_loss_decay_branch(self):
+        """The static-decay objective path also produces a finite loss."""
+        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        loss, acc = model._compute_loss(*self._make_inputs())
+        assert torch.isfinite(loss).item() and loss.item() > 0
+        assert 0.0 <= acc <= 1.0
+
+    def test_compute_loss_dpace_kd_branch(self):
+        """dpace + KD (base_logits given): confidences use a dedicated no_grad CE pass."""
+        vocab = 32
+        model = self._converted_model("dpace")
+        inputs = self._make_inputs(vocab=vocab)
+        base_logits = torch.randn(1, SEQ_LEN, vocab)
+        loss, acc = model._compute_loss(*inputs, base_logits=base_logits)
+        assert torch.isfinite(loss).item()
+        assert 0.0 <= acc <= 1.0
 
 
 class TestDFlashSaveRestore:
@@ -123,7 +477,7 @@ class TestDFlashSaveRestore:
         """Test round-trip save/load preserves modelopt state and outputs."""
         mto.enable_huggingface_checkpointing()
         model_ref = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model_ref, [("dflash", config)])
 
         model_ref.save_pretrained(tmp_path / "modelopt_model")
@@ -135,29 +489,45 @@ class TestDFlashSaveRestore:
 
 
 class TestDFlashLazyRotaryEmb:
-    """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
+    """Rotary embedding creation: eager on a real device, still lazy on meta.
 
-    rotary_emb is not created in __init__ — it's lazily initialized on first
-    forward call to avoid meta-tensor issues during from_pretrained restore.
+    The laziness exists for one reason — ``__init__`` runs on the meta device during
+    ``from_pretrained`` restore, and building ``inv_freq`` there produces a meta buffer.
+    That reason only applies on meta, and deferring everywhere else costs a correctness
+    property under DDP: ``inv_freq`` is non-persistent, so a rank whose batch has no
+    valid anchor returns before running the draft and ends the step one buffer short.
+    ``broadcast_buffers`` then coalesces mismatched buffer lists across ranks and hangs
+    rather than raising, which single-node runs never reproduce.
+
+    So the buffer is built during ``modify()`` when the base model is on a real device,
+    and still deferred when it is on meta.
     """
 
-    def test_rotary_emb_not_created_in_init(self):
-        """rotary_emb should not exist after convert (before forward)."""
+    def test_rotary_emb_created_during_convert_on_a_real_device(self):
+        """On a real device the buffer exists after convert, before any forward."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+        assert hasattr(model.dflash_module, "rotary_emb")
+        assert not any(b.is_meta for b in model.dflash_module.rotary_emb.buffers())
+
+    def test_rotary_emb_deferred_on_meta(self):
+        """On meta the buffer is still deferred, which is what the laziness is for."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
 
-    def test_rotary_emb_created_on_forward(self):
-        """rotary_emb should be created on first forward call."""
+    def test_rotary_emb_init_is_idempotent(self):
+        """A later _maybe_init_rotary_emb must not replace an existing buffer."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
-        # Call _maybe_init_rotary_emb directly
+        first = dflash_mod.rotary_emb
         dflash_mod._maybe_init_rotary_emb(device="cpu")
-        assert hasattr(dflash_mod, "rotary_emb")
+        assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
 
@@ -225,6 +595,75 @@ class TestDFlashSlidingWindow:
         )
         attn = DFlashAttention(config, layer_idx=0)
         assert attn.sliding_window is None
+
+
+class TestDFlashSwaMask:
+    """Test all-layer non-causal sliding-window attention mask (MiMo-style)."""
+
+    def test_window_masks_context_beyond_window(self):
+        """Context beyond the window (relative to each query's real position) is masked out."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        window = 6
+        config["dflash_swa_window_size"] = window
+        mtsp.convert(model, [("dflash", config)])
+
+        seq_len = 16
+        block_size = 4
+        # One block anchored at position 10 → query real positions [10, 11, 12, 13].
+        anchor_positions = torch.tensor([[10]], dtype=torch.long)
+        block_keep_mask = torch.tensor([[True]])
+        dtype = torch.float32
+        device = torch.device("cpu")
+
+        mask = model._build_draft_attention_mask(
+            seq_len, anchor_positions, block_keep_mask, 1, dtype, device, window=window
+        )
+        neg = torch.finfo(dtype).min
+        attend = mask > neg / 2  # True where a position is attended (additive mask == 0)
+
+        # Context kv are positions [0, seq_len). For query k (real pos 10 + k) only context
+        # positions in (10 + k - window, 10) are visible.
+        for k in range(block_size):
+            q_real = 10 + k
+            for c in range(seq_len):
+                visible = attend[0, 0, k, c].item()
+                if c < 10:  # context strictly before the anchor
+                    assert visible == (c > q_real - window), (
+                        f"query k={k} (pos {q_real}), context c={c}: "
+                        f"expected visible={c > q_real - window}, got {visible}"
+                    )
+
+    def test_window_is_subset_of_full(self):
+        """The windowed mask attends to a subset of what the full-attention mask attends to."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 6
+        mtsp.convert(model, [("dflash", config)])
+
+        args = (
+            16,
+            torch.tensor([[10]]),
+            torch.tensor([[True]]),
+            1,
+            torch.float32,
+            torch.device("cpu"),
+        )
+        full = model._build_draft_attention_mask(*args, window=None)
+        windowed = model._build_draft_attention_mask(*args, window=6)
+        neg = torch.finfo(torch.float32).min
+        # Everything masked by full attention must also be masked by the windowed mask.
+        assert ((full <= neg / 2) <= (windowed <= neg / 2)).all()
+        # The window strictly removes some connections (it is not a no-op here).
+        assert (windowed <= neg / 2).sum() > (full <= neg / 2).sum()
+
+    def test_window_smaller_than_block_rejected(self):
+        """A window smaller than the block size is rejected at config validation."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 2  # < block_size
+        with pytest.raises(ValueError, match="dflash_swa_window_size"):
+            mtsp.convert(model, [("dflash", config)])
 
 
 class TestValidateOnline:
@@ -317,7 +756,7 @@ class TestDFlashExporter:
         """Test that export produces model.safetensors and config.json."""
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -332,7 +771,7 @@ class TestDFlashExporter:
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -348,7 +787,7 @@ class TestDFlashExporter:
     def test_export_config_fields(self, tmp_path):
         """Exported config.json should have required DFlash fields."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -368,13 +807,40 @@ class TestDFlashExporter:
         assert "vocab_size" in cfg
         assert "layer_types" in cfg
         assert len(cfg["layer_types"]) == NUM_DRAFT_LAYERS
+        # Without SWA configured, no sliding-window fields are emitted.
+        assert "sliding_window" not in cfg
+        assert "use_swa" not in cfg["dflash_config"]
+
+    def test_export_swa_fields(self, tmp_path):
+        """With dflash_swa_window_size set, exported config carries vLLM's SWA fields."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        config["dflash_swa_window_size"] = 256
+        mtsp.convert(model, [("dflash", config)])
+
+        exporter = model.get_exporter()
+        export_dir = tmp_path / "exported"
+        exporter.export(export_dir)
+
+        with open(export_dir / "config.json") as f:
+            cfg = json.load(f)
+
+        # vLLM _resolve_layer_attention reads these; all-full layer_types + use_swa=True
+        # → non-causal sliding window on every draft layer.
+        assert cfg["sliding_window"] == 256
+        assert cfg["dflash_config"]["use_swa"] is True
+        assert cfg["dflash_config"]["swa_window_size"] == 256
+        assert cfg["dflash_config"]["causal"] is False
+        # The pre-existing dflash_config keys must survive the update.
+        assert "mask_token_id" in cfg["dflash_config"]
+        assert "target_layer_ids" in cfg["dflash_config"]
 
     def test_export_tensor_count(self, tmp_path):
         """Exported model should have the right number of tensors."""
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -467,3 +933,394 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def _dflash_batch(vocab_size, bsz=2, seq_len=SEQ_LEN):
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, vocab_size, (bsz, seq_len))
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def _converted(fp32_master_weights=None, num_hidden_layers=4):
+    model = get_tiny_llama(num_hidden_layers=num_hidden_layers)
+    config = get_dflash_config()
+    if fp32_master_weights is not None:
+        config["dflash_fp32_master_weights"] = fp32_master_weights
+    mtsp.convert(model, [("dflash", config)])
+    return model
+
+
+class TestDFlashFp32MasterWeights:
+    """``dflash_fp32_master_weights``: the extra precision lives in the OPTIMIZER.
+
+    The model is untouched -- draft and frozen base share a dtype either way -- so what has
+    to be pinned is that the optimizer holds an fp32 master copy and fp32 moments, and that
+    a resume does not quietly round them back down.
+    """
+
+    def test_the_draft_matches_the_base_dtype_either_way(self):
+        """The flag must not move the model, or something has to reconcile dtypes again."""
+        for flag in (False, True):
+            model = _converted(fp32_master_weights=flag)
+            assert model._base_model.dtype == torch.bfloat16
+            assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
+
+    def test_forward_and_generate_need_no_autocast(self):
+        """Nothing in the model holds a dtype the rest of it does not, so nothing wraps."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        assert torch.isfinite(model(**_dflash_batch(model.dflash_config.vocab_size)).loss)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+    def test_master_and_moments_are_fp32_for_a_bf16_draft(self):
+        """The half that matters: AdamW's moments follow the master, not the parameter."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        optimizer.step()
+
+        assert {p.dtype for p in trainable} == {torch.bfloat16}
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in optimizer.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+
+    def test_plain_adamw_leaves_the_moments_in_bf16(self):
+        """The control, and the reason the flag exists at all."""
+        model = _converted(fp32_master_weights=False)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        optimizer.step()
+        assert {
+            state[key].dtype
+            for state in optimizer.state.values()
+            for key in ("exp_avg", "exp_avg_sq")
+        } == {torch.bfloat16}
+
+    def test_resume_does_not_round_the_master_back_down(self):
+        """``Optimizer.load_state_dict`` casts float state to the parameter's dtype.
+
+        For a bf16 model that silently rounds the master copy and both moments on every
+        resume, which is precisely the loss this optimizer exists to avoid and produces no
+        error at all. ``MasterWeightAdamW`` puts them back from the incoming state dict.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-2)
+        for _ in range(2):
+            model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+        saved = optimizer.state_dict()
+        reference = {
+            i: {k: v.clone() for k, v in state.items() if isinstance(v, torch.Tensor)}
+            for i, state in saved["state"].items()
+        }
+
+        restored = MasterWeightAdamW(trainable, lr=1e-2)
+        restored.load_state_dict(saved)
+
+        params = [p for group in restored.param_groups for p in group["params"]]
+        for i, state in reference.items():
+            got = restored.state[params[i]]
+            for key in ("master", "exp_avg", "exp_avg_sq"):
+                assert got[key].dtype == torch.float32, f"{key} came back as {got[key].dtype}"
+                assert torch.equal(got[key], state[key]), key
+
+    def test_resume_from_plain_adamw_upcasts_instead_of_crashing(self):
+        """The upgrade path every in-flight job takes, and the one that used to crash.
+
+        A checkpoint written before this flag defaulted to ``True`` holds moments but no
+        master, so an all-or-nothing state guard skipped the master and ``step()`` died on a
+        bare ``KeyError``. Those moments are also bf16, so restoring them verbatim would trade
+        the crash for a run where the feature is silently absent.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+
+        plain = torch.optim.AdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        model.zero_grad(set_to_none=True)
+        saved = plain.state_dict()
+        assert {
+            state[key].dtype for state in plain.state.values() for key in ("exp_avg", "exp_avg_sq")
+        } == {torch.bfloat16}
+
+        resumed = MasterWeightAdamW(trainable, lr=1e-2)
+        resumed.load_state_dict(saved)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        resumed.step()
+
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in resumed.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+        assert {p.dtype for p in trainable} == {torch.bfloat16}
+
+    def test_resume_keyed_by_name_still_restores_fp32(self):
+        """FSDP2 restores through torch's distributed checkpoint, which keys state by FQN.
+
+        It hands ``load_state_dict`` a dict whose ids are strings rather than the integers a
+        plain ``torch.save`` round trip produces, and does not convert them back. Anything
+        that only recognises integer ids silently restores nothing and leaves the base class's
+        downcast to the parameter dtype standing.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        optimizer = MasterWeightAdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        optimizer.step()
+
+        saved = optimizer.state_dict()
+        names = {i: f"dflash_module.p{i}" for i in range(len(trainable))}
+        saved["state"] = {names[i]: state for i, state in saved["state"].items()}
+        for group in saved["param_groups"]:
+            group["params"] = [names[i] for i in group["params"]]
+
+        restored = MasterWeightAdamW(trainable, lr=1e-2)
+        restored.load_state_dict(saved)
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in restored.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+
+    def test_resume_does_not_restore_the_fused_kernel(self):
+        """``load_state_dict`` takes every hyperparameter from the checkpoint, not this run.
+
+        ``TrainingArguments.optim`` defaults to ``adamw_torch_fused``, so a checkpoint written
+        before the flag was on carries ``fused``; restoring it undoes the switch to foreach
+        that building this optimizer performs, and ``step()`` refuses fused before it reaches
+        the master. The resume would fail on the most ordinary checkpoint there is.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-2)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        model.zero_grad(set_to_none=True)
+        saved = plain.state_dict()
+        for group in saved["param_groups"]:
+            group["fused"] = True
+
+        resumed = MasterWeightAdamW(trainable, lr=1e-2, foreach=True)
+        resumed.load_state_dict(saved)
+        assert not any(group["fused"] for group in resumed.param_groups)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        resumed.step()
+
+    def test_resume_drops_a_master_the_parameter_no_longer_needs(self):
+        """A master left on an fp32 parameter goes stale and later rolls the weights back.
+
+        ``step()`` updates an fp32 parameter directly, so a master restored onto one never
+        advances again -- but it is still written to the next checkpoint, and the resume after
+        that copies it over a parameter thousands of steps newer.
+        """
+        bf16 = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        source = MasterWeightAdamW(bf16.parameters(), lr=1e-2)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        source.step()
+        assert all("master" in state for state in source.state.values())
+
+        fp32 = torch.nn.Linear(16, 16, bias=False)
+        resumed = MasterWeightAdamW(fp32.parameters(), lr=1e-2)
+        resumed.load_state_dict(source.state_dict())
+        assert all("master" not in state for state in resumed.state.values())
+
+    def test_a_restore_that_skipped_load_state_dict_heals_the_master_too(self):
+        """Not every restore reaches ``load_state_dict`` -- DeepSpeed never calls it.
+
+        On those paths the base class's cast to the parameter's dtype stands, and a bf16
+        master reads as present, so it survives the per-key creation and is then updated in
+        bf16. That is the loss this optimizer exists to prevent, arrived at from the other
+        side, and the functional update promotes rather than raising, so nothing says so.
+        """
+        bf16 = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        optimizer = MasterWeightAdamW(bf16.parameters(), lr=1e-2)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        optimizer.step()
+        for state in optimizer.state.values():
+            for key in ("master", "exp_avg", "exp_avg_sq"):
+                state[key] = state[key].to(torch.bfloat16)
+
+        bf16.zero_grad(set_to_none=True)
+        bf16(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean().backward()
+        optimizer.step()
+        for key in ("master", "exp_avg", "exp_avg_sq"):
+            seen = {state[key].dtype for state in optimizer.state.values()}
+            assert seen == {torch.float32}, f"{key}: {seen}"
+
+    def test_a_closure_may_call_backward(self):
+        """``step(closure)`` is documented to re-evaluate the loss, which means ``backward()``."""
+        model = torch.nn.Linear(16, 16, bias=False).to(torch.bfloat16)
+        optimizer = MasterWeightAdamW(model.parameters(), lr=1e-2)
+
+        def closure():
+            optimizer.zero_grad()
+            loss = model(torch.randn(4, 16, dtype=torch.bfloat16)).pow(2).mean()
+            loss.backward()
+            return loss
+
+        assert optimizer.step(closure) is not None
+
+    def test_differentiable_is_refused_rather_than_ignored(self):
+        """The update runs on a master and is copied back, so a graph would stop at the copy."""
+        model = torch.nn.Linear(16, 16, bias=False)
+        optimizer = MasterWeightAdamW(model.parameters(), lr=1e-2, differentiable=True)
+        model(torch.randn(4, 16)).pow(2).mean().backward()
+        with pytest.raises(ValueError, match="differentiable"):
+            optimizer.step()
+
+    def test_the_callback_stays_armed_when_no_step_landed(self):
+        """An empty optimizer state means nothing happened, not that everything is fine.
+
+        A ``GradScaler`` can skip the first step on a non-finite gradient; consuming the
+        tripwire there would pass the whole run on a check that examined nothing.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=0), None)
+        callback.on_step_end(None, SimpleNamespace(global_step=1), None, optimizer=plain)
+        assert not callback._checked
+
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            callback.on_step_end(None, SimpleNamespace(global_step=2), None, optimizer=plain)
+
+    def test_an_fp32_model_is_plain_adamw(self):
+        """No master copy where there is no precision to recover, and identical arithmetic."""
+        torch.manual_seed(3)
+        a = torch.nn.Linear(16, 16, bias=False)
+        torch.manual_seed(3)
+        b = torch.nn.Linear(16, 16, bias=False)
+        master_opt = MasterWeightAdamW(a.parameters(), lr=1e-2)
+        plain_opt = torch.optim.AdamW(b.parameters(), lr=1e-2)
+        for step in range(4):
+            x = torch.randn(4, 16, generator=torch.Generator().manual_seed(step))
+            a(x).pow(2).mean().backward()
+            b(x).pow(2).mean().backward()
+            master_opt.step()
+            plain_opt.step()
+            a.weight.grad = b.weight.grad = None
+        assert torch.equal(a.weight, b.weight)
+        assert "master" not in next(iter(master_opt.state.values()))
+
+    def test_the_callback_refuses_a_loop_that_forgot_the_optimizer(self):
+        """Wiring the optimizer is the caller's job, so a missed wiring has to be loud."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        state = SimpleNamespace(global_step=1)
+
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            VerifyMasterWeightsCallback().on_step_end(None, state, None, optimizer=plain)
+
+        model.zero_grad(set_to_none=True)
+        correct = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        correct.step()
+        VerifyMasterWeightsCallback().on_step_end(None, state, None, optimizer=correct)
+
+    def test_the_callback_still_checks_after_a_resume(self):
+        """A resume restores ``global_step``, so an exact step number never matches again.
+
+        That would leave the check dead on the one path where the fp32 state can be lost
+        without anything else noticing -- a restore that does not go through
+        ``MasterWeightAdamW.load_state_dict`` comes back at the parameter's dtype.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=4210), None)
+        with pytest.raises(RuntimeError, match="dflash_fp32_master_weights"):
+            callback.on_step_end(None, SimpleNamespace(global_step=4211), None, optimizer=plain)
+
+    def test_the_callback_checks_once_and_then_stays_out_of_the_way(self):
+        """It runs per ``train()`` call, not per step -- the state cannot change mid-run."""
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+        correct = MasterWeightAdamW(trainable, lr=1e-4)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        correct.step()
+
+        callback = VerifyMasterWeightsCallback()
+        callback.on_train_begin(None, SimpleNamespace(global_step=0), None)
+        callback.on_step_end(None, SimpleNamespace(global_step=1), None, optimizer=correct)
+        assert callback._checked
+        # a second step must not re-check, so a bf16 optimizer handed over later is ignored
+        plain = torch.optim.AdamW(trainable, lr=1e-4)
+        model.zero_grad(set_to_none=True)
+        model(**_dflash_batch(model.dflash_config.vocab_size)).loss.backward()
+        plain.step()
+        callback.on_step_end(None, SimpleNamespace(global_step=2), None, optimizer=plain)
+
+
+class TestDFlashDraftActivationCheckpointing:
+    """``training.gradient_checkpointing`` has to reach the draft, and be inert when it does.
+
+    The draft is the only trainable part of a DFlash setup, so it is the only part where
+    checkpointing saves anything: the frozen target runs under ``no_grad`` and stores no
+    activations, and a flag that landed only there would report the feature as enabled
+    while saving nothing.
+    """
+
+    def test_the_flag_reaches_the_draft_layers(self):
+        model = _converted()
+        layers = list(model.dflash_module.layers)
+        assert layers
+        # Inheriting the supported base class is what makes HF's own recursion find them.
+        assert all(isinstance(layer, GradientCheckpointingLayer) for layer in layers)
+        assert all(layer.gradient_checkpointing is False for layer in layers)
+
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        assert all(layer.gradient_checkpointing for layer in layers)
+
+    def test_gradients_are_bit_identical_with_and_without(self):
+        """Recompute is mathematically neutral; it trades step time for memory only."""
+        grads = {}
+        for enabled in (False, True):
+            torch.manual_seed(99)
+            model = _converted()
+            model.train()
+            if enabled:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            torch.manual_seed(99)
+            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            grads[enabled] = {
+                name: param.grad.detach().clone()
+                for name, param in model.dflash_module.named_parameters()
+                if param.grad is not None
+            }
+
+        assert grads[False] and grads[False].keys() == grads[True].keys()
+        for name, grad in grads[False].items():
+            assert torch.equal(grad, grads[True][name]), name

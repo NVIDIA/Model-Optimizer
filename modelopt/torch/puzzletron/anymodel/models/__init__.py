@@ -24,6 +24,4 @@ from .nemotron_h import *
 from .nemotron_h_v2 import *
 from .qwen2 import *
 from .qwen3 import *
-
-if _Version(_transformers_version) >= _Version("4.57.0"):
-    from .qwen3_vl import *
+from .qwen3_vl import *

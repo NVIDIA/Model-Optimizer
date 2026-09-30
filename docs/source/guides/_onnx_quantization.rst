@@ -37,7 +37,7 @@ Requirements
 Apply Post Training Quantization (PTQ)
 ======================================
 
-PTQ should be done with a calibration dataset. If calibration dataset is not provided, ModelOpt will use random scales for the QDQ nodes.
+PTQ should be done with a calibration dataset. Random calibration inputs are used when no calibration dataset is provided.
 
 Prepare calibration dataset
 ---------------------------
@@ -72,6 +72,16 @@ Call PTQ function
         calibration_data=calibration_data,
         output_path="quant.onnx",
         quantize_mode="int8",
+    )
+
+Optionally enable Autotune for more optimized Q/DQ placement. Note that this will likely increase the time required to calibrate the model.
+
+.. code-block:: python
+
+    moq.quantize(
+        ...
+        # Default Autotune settings, can be tuned with the autotune_* arguments below.
+        autotune=True,
     )
 
 Alternatively, you can call PTQ function in command line:

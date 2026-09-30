@@ -188,35 +188,3 @@ def _skip_softmax_decision(
             tl.atomic_add(Sparsity_skipped, 1)  # count skipped tiles
 
     return skip_tile
-
-
-# ---------------------------------------------------------------------------
-# Sink/window dense-region check
-# ---------------------------------------------------------------------------
-@triton.jit
-def _is_dense_region(
-    kv_start,
-    tile_q,
-    seq_len_q,
-    seq_len_kv,
-    BLOCK_M: tl.constexpr,
-    DENSE_SINK_TOKENS: tl.constexpr,
-    DENSE_RECENT_TOKENS: tl.constexpr,
-):
-    """Check if a KV tile falls in a dense region (sink tokens or local window).
-
-    Uses absolute token positions so the result is BLOCK_N-independent,
-    ensuring forward and backward (which may use different BLOCK_N) agree.
-
-    Returns:
-        True if the tile should be kept dense (skip N:M sparsification).
-    """
-    # N:M sparse softmax is a prefill optimization. Keep decode rows dense,
-    # including decode rows that are scheduled in a mixed prefill/decode launch.
-    is_decode = seq_len_q <= 1
-    is_sink = kv_start < DENSE_SINK_TOKENS
-    causal_offset = seq_len_kv - seq_len_q
-    q_abs_pos = tile_q * BLOCK_M + causal_offset
-    token_distance = q_abs_pos - kv_start
-    is_local = (token_distance >= 0) and (token_distance < DENSE_RECENT_TOKENS)
-    return is_decode or is_sink or is_local

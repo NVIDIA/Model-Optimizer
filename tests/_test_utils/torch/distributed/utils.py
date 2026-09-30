@@ -30,6 +30,16 @@ def get_free_port():
     return port
 
 
+def _init_backend(backend):
+    """Mirror ``modelopt.torch.utils.distributed.setup``, which pairs NCCL with a CPU backend.
+
+    Bare ``"nccl"`` registers no backend for CPU tensors, so a collective on a CPU-resident
+    shard -- gathering an FSDP2 ``cpu_offload`` parameter, say -- fails with "No backend type
+    associated with device type cpu" in tests but not in production.
+    """
+    return "cpu:gloo,cuda:nccl" if backend == "nccl" else backend
+
+
 def init_process(rank, size, job=None, backend="gloo", port=None):
     """Initialize the distributed environment."""
 
@@ -45,7 +55,7 @@ def init_process(rank, size, job=None, backend="gloo", port=None):
     # We need to use a different port for each tests to avoid conflicts
     os.environ["MASTER_PORT"] = port
 
-    dist.init_process_group(backend, rank=rank, world_size=size)
+    dist.init_process_group(_init_backend(backend), rank=rank, world_size=size)
     if backend == "nccl" and torch.cuda.is_available():
         torch.cuda.set_device(rank)
     torch.manual_seed(1234)
@@ -140,7 +150,7 @@ class DistributedWorkerPool:
         os.environ["LOCAL_RANK"] = str(rank)
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        dist.init_process_group(_init_backend(backend), rank=rank, world_size=world_size)
         if backend == "nccl" and torch.cuda.is_available():
             torch.cuda.set_device(rank)
         torch.manual_seed(1234)

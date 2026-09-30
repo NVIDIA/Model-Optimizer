@@ -44,6 +44,11 @@ class ModelArguments(BaseModel):
     model_name_or_path: str | None = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     use_fake_base_for_offline: bool = False
     trust_remote_code: bool = False
+    # Optional config field overrides applied to the loaded model config (and its
+    # text_config) before instantiation. Needed for checkpoints whose config doesn't
+    # round-trip cleanly through transformers (e.g. Cosmos3's Qwen3-VL text tower,
+    # where intermediate_size/num_key_value_heads don't propagate from text_config).
+    config_overrides: dict | None = None
 
 
 class DataArguments(BaseModel):
@@ -64,6 +69,11 @@ class DataArguments(BaseModel):
     sample_size: int = -1
     streaming_server_url: str | None = None
     streaming_model_name: str | None = None
+    # Set for a draft whose top aux layer already is the base's last layer (e.g. the released
+    # Nemotron-3.5 DSpark draft: aux ids [1,5,19,29,41,51], zero-based, on a 52-layer base).
+    # vLLM captures each layer once, so there is no distinct extra plane for the base hidden
+    # and the final plane must serve both roles.
+    final_aux_is_base_hidden: bool = False
 
     @field_validator("sample_size")
     @classmethod

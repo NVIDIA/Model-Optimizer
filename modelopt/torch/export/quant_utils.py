@@ -15,9 +15,10 @@
 
 """Utils for quantization including scaling factors adjustments."""
 
+import fnmatch
 import logging
+from collections import defaultdict
 from collections.abc import Generator
-from types import SimpleNamespace
 from typing import Any
 from warnings import warn
 
@@ -25,6 +26,8 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
+from modelopt.torch.models import get_spec, list_all_possible
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -47,8 +50,11 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils import clear_cuda_cache
 
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
-from .model_config import (
+from .model_utils import TiedWeightMap, get_language_model_from_vl
+from .quant_format import (
+    IQ_FORMATS,
     KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_INT8,
     KV_CACHE_NVFP4,
     KV_CACHE_NVFP4_AFFINE,
@@ -74,30 +80,9 @@ from .model_config import (
 logger = logging.getLogger(__name__)
 
 
-def get_scaling_factor_from_weight(weight, group_size) -> torch.tensor:
-    """Calculate the weight scaling factor for a given group size."""
-    [n, k] = weight.shape
-
-    if group_size != 0:
-        # int4_awq
-        if k % group_size != 0:
-            raise NotImplementedError(
-                "Weight shape is not divisible for block size for block quantization."
-            )
-        weight = weight.reshape(n, k // group_size, group_size)
-        maxbound = 7.0
-    else:
-        # int8_sq
-        maxbound = 127.0
-    amax = weight.abs().max(dim=-1)[0].float()
-
-    weights_scaling_factor = amax / maxbound
-
-    # Let's filter the zeros in the scaling factor if the weights are zero
-    # to avoid the divided-by-zero error..
-    weights_scaling_factor[weights_scaling_factor == 0] = 1.0
-
-    return weights_scaling_factor
+def _has_large_fp8_scale(value: torch.Tensor) -> bool:
+    """Return whether an FP8 scale exceeds the recommended threshold."""
+    return bool(torch.any(value > 0.5))
 
 
 def maybe_transpose_expert_weight_dimensions(
@@ -130,65 +115,6 @@ def maybe_transpose_expert_weight_dimensions(
     transposed_weight_scale = weight_scale.transpose(-2, -1) if weight_scale is not None else None
 
     return transposed_weight, transposed_weight_scale
-
-
-def resmooth_and_get_scale(
-    merged_weights: torch.Tensor,
-    pre_quant_scales: list[torch.Tensor],
-    ranks: int,
-    group_size: int,
-    new_pre_quant_scale: torch.Tensor | None = None,
-    quantization: str | None = QUANTIZATION_NONE,
-):
-    """Resmooths weights from a single or multiple ranks and get scaling factors and amax.
-
-    Args:
-        merged_weights: Merged weights from ranks.
-        pre_quant_scales: List of pre-quantization scales for each rank.
-        ranks: Number of ranks.
-        group_size: Group size of the quantization block.
-        new_pre_quant_scale (optional): If not provided, weights will be resmoothed using
-            the average of pre_quant_scales.
-
-    Returns:
-        weights: Resmoothed weights.
-        weight_scaling_factors: Resmoothed scaling factors.
-        avg_pre_quant_scale: Calculated average of the quantization scale.
-    """
-    if new_pre_quant_scale is None:
-        new_pre_quant_scale = torch.stack(pre_quant_scales).mean(dim=0)
-
-    assert len(pre_quant_scales) > 0 and new_pre_quant_scale.numel() == merged_weights.shape[1], (
-        "Shape of pre_quant_scales and weights do not match."
-    )
-    weights = torch.chunk(merged_weights, ranks, dim=0)
-
-    scales = []
-    new_weights = []
-    for i, p_scaling_factor in enumerate(pre_quant_scales):
-        # De smooth & Re smooth
-        weight = (
-            weights[i]
-            * p_scaling_factor.type(weights[i].dtype)
-            / new_pre_quant_scale.type(weights[i].dtype)
-        )
-        new_weights.append(weight)
-        # If NVFP4_AWQ then we view the scales as uint8 to allow for cat later
-        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]:
-            scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, group_size).view(torch.uint8)
-        else:
-            scale = get_scaling_factor_from_weight(weight, group_size)
-        scales.append(scale)
-
-    resmoothed_scales = torch.cat(scales, dim=0)
-
-    return (
-        torch.cat(new_weights, dim=0),
-        resmoothed_scales.view(torch.float8_e4m3fn)
-        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]
-        else resmoothed_scales,  # if NVFP4_AWQ we view the scales back as float8_e4m3fn after cat
-        new_pre_quant_scale,
-    )
 
 
 def adjust_attn_amax_values(module):
@@ -368,11 +294,14 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
     return kv_bias
 
 
-def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.Tensor | None]:
+def get_kv_cache_scaling_factor(
+    self_attention_module: nn.Module, clamp_fp8_scales: bool = True
+) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
+        clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
 
     Returns:
         The K and V BMM scaling factors.
@@ -387,27 +316,38 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
 
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
-        for i, factor in enumerate(scaling_factors):
-            if factor is None:
-                continue
-            if factor.item() > 0.5:
-                warn(
-                    f"Warning: Large KV activation detected: {factor.item()}, "
-                    "Quantized KV cache may lead to higher accuracy drop."
-                )
-            scaling_factors[i] = torch.max(
-                factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+    # For FP8, we recommend default KV-cache scaling factor to be 1. The
+    # asymmetric format applies this only to K; V remains NVFP4.
+    kv_cache_dtype = get_kv_cache_dtype(self_attention_module)
+    if not clamp_fp8_scales:
+        fp8_indices = ()
+    elif kv_cache_dtype == KV_CACHE_FP8:
+        fp8_indices = range(len(scaling_factors))
+    elif kv_cache_dtype == KV_CACHE_FP8_K_NVFP4_V:
+        fp8_indices = (0,)
+    else:
+        fp8_indices = ()
+    for i in fp8_indices:
+        factor = scaling_factors[i]
+        if factor is None:
+            continue
+        if _has_large_fp8_scale(factor):
+            warn(
+                "Warning: Large KV activation detected. "
+                "Quantized KV cache may lead to higher accuracy drop."
             )
+        scaling_factors[i] = torch.max(
+            factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+        )
     return scaling_factors
 
 
 def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
     """Returns the kv_cache dtype.
 
-    If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
-    otherwise returns None.
+    K/V quantizers are inspected as a pair so FP8 K with NVFP4 V remains
+    distinguishable from uniform FP8 or NVFP4. The output quantizer is retained
+    as a fallback for the unified Megatron export path.
 
     Args:
         modules: The module or list of modules to inspect.
@@ -422,6 +362,29 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
         modules = [modules]
 
     for module in modules:
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        if (
+            k_quantizer is not None
+            and v_quantizer is not None
+            and k_quantizer.is_enabled
+            and v_quantizer.is_enabled
+        ):
+            k_dtype = _compute_kv_cache_dtype(
+                [k_quantizer.num_bits], hasattr(k_quantizer, "_bias_value")
+            )
+            v_dtype = _compute_kv_cache_dtype(
+                [v_quantizer.num_bits], hasattr(v_quantizer, "_bias_value")
+            )
+            if k_dtype == KV_CACHE_FP8 and v_dtype == KV_CACHE_NVFP4:
+                return KV_CACHE_FP8_K_NVFP4_V
+            if k_dtype == v_dtype:
+                return k_dtype
+            raise NotImplementedError(
+                "Unsupported mixed K/V cache quantization pair: "
+                f"K uses {k_dtype}, while V uses {v_dtype}."
+            )
+
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
         # Still check for output quantizer for the unified_megatron_export path
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer", "output_quantizer"):
@@ -480,6 +443,35 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
+def uses_iq_quantization(module) -> bool:
+    """Whether any weight quantizer in ``module`` or its children targets an IQ format.
+
+    ``get_quantization_format`` returns the *first* non-``NONE`` format it finds, so in a
+    mixed-format model IQ layers sitting behind, say, an FP8 layer are invisible to it. Callers
+    that must reject IQ specifically need to see every layer.
+
+    This reads ``num_bits`` directly rather than resolving each layer's full format, so an
+    unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
+
+    Known gap, shared with ``get_quantization_format``: ``weight_attr_names`` yields nothing for
+    a TEGroupedLinear, whose parameters are ``weight0..N`` while its quantizer is a single
+    ``GroupedQuantizer`` under ``weight_quantizer``. Neither function sees such a module, so an
+    experts-only IQ model reports no format at all -- not just here. Closing it belongs in
+    ``weight_attr_names``, where it affects every format, rather than in this helper.
+    """
+    for weight_name in weight_attr_names(module):
+        weight_quantizer = representative_weight_quantizer(module, weight_name)
+        # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never IQ --
+        # IQ is a single quantizer with backend="ggml".
+        if (
+            weight_quantizer is not None
+            and weight_quantizer.is_enabled
+            and getattr(weight_quantizer, "num_bits", None) in IQ_FORMATS
+        ):
+            return True
+    return any(uses_iq_quantization(child) for _, child in module.named_children())
+
+
 def get_quantization_format(module) -> str | None:
     """Gets the quantization string.
 
@@ -514,6 +506,24 @@ def get_quantization_format(module) -> str | None:
             return QUANTIZATION_W4A8_AWQ
 
         # Handle individual num_bits cases
+        if weight_quantizer.num_bits in IQ_FORMATS:
+            if weight_quantizer.backend != "ggml":
+                raise ValueError("IQ formats require the built-in 'ggml' quantization backend")
+            # Both exporters return before collecting input_scale and before the pre_quant_scale
+            # handling below, so an enabled activation quantizer would be dropped without a trace
+            # and the checkpoint would load as weight-only. Refuse instead.
+            if input_quantizer is not None and input_quantizer.is_enabled:
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export is weight-only, but this layer has an enabled input "
+                    "quantizer. The GGML block payload carries no activation scale, so the "
+                    "activation quantization would be silently lost."
+                )
+            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+                raise NotImplementedError(
+                    "IQ1_S/IQ2_XS export does not support an AWQ-style pre_quant_scale."
+                )
+            return weight_quantizer.num_bits
+
         if weight_quantizer.num_bits == 4:
             assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
                 "Invalid block_sizes for INT4 quantizer"
@@ -749,14 +759,33 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v == "nvfp4_svdquant":
+            # SVDQuant builds on the AWQ-style pre_quant_scale smoothing, so its
+            # config mirrors nvfp4_awq (group_size + pre_quant_scale flag).
             layer_config = {
                 "quant_algo": "NVFP4_SVD",
                 "group_size": block_size_value,
+                "has_zero_point": False,
+                "pre_quant_scale": True,
             }
         elif v == "mxfp8":
             layer_config = {
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
+            }
+        elif v in IQ_FORMATS:
+            iq_format = IQ_FORMAT_REGISTRY[v]
+            block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
+            effective_bits = iq_format.effective_bits
+            if block_size_value != block_size:
+                raise ValueError(
+                    f"{v.upper()} requires block size {block_size}, got {block_size_value}"
+                )
+            layer_config = {
+                "quant_algo": v.upper(),
+                "group_size": block_size,
+                "effective_bits": effective_bits,
+                "block_payload_bytes": payload_bytes,
+                "packing": "ggml",
             }
         else:
             layer_config = {"quant_algo": v}
@@ -783,12 +812,22 @@ def process_layer_quant_config(layer_config_dict):
     return per_layer_config
 
 
-def pack_int4_in_uint8(weight, weights_scaling_factor):
+def _validate_int4_block_size(in_dim, block_size):
+    if not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError(f"Block size must be a positive integer, got {block_size}.")
+    if in_dim % block_size != 0:
+        raise NotImplementedError(
+            f"Cannot pack weight with input dimension {in_dim} and block size {block_size}: "
+            "partial blocks are not supported."
+        )
+
+
+def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
-    block_size = weight.shape[-1] // weights_scaling_factor.shape[-1]
+    _validate_int4_block_size(in_dim, block_size)
 
     # Scale, round, and clamp to the signed 4-bit range [-8..7].
     int8_tensor = (
@@ -843,6 +882,8 @@ def to_quantized_weight(
 
     # For compressed weights, we directly return the data from wrapper
     if isinstance(weight, QTensorWrapper):
+        if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
+            _validate_int4_block_size(weight.metadata["shape"][-1], block_size)
         return weight.data
 
     if quantization == QUANTIZATION_FP8:
@@ -903,7 +944,7 @@ def to_quantized_weight(
         return (weight / weights_scaling_factor[:, None]).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
-        return pack_int4_in_uint8(weight, weights_scaling_factor)
+        return pack_int4_in_uint8(weight, weights_scaling_factor, block_size)
 
     if quantization in [
         QUANTIZATION_NVFP4,
@@ -955,48 +996,160 @@ def from_quantized_weight(
     raise NotImplementedError(f"quantization format {quantization} not supported")
 
 
+_KV_CACHE_REPLACEMENTS: dict[str, str] = {
+    "k_bmm_quantizer._amax": "k_proj.k_scale",
+    "v_bmm_quantizer._amax": "v_proj.v_scale",
+    "k_bmm_quantizer._bias_value": "k_proj.k_bias",
+    "v_bmm_quantizer._bias_value": "v_proj.v_bias",
+    "input_quantizer._pre_quant_scale": "pre_quant_scale",
+}
+_BASE_SKIP_KEYS: tuple[str, ...] = (
+    "output_quantizer",
+    "_amax",
+    "_bias_value",
+    "input_quantizer._pre_quant_scale",
+    "weight_shape",
+)
+
+
+def _strip_base_layer(key: str, is_modelopt_qlora: bool) -> str:
+    """Drop the `base_layer` component PEFT inserts, which deployment does not expect.
+
+    Stripping generically means new key types (bias, scales) need no enumeration here.
+    """
+    return key.replace(".base_layer.", ".") if is_modelopt_qlora else key
+
+
+def _maybe_squeeze_scale(key: str, value: Any) -> Any:
+    """Squeeze a leading dim=1 from 3-D scale tensors of shape (1, n, m)."""
+    if (
+        "scale" in key
+        and isinstance(value, torch.Tensor)
+        and value.dim() == 3
+        and value.shape[0] == 1
+    ):
+        return value.squeeze(0)
+    return value
+
+
+def _postprocess_single_tensor(
+    key: str,
+    value: torch.Tensor,
+    kv_cache_max_bound: float,
+    kv_cache_format: str | dict[str, dict[str, str]] | None,
+    is_modelopt_qlora: bool = False,
+) -> tuple[str | None, torch.Tensor | None]:
+    """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
+
+    Returns ``(new_key, new_value)`` to emit, or ``(None, None)`` to skip.
+    Tied-weight dedup is NOT performed here; callers should pre-compute alias
+    keys from ``model._tied_weights_keys`` and filter them at the call site.
+    """
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
+
+    # Skip problematic VL model parameters
+    if key == "vision_model.radio_model.summary_idxs":
+        return None, None
+
+    # Skip real quant parameters
+    if any(key.endswith("weight_quantizer." + q) for q in RealQuantLinear.list_of_scale_tensors):
+        return None, None
+
+    # Skip LoRA adapters for QLoRA models
+    if is_modelopt_qlora and "lora" in key:
+        return None, None
+
+    # Keys not related to quantizers: keep as-is
+    if all(sk not in key for sk in skip_keys):
+        new_key = _strip_base_layer(key, is_modelopt_qlora)
+        return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Apply replacements if the key matches any suffix in the replacements dict
+    for old_suffix, new_suffix in replacements.items():
+        if key.endswith(old_suffix):
+            prefix = key[: -len(old_suffix)]
+            if "_amax" in key:
+                layer_quantization = _resolve_kv_cache_format_for_key(key, kv_cache_format)
+                assert layer_quantization in [
+                    KV_CACHE_FP8,
+                    KV_CACHE_NVFP4,
+                    KV_CACHE_NVFP4_AFFINE,
+                ], "Invalid KV cache quantization format."
+                assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
+                value = value.float() / kv_cache_max_bound
+                if layer_quantization == KV_CACHE_FP8 and _has_large_fp8_scale(value):
+                    logger.warning(
+                        "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
+                    )
+            new_key = _strip_base_layer(prefix + new_suffix, is_modelopt_qlora)
+            return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Key has a skip_key but no replacement matched — drop it
+    return None, None
+
+
+def _resolve_kv_cache_format_for_key(
+    key: str, quantization: str | dict[str, dict[str, str]] | None
+) -> str | None:
+    """Resolve uniform or per-layer metadata to the format for this K or V tensor."""
+    if isinstance(quantization, dict):
+        matches = [
+            (layer_name, layer_config.get("quant_algo"))
+            for layer_name, layer_config in quantization.items()
+            if key == layer_name or key.startswith(layer_name + ".")
+        ]
+        quantization = max(matches, key=lambda item: len(item[0]))[1] if matches else None
+    if quantization == KV_CACHE_FP8_K_NVFP4_V:
+        if key.endswith("k_bmm_quantizer._amax"):
+            return KV_CACHE_FP8
+        if key.endswith("v_bmm_quantizer._amax"):
+            return KV_CACHE_NVFP4
+        return None
+    return quantization
+
+
+def _get_kv_cache_postprocess_config(
+    quantization_details: dict[str, Any],
+) -> str | dict[str, dict[str, str]] | None:
+    """Return the uniform format or layer map consumed by both HF exporters."""
+    kv_cache_format = quantization_details.get("kv_cache_quant_algo")
+    if kv_cache_format == "MIXED_PRECISION":
+        return quantization_details.get("kv_cache_quantized_layers", {})
+    return kv_cache_format
+
+
 def postprocess_state_dict(
     state_dict: dict,
     maxbound: float,
-    quantization: str | None,
+    quantization: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool = False,
+    tied_map: "TiedWeightMap | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
     Args:
         state_dict: The full model state_dict.
         maxbound: The maximum bound value for the output quantizer.
-        quantization: The KV cache quantization format.
+        quantization: The uniform KV cache quantization format, or a per-attention-layer
+            ``{layer_name: {"quant_algo": ...}}`` mapping for mixed precision.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        tied_map: Optional :class:`TiedWeightMap`. When provided, tied-weight
+            dedup is authoritative and name-based: a declared alias key whose canonical
+            counterpart is present is dropped, independent of tensor address. This is
+            what makes dedup correct under the FSDP full-state-dict gather (and offload),
+            where tied tensors are materialized at distinct addresses and the address
+            pass below cannot see the tie. The address pass is retained as a backstop for
+            undeclared genuine shares and coincidental collisions.
 
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
     """
-    replacements = {
-        "k_bmm_quantizer._amax": "k_proj.k_scale",
-        "v_bmm_quantizer._amax": "v_proj.v_scale",
-        "k_bmm_quantizer._bias_value": "k_proj.k_bias",
-        "v_bmm_quantizer._bias_value": "v_proj.v_bias",
-        "input_quantizer._pre_quant_scale": "pre_quant_scale",
-    }
-    skip_keys = [
-        "output_quantizer",
-        "_amax",
-        "_bias_value",
-        "input_quantizer._pre_quant_scale",
-        "weight_shape",
-    ]
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
 
-    # For modelopt-trained LoRA models, we need to remove the base_layer prefix from the keys for deployment
-    if is_modelopt_qlora:
-        replacements.update(
-            {
-                "base_layer.weight": "weight",
-                "base_layer.input_scale": "input_scale",
-                "base_layer.weight_scale": "weight_scale",
-            }
-        )
-        skip_keys.append("base_layer")
+    def _export_key(key: str) -> str:
+        return _strip_base_layer(key, is_modelopt_qlora)
 
     post_state_dict = {}
 
@@ -1008,7 +1161,7 @@ def postprocess_state_dict(
 
         # Skip keys not related to quantizers
         if all(skip_key not in key for skip_key in skip_keys):
-            post_state_dict[key] = value
+            post_state_dict[_export_key(key)] = value
             continue
 
         # Apply replacements if the key matches any suffix in the replacements dict
@@ -1017,30 +1170,25 @@ def postprocess_state_dict(
                 prefix = key[: -len(old_suffix)]
 
                 if "_amax" in key:
-                    assert quantization in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
-                        "Invalid KV cache quantization format."
-                    )
+                    layer_quantization = _resolve_kv_cache_format_for_key(key, quantization)
+                    assert layer_quantization in [
+                        KV_CACHE_FP8,
+                        KV_CACHE_NVFP4,
+                        KV_CACHE_NVFP4_AFFINE,
+                    ], "Invalid KV cache quantization format."
                     assert maxbound > 0, "Maxbound must be greater than zero."
 
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    if quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                    if layer_quantization == KV_CACHE_FP8 and _has_large_fp8_scale(value):
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
-                post_state_dict[prefix + new_suffix] = value
+                post_state_dict[_export_key(prefix + new_suffix)] = value
                 break
 
-    # Squeeze scales with a leading dimension of 1
-    for key, value in post_state_dict.items():
-        if (
-            "scale" in key
-            and isinstance(value, torch.Tensor)
-            and value.dim() == 3
-            and value.shape[0] == 1
-        ):
-            post_state_dict[key] = value.squeeze(0)
+    post_state_dict = {k: _maybe_squeeze_scale(k, v) for k, v in post_state_dict.items()}
 
     # remove real quant parameters from the state dict
     keys_to_delete = []
@@ -1056,26 +1204,147 @@ def postprocess_state_dict(
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
                 keys_to_delete.append(key)
-    # Check for tied weights and remove duplicates
-    seen_tensors = {}
+    # Name-based tied-weight dedup (authoritative, address-independent): for each declared
+    # {alias: canonical} tie, drop the alias's own exported keys when the canonical is present.
+    # Per-parameter (not per-prefix), so an untied sibling (a bias, an untied projection) is kept.
+    # This is what makes it correct under the FSDP gather / offload, where tied tensors land at
+    # distinct addresses.
+    dropped_dense_prefixes: set[str] = set()
+    if tied_map is not None and tied_map.alias_to_canonical:
+        # Expand each tied *pre-pack* parameter name into the concrete keys export produced. If
+        # export starts emitting a new scale companion or fused-projection name, extend
+        # `weight_suffixes` / `proj_splits` here -- nothing else needs to change.
+        # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
+        weight_suffixes = (
+            "weight",
+            "weight_scale",
+            "weight_scale_2",
+            "input_scale",
+            "pre_quant_scale",
+        )
+        # A tied 3-D fused projection splits into these per-expert 2-D projection names.
+        proj_splits = {
+            "gate_up_proj": ("gate_proj", "up_proj"),
+            "up_proj": ("up_proj",),
+            "down_proj": ("down_proj",),
+        }
 
-    # Remove any tied weights if found.
+        # group name -> [(alias_key, canonical_key), ...], dropped all-or-none.
+        alias_groups: dict[str, list[tuple[str, str]]] = {}
+        # dense group name -> module prefix, for the leftover-companion check below.
+        dense_prefixes: dict[str, str] = {}
+        # fused-MoE container (alias_prefix, canonical_prefix) -> its tied per-expert projection names.
+        moe_containers: dict[tuple[str, str], set[str]] = {}
+
+        for alias, canonical in tied_map.alias_to_canonical.items():
+            a_pre, _, a_name = alias.rpartition(".")
+            c_pre, _, c_name = canonical.rpartition(".")
+            if a_name == c_name == "weight":
+                # Dense tie: the weight and its own scale companions only (never a sibling bias).
+                members = [
+                    (f"{a_pre}.{s}" if a_pre else s, f"{c_pre}.{s}" if c_pre else s)
+                    for s in weight_suffixes
+                ]
+                members = [(ak, ck) for ak, ck in members if ak in post_state_dict]
+                if members:
+                    alias_groups[alias] = members
+                    dense_prefixes[alias] = a_pre
+            elif a_name in proj_splits and a_name == c_name:
+                # Fused-MoE: export splits the 3-D container into per-expert keys; record those names.
+                moe_containers.setdefault((a_pre, c_pre), set()).update(proj_splits[a_name])
+            elif alias in post_state_dict:
+                alias_groups[alias] = [(alias, canonical)]
+
+        for (a_pre, c_pre), tied_proj_names in moe_containers.items():
+            # Rewrite only the tied projections' per-expert keys, so an untied projection (e.g.
+            # down_proj when only gate_up_proj is tied) or a router/bias child is left alone.
+            prefix = f"{a_pre}." if a_pre else ""
+            members = [
+                (key, c_pre + key[len(a_pre) :])
+                for key in post_state_dict
+                if key.startswith(prefix)
+                and any(part in tied_proj_names for part in key[len(prefix) :].split("."))
+            ]
+            if members:
+                # Key by the full (alias, canonical) pair: one alias container's projections may
+                # tie to different canonical containers, and keying by a_pre alone would overwrite.
+                alias_groups[f"{a_pre} -> {c_pre}"] = members
+
+        # Atomic drop: remove a group only when every alias key has its canonical twin present,
+        # so mixed quant state (one side quantized, the other not) never orphans a scale.
+        for gk, members in alias_groups.items():
+            missing = [ak for ak, ck in members if ck not in post_state_dict]
+            if missing:
+                logger.warning(
+                    f"Skipping name-based dedup of '{gk}': tied sides have mismatched keys "
+                    f"(e.g. '{missing[0]}' has no canonical counterpart, likely differing "
+                    f"quantization state); keeping both sides to avoid orphaned tensors."
+                )
+                continue
+            # Safety: a declared tie must export identical bytes on both sides. If quantization
+            # diverged them, dropping the alias would silently corrupt it (HF re-ties canonical over
+            # it on load) -- so raise. Mirrors HF's own torch.equal decline-to-tie.
+            for ak, ck in members:
+                av, cv = post_state_dict[ak], post_state_dict[ck]
+                if (
+                    isinstance(av, torch.Tensor)
+                    and isinstance(cv, torch.Tensor)
+                    and not av.is_meta
+                    and not cv.is_meta
+                    and not torch.equal(av, cv)
+                ):
+                    raise RuntimeError(
+                        f"Tied-weight export mismatch: '{ak}' differs from its canonical '{ck}'. "
+                        f"The tie is declared but the two sides quantized to different values, so "
+                        f"deduplicating would corrupt '{ak}'. Ensure both tied modules use the same "
+                        f"quantization format/config."
+                    )
+            for ak, _ in members:
+                keys_to_delete.append(ak)
+            if gk in dense_prefixes:
+                dropped_dense_prefixes.add(dense_prefixes[gk])
+            logger.warning(
+                f"Tied weight (declared): dropping {len(members)} alias key(s) for '{gk}'; "
+                f"canonical kept."
+            )
+
+    # Apply the name drops first so the address pass below runs on the reduced dict and never
+    # re-processes a declared alias. dict.fromkeys dedups the delete list while preserving order.
+    for key in dict.fromkeys(keys_to_delete):
+        post_state_dict.pop(key, None)
+
+    # Address backstop (pre-existing, unchanged): drop any remaining keys that still share a
+    # data_ptr. Declared ties are already gone above, so this only catches an undeclared
+    # same-address share (an unquantized/unpacked tie); a quantized tie packs to distinct storage
+    # and never reaches here. Zero-pointer (meta) tensors are left to serialization.
+    seen_tensors: dict = {}
+    backstop_delete = []
     for key, value in post_state_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Use tensor data pointer to identify tied weights
+        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
             tensor_id = value.data_ptr()
             if tensor_id in seen_tensors:
-                # This is a tied weight, mark for deletion and warn
-                keys_to_delete.append(key)
+                backstop_delete.append(key)
                 logger.warning(
                     f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
                     f"Removing duplicate '{key}' from the exported state dict."
                 )
             else:
                 seen_tensors[tensor_id] = key
-
-    for key in keys_to_delete:
+    for key in backstop_delete:
         del post_state_dict[key]
+
+    # If a dense tie was dropped but a non-`bias` key still remains under its prefix, it is likely
+    # a new quantizer companion missing from `weight_suffixes` -- warn so it gets added.
+    for pre in dropped_dense_prefixes:
+        leftovers = [
+            k for k in post_state_dict if k.startswith(f"{pre}.") and k.rsplit(".", 1)[-1] != "bias"
+        ]
+        if leftovers:
+            logger.warning(
+                f"Tied weight '{pre}.weight' was deduped but companion key(s) {leftovers} remain "
+                f"under '{pre}.'; likely an un-enumerated quantizer companion -- add its suffix to "
+                f"weight_suffixes in postprocess_state_dict so it is dropped with the tie."
+            )
 
     return post_state_dict
 
@@ -1139,40 +1408,57 @@ def _update_svdquant(modules, new_pre_quant_scale):
         finish_stats_collection(module.weight_quantizer)
 
 
-# Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
-PQS_FUSE_MODULE_MAPPING = [
-    # Attention: Fuse o_proj's pre_quant_scale into v_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
-    #   After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
-    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention"], ("v_proj", "o_proj")),
-    # MLP: Fuse down_proj's pre_quant_scale into up_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: down_proj_out = {[act_fn(self.gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
-    #   After:  down_proj_out = {[act_fn(self.gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
-    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP"], ("up_proj", "down_proj")),
-]
+# AWQ pre_quant_scale fusion rules are per-model data and live in modelopt/torch/models/*:
+#   - Attention: fold o_proj's pre_quant_scale into v_proj's output dimension.
+#       Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
+#       After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
+#   - MLP: fold down_proj's pre_quant_scale into up_proj's output dimension.
+#       Before: down_proj_out = {[act_fn(gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
+#       After:  down_proj_out = {[act_fn(gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
+# Each rule is a (module_class_substrings, fuse_into, fuse_from) triple.
 
 
-def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
+def _pqs_fuse_rules(model_type: str | None):
+    """The AWQ pre_quant_scale fusion rules to try, preferring the model's own.
+
+    A rule asserts a mathematical equivalence for one model's modules, so a registered
+    model uses only what its own spec declares. The aggregate across every spec is the
+    fallback for a model with no spec, or one whose spec declares no rules -- which is
+    what this did for every model before. That fallback is safe rather than merely
+    tolerated, because each rule is keyed on class-name substrings (``LlamaAttention``,
+    ``Qwen3MoeMLP``) that cannot match another family's modules.
+    """
+    spec = get_spec(model_type) if model_type else None
+    export_spec = spec.export_spec if spec is not None else None
+    if export_spec is not None and export_spec.pqs_fuse_rules:
+        return export_spec.pqs_fuse_rules
+    return list_all_possible("pqs_fuse_rules")
+
+
+def fuse_prequant_to_linear(
+    model: torch.nn.Module, fuse_grouped_heads=False, model_type: str | None = None
+):
     """Fuse pre_quant_scale to the linear weights if possible.
 
     Args:
         model: The model to fuse pre_quant_scale to.
         fuse_grouped_heads: If True, fuse the pre_quant_scale even if dimension between pre_quant_scale
             and linear weights is not the same.
+        model_type: The root model's HF model type, used to prefer its own fusion rules.
 
     Returns:
         fused_modules: A list of modules of which pre_quant_scale is fused to the previous linear layer.
     """
+    # Resolved once: this is a fixed vocabulary for the whole walk, and recomputing it per
+    # module rescans every registered spec.
+    fuse_rules = _pqs_fuse_rules(model_type)
+
     # Fuse pre_quant_scale to the linear weights
     for _, module in model.named_modules():
-        for module_map in PQS_FUSE_MODULE_MAPPING:
-            target_module_list = module_map[0]
-            linear_pair = module_map[1]
+        for target_module_list, fuse_into, fuse_from in fuse_rules:
             if any(module_name in type(module).__name__ for module_name in target_module_list):
-                linear_fuse_into = module.get_submodule(linear_pair[0])
-                linear_pqs_from = module.get_submodule(linear_pair[1])
+                linear_fuse_into = module.get_submodule(fuse_into)
+                linear_pqs_from = module.get_submodule(fuse_from)
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
@@ -1233,10 +1519,23 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    if any(
-        name in type(module).__name__
-        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-    ):
+    """Whether this norm stores ``w - 1``, so export must fold scales into ``weight + 1``.
+
+    The names are per-model data (``ExportSpec.weight_plus_one_norm_names``) but the match
+    is by *substring*, not exact name, which is what the hardcoded list this replaced did.
+    That is load-bearing rather than sloppy: the convention travels by family, and
+    transformers derives several norms whose names embed a registered one --
+    ``DiffusionGemmaRMSNorm``, ``RecurrentGemmaRMSNorm``, ``T5GemmaRMSNorm``,
+    ``T5Gemma2RMSNorm``, ``VaultGemmaRMSNorm`` all carry the Gemma convention. Exact
+    matching would drop them silently, and the failure is wrong numerics in an exported
+    checkpoint rather than an error.
+
+    Checked against every class in the MRO so quantized subclasses still match.
+    ``zero_centered_gamma`` is the structural fallback for norms that announce it.
+    """
+    registered = [n.lower() for n in list_all_possible("weight_plus_one_norm_names")]
+    mro_names = [cls.__name__.lower() for cls in type(module).__mro__]
+    if any(name in cls_name for cls_name in mro_names for name in registered):
         return True
 
     return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
@@ -1257,9 +1556,10 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
-        layernorm_module.weight.device
-    )
+    if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
+        return
+
+    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
     if _layernorm_uses_weight_plus_one(layernorm_module):
         # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
         fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
@@ -1349,6 +1649,109 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 module.weight_quantizer.amax = weight_amax
 
 
+def seed_carried_over_exclusions(model: nn.Module, quant_config: dict) -> list[str]:
+    """Add carried-weight module names to an already-built ``quant_config``'s exclusions.
+
+    The single place carried weights reach ``exclude_modules``, for both exporters.
+    :func:`get_quant_config` calls it once the per-layer pass is done, and the layerwise exporter
+    calls it again from ``finalize()`` -- it snapshots its config during ``bind()``, while
+    calibration is still running and long before ``export_hf_checkpoint`` records what it carried,
+    so it has no chance to see them any earlier. Without it a layerwise export copies GLM-4.7's
+    ``mtp.safetensors`` into the checkpoint with nothing in ``exclude_modules``: the same
+    NVBug 5718750 failure this pass exists to prevent, reached through the other exporter.
+
+    Exclusions are exact module names rather than prefix wildcards. That keeps both exporters
+    emitting the same thing, and a literal can never over-match a module the export did in fact
+    quantize -- the risk :func:`_prefix_wildcard_summarize_exclude_modules` has to guard against by
+    consulting ``quantized_layers``, which is unavailable by the time the layerwise path runs.
+
+    Returns the names it added. No-op when the export is not uniformly quantized -- there is no
+    single ``quant_algo`` for a deployment framework to misapply, so there is nothing to exclude
+    a weight from.
+    """
+    names = _get_carried_over_module_names(model)
+    if not names:
+        return []
+    quantization = quant_config.get("quantization")
+    if not isinstance(quantization, dict):
+        return []
+    if quantization.get("quant_algo") in (None, QUANTIZATION_NONE, "MIXED_PRECISION"):
+        return []
+    exclude_modules = quantization.setdefault("exclude_modules", [])
+    added = [n for n in names if not any(fnmatch.fnmatch(n, p) for p in exclude_modules)]
+    if added:
+        exclude_modules.extend(added)
+        exclude_modules.sort()
+    return added
+
+
+def _get_carried_over_module_names(model: nn.Module) -> list[str]:
+    """Return module names for checkpoint weights carried over without a module.
+
+    Weights the loader could not place -- an MTP head, an auxiliary tower -- are copied into
+    the export verbatim from the source checkpoint (see
+    :func:`modelopt.torch.export.unified_export_hf.read_unplaced_weights`). They
+    have no module in the live model, so the quantizer walk in :func:`get_quant_config` cannot
+    see them and would leave them out of ``exclude_modules`` even though their original-precision
+    weight is written to the checkpoint. A deployment framework then reads the top-level
+    ``quant_algo`` and tries to load e.g. an MTP ``eh_proj`` as an FP8 weight.
+
+    This is the same failure the MoE-router pass above exists to prevent -- only the reason the
+    module is invisible differs (no quantizer there, no module at all here).
+
+    Prefers ``_modelopt_carried_over_names``, which the export records once it knows what it
+    actually wrote -- carried tensors plus the off-index sidecars copied verbatim. Those sidecars
+    are never ``unexpected_keys``, so the unplaced list alone would miss GLM-4.7's
+    ``mtp.safetensors`` and leave its tensors in the export with nothing in ``exclude_modules``.
+
+    A state-dict key is ``<module path>.<parameter name>``, so the owning module is the key with
+    its last component removed. Keys without a dot are top-level tensors with no module and are
+    skipped.
+    """
+    keys = getattr(model, "_modelopt_carried_over_names", None)
+    if keys is None:
+        # Export has not recorded yet (or this model never went through it). The recorded unplaced
+        # list is the best available answer; it is wider than what gets written, so it can name a
+        # module the export did not emit. That way round is harmless -- a deployment framework
+        # ignores an exclusion it finds no weight for, but fails loading one it was never told
+        # about.
+        keys = getattr(model, "_modelopt_unplaced_source_keys", None) or []
+    return sorted({key.rsplit(".", 1)[0] for key in keys if "." in key})
+
+
+def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
+    """Return the names of MoE router/gate submodules left in original precision.
+
+    A module is added to ``exclude_modules`` during unified HF export only if it carries a
+    quantizer (even a disabled one) -- see :func:`get_quant_config`. MoE routers are kept
+    unquantized on purpose, but on ``transformers>=5.0`` they are no longer ``nn.Linear``
+    modules (e.g. ``TopKRouter``), so ``mtq.quantize`` never attaches a quantizer to them.
+    Without this, the BF16 router weight is written to the checkpoint but omitted from
+    ``exclude_modules``, and deployment frameworks (vLLM / SGLang) then try to load it as a
+    quantized weight -- e.g. ``AssertionError: Tried to load weights of size [E, H] to a
+    parameter of size [E, H/2]`` for Qwen3-MoE.
+
+    Routers are detected structurally: an MoE block exposes an ``experts`` container plus a
+    ``gate`` / ``router`` (or ``shared_expert_gate``) submodule that owns a weight tensor.
+    Routers that the user opted to quantize (a non-NONE format) are skipped.
+    """
+    router_attrs = ("gate", "router", "shared_expert_gate")
+    router_names = []
+    for name, module in model.named_modules():
+        if not hasattr(module, "experts"):
+            continue
+        for attr in router_attrs:
+            router = getattr(module, attr, None)
+            if not isinstance(router, nn.Module):
+                continue
+            if not isinstance(getattr(router, "weight", None), torch.Tensor):
+                continue
+            if get_quantization_format(router) != QUANTIZATION_NONE:
+                continue
+            router_names.append(f"{name + '.' if name else ''}{attr}")
+    return router_names
+
+
 def get_quant_config(
     model: nn.Module,
     is_modelopt_qlora: bool = False,
@@ -1370,7 +1773,7 @@ def get_quant_config(
     block_size = None
 
     # Create base config
-    quant_config = {
+    quant_config: dict[str, Any] = {
         "producer": {
             "name": "modelopt",
             "version": __version__,
@@ -1388,7 +1791,14 @@ def get_quant_config(
     # It also holds awq_block_size information for applicable layers.
     layer_config_dict = {}
 
-    kv_cache_format = QUANTIZATION_NONE
+    kv_cache_formats: set[str] = set()
+    kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
+    language_model_lineage = get_language_model_from_vl(model)
+    language_model_modules = (
+        None
+        if language_model_lineage is None
+        else {id(module) for module in language_model_lineage[-1].modules()}
+    )
     for name, module in dict(model.named_modules()).items():
         # Check for standard quantizers or any quantizers from weight attributes
         weight_names = list(weight_attr_names(module))
@@ -1441,27 +1851,81 @@ def get_quant_config(
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
 
-        not_enabled = SimpleNamespace(is_enabled=False)
-
         # Find kv cache quant format
-        if (
-            getattr(module, "k_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "v_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "output_quantizer", not_enabled).is_enabled
-        ):
+        is_language_model_module = (
+            language_model_modules is None or id(module) in language_model_modules
+        )
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        output_quantizer = getattr(module, "output_quantizer", None)
+        # Projection modules also expose output_quantizer; it is a KV fallback only on an
+        # attention boundary that has at least one K/V quantizer attribute.
+        is_kv_boundary = k_quantizer is not None or v_quantizer is not None
+        enabled_kv_quantizers = [
+            quantizer
+            for quantizer in (k_quantizer, v_quantizer, output_quantizer)
+            if is_kv_boundary and quantizer is not None and quantizer.is_enabled
+        ]
+        if enabled_kv_quantizers and is_language_model_module:
             module_kv_quant = get_kv_cache_dtype(module)
-            if kv_cache_format == QUANTIZATION_NONE:
-                kv_cache_format = module_kv_quant
-            else:
-                assert kv_cache_format == module_kv_quant, (
-                    "Do not support mixed precision kv cache quantization"
-                )
+            if module_kv_quant != QUANTIZATION_NONE:
+                kv_cache_formats.add(module_kv_quant)
+                # Per-layer mixed-KV metadata is defined only for an actual enabled K/V pair.
+                # Keep the output-quantizer/single-sided Megatron fallback top-level only.
+                if (
+                    k_quantizer is not None
+                    and v_quantizer is not None
+                    and k_quantizer.is_enabled
+                    and v_quantizer.is_enabled
+                ):
+                    kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
+
+    # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
+    # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
+    # be missing from exclude_modules even though their BF16 weight is exported -- causing
+    # deployment frameworks to load them as quantized weights. Record them explicitly as
+    # unquantized so they land in exclude_modules.
+    for router_name in _get_unquantized_moe_router_names(model):
+        layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
 
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    if kv_cache_format is not None:
-        quant_config["quantization"]["kv_cache_quant_algo"] = kv_cache_format
+    # Carried weights are seeded AFTER the per-layer pass, through the same helper the layerwise
+    # exporter calls. Seeding them into layer_config_dict instead would route them through
+    # _prefix_wildcard_summarize_exclude_modules and emit wildcards here, while the layerwise path
+    # -- which can only act once its config is already built -- emits literals: one model, two
+    # exporters, two different-looking quantization_config.ignore. The summarizer cannot serve both,
+    # because it needs `quantized_layers` to avoid a wildcard swallowing a quantized module and
+    # process_layer_quant_config pops that key before returning.
+    seed_carried_over_exclusions(model, quant_config)
+
+    weight_quant_algo = quant_config["quantization"].get("quant_algo")
+    needs_layerwise_kv_metadata = bool(kv_cache_quantized_layers) and (
+        weight_quant_algo is None or len(kv_cache_formats) > 1
+    )
+    if needs_layerwise_kv_metadata:
+        if weight_quant_algo not in (None, "MIXED_PRECISION"):
+            warn(
+                "The exported checkpoint combines uniform quantized weights with a mixed-precision "
+                "KV-cache layer map. Released runtimes do not yet consume "
+                "kv_cache_quantized_layers for uniform-weight ModelOpt checkpoints. Export succeeds "
+                "for artifact inspection only; do not deploy this checkpoint until the runtime "
+                "adds that metadata path. The exported metadata records "
+                "kv_cache_deployment_supported=false.",
+                stacklevel=2,
+            )
+            quant_config["quantization"]["kv_cache_deployment_supported"] = False
+        # KV metadata is orthogonal to weight metadata. In particular, a KV-only search
+        # must preserve BF16 weights instead of synthesizing a weight quantization algorithm.
+        quant_config["quantization"]["kv_cache_quant_algo"] = (
+            next(iter(kv_cache_formats)) if len(kv_cache_formats) == 1 else "MIXED_PRECISION"
+        )
+        quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
+        quant_config["quantization"]["kv_cache_schema_version"] = 1
+    elif len(kv_cache_formats) == 1:
+        # Preserve the pre-AutoQuantize uniform KV schema, including partial coverage.
+        quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
 
     return quant_config
 
@@ -1479,3 +1943,90 @@ def has_quantized_modules(model: nn.Module) -> bool:
         get_quantization_format(sub_module) != QUANTIZATION_NONE
         for _, sub_module in model.named_modules()
     )
+
+
+def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = None) -> int:
+    """Max-merge ``input_quantizer`` amaxes across modules that share a weight, in place.
+
+    Tied modules whose forward paths see different activation ranges (encoder vs decoder in
+    YOCO-style models) must end up with one ``input_scale`` covering every side. Run BEFORE
+    per-module export so the merged amax flows into ``input_scale`` derivation; the model is
+    not expected to be reused afterward.
+
+    Declared ties are grouped by name via :class:`TiedWeightMap` (dense Linears and fused-MoE
+    containers). A physically shared but *undeclared* weight is grouped by ``id(weight)`` as a
+    fallback, so the side the address backstop later drops still had its amax merged in here.
+    Returns the number of groups merged; pass ``tied_map`` to reuse one, else it is built here.
+    """
+    if tied_map is None:
+        tied_map = TiedWeightMap(model)
+
+    by_group: dict = defaultdict(list)
+    for name, m in model.named_modules():
+        # Fused MoE: 3-D source tensors with shared input quantizers
+        first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
+        first_proj = getattr(m, first_proj_attr, None)
+        first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
+        if (
+            hasattr(m, first_proj_input_quantizer_attr)
+            and first_proj is not None
+            and hasattr(m, "down_proj")
+            and first_proj.dim() == 3
+        ):
+            gk = tied_map.container_group_key(name, first_proj_attr)
+            if gk is not None:
+                by_group[("moe", gk)].append(m)
+            else:
+                # Undeclared share: group by projection identity so its amaxes still merge
+                # (symmetric with the dense fallback below).
+                by_group[("moe_shared", id(first_proj))].append(m)
+        # Dense quantized Linear with an input_quantizer
+        elif (
+            hasattr(m, "input_quantizer")
+            and hasattr(m, "weight")
+            and isinstance(m.weight, torch.nn.Parameter)
+        ):
+            gk = tied_map.group_key(f"{name}.weight" if name else "weight")
+            if gk is not None:
+                by_group[("dense", gk)].append(m)
+            else:
+                # Undeclared share: group by object identity so its amaxes still merge.
+                by_group[("dense_shared", id(m.weight))].append(m)
+
+    def _merge(quantizers: list) -> bool:
+        """Max-merge amaxes across the quantizer list. Returns True on merge."""
+        valid = [
+            q
+            for q in quantizers
+            if q is not None
+            and getattr(q, "is_enabled", False)
+            and getattr(q, "_amax", None) is not None
+            and not q._amax.is_meta
+        ]
+        if len(valid) < 2:
+            return False
+        # Require scalar (per-tensor) amax — matches preprocess_linear_fusion.
+        if any(q._amax.numel() != 1 for q in valid):
+            warn(
+                "sync_tied_input_amax: non-scalar input_quantizer amax encountered "
+                "in a tied group; skipping. Only per-tensor input quantizers are "
+                "supported for tied-modules merging."
+            )
+            return False
+        merged = torch.max(torch.stack([q.amax for q in valid]))
+        for q in valid:
+            q.amax = merged.clone()
+        return True
+
+    synced = 0
+    for key, modules in by_group.items():
+        if len(modules) < 2:
+            continue
+        if key[0] == "moe":
+            first_proj_attr = getattr(modules[0], "_first_proj_attr", "gate_up_proj")
+            for q_name in (f"{first_proj_attr}_input_quantizer", "down_proj_input_quantizer"):
+                if _merge([getattr(m, q_name, None) for m in modules]):
+                    synced += 1
+        elif _merge([m.input_quantizer for m in modules]):
+            synced += 1
+    return synced

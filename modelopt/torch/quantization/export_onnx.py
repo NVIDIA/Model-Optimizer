@@ -225,9 +225,12 @@ def _fp8_quantize(
         "Constant",
         value_t=torch.tensor(scale_inv).to(torch_dtype_map[inputs.type().scalarType()]),
     )
-    return g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
+    quantized = g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
         inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
     )
+    # PyTorch runs shape inference before setType for custom ops, so refresh its reliability state.
+    torch._C._jit_pass_onnx_node_shape_type_inference(quantized.node(), g.params_dict, g.opset)
+    return quantized
 
 
 def _fp8_dequantize(
@@ -281,7 +284,7 @@ def scaled_dot_product_attention(
     if hasattr(torch.onnx, "_type_utils"):
         from torch.onnx._type_utils import JitScalarType
     else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter import JitScalarType
+        from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
 
     if hasattr(torch.onnx, "symbolic_opset14"):
         from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
@@ -643,18 +646,19 @@ def configure_linear_module_onnx_quantizers(model):
 
     For modules with block quantization (NVFP4/MXFP8):
     - Weight quantizers use "static" export (TRT_FP4QDQ for NVFP4, DQ-only for MXFP8)
-    - Input/activation quantizers use "dynamic" export (TRT_FP4DynamicQuantize, etc.)
+    - Input/output activation quantizers use "dynamic" export (TRT_FP4DynamicQuantize, etc.)
 
-    This must be set for ALL modules with block quantization, not just nn.Linear,
-    because models like ResNet have non-Linear modules (e.g., MaxPool2d) with NVFP4/MXFP8
-    input quantizers that would otherwise default to the static path and produce
-    TRT_FP4QDQ nodes on activations (which the NVFP4 exporter cannot handle).
+    This must be set for ALL quantizers on activations, not just nn.Linear inputs,
+    because non-Linear modules (e.g., ResNet's MaxPool2d) and enabled output
+    quantizers would otherwise default to the static path and produce TRT_FP4QDQ
+    nodes on activations (which the NVFP4 exporter cannot handle).
     """
     sentinel = object()
     originals: list[tuple] = []
     for _, module in model.named_modules():
         for attr_name, new_value in (
             ("input_quantizer", "dynamic"),
+            ("output_quantizer", "dynamic"),
             ("weight_quantizer", "static"),
         ):
             quantizer = getattr(module, attr_name, None)

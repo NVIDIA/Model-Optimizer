@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -289,6 +290,12 @@ def get_tiny_qwen_image_transformer(**config_kwargs):
         "axes_dims_rope": (8, 4, 4),  # sums to attention_head_dim (16)
     }
     kwargs.update(**config_kwargs)
+    # Drop kwargs the installed diffusers QwenImageTransformer2DModel doesn't accept.
+    # `pooled_projection_dim` is present in the published config.json but was removed
+    # from the constructor in newer diffusers: from_pretrained tolerates the extra
+    # config key, but a direct constructor call raises TypeError.
+    accepted = set(inspect.signature(QwenImageTransformer2DModel.__init__).parameters)
+    kwargs = {k: v for k, v in kwargs.items() if k in accepted}
     return QwenImageTransformer2DModel(**kwargs)
 
 
@@ -311,21 +318,75 @@ def get_tiny_qwen_image_vae(**config_kwargs):
     return AutoencoderKLQwenImage(**kwargs)
 
 
+def _byte_level_unicode_chars() -> list[str]:
+    """The 256 GPT-2/Qwen byte-level BPE unicode characters, in byte order.
+
+    Inlined copy of the standard GPT-2 ``bytes_to_unicode`` mapping (transformers
+    v5 removed it from ``transformers.models.gpt2.tokenization_gpt2``).
+    """
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    return [chr(c) for c in cs]
+
+
+def _build_local_qwen2_tokenizer(out_dir: Path):
+    """Build a tiny, fully offline byte-level Qwen2 tokenizer (no Hub access).
+
+    Uses the GPT-2/Qwen byte->unicode mapping for the 256 single-byte tokens plus
+    Qwen's core special tokens, with an empty merge table (pure byte-level
+    fallback). This is enough to tokenize calibration prompts so the pipeline runs
+    end-to-end; it is not meant for high-quality text.
+    """
+    import json
+
+    import transformers
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vocab = {token: idx for idx, token in enumerate(_byte_level_unicode_chars())}
+    for special in ("<|endoftext|>", "<|im_start|>", "<|im_end|>"):
+        vocab.setdefault(special, len(vocab))
+    (out_dir / "vocab.json").write_text(json.dumps(vocab))
+    (out_dir / "merges.txt").write_text("#version: 0.2\n")
+
+    special_kwargs = {
+        "unk_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<|endoftext|>",
+    }
+    tokenizer_params = inspect.signature(transformers.Qwen2Tokenizer.__init__).parameters
+    if "vocab_file" in tokenizer_params:
+        # transformers v4: slow tokenizer reads vocab/merges from files.
+        return transformers.Qwen2Tokenizer(
+            vocab_file=str(out_dir / "vocab.json"),
+            merges_file=str(out_dir / "merges.txt"),
+            **special_kwargs,
+        )
+    # transformers v5: tokenizers-backed class takes the vocab dict and merge
+    # list directly (``vocab_file=`` would be silently swallowed by **kwargs).
+    return transformers.Qwen2Tokenizer(vocab=vocab, merges=[], **special_kwargs)
+
+
 def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
-    """Create and save a tiny Qwen-Image pipeline to a directory (SKETCH).
+    """Create and save a tiny, fully offline Qwen-Image pipeline to a directory.
 
-    Mirrors ``create_tiny_wan22_pipeline_dir``. Needs in-container validation; the
-    fragile piece is the Qwen2.5-VL text encoder. This prefers a tiny-random HF model
-    (as Wan uses ``hf-internal-testing/tiny-random-t5``); if that id drifts or the
-    config schema differs across transformers versions, copy the text-encoder
-    construction from diffusers' own QwenImage fast test
-    (``tests/pipelines/qwenimage/test_qwenimage.py``).
-
-    For the DMD2 mock-data training path the transformer consumes the dataloader's
-    embeddings rather than the text encoder, so the bundled tiny text encoder only
-    needs to load; its hidden size is intentionally decoupled from the transformer's
-    ``joint_attention_dim`` (set the dataloader's ``text_embed_dim`` to match instead).
-    The saved dir loads with ``QwenImagePipeline.from_pretrained(path)``.
+    Mirrors diffusers' ``QwenImagePipelineFastTests.get_dummy_components`` but with
+    no Hub access: the Qwen2.5-VL text encoder is built inline from a tiny
+    ``Qwen2_5_VLConfig``, and the tokenizer is built locally by
+    ``_build_local_qwen2_tokenizer`` (byte-level vocab written to a temp dir). The
+    transformer uses ``num_layers=6`` so the first-2/last-2 block-range recipe is
+    valid, and its ``joint_attention_dim`` matches the text encoder ``hidden_size``
+    (16) so the pipeline runs end-to-end during quantization calibration. The saved
+    dir loads with ``QwenImagePipeline.from_pretrained(path)``.
     """
     if QwenImageTransformer2DModel is None or AutoencoderKLQwenImage is None:
         pytest.skip("QwenImage diffusers classes not available in this diffusers version.")
@@ -333,27 +394,52 @@ def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
 
     transformers = pytest.importorskip("transformers")
 
-    # Tiny Qwen2.5-VL text encoder + matching Qwen2 tokenizer (loaded, but bypassed
-    # during DMD2 mock-data training).
-    # NOTE (validated 2026-06-06): the hf-internal-testing id below does NOT exist on the
-    # Hub, so this fixture currently skips. To make the recipe e2e runnable in CI,
-    # construct the encoder inline from a tiny ``Qwen2_5_VLConfig`` (nested text + vision
-    # config) — mirror diffusers' ``QwenImagePipelineFastTests.get_dummy_components`` in
-    # ``tests/pipelines/qwenimage/test_qwenimage.py``.
-    tiny_id = "hf-internal-testing/tiny-random-Qwen2_5_VLForConditionalGeneration"
-    try:
-        text_encoder = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(tiny_id)
-        tokenizer = transformers.Qwen2Tokenizer.from_pretrained(tiny_id)
-    except Exception as exc:  # pragma: no cover - depends on hub availability / version
-        pytest.skip(
-            f"tiny Qwen2.5-VL text encoder unavailable ({exc}); "
-            "copy the fixture from diffusers' QwenImage fast test"
-        )
+    # Tiny Qwen2.5-VL text encoder, built offline from a tiny config (no Hub model
+    # load), mirroring diffusers' QwenImagePipelineFastTests.get_dummy_components.
+    qwen_vl_config = transformers.Qwen2_5_VLConfig(
+        text_config={
+            "hidden_size": 16,
+            "intermediate_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "rope_scaling": {
+                "mrope_section": [1, 1, 2],
+                "rope_type": "default",
+                "type": "default",
+            },
+            "rope_theta": 1000000.0,
+        },
+        vision_config={
+            "depth": 2,
+            "hidden_size": 16,
+            "intermediate_size": 16,
+            "num_heads": 2,
+            "out_hidden_size": 16,
+        },
+        hidden_size=16,
+        vocab_size=152064,
+        vision_end_token_id=151653,
+        vision_start_token_id=151652,
+        vision_token_id=151654,
+    )
+    text_encoder = transformers.Qwen2_5_VLForConditionalGeneration(qwen_vl_config).eval()
+
+    # Deterministic local byte-level Qwen2 tokenizer (built offline; no Hub, no skip).
+    tokenizer = _build_local_qwen2_tokenizer(tmp_path / "qwen_tokenizer")
 
     torch.manual_seed(0)
-    transformer = get_tiny_qwen_image_transformer()
+    # num_layers=6 so the first-2/last-2 block-range recipe (which needs >=6 blocks)
+    # is valid; joint_attention_dim must match the text encoder hidden_size (16).
+    transformer = get_tiny_qwen_image_transformer(
+        num_layers=6,
+        in_channels=16,
+        out_channels=4,
+        joint_attention_dim=16,
+        num_attention_heads=3,
+    )
     torch.manual_seed(0)
-    vae = get_tiny_qwen_image_vae()
+    vae = get_tiny_qwen_image_vae(z_dim=4, latents_mean=[0.0] * 4, latents_std=[1.0] * 4)
 
     scheduler = FlowMatchEulerDiscreteScheduler(
         base_image_seq_len=256,

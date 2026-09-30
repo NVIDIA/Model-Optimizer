@@ -15,6 +15,8 @@
 
 import torch
 
+from modelopt.torch.quantization.nn import TensorQuantizer
+
 
 def quant(x, amax, num_bits=8, fake=False, narrow_range=True):
     """Quantize x using torch."""
@@ -32,3 +34,23 @@ def quant(x, amax, num_bits=8, fake=False, narrow_range=True):
 
 def get_model_size(model):
     return sum([p.element_size() * p.nelement() for p in model.parameters()])
+
+
+def nvfp4_static_amax_dtypes(model):
+    """Map of ``module name -> amax dtype`` for every NVFP4 static quantizer with an amax."""
+    return {
+        name: module.amax.dtype
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+        and module.is_nvfp4_static
+        and module.amax is not None
+    }
+
+
+def assert_nvfp4_static_amaxes_fp32(amax_dtypes, model_dtype, label):
+    """NVFP4 static amaxes must stay fp32 regardless of the model's own dtype."""
+    assert amax_dtypes, f"{label}: expected NVFP4 static amaxes for model dtype {model_dtype}"
+    assert all(amax_dtype == torch.float32 for amax_dtype in amax_dtypes.values()), (
+        f"{label}: expected all NVFP4 static amaxes to be fp32 for model dtype {model_dtype}, "
+        f"got {amax_dtypes}"
+    )

@@ -125,7 +125,7 @@ class QTensorWrapper(torch.nn.Parameter):
         changing_device, changing_dtype, *_ = torch._C._nn._parse_to(*args, **kwargs)
         if changing_device:
             self.data = self.data.to(device=changing_device)
-        dtype = changing_dtype if changing_dtype else self.metadata["dtype"]
+        dtype = changing_dtype or self.metadata["dtype"]
         return QTensorWrapper(
             self.metadata["qtensor_class"](self.metadata["shape"], dtype, self.data)
         )

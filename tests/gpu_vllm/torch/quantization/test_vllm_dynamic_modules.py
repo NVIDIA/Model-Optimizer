@@ -28,9 +28,15 @@ TinyDeepseekV3 (+ MLAAttention).
 
 from __future__ import annotations
 
+import builtins
 import gc
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+import torch
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
     create_tiny_llama_dir,
@@ -40,14 +46,604 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
     _QuantFusedMoEBase,
+    _QuantVLLMAttention,
     _VLLMParallelLinear,
+    build_vllm_attention_quant_cfg,
+    configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
+
+
+def _load_example_module(name: str):
+    """Import a module from ``examples/vllm_serve/`` by path (not an installed package)."""
+    path = Path(__file__).parents[4] / "examples/vllm_serve" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"{name}_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _calibration_worker(
+    num_blocks: int,
+    *,
+    cache_specs=("attention", "mamba"),
+    needs_kv_cache_zeroing=True,
+):
+    cache_groups = [SimpleNamespace(kv_cache_spec=spec) for spec in cache_specs]
+    return SimpleNamespace(
+        model_runner=SimpleNamespace(
+            kv_cache_config=SimpleNamespace(
+                kv_cache_groups=cache_groups,
+                num_blocks=num_blocks,
+                needs_kv_cache_zeroing=needs_kv_cache_zeroing,
+            )
+        )
+    )
+
+
+def _patch_vllm_imports(monkeypatch, modules):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in modules:
+            imported = modules[name]
+            if isinstance(imported, BaseException):
+                raise imported
+            return imported
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def _launcher_import_modules():
+    """Build isolated vLLM module stubs for launcher import compatibility tests."""
+    entrypoints = SimpleNamespace(
+        current_run_server=Mock(name="current_run_server"),
+        legacy_run_server=Mock(name="legacy_run_server"),
+        current_arg_parser=Mock(name="current_arg_parser"),
+        legacy_arg_parser=Mock(name="legacy_arg_parser"),
+    )
+    modules = {
+        "uvloop": SimpleNamespace(run=Mock()),
+        "vllm": SimpleNamespace(__version__="0.30.0"),
+        "vllm_mlflow_utils": SimpleNamespace(
+            MLFLOW_ENV_VARS=set(),
+            add_mlflow_args=Mock(),
+            resolve_mlflow_args=Mock(),
+        ),
+        "vllm.entrypoints.launchers.api_server.entry": SimpleNamespace(
+            run_server=entrypoints.current_run_server
+        ),
+        "vllm.entrypoints.openai.api_server": SimpleNamespace(
+            run_server=entrypoints.legacy_run_server
+        ),
+        "vllm.entrypoints.cli.serve": SimpleNamespace(
+            make_arg_parser=entrypoints.current_arg_parser
+        ),
+        "vllm.entrypoints.openai.cli_args": SimpleNamespace(
+            make_arg_parser=entrypoints.legacy_arg_parser
+        ),
+        "vllm.utils.argparse_utils": SimpleNamespace(FlexibleArgumentParser=Mock()),
+        "vllm.executor.ray_distributed_executor": SimpleNamespace(
+            RayDistributedExecutor=SimpleNamespace(ADDITIONAL_ENV_VARS=set())
+        ),
+    }
+    return modules, entrypoints
+
+
+@pytest.mark.parametrize(
+    ("run_server_missing", "arg_parser_missing", "uses_legacy"),
+    [
+        (None, None, False),
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.cli.serve",
+            True,
+        ),
+        ("vllm.entrypoints", "vllm.entrypoints", True),
+    ],
+    ids=("current", "legacy", "missing-parent"),
+)
+def test_vllm_serve_entrypoint_layouts(
+    monkeypatch, run_server_missing, arg_parser_missing, uses_legacy
+):
+    """Resolve current entrypoints and valid legacy fallbacks."""
+    modules, entrypoints = _launcher_import_modules()
+    if run_server_missing is not None:
+        modules["vllm.entrypoints.launchers.api_server.entry"] = ModuleNotFoundError(
+            name=run_server_missing
+        )
+    if arg_parser_missing is not None:
+        modules["vllm.entrypoints.cli.serve"] = ModuleNotFoundError(name=arg_parser_missing)
+    _patch_vllm_imports(monkeypatch, modules)
+
+    launcher = _load_example_module("vllm_serve_fakequant")
+
+    expected_run_server = (
+        entrypoints.legacy_run_server if uses_legacy else entrypoints.current_run_server
+    )
+    expected_arg_parser = (
+        entrypoints.legacy_arg_parser if uses_legacy else entrypoints.current_arg_parser
+    )
+    assert launcher.run_server is expected_run_server
+    assert launcher.make_arg_parser is expected_arg_parser
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "fallback"),
+    [
+        (
+            "vllm.entrypoints.launchers.api_server.entry",
+            "vllm.entrypoints.openai.api_server",
+        ),
+        ("vllm.entrypoints.cli.serve", "vllm.entrypoints.openai.cli_args"),
+    ],
+    ids=("run-server", "argument-parser"),
+)
+def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch, entrypoint, fallback):
+    """Do not replace a missing entrypoint dependency with a fallback import error."""
+    modules, _ = _launcher_import_modules()
+    dependency_error = ModuleNotFoundError(name="vllm_dependency")
+    modules[entrypoint] = dependency_error
+    modules[fallback] = AssertionError("fallback must not be imported")
+    _patch_vllm_imports(monkeypatch, modules)
+
+    with pytest.raises(ModuleNotFoundError) as raised:
+        _load_example_module("vllm_serve_fakequant")
+
+    assert raised.value is dependency_error
+
+
+def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
+    """The current vLLM adapter must forward every warmup reservation argument."""
+    module = _load_example_module("vllm_ptq_utils")
+    reserved_block_count = Mock(return_value=4)
+    _patch_vllm_imports(
+        monkeypatch,
+        {"vllm.v1.worker.gpu.warmup": SimpleNamespace(_reserved_block_count=reserved_block_count)},
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=3),
+        max_model_len=2048,
+    )
+    kv_cache_spec = object()
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, kv_cache_spec) == 4
+    reserved_block_count.assert_called_once_with(
+        128,
+        kv_cache_spec,
+        num_lookahead_tokens=3,
+        max_model_len=2048,
+        max_encoder_len=0,
+    )
+
+
+def test_get_calibration_block_count_reserves_one_kpool_tail_block(monkeypatch):
+    """Kpool's circular tail cache owns exactly one physical block per request."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class KpoolTailSpec:
+        pass
+
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, first_spec):
+            self.first_spec = first_spec
+
+    reserved_block_count = Mock(return_value=32)
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": SimpleNamespace(
+                _reserved_block_count=reserved_block_count
+            ),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                KpoolTailSpec=KpoolTailSpec,
+                UniformTypeKVCacheSpecs=UniformTypeKVCacheSpecs,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        max_model_len=1024,
+    )
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(128, KpoolTailSpec()) == 1
+    assert block_count(128, UniformTypeKVCacheSpecs(KpoolTailSpec())) == 1
+    reserved_block_count.assert_not_called()
+
+
+def test_get_calibration_block_count_uses_vllm_026_reservation_policy(monkeypatch):
+    """The vLLM 0.26 adapter must preserve its cross-attention and Mamba rules."""
+    module = _load_example_module("vllm_ptq_utils")
+
+    class CrossAttentionSpec:
+        block_size = 16
+
+    class MambaSpec:
+        block_size = 16
+        mamba_cache_mode = "align"
+        num_speculative_blocks = 2
+
+    cdiv = Mock(
+        side_effect=lambda numerator, denominator: (numerator + denominator - 1) // denominator
+    )
+    _patch_vllm_imports(
+        monkeypatch,
+        {
+            "vllm.v1.worker.gpu.warmup": ImportError("0.28 helper unavailable"),
+            "vllm.utils.math_utils": SimpleNamespace(cdiv=cdiv),
+            "vllm.v1.kv_cache_interface": SimpleNamespace(
+                CrossAttentionSpec=CrossAttentionSpec,
+                MambaSpec=MambaSpec,
+            ),
+        },
+    )
+    model_runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        max_model_len=2048,
+    )
+
+    block_count = module._get_calibration_block_count(model_runner)
+
+    assert block_count is not None
+    assert block_count(33, SimpleNamespace(block_size=16)) == 3
+    assert block_count(33, CrossAttentionSpec()) == 0
+    assert block_count(33, MambaSpec()) == 5
+    assert cdiv.call_args_list == [
+        ((33, 16),),
+        ((0, 16),),
+        ((33, 16),),
+    ]
+
+
+def test_allocate_calibration_blocks_assigns_non_null_blocks(monkeypatch):
+    """Scratch block tables must use unique non-null blocks for every request and group."""
+    module = _load_example_module("vllm_ptq_utils")
+    block_count = Mock(side_effect=[1, 2, 2, 1])
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=block_count),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(num_blocks=7),
+        sequence_lengths=[8, 16],
+    )
+
+    assert block_tables == [
+        ([1], [2, 3]),
+        ([4, 5], [6]),
+    ]
+    assert block_count.call_args_list == [
+        ((8, "attention"),),
+        ((8, "mamba"),),
+        ((16, "attention"),),
+        ((16, "mamba"),),
+    ]
+
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = (
+        [1, 2, 3, 4, 5, 6] if "new_block_ids_to_zero" in scheduler_fields else None
+    )
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_skips_zeroing_for_attention_only_cache(monkeypatch):
+    """Attention-only caches have no block zeroer and must receive an empty zeroing list."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(return_value=1)),
+    )
+
+    block_tables, blocks_to_zero = module._allocate_calibration_blocks(
+        _calibration_worker(
+            num_blocks=4,
+            cache_specs=("attention",),
+            needs_kv_cache_zeroing=False,
+        ),
+        sequence_lengths=[8],
+    )
+
+    assert block_tables == [([1],)]
+    scheduler_fields = {field.name for field in module.dataclasses.fields(module.SchedulerOutput)}
+    expected_blocks_to_zero = [] if "new_block_ids_to_zero" in scheduler_fields else None
+    assert blocks_to_zero == expected_blocks_to_zero
+
+
+def test_allocate_calibration_blocks_rejects_insufficient_capacity(monkeypatch):
+    """Scratch block allocation must account for block 0 being unavailable."""
+    module = _load_example_module("vllm_ptq_utils")
+    monkeypatch.setattr(
+        module,
+        "_get_calibration_block_count",
+        Mock(return_value=Mock(side_effect=[1, 2, 2, 1])),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Calibration batch requires 6 KV cache blocks, "
+            r"but only 5 non-null blocks are available\."
+        ),
+    ):
+        module._allocate_calibration_blocks(
+            _calibration_worker(num_blocks=6),
+            sequence_lengths=[8, 16],
+        )
+
+
+@pytest.mark.parametrize("has_calibration_error", [False, True])
+def test_cleanup_failure_preserves_calibration_error(has_calibration_error):
+    """Cleanup must fail closed without replacing an active calibration error."""
+    module = _load_example_module("vllm_ptq_utils")
+    execute_error = RuntimeError("scheduler cleanup failed")
+    finish_error = RuntimeError("legacy cleanup failed")
+    calibration_error = ValueError("calibration failed") if has_calibration_error else None
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=execute_error),
+        model_runner=SimpleNamespace(finish_requests=Mock(side_effect=finish_error)),
+    )
+
+    expected_error = calibration_error or finish_error
+    with pytest.raises(type(expected_error)) as raised:
+        module._cleanup_calibration_requests(worker, object(), calibration_error)
+
+    assert raised.value is expected_error
+    if calibration_error is not None:
+        assert calibration_error.__cause__ is finish_error
+    assert finish_error.__cause__ is execute_error
+
+
+@pytest.mark.parametrize("has_calibration_error", [False, True])
+def test_cleanup_without_legacy_fallback_preserves_primary_error(has_calibration_error):
+    """Missing legacy cleanup must preserve the most useful primary error."""
+    module = _load_example_module("vllm_ptq_utils")
+    execute_error = RuntimeError("scheduler cleanup failed")
+    calibration_error = ValueError("calibration failed") if has_calibration_error else None
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=execute_error),
+        model_runner=SimpleNamespace(),
+    )
+
+    expected_error = calibration_error or execute_error
+    with pytest.raises(type(expected_error)) as raised:
+        module._cleanup_calibration_requests(worker, object(), calibration_error)
+
+    assert raised.value is expected_error
+    if calibration_error is not None:
+        assert calibration_error.__cause__ is execute_error
+
+
+def test_cleanup_uses_legacy_fallback():
+    """A successful legacy cleanup may recover from an unsupported scheduler step."""
+    module = _load_example_module("vllm_ptq_utils")
+    cleanup_output = object()
+    finish_requests = Mock()
+    worker = SimpleNamespace(
+        execute_model=Mock(side_effect=RuntimeError("unsupported scheduler cleanup")),
+        model_runner=SimpleNamespace(finish_requests=finish_requests),
+    )
+
+    module._cleanup_calibration_requests(worker, cleanup_output, calibration_error=None)
+
+    finish_requests.assert_called_once_with(cleanup_output)
+
+
+class _NativeAttention(torch.nn.Module):
+    def forward(self, query, key, value, *args, **kwargs):
+        return query, key, value
+
+
+class _TestQuantVLLMAttention(_QuantVLLMAttention, _NativeAttention):
+    pass
+
+
+def _new_attention(cls):
+    attention = object.__new__(cls)
+    torch.nn.Module.__init__(attention)
+    return attention
+
+
+def _nvfp4_quantizer(*, block_size=16, enabled=True):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: block_size, "type": "dynamic", "scale_bits": (4, 3)},
+            enable=enabled,
+        )
+    )
+    return quantizer
+
+
+def test_attention_setup_keeps_qkv_only_checkpoint_surface(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = _new_attention(_TestQuantVLLMAttention)
+
+    attention._setup()
+
+    quantizer_names = ("q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer")
+    assert set(dict(attention.named_children())) == set(quantizer_names)
+    for name in quantizer_names:
+        getattr(attention, name).amax = torch.tensor(1.0)
+    assert set(attention.state_dict()) == {f"{name}._amax" for name in quantizer_names}
+    assert not hasattr(attention, "_query_quant_in_kernel")
+    assert not hasattr(attention, "_value_quant_in_kernel")
+
+    attention.k_bmm_quantizer = _nvfp4_quantizer()
+    attention.v_bmm_quantizer = _nvfp4_quantizer()
+    attention.device, attention.dtype = torch.device("cpu"), torch.float32
+    attention.modelopt_post_restore()
+    assert not hasattr(attention.k_bmm_quantizer, "_amax")
+    assert not hasattr(attention.v_bmm_quantizer, "_amax")
+
+
+def test_configure_vllm_nvfp4_attention_quantizers_is_attention_scoped(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+    linear = torch.nn.Linear(4, 4)
+    attention.unrelated_linear = linear
+    original_linear_type = type(linear)
+
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention, device="cpu", dtype=torch.bfloat16
+    )
+
+    assert converted is attention
+    assert isinstance(converted, _QuantVLLMAttention)
+    assert converted.device == torch.device("cpu")
+    assert converted.dtype == torch.bfloat16
+    assert type(linear) is original_linear_type
+    for name in ("q", "k", "p", "v"):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled
+        assert quantizer.is_nvfp4_dynamic
+        assert quantizer.block_sizes[-1] == 16
+    assert not hasattr(converted.q_bmm_quantizer, "_amax")
+    assert not hasattr(converted.p_bmm_quantizer, "_amax")
+    assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
+    assert converted.v_bmm_quantizer._amax == 6.0 * 448.0
+    assert not hasattr(converted, "_query_quant_in_kernel")
+    assert not hasattr(converted, "_value_quant_in_kernel")
+
+
+def test_configure_vllm_nvfp4_attention_quantizers_preserves_and_moves_amax(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention, device="cpu", dtype=torch.float16
+    )
+    for name, value in zip(("q", "k", "p", "v"), (13.0, 17.0, 23.0, 19.0), strict=True):
+        getattr(converted, f"{name}_bmm_quantizer").amax = torch.tensor(value)
+    reconfigured = configure_vllm_nvfp4_attention_quantizers(
+        converted, device="cpu", dtype=torch.float16
+    )
+
+    assert reconfigured is converted
+    assert converted.q_bmm_quantizer._amax == 13.0
+    assert converted.k_bmm_quantizer._amax == 17.0
+    assert converted.p_bmm_quantizer._amax == 23.0
+    assert converted.v_bmm_quantizer._amax == 19.0
+
+    configure_vllm_nvfp4_attention_quantizers(converted, device="meta", dtype=torch.float16)
+    for name in ("q", "k", "p", "v"):
+        assert getattr(converted, f"{name}_bmm_quantizer")._amax.device.type == "meta"
+
+
+def test_quant_vllm_attention_forward_skips_only_in_kernel_qv_quantization():
+    attention = _new_attention(_TestQuantVLLMAttention)
+    attention.q_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 1)
+    attention.k_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 2)
+    attention.v_bmm_quantizer = Mock(side_effect=lambda inputs: inputs + 3)
+    query = torch.tensor(10)
+    key = torch.tensor(20)
+    value = torch.tensor(30)
+
+    assert not hasattr(attention, "_query_quant_in_kernel")
+    assert not hasattr(attention, "_value_quant_in_kernel")
+    quantized = attention(query, key, value)
+    attention._query_quant_in_kernel = True
+    query_in_kernel = attention(query, key, value)
+    attention._value_quant_in_kernel = True
+    qv_in_kernel = attention(query, key, value)
+
+    assert quantized[:3] == (torch.tensor(11), torch.tensor(22), torch.tensor(33))
+    assert query_in_kernel[:3] == (query, torch.tensor(22), torch.tensor(33))
+    assert qv_in_kernel[:3] == (query, torch.tensor(22), value)
+    assert attention.q_bmm_quantizer.call_count == 1
+    assert attention.k_bmm_quantizer.call_count == 3
+    assert attention.v_bmm_quantizer.call_count == 2
+
+
+def test_disable_compilation_warns_without_installing_marker():
+    """A non-compile-wrapped model remains unchanged while the no-op risk is visible."""
+    model = torch.nn.Module()
+
+    with pytest.warns(UserWarning, match="rerun with --enforce-eager"), disable_compilation(model):
+        assert not hasattr(model, "do_not_compile")
+
+    assert not hasattr(model, "do_not_compile")
+
+
+def test_disable_compilation_updates_all_markers_and_restores_after_error():
+    """Every language and vision compile wrapper is restored after an exceptional exit."""
+
+    class CompileWrappedModule(torch.nn.Module):
+        do_not_compile = False
+
+    model = CompileWrappedModule()
+    model.do_not_compile = False
+    model.vision_model = CompileWrappedModule()
+    model.vision_model.do_not_compile = True
+    model.language_model = CompileWrappedModule()
+
+    with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
+        assert model.do_not_compile is True
+        assert model.vision_model.do_not_compile is True
+        assert model.language_model.do_not_compile is True
+        raise RuntimeError("quantization failed")
+
+    assert model.do_not_compile is False
+    assert model.vision_model.do_not_compile is True
+    assert model.language_model.do_not_compile is False
+    assert "do_not_compile" not in vars(model.language_model)
+
+
+def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
+    calibrated_amax = 7.25
+    layer = SimpleNamespace(
+        q_bmm_quantizer=_nvfp4_quantizer(),
+        k_bmm_quantizer=_nvfp4_quantizer(),
+        v_bmm_quantizer=_nvfp4_quantizer(),
+        p_bmm_quantizer=_nvfp4_quantizer(),
+    )
+    layer.v_bmm_quantizer.amax = calibrated_amax
+
+    vllm_plugin._set_vllm_attention_kv_default_amax(layer, torch.device("cpu"))
+
+    assert layer.k_bmm_quantizer._amax.item() == 6.0 * 448.0
+    assert layer.v_bmm_quantizer._amax.item() == calibrated_amax
+    assert not hasattr(layer.q_bmm_quantizer, "_amax")
+    assert not hasattr(layer.p_bmm_quantizer, "_amax")
+
+
+def test_attention_kv_defaults_ignore_unsupported_quantizers():
+    for quantizer in (
+        TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3))),
+        _nvfp4_quantizer(block_size=32),
+        _nvfp4_quantizer(enabled=False),
+    ):
+        layer = SimpleNamespace(k_bmm_quantizer=quantizer, v_bmm_quantizer=quantizer)
+        vllm_plugin._set_vllm_attention_kv_default_amax(layer, torch.device("cpu"))
+        assert not hasattr(quantizer, "_amax")
 
 
 def _quantize_and_summarize(self):
@@ -131,6 +727,9 @@ def _quantize_and_summarize(self):
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
         "enabled_quantizer_count": enabled_quantizer_count,
+        "quantizer_names": sorted(
+            name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        ),
     }
 
 
@@ -163,9 +762,17 @@ def _shutdown_llm(llm):
 @pytest.fixture(scope="module")
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
-    # Helper default ``max_position_embeddings=32`` would clash with vLLM's
-    # ``max_model_len=64`` set in ``_boot_llm``.
-    model_dir = create_tiny_llama_dir(tmp, max_position_embeddings=64)
+    # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
+    model_dir = create_tiny_llama_dir(
+        tmp,
+        hidden_size=128,
+        intermediate_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        head_dim=64,
+    )
     llm = _boot_llm(model_dir)
     try:
         yield llm
@@ -176,7 +783,7 @@ def tiny_llama_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_qwen3_moe_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    # head_dim=64 with num_heads=2 is broadly supported by vLLM's attention backends.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
     model_dir = create_tiny_qwen3_moe_dir(
         tmp,
         hidden_size=128,
@@ -202,7 +809,11 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
-    model_dir = create_tiny_deepseek_v3_dir(tmp)
+    # vLLM >= 0.26 only accepts a fixed set of MLA dimension triples (its MLA prefill backend
+    # selector rejects the helper's 16/16/16 default); use the real DeepSeek 128/64/128 one.
+    model_dir = create_tiny_deepseek_v3_dir(
+        tmp, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+    )
     llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
     try:
         yield llm
@@ -260,6 +871,19 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
 
     _assert_quantizer_amax_is_static(summary)
 
+    # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:
+    # a stale mapping is dropped silently at load and serves uncalibrated experts.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    for hf_key, expected_quantizer in (
+        ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+    ):
+        action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
+        assert action == "group", (hf_key, action)
+        module_path = vllm_key.rsplit("._amax", 1)[0]
+        assert module_path.endswith(expected_quantizer), vllm_key
+        assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
+
 
 def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     """Tiny DeepSeek-V3 covers MLAAttention (and again FusedMoE)."""
@@ -272,3 +896,52 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     assert summary["moe_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+
+    # ``n_shared_experts=1``: vLLM merges the shared expert's gate/up into ``gate_up_proj``, so
+    # the reload helper must merge those HF keys too rather than copying them through.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    action, vllm_key, _ = reload_utils._convert_key_for_vllm(
+        "model.layers.0.mlp.shared_experts.gate_proj.input_quantizer._amax", 1.0
+    )
+    assert action == "group", (action, vllm_key)
+    assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
+
+
+def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    attention = object.__new__(vllm_plugin.vllm_attention.Attention)
+    torch.nn.Module.__init__(attention)
+
+    converted = configure_vllm_nvfp4_attention_quantizers(
+        attention,
+        device="cpu",
+        dtype=torch.bfloat16,
+        cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
+    )
+
+    # BMM1 unchanged: Q/K dynamic block-16 NVFP4 (F1)
+    for name in ("q", "k"):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled and quantizer.is_nvfp4_dynamic
+        assert quantizer.block_sizes[-1] == 16
+    assert converted.k_bmm_quantizer._amax == 6.0 * 448.0
+    # BMM2: P/V per-tensor FP8 E4M3 with fixed amax (P=1.0, V=448) (F3)
+    for name, amax in (("p", 1.0), ("v", 448.0)):
+        quantizer = getattr(converted, f"{name}_bmm_quantizer")
+        assert quantizer.is_enabled
+        assert quantizer.num_bits == (4, 3)
+        assert not quantizer.block_sizes
+        assert float(quantizer._amax) == amax
+    # idempotent: calibrated amax survives reconfiguration
+    converted.v_bmm_quantizer.amax = torch.tensor(96.0)
+    reconfigured = configure_vllm_nvfp4_attention_quantizers(
+        converted,
+        device="cpu",
+        dtype=torch.bfloat16,
+        cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
+    )
+    assert float(reconfigured.v_bmm_quantizer._amax) == 96.0
