@@ -190,6 +190,14 @@ def _apply_merge_rule(state_dict: dict[str, torch.Tensor], rule: _MergeRule) -> 
         target_key, source_pattern = converter.rename_source_key(key)
         if source_pattern is None:
             continue
+        # A weight-specific pattern need not match the module's companion scale keys.
+        if key.endswith(".weight"):
+            module = key.removesuffix(".weight")
+            if any(module + leaf in state_dict for leaf in _QUANT_STATE_SUFFIXES):
+                raise QuantConversionUnsupportedError(
+                    f"cannot merge quantization state for '{module}'; "
+                    "only unquantized tensor groups are supported"
+                )
         sources = groups.setdefault(target_key, {})
         if source_pattern in sources:
             raise QuantConversionUnsupportedError(
@@ -337,12 +345,6 @@ def build_reverse_name_mapper(model):
     if not merge_rules and not rename_rules:
         return None
     compiled = _compile_rename_rules(rename_rules)
-    # The rename patterns are anchored on full weight keys and use ``.`` (any char) as a
-    # path separator, so a trailing glob wildcard in an exclude pattern would be consumed
-    # (e.g. ``...mlp.shared_experts.`` -> ``...`` would eat the ``*``). Append a sentinel
-    # path segment so container renames whose pattern ends in ``.`` match the sentinel's
-    # separator, then strip it and restore the wildcard.
-    _sentinel = ".\x00modelopt_name_sentinel"
 
     def _apply(text: str) -> str:
         for rule in merge_rules:
@@ -355,8 +357,10 @@ def build_reverse_name_mapper(model):
             base, suffix = name[:-2], ".*"
         elif name.endswith("*"):
             base, suffix = name[:-1], "*"
-        mapped = _apply(base + _sentinel)
-        mapped = mapped.removesuffix(_sentinel)
+        # Probe a real weight key so tensor-specific patterns match; the added leaf also
+        # prevents container renames ending in ``.`` from consuming the trailing wildcard.
+        mapped = _apply(base + ".weight")
+        mapped = mapped.removesuffix(".weight")
         return mapped + suffix
 
     return _map
@@ -414,11 +418,10 @@ def _scope_prefixes(rev) -> tuple[str, ...]:
     """Candidate key prefixes a scoped sub-model transform may apply under.
 
     transformers tags a conversion collected from a sub-model with ``scope_prefix`` (the
-    sub-module path). Older versions also tagged a ``base_model_prefix`` and matched keys
+    sub-module path). Some versions also tag a ``base_model_prefix`` and match keys
     against ``base_model_prefix.scope_prefix.`` first and ``scope_prefix.`` second;
-    transformers>=5.9 dropped ``base_model_prefix`` and ``WeightTransform._scoped_match``
-    now keys off ``scope_prefix`` alone. The ``getattr`` fallback below covers both: an
-    absent ``base_model_prefix`` collapses to just the ``scope_prefix.`` candidate.
+    versions without ``base_model_prefix`` match only ``scope_prefix``. The ``getattr``
+    fallback covers both: an absent ``base_model_prefix`` leaves just ``scope_prefix.``.
     Returned in priority order, each with a trailing dot. Empty tuple when the transform is
     unscoped (owned by the root model), in which case its patterns already address the full
     key space.

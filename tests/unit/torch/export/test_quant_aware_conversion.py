@@ -37,6 +37,10 @@ from modelopt.torch.export.quant_aware_conversion import (
     revert_quant_config_names,
     revert_weight_conversion_quant_aware,
 )
+from modelopt.torch.export.unified_export_hf_streaming import (
+    _assert_no_split_rules,
+    _build_reverse_name_mapper_or_none,
+)
 
 BLOCK = 16
 
@@ -44,11 +48,9 @@ BLOCK = 16
 def _set_scope_attr(transform, name, value):
     """Set an optional scoped-match attribute that only some transformers versions expose.
 
-    transformers>=5.9 dropped ``base_model_prefix`` from ``WeightTransform``'s ``__slots__``
-    (scoped matching now keys off ``scope_prefix`` alone); older supported versions still
-    carry it. Production ``_scope_prefixes`` reads it via ``getattr(..., None)``, so skipping
-    the assignment where the slot is absent is equivalent — and lets these tests run across
-    the whole supported transformers range instead of ``AttributeError``-ing on the setattr.
+    Some transformers versions omit ``base_model_prefix`` from ``WeightTransform``'s
+    ``__slots__`` and match only ``scope_prefix``. Callers must include any parent path
+    in ``scope_prefix`` on those versions.
 
     The suppression is scoped to that one known version-dependent slot: a setattr failure for
     any other name (a typo or a future rename) still raises instead of silently no-op-ing.
@@ -60,18 +62,20 @@ def _set_scope_attr(transform, name, value):
             raise
 
 
-def _radio_qkv_conversion(base_model_prefix=""):
+def _radio_qkv_conversion(base_model_prefix="", pattern_suffix=""):
     """Build the RADIO fused-QKV conversion with an optional parent-model scope."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: transformers is an optional dependency for ModelOpt.
     from transformers.core_model_loading import Chunk, WeightConverter
 
     qkv = WeightConverter(
-        source_patterns="attn.qkv",
-        target_patterns=["attention.q_proj", "attention.k_proj", "attention.v_proj"],
+        source_patterns="attn.qkv" + pattern_suffix,
+        target_patterns=[f"attention.{part}_proj{pattern_suffix}" for part in ("q", "k", "v")],
         operations=[Chunk(dim=0)],
     )
     qkv.scope_prefix = "vision_model"
+    if base_model_prefix and not hasattr(qkv, "base_model_prefix"):
+        qkv.scope_prefix = f"{base_model_prefix}.{qkv.scope_prefix}"
     _set_scope_attr(qkv, "base_model_prefix", base_model_prefix)
     return qkv
 
@@ -471,15 +475,16 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
 
 
 @pytest.mark.parametrize("with_renames", [False, True])
-def test_scoped_radio_qkv_converter_restores_hub_layout(with_renames):
+@pytest.mark.parametrize("pattern_suffix", ["", ".weight", ".weight$"])
+def test_scoped_radio_qkv_converter_restores_hub_layout(with_renames, pattern_suffix):
     """RADIO Q/K/V tensors are re-fused in scope before hub-name renames run."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import WeightRenaming
 
-    qkv = _radio_qkv_conversion(base_model_prefix="model")
+    qkv = _radio_qkv_conversion(base_model_prefix="model", pattern_suffix=pattern_suffix)
     radio_blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
-    radio_blocks.scope_prefix = "vision_model"
+    radio_blocks.scope_prefix = qkv.scope_prefix
     _set_scope_attr(radio_blocks, "base_model_prefix", "model")
     projector = WeightRenaming("mlp1", "vision_projector.mlp1")
 
@@ -575,11 +580,16 @@ def test_radio_merge_rejects_unsafe_tensor_groups(leaf, tensors, message):
     "leaf", ["input_scale", "weight_scale_2", "weight_scale", "weight_scale_inv"]
 )
 @pytest.mark.parametrize("shape", [(1,), (2, 1)])
-def test_radio_merge_rejects_quantization_state_without_mutating_input(leaf, shape):
+@pytest.mark.parametrize("pattern_suffix", ["", ".weight$"])
+def test_radio_merge_rejects_quantization_state_without_mutating_input(leaf, shape, pattern_suffix):
     """One-element and blocked scales must not be concatenated into a fused module."""
-    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    model = types.SimpleNamespace(
+        _weight_conversions=[_radio_qkv_conversion(pattern_suffix=pattern_suffix)]
+    )
     state_dict = {
-        f"vision_model.encoder.layer.0.attention.{part}_proj.weight": torch.ones(2, 3)
+        f"vision_model.encoder.layer.0.attention.{part}_proj.weight": torch.ones(
+            2, 3, dtype=torch.uint8
+        )
         for part in ("q", "k", "v")
     }
     state_dict.update(
@@ -596,6 +606,30 @@ def test_radio_merge_rejects_quantization_state_without_mutating_input(leaf, sha
     assert state_dict.keys() == original.keys()
     for key, tensor in state_dict.items():
         torch.testing.assert_close(tensor, original[key])
+
+
+def test_per_tensor_export_rejects_merge_rules():
+    """Streaming and the guard shared with layerwise export reject cross-tensor merges."""
+    model = types.SimpleNamespace(_weight_conversions=[_radio_qkv_conversion()])
+    for guard in (_assert_no_split_rules, _build_reverse_name_mapper_or_none):
+        with pytest.raises(NotImplementedError, match="tensor-level split or merge rules"):
+            guard(model)
+
+
+def test_per_tensor_export_accepts_rename_only():
+    """A converter-free name mapping remains supported in per-tensor export."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    model = types.SimpleNamespace(
+        _weight_conversions=[WeightRenaming("mlp1", "vision_projector.mlp1")]
+    )
+    _assert_no_split_rules(model)
+    mapper = _build_reverse_name_mapper_or_none(model)
+    assert mapper is not None
+    assert mapper("vision_projector.mlp1.0.weight") == "mlp1.0.weight"
+    assert mapper("model.language_model.layers.0.weight") == "model.language_model.layers.0.weight"
 
 
 def test_radio_merge_requires_converter_rename_source_key():
