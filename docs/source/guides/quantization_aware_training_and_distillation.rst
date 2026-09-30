@@ -9,9 +9,6 @@ quality lost when a model is quantized. Both train with simulated quantization
 enabled, so the resulting checkpoint retains its ModelOpt quantization state for
 deployment.
 
-QAT versus QAD
-==============
-
 **Quantization Aware Training (QAT)** inserts simulated quantization operations
 into the model graph and then fine-tunes the model so its weights learn to
 compensate for quantization error. During training, quantization scales are frozen
@@ -52,20 +49,24 @@ When to Use QAT vs QAD
      - Start from a quantized checkpoint, fine-tune with task-specific data
      - Full-precision fine-tuning first, then QAD to recover quantization loss
 
-**QAD is Model Optimizer's recommended strategy for accuracy recovery after
-quantization.** In our experiments, full-precision fine-tuning followed by QAD
-delivers the best accuracy, especially at aggressive quantization levels (e.g.,
-NVFP4). The optimal balance between QAT and QAD for a given model and task is an
-active area of research.
-
 QAD rationale
 =============
+
+**QAD is Model Optimizer's recommended strategy for accuracy recovery after
+quantization.**
+
+In our experiments, full-precision fine-tuning followed by QAD
+delivers the best accuracy, especially at aggressive quantization levels (e.g.,
+NVFP4).
 
 `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery
 <https://arxiv.org/abs/2601.20088>`_ recommends QAD for recovery after aggressive
 quantization, especially for models that have passed through multi-stage
 post-training such as SFT, RL, or model merging. The teacher signal makes recovery
 more robust when training-data quality or coverage is limited.
+
+The optimal balance between QAT and QAD for a given model and task is an
+active area of research.
 
 To learn more, read the `QAT/QAD blog post
 <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_.
