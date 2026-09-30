@@ -86,6 +86,7 @@ from torch import nn
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  # noqa: N814
 
 from .modeling_dflash import DFlashModule
+from .modeling_draft_checkpoint_compat import remap_lilicorr_vllm_head_keys
 
 __all__ = ["LiLiCorrHead", "LiLiCorrLayer", "LiLiCorrModule"]
 
@@ -519,6 +520,11 @@ class LiLiCorrModule(DFlashModule):
         group_size = getattr(config, "conv_group_size", None)
         if taps is not None and group_size is not None:
             self._install_sublayer_convs(config, int(taps), int(group_size))
+
+        # Deployment uses vLLM's named MLP modules while ModelOpt keeps the training
+        # implementation as compact Sequential blocks. Accept the exported spelling so
+        # dflash_init_checkpoint remains a strict round trip.
+        self._register_load_state_dict_pre_hook(remap_lilicorr_vllm_head_keys, with_module=False)
 
     def _install_sublayer_convs(self, config, taps: int, group_size: int) -> None:
         """Replace each backbone layer's no-op sublayer wrappers with grouped convs.
