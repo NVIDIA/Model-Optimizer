@@ -333,7 +333,7 @@ The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outsi
 | **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 1,674 → 1,476 |
 | **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 2,340 → 1,316 |
 
-Accuracy is neutral — the deltas span −0.59 to +0.89, which is run-to-run noise in both directions. Note what that implies: ~94 recovered zeros on the QAD row is up to +3.5 pp of mechanical headroom, and none of it materialised, so the sub-steps that stop looping still fail their tests. The win is cost, not accuracy — generation gets 12-44% faster.
+Accuracy is neutral — the deltas span −0.59 to +0.89, which is run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy: generation gets 12-44% faster.
 
 The shipped `eval_configs/scicode.yaml` deliberately leaves it out so it reproduces the results table above; add it under `adapter_config.params_to_add` to get the right-hand column.
 
