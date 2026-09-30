@@ -202,6 +202,15 @@ class Testfp4:
 
         assert torch.equal(output, torch.zeros_like(output))
 
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    def test_static_blockwise_fp4_over_int32_numel(self):
+        x = torch.randn(2**31 + 2**20, device="cuda", dtype=torch.bfloat16)
+        amax = x.view(-1, 16).abs().amax(-1).float()
+        output = triton_kernel.static_blockwise_fp4_fake_quant(x, amax, amax.max())
+        tail = triton_kernel.static_blockwise_fp4_fake_quant(x[-4096:], amax[-256:], amax.max())
+
+        assert torch.equal(output[-4096:], tail)
+
     @pytest.mark.skipif(get_cuda_ext_mx() is None, reason="cuda_ext_mx is not available")
     @pytest.mark.parametrize(
         "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
