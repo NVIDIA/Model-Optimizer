@@ -326,14 +326,16 @@ The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outsi
 
 **It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token; almost all such sub-steps return nothing and score zero. The denominator is 2,704 sub-steps:
 
-| Model | Capped sub-steps | SciCode (Subtask) | Generation time (s) |
-| --- | --- | --- | --- |
-| **BF16** (teacher) | 20 → **0** | 39.9 → 39.9 | 1,464 → 1,158 |
-| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 2,081 → 1,394 |
-| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 1,674 → 1,476 |
-| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 2,340 → 1,316 |
+| Model | Capped sub-steps | SciCode (Subtask) | Mean tokens | Median tokens |
+| --- | --- | --- | --- | --- |
+| **BF16** (teacher) | 20 → **0** | 39.9 → 39.9 | 5,337 → 3,586 | 1,817 → 1,927 |
+| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 6,559 → 3,834 | 1,917 → 1,978 |
+| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 6,701 → 4,048 | 2,116 → 2,184 |
+| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 10,186 → 4,634 | 3,482 → 3,302 |
 
-Accuracy is neutral — the deltas span −0.59 to +0.89, which is run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy: generation gets 12-44% faster.
+Accuracy is neutral — the deltas span −0.59 to +0.89, run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy, and wall-clock generation drops 12-44%.
+
+**Read the two token columns together: the penalty removes the tail, it does not make the model concise.** The median is flat or slightly *up* on three of four builds, so a typical response is unchanged; the mean falls 33-55% purely because the runaway generations are gone. And the underlying shift survives — QAD's median is still **+71%** over BF16 with the penalty on, against +91.6% without. This suppresses the pathology, not the verbosity QAD introduced.
 
 The shipped `eval_configs/scicode.yaml` deliberately leaves it out so it reproduces the results table above; add it under `adapter_config.params_to_add` to get the right-hand column.
 
