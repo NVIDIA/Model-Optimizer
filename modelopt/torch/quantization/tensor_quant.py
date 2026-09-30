@@ -678,7 +678,6 @@ class LSQFP4FakeQuantFunction(Function):
     @staticmethod
     def forward(ctx, x, scale_pre, scale_post):
         """Forward pass. ``x`` is [num_blocks, block_size]; scales are fp32 [num_blocks]."""
-        x = x.contiguous()
         ctx.save_for_backward(x, scale_pre, scale_post)
         return triton_kernel.lsq_fp4_fake_quant_forward(x, scale_pre, scale_post)
 

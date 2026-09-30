@@ -222,3 +222,11 @@ def test_lsq_fp4_fused_matches_eager(dtype, block_size):
     assert torch.equal(out, ref_out)
     for g, ref in zip(grads, ref_grads):
         torch.testing.assert_close(g, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_lsq_fp4_fused_non_contiguous_scales():
+    x = torch.randn(1000, 16, device="cuda")
+    s_pre = (torch.rand(2000, device="cuda") + 0.2)[::2]
+    s_post = torch.tensor(0.7, device="cuda").expand(1000)
+    ref = fp4_cast_ste(x / s_pre.view(-1, 1)) * s_post.view(-1, 1)
+    assert torch.equal(lsq_fp4_fake_quant(x, s_pre, s_post), ref)

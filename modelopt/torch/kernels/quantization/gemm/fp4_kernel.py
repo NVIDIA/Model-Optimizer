@@ -470,6 +470,7 @@ def _lsq_fp4_launch_args(x: torch.Tensor):
 
 def lsq_fp4_fake_quant_forward(x, s_pre, s_post):
     """``cast_fp4(x / s_pre) * s_post`` with ``x`` [num_blocks, block_size], fp32 scales."""
+    x, s_pre, s_post = x.contiguous(), s_pre.contiguous(), s_post.contiguous()
     y = torch.empty_like(x)
     grid, n_rows, n_cols, rows, cols = _lsq_fp4_launch_args(x)
     with torch.cuda.device(x.device):
@@ -481,6 +482,7 @@ def lsq_fp4_fake_quant_forward(x, s_pre, s_post):
 
 def lsq_fp4_fake_quant_backward(grad, x, s_pre, s_post):
     """Gradients of :func:`lsq_fp4_fake_quant_forward` w.r.t. ``x``, ``s_pre`` and ``s_post``."""
+    x, s_pre, s_post = x.contiguous(), s_pre.contiguous(), s_post.contiguous()
     grad_x = torch.empty_like(x)
     grad_s_pre = torch.empty_like(s_pre)
     grad_s_post = torch.empty_like(s_post)
