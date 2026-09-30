@@ -24,11 +24,13 @@ import pytest
 import torch
 
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
+import modelopt.torch.quantization.ggml.iq2_s as iq2_s_module
 import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
 from modelopt.torch.quantization.ggml import (
     IQ1_S_BLOCK_BYTES,
+    IQ2_S_BLOCK_BYTES,
     IQ2_XS_BLOCK_BYTES,
     IQ2_XXS_BLOCK_BYTES,
     IQ_FORMAT_REGISTRY,
@@ -39,6 +41,7 @@ FORMATS = {
     "iq1_s": (iq1_s_module, "iq1_s_pack", IQ1_S_BLOCK_BYTES, False),
     "iq2_xxs": (iq2_xxs_module, "iq2_xxs_pack", IQ2_XXS_BLOCK_BYTES, True),
     "iq2_xs": (iq2_xs_module, "iq2_xs_pack", IQ2_XS_BLOCK_BYTES, True),
+    "iq2_s": (iq2_s_module, "iq2_s_pack", IQ2_S_BLOCK_BYTES, True),
 }
 
 
