@@ -60,6 +60,7 @@ Changelog
 - Fix Megatron Top-K/Top-P distillation gradients being multiplied by the tensor-parallel size when tensor parallelism is enabled; reported loss values are unchanged.
 - Fix the Puzzletron memory objective pricing the KV cache with ``hidden_size // num_attention_heads`` instead of the model's ``head_dim``, which misestimated it for models such as Mistral-Small, GPT-OSS and Gemma-3 and for every candidate with a pruned hidden size. Recompute subblock statistics produced with earlier versions.
 - Fix ONNX INT4 quantization ending the Python process when the INT4 packing extension fails to build, for example without a C++ compiler. It now falls back to the Python implementation.
+- Fix KV-cache quantization through ``register_attention_for_kv_quant``, the fallback for Hugging Face attention classes that do not use the attention interface, attaching the ``q``, ``k`` and ``v`` bmm quantizers to the wrong tensors for most attention layouts. Recalibrate and re-export models quantized through this fallback.
 
 0.48.0 (2026-10-xx)
 ^^^^^^^^^^^^^^^^^^^
