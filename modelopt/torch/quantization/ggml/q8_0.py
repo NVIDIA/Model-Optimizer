@@ -57,6 +57,7 @@ def _encode_blocks(blocks: torch.Tensor) -> torch.Tensor:
     # finite float64 values outside the float32/fp16 scale range.
     d_float = (amax / _Q8_0_MAX_QUANT).clamp(max=65504.0)
     d = d_float.to(torch.float16)
+    # Select quants with the unrounded float32 scale, not the serialized fp16 scale.
     inverse = torch.where(d_float > 0, d_float.reciprocal(), torch.zeros_like(d_float))
     normalized = x * inverse.unsqueeze(1)
     # C roundf, used by the canonical Q8_0 encoder, rounds half-way cases away from zero.
@@ -71,7 +72,7 @@ def _encode_blocks(blocks: torch.Tensor) -> torch.Tensor:
     packed = torch.empty((block_count, Q8_0_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
     packed[:, :2] = d.contiguous().view(torch.uint8).reshape(block_count, 2)
     packed[:, 2:] = quants.view(torch.uint8)
-    return torch.where((d_float == 0).unsqueeze(1), 0, packed)
+    return packed
 
 
 @torch.no_grad()

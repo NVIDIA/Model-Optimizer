@@ -236,6 +236,16 @@ def test_registry_lists_every_exported_encoder():
     assert encoders == set(GGML_FORMAT_REGISTRY)
 
 
+def test_iq_registry_remains_a_compatible_subset_of_ggml_registry():
+    assert ggml.IQFormat is ggml.GGMLFormat
+    assert set(ggml.IQ_FORMAT_REGISTRY) == {
+        name for name in GGML_FORMAT_REGISTRY if name.startswith("iq")
+    }
+    assert "q8_0" not in ggml.IQ_FORMAT_REGISTRY
+    for name, record in ggml.IQ_FORMAT_REGISTRY.items():
+        assert record is GGML_FORMAT_REGISTRY[name]
+
+
 @pytest.mark.parametrize(("num_bits", "module"), FORMAT_MODULES)
 def test_registry_record_is_wired_to_its_own_codec(num_bits, module):
     """Each record points at its own format's encoder, decoder, geometry and chunk defaults."""

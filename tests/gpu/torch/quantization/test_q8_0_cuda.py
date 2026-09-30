@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 
 import modelopt.torch.quantization.ggml.q8_0 as q8_0_module
@@ -80,13 +81,23 @@ def test_q8_0_cuda_float64_matches_pytorch_encoder():
     assert torch.equal(reference, packed.cpu())
 
 
-def test_q8_0_cuda_reciprocal_rounding_boundary_matches_pytorch_encoder(monkeypatch):
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([5207.0, 20.5, -20.5], [127, 0, 0]),
+        ([1.0, 3.4999 / 127, -3.4999 / 127], [127, 3, -3]),
+    ],
+    ids=["reciprocal-rounding", "unrounded-scale"],
+)
+def test_q8_0_cuda_reciprocal_rounding_boundary_matches_pytorch_encoder(
+    monkeypatch, values, expected
+):
     weight = torch.zeros((1, 32), device="cuda", dtype=torch.float32)
-    weight[0, :3] = torch.tensor([5207.0, 20.5, -20.5], device="cuda")
+    weight[0, :3] = torch.tensor(values, device="cuda")
 
     packed = _extension().q8_0_pack(weight).reshape(1, 1, 34)
     monkeypatch.setattr(q8_0_module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = quantize_q8_0(weight)
 
     assert torch.equal(packed, reference)
-    assert packed[0, 0, 2:5].view(torch.int8).tolist() == [127, 0, 0]
+    assert packed[0, 0, 2:5].view(torch.int8).tolist() == expected

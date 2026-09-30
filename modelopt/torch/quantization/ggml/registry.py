@@ -16,7 +16,9 @@
 """GGML block formats, listed once for backend dispatch and export."""
 
 from .common import GGMLFormat, IQFormat
+from .iq1_m import IQ1_M_FORMAT
 from .iq1_s import IQ1_S_FORMAT
+from .iq2_s import IQ2_S_FORMAT
 from .iq2_xs import IQ2_XS_FORMAT
 from .iq2_xxs import IQ2_XXS_FORMAT
 from .q8_0 import Q8_0_FORMAT
@@ -30,7 +32,15 @@ __all__ = ["GGML_FORMAT_REGISTRY", "IQ_FORMAT_REGISTRY", "GGMLFormat", "IQFormat
 # It is an explicit list rather than formats registering themselves on import, so its contents
 # never depend on which modules happen to have been imported first.
 GGML_FORMAT_REGISTRY: dict[str, GGMLFormat] = {
-    fmt.name: fmt for fmt in (IQ1_S_FORMAT, IQ2_XXS_FORMAT, IQ2_XS_FORMAT, Q8_0_FORMAT)
+    fmt.name: fmt
+    for fmt in (
+        IQ1_S_FORMAT,
+        IQ1_M_FORMAT,
+        IQ2_XXS_FORMAT,
+        IQ2_XS_FORMAT,
+        IQ2_S_FORMAT,
+        Q8_0_FORMAT,
+    )
 }
 
 # Compatibility view for the already-merged IQ export path. Export migrates to the general

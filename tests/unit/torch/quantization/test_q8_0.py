@@ -59,6 +59,18 @@ def test_q8_0_uses_roundf_ties_away_from_zero():
     assert torch.equal(dequantize_q8_0(packed, shape, dtype=torch.float32), expected)
 
 
+def test_q8_0_selects_quants_before_rounding_scale_to_fp16():
+    weight = torch.zeros((1, 32), dtype=torch.float32)
+    weight[0, :3] = torch.tensor([1.0, 3.4999 / 127, -3.4999 / 127])
+
+    packed, _ = quantize_q8_0(weight)
+
+    scale = packed[0, 0, :2].contiguous().view(torch.float16).item()
+    assert scale == torch.tensor(1.0 / 127, dtype=torch.float16).item()
+    # The unrounded scale gives +/-3.4999; using the stored scale would cross +/-3.5.
+    assert packed[0, 0, 2:5].contiguous().view(torch.int8).tolist() == [127, 3, -3]
+
+
 def test_q8_0_round_trip_and_payload_fields():
     generator = torch.Generator().manual_seed(1234)
     weight = torch.randn((2, 64), generator=generator, dtype=torch.bfloat16)
