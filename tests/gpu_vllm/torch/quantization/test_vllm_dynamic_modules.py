@@ -738,7 +738,7 @@ def _quantize_and_summarize(self):
     }
 
 
-def _boot_llm(model_dir, **extra):
+def _boot_llm(model_dir, max_model_len=64, **extra):
     """Construct a vLLM engine on a tiny model.
 
     MoE fixtures override with ``moe_backend="triton"`` (pins the Triton
@@ -750,7 +750,7 @@ def _boot_llm(model_dir, **extra):
         model=str(model_dir),
         enforce_eager=True,
         gpu_memory_utilization=0.2,
-        max_model_len=64,
+        max_model_len=max_model_len,
         max_num_seqs=1,
         dtype="bfloat16",
         skip_tokenizer_init=True,
@@ -826,10 +826,11 @@ def tiny_deepseek_llm(tmp_path_factory):
         _shutdown_llm(llm)
 
 
-_INDEXER_K_FP8_CFG = {
+_INDEXER_FP8_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
         {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
     ],
     "algorithm": "max",
 }
@@ -841,10 +842,12 @@ _SPARSE_ATTN_MODELS = {
         create_tiny_glm5_next_config_dir,
         {"load_format": "dummy"},
     ),
+    # DeepSeek-V4 computes the indexer query only when top-k selection is needed, i.e. beyond
+    # compress_ratio * index_topk = 4 * 1024 tokens.
     "deepseek_v4": (
         "DeepseekV4ForCausalLM",
         create_tiny_deepseek_v4_config_dir,
-        {"load_format": "dummy"},
+        {"load_format": "dummy", "max_model_len": 4608, "max_num_batched_tokens": 4608},
     ),
 }
 
@@ -890,24 +893,27 @@ def _indexer_cache_rows(kv_cache, mask):
 
 
 def _calibrate_and_clip_indexer_k(self):
-    """Run on the worker: calibrate an FP8 indexer-K quantizer, then clip it to 1/8 of its amax.
+    """Run on the worker: calibrate FP8 indexer q and K quantizers, then clip K to 1/8 of its amax.
 
     Calibration goes through real scheduled prefills: the fused indexers write their cache only
-    when ``attn_metadata`` is set, which a dummy run does not do.
+    when ``attn_metadata`` is set, which a dummy run does not do. The second prompt fills the
+    context, so that DeepSeek-V4 selects top-k and computes its query.
     """
     model = self.get_model()
-    batches = [{"input_ids": torch.randint(1, 100, (1, 40))} for _ in range(2)]
+    lengths = (40, self.model_config.max_model_len - 8)
+    batches = [{"input_ids": torch.randint(1, 100, (1, n))} for n in lengths]
     forward_loop = _load_example_module("vllm_ptq_utils").calibrate_fun(batches, self)
     with disable_compilation(model):
-        mtq.quantize(model, _INDEXER_K_FP8_CFG, forward_loop=forward_loop)
+        mtq.quantize(model, _INDEXER_FP8_CFG, forward_loop=forward_loop)
 
-    amaxes, self.indexer_k_snapshots = {}, {}
+    amaxes, self.indexer_k_snapshots = {"k": {}, "q": {}}, {}
     for name, module in model.named_modules():
         if isinstance(module, _QuantVLLMIndexerBase):
-            quantizer = module.indexer_k_quantizer
-            amaxes[name] = None if quantizer.amax is None else quantizer.amax.item()
-            if amaxes[name]:
-                quantizer.amax = quantizer.amax / 8
+            for kind in amaxes:
+                amax = getattr(module, f"indexer_{kind}_quantizer").amax
+                amaxes[kind][name] = None if amax is None else amax.item()
+            if amaxes["k"][name]:
+                module.indexer_k_quantizer.amax = module.indexer_k_quantizer.amax / 8
             self.indexer_k_snapshots[name] = _cache_row_signature(module.k_cache.kv_cache)
     return amaxes
 
@@ -1028,11 +1034,12 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
 
 
 @pytest.mark.timeout(600)  # engine boot and the DeepGEMM JIT dominate
-def test_tiny_sparse_attn_indexer_k_quantize(tiny_sparse_attn_llm):
-    """The indexer K cache the sparse-attention kernels read holds fake-quantized keys."""
+def test_tiny_sparse_attn_indexer_quantize(tiny_sparse_attn_llm):
+    """The indexer query is fake-quantized and the K cache the kernels read holds QDQ keys."""
     amaxes = tiny_sparse_attn_llm.collective_rpc(_calibrate_and_clip_indexer_k)[0]
-    assert amaxes, "no indexer was converted"
-    assert all(amax is not None and 0 < amax < float("inf") for amax in amaxes.values()), amaxes
+    assert amaxes["k"], "no indexer was converted"
+    for kind_amaxes in amaxes.values():  # calibrated: the quantizer saw the kernels' tensors
+        assert all(a is not None and 0 < a < float("inf") for a in kind_amaxes.values()), amaxes
 
     # Prefill plus decode steps that complete further pools / compression groups.
     prompts = [TokensPrompt(prompt_token_ids=list(range(1 + i, 41 + i))) for i in range(2)]

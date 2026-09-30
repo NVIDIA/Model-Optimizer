@@ -1870,13 +1870,15 @@ def test_kv_cache_quant(dist_workers_size_1, config):
     dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
 
 
-INDEXER_K_FP8_CFG = {
+INDEXER_FP8_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
         {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
     ],
     "algorithm": "max",
 }
+INDEXER_QUANTIZERS = ("indexer_q_quantizer", "indexer_k_quantizer")
 # The KV-cache preset merged onto a disable-all base, as every model recipe does.
 KV_ONLY_FP8_CFG = {
     "quant_cfg": [{"quantizer_name": "*", "enable": False}, *mtq.FP8_KV_CFG["quant_cfg"]],
@@ -1896,34 +1898,36 @@ def _fp8_grid_error(x, amax):
     ).item()
 
 
-def _returned_keys(model, forward):
-    """``(indexer, key)`` for every ``forward_before_topk`` call of ``forward(model)``."""
-    keys = []
+def _returned_queries_and_keys(model, forward):
+    """``(indexer, query, key)`` for every ``forward_before_topk`` call of ``forward(model)``."""
+    outputs = []
     with ExitStack() as stack:
         for module in _indexers(model):
 
             def spy(*args, _original=module.forward_before_topk, _module=module, **kwargs):
                 q, k, weights = _original(*args, **kwargs)
-                keys.append((_module, k))
+                outputs.append((_module, q, k))
                 return q, k, weights
 
             stack.enter_context(patch.object(module, "forward_before_topk", spy))
         forward(model)
-    assert keys
-    return keys
+    assert outputs
+    return outputs
 
 
-def _assert_keys_quantized_in_serving_basis(model, forward):
-    """The key every indexer returns is fake-quantized before the compressor's Hadamard rotation.
+def _assert_quantized_in_serving_basis(model, forward):
+    """The query and key every indexer returns are fake-quantized before the Hadamard rotation.
 
-    vLLM caches the DeepSeek-V4 key unrotated. After FP8 fake quantization in that basis the
-    unrotated key lies on the FP8 grid while the rotated one does not.
+    vLLM quantizes the DeepSeek-V4 query and key unrotated. After FP8 fake quantization in that
+    basis the unrotated tensor lies on the FP8 grid while the rotated one does not.
     """
-    keys = _returned_keys(model, forward)
-    for module, key in keys:
-        amax = module.indexer_k_quantizer.amax
-        assert _fp8_grid_error(rotate_activation(key), amax) < 0.01
-        assert _fp8_grid_error(key, amax) > 0.01  # the check tells the two bases apart
+    for module, query, key in _returned_queries_and_keys(model, forward):
+        for x, quantizer in (
+            (query, module.indexer_q_quantizer),
+            (key, module.indexer_k_quantizer),
+        ):
+            assert _fp8_grid_error(rotate_activation(x), quantizer.amax) < 0.01
+            assert _fp8_grid_error(x, quantizer.amax) > 0.01  # the check tells the bases apart
 
 
 def _csa_indexer_model():
@@ -1992,7 +1996,7 @@ def _csa_indexer_model():
     return model.cuda()
 
 
-def _test_csa_indexer_k_quant_helper(tmp_path, rank, size):
+def _test_csa_indexer_quant_helper(tmp_path, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
@@ -2002,35 +2006,42 @@ def _test_csa_indexer_k_quant_helper(tmp_path, rank, size):
     def forward(model):
         return model.indexer(x, qr)
 
-    # The KV-cache glob does not match the indexer key.
+    # The KV-cache glob does not match the indexer query and key.
     kv_model = mtq.quantize(_csa_indexer_model(), KV_ONLY_FP8_CFG, forward)
     assert _indexers(kv_model) and not any(
-        m.indexer_k_quantizer.is_enabled for m in _indexers(kv_model)
+        getattr(m, name).is_enabled for m in _indexers(kv_model) for name in INDEXER_QUANTIZERS
     )
 
     model = _csa_indexer_model()
     with torch.no_grad():
-        _, rotated_key, _ = model.indexer.forward_before_topk(x, qr)
-    model = mtq.quantize(model, INDEXER_K_FP8_CFG, forward)
+        rotated_query, rotated_key, _ = model.indexer.forward_before_topk(x, qr)
+    model = mtq.quantize(model, INDEXER_FP8_CFG, forward)
     (indexer,) = _indexers(model)
-    # Calibrated on the unrotated key that vLLM caches, not on the rotated one the scores use.
-    unrotated_amax = rotate_activation(rotated_key).abs().amax().float()
-    assert torch.allclose(indexer.indexer_k_quantizer.amax.float(), unrotated_amax, rtol=0.02)
-    _assert_keys_quantized_in_serving_basis(model, forward)
-    assert any(k.endswith("indexer._extra_state") for k in model.sharded_state_dict())
-    assert any(k.endswith("indexer.indexer_k_quantizer._amax") for k in model.sharded_state_dict())
+    # Calibrated on the unrotated query and key that vLLM quantizes, not on the rotated ones the
+    # scores use.
+    for name, rotated in zip(INDEXER_QUANTIZERS, (rotated_query, rotated_key)):
+        unrotated_amax = rotate_activation(rotated).abs().amax().float()
+        assert torch.allclose(getattr(indexer, name).amax.float(), unrotated_amax, rtol=0.02)
+    _assert_quantized_in_serving_basis(model, forward)
+    sharded_keys = list(model.sharded_state_dict())
+    assert any(k.endswith("indexer._extra_state") for k in sharded_keys)
+    for name in INDEXER_QUANTIZERS:
+        assert any(k.endswith(f"indexer.{name}._amax") for k in sharded_keys)
 
     # Megatron resumes in two passes: the extra state recreates the quantizer buffers from their
     # metadata (and must place them on device), then the full state dict fills in the values.
-    amax = indexer.indexer_k_quantizer.amax.clone()
+    amaxes = {name: getattr(indexer, name).amax.clone() for name in INDEXER_QUANTIZERS}
     state_dict = indexer.state_dict()
     indexer.allow_post_restore = True
     indexer.set_extra_state(indexer.get_extra_state())
-    assert indexer.indexer_k_quantizer.is_enabled
-    assert indexer.indexer_k_quantizer.amax.is_cuda
-    assert indexer.indexer_k_quantizer.amax.shape == amax.shape
+    for name, amax in amaxes.items():
+        quantizer = getattr(indexer, name)
+        assert quantizer.is_enabled
+        assert quantizer.amax.is_cuda
+        assert quantizer.amax.shape == amax.shape
     indexer.load_state_dict(state_dict)
-    assert torch.equal(indexer.indexer_k_quantizer.amax, amax)
+    for name, amax in amaxes.items():
+        assert torch.equal(getattr(indexer, name).amax, amax)
 
     def query_key_weights(model):
         """A float output that depends on every indexer parameter, for the round-trip checks."""
@@ -2041,23 +2052,28 @@ def _test_csa_indexer_k_quant_helper(tmp_path, rank, size):
     (tmp_path / "disabled").mkdir()
     model_test = _csa_indexer_model()
     sharded_state_dict_test_helper(tmp_path / "enabled", model, model_test, query_key_weights)
-    assert all(m.indexer_k_quantizer.is_enabled for m in _indexers(model_test))
+    assert all(
+        getattr(m, name).is_enabled for m in _indexers(model_test) for name in INDEXER_QUANTIZERS
+    )
 
     # A quantizer toggled outside the recipe (auto_quantize does this) must survive the round trip:
     # the extra state, not the quant_cfg, is the record of the enabled flag.
     mtq.disable_quantizer(model, "*indexer_k_quantizer")
     model_test = _csa_indexer_model()
     sharded_state_dict_test_helper(tmp_path / "disabled", model, model_test, query_key_weights)
-    assert not any(m.indexer_k_quantizer.is_enabled for m in _indexers(model_test))
+    assert all(
+        m.indexer_q_quantizer.is_enabled and not m.indexer_k_quantizer.is_enabled
+        for m in _indexers(model_test)
+    )
 
 
 @pytest.mark.skipif(not HAS_TE, reason="the CSA indexer is built from Transformer Engine layers")
 @pytest.mark.skipif(CSAIndexer is None, reason="megatron-core without Compressed Sparse Attention")
 @pytest.mark.skipif(not HAS_HADAMARD, reason="rotate_activation needs fast_hadamard_transform")
-def test_csa_indexer_k_quant(dist_workers_size_1, tmp_path):
-    """The DeepSeek-V4 CSA indexer key is fake-quantized before its compressor's rotation, and its
-    quantizer state survives save/restore."""
-    dist_workers_size_1.run(partial(_test_csa_indexer_k_quant_helper, tmp_path))
+def test_csa_indexer_quant(dist_workers_size_1, tmp_path):
+    """The DeepSeek-V4 CSA indexer query and key are fake-quantized before the Hadamard rotation,
+    and their quantizer state survives save/restore."""
+    dist_workers_size_1.run(partial(_test_csa_indexer_quant_helper, tmp_path))
 
 
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):

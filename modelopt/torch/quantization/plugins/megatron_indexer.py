@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake quantization of the sparse-attention indexer K cache in Megatron-Core.
+"""Fake quantization of the sparse-attention indexer query and K cache in Megatron-Core.
 
 Covers ``CSAIndexer`` (DeepSeek-V4); GLM-5.3-Flash's k-pool indexer is not in Megatron-Core yet.
 ``indexer_k_quantizer`` fake-quantizes the key the indexer scores against, in the basis serving
-writes it into the indexer K cache. The name avoids the ``*[kv]_bmm_quantizer`` globs, so the
-KV-cache presets leave it disabled. The ModelOpt extra-state callbacks come from
+writes it into the indexer K cache, and ``indexer_q_quantizer`` the query in the basis serving
+quantizes it. The names avoid the ``*[kv]_bmm_quantizer`` globs, so the KV-cache presets leave them
+disabled. The ModelOpt extra-state callbacks come from
 ``megatron_replace_quant_module_hook`` in the Megatron plugin, which covers every registered
 QuantModule.
 """
@@ -41,17 +42,18 @@ except ImportError:  # megatron-core without Compressed Sparse Attention
 
 
 class _QuantMegatronIndexer(QuantModule):
-    """DeepSeek-V4 CSA indexer with fake quantization of its key, the indexer K cache entry.
+    """DeepSeek-V4 CSA indexer with fake quantization of its query and key (the K cache entry).
 
-    ``indexer_k_quantizer`` is applied to the key returned by ``forward_before_topk``, which every
-    scoring path consumes, in the layout vLLM caches it: after norm and RoPE, without the Hadamard
-    rotation that the compressor applies. The rotation hits q and k alike, so it leaves the index
-    scores unchanged; the key is rotated back around the QDQ (``rotate_activation`` is orthonormal
-    and symmetric, so it is its own inverse). The indexer projections are TP-duplicated, so the amax
-    only needs the DP/CP sync of ``parallel_state``.
+    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` are applied to the query and key returned by
+    ``forward_before_topk``, which every scoring path consumes, in the layout vLLM quantizes them:
+    after norm and RoPE, without the Hadamard rotation that the indexer applies. The rotation hits q
+    and k alike, so it leaves the index scores unchanged; both are rotated back around the QDQ
+    (``rotate_activation`` is orthonormal and symmetric, so it is its own inverse). The indexer
+    projections are TP-duplicated, so the amax only needs the DP/CP sync of ``parallel_state``.
     """
 
     def _setup(self):
+        self.indexer_q_quantizer = TensorQuantizer()
         self.indexer_k_quantizer = TensorQuantizer()
         try:
             data_parallel_group = get_data_parallel_group(with_context_parallel=True)
@@ -74,21 +76,23 @@ class _QuantMegatronIndexer(QuantModule):
         # second time by ``replace_quant_module`` (inconsistent MRO).
         return super().forward(*args, **kwargs)
 
-    def _quantize_key(self, k: torch.Tensor) -> torch.Tensor:
-        # The compressor has no switch for its rotation: rotate the key back to the unrotated basis
-        # vLLM caches before the QDQ and rotate it again after.
-        rotated = self.compressor.rotate
+    @staticmethod
+    def _quantize_unrotated(x: torch.Tensor, quantizer: TensorQuantizer, rotated: bool):
+        # The rotation has no config switch: rotate back to the unrotated basis vLLM quantizes in
+        # before the QDQ and rotate again after.
         if rotated:  # rotate back (rotate_activation is its own inverse)
-            k = rotate_activation(k)
-        k = self.indexer_k_quantizer(k)
+            x = rotate_activation(x)
+        x = quantizer(x)
         if rotated:  # rotate again, back to the basis the scores use
-            k = rotate_activation(k)
-        return k
+            x = rotate_activation(x)
+        return x
 
     def forward_before_topk(self, *args, **kwargs):
         q, k, weights = super().forward_before_topk(*args, **kwargs)
+        if self.indexer_q_quantizer.is_enabled:  # the query is always rotated
+            q = self._quantize_unrotated(q, self.indexer_q_quantizer, rotated=True)
         if self.indexer_k_quantizer.is_enabled:
-            k = self._quantize_key(k)
+            k = self._quantize_unrotated(k, self.indexer_k_quantizer, self.compressor.rotate)
         return q, k, weights
 
     # torch emits and loads ``_extra_state`` only when the class overrides these two. ModelOpt binds
@@ -103,6 +107,7 @@ class _QuantMegatronIndexer(QuantModule):
     def modelopt_post_restore(self, prefix: str = ""):
         # The base implementation takes the first state_dict entry as device reference, which here
         # is the CPU ``_extra_state`` byte tensor; the TP-duplicated query projection is the anchor.
+        self.indexer_q_quantizer.to(self.linear_wq_b.weight.device)
         self.indexer_k_quantizer.to(self.linear_wq_b.weight.device)
 
 

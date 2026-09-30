@@ -687,6 +687,20 @@ def test_indexer_k_patterns_on_converted_indexer_pass():
     assert model.indexer.indexer_k_quantizer.amax is not None
 
 
+def test_indexer_q_patterns_need_the_query_quantizer():
+    """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"].append(
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        with pytest.raises(RuntimeError, match=r"enables indexer_q_quantizer, but no"):
+            mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+
+
 def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
     """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
     config = copy.deepcopy(INDEXER_K_ONLY_CFG)

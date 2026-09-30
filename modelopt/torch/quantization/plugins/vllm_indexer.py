@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake quantization of the sparse-attention indexer K cache in vLLM.
+"""Fake quantization of the sparse-attention indexer query and K cache in vLLM.
 
 Covers the CSA indexer of DeepSeek-V4 and the k-pool indexer of GLM-5.3-Flash.
 
-``indexer_k_quantizer`` fake-quantizes the tensor the serving kernel quantizes into the indexer K
-cache. Where vLLM only materializes that key inside a fused kernel that already wrote FP8 to the
-cache, the entries written in the current step are read back, fake-quantized and re-stored. The
-name avoids the ``*[kv]_bmm_quantizer`` globs, so the KV-cache presets leave it disabled.
+``indexer_k_quantizer`` fake-quantizes the key the serving kernel quantizes into the indexer K
+cache, and ``indexer_q_quantizer`` the query it quantizes for scoring. vLLM only materializes both
+inside fused kernels that already produced FP8, so the FP8 tensors (the cache entries written in the
+current step, the query) are dequantized, fake-quantized and quantized again with the kernels' scale
+rule. The names avoid the ``*[kv]_bmm_quantizer`` globs, so the KV-cache presets leave them
+disabled.
 """
 
 import functools
@@ -70,13 +72,26 @@ def _import_glm5next_indexer() -> tuple[type | None, ModuleType | None]:
 
 VllmGlm5NextIndexer, _glm5next_kpool_ops = _import_glm5next_indexer()
 
-_INDEXER_K_FP8_MAX = 448.0
+_INDEXER_FP8_MAX = 448.0
 _INDEXER_K_SCALE_BYTES = 4
 
 
-def _indexer_k_ue8m0_scale(amax: torch.Tensor) -> torch.Tensor:
-    """Power-of-two FP8 scale used by vLLM's indexer K cache kernels (``scale_fmt="ue8m0"``)."""
-    return torch.exp2(torch.ceil(torch.log2(amax.clamp_min(1e-4) / _INDEXER_K_FP8_MAX)))
+def _indexer_ue8m0_scale(amax: torch.Tensor) -> torch.Tensor:
+    """Power-of-two FP8 scale used by vLLM's indexer q and K kernels (``scale_fmt="ue8m0"``)."""
+    return torch.exp2(torch.ceil(torch.log2(amax.clamp_min(1e-4) / _INDEXER_FP8_MAX)))
+
+
+def _fake_quantize_fp8_rows(
+    x: torch.Tensor, quantizer: TensorQuantizer
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fake-quantize the dequantized rows ``x`` and quantize them back to E4M3 like vLLM's kernels.
+
+    Returns the E4M3 rows and their power-of-two fp32 scales (shape ``x.shape[:-1]``).
+    """
+    x = quantizer(x)
+    scale = _indexer_ue8m0_scale(x.abs().amax(dim=-1))
+    values = (x / scale[..., None]).clamp(-_INDEXER_FP8_MAX, _INDEXER_FP8_MAX)
+    return values.to(torch.float8_e4m3fn), scale
 
 
 def _requantize_fp8_indexer_k_cache(
@@ -116,14 +131,8 @@ def _requantize_fp8_indexer_k_cache(
 
     # Zero the redirected rows so they cannot influence calibration or dynamic scales.
     k = torch.where(valid[:, None], k, torch.zeros_like(k))
-    k = quantizer(k)
-    new_scale = _indexer_k_ue8m0_scale(k.abs().amax(dim=-1))
-    new_values = (
-        (k / new_scale[:, None])
-        .clamp(-_INDEXER_K_FP8_MAX, _INDEXER_K_FP8_MAX)
-        .to(torch.float8_e4m3fn)
-        .view(torch.uint8)
-    )
+    new_values, new_scale = _fake_quantize_fp8_rows(k, quantizer)
+    new_values = new_values.view(torch.uint8)
     new_scales = new_scale.contiguous().view(torch.uint8).view(-1, _INDEXER_K_SCALE_BYTES)
 
     keep = valid[:, None]
@@ -148,9 +157,10 @@ def _get_arg(args: tuple, kwargs: dict, name: str, pos: int):
 
 
 class _QuantVLLMIndexerBase(QuantModule):
-    """Owner of ``indexer_k_quantizer`` for one vLLM indexer layout."""
+    """Owner of ``indexer_q_quantizer`` and ``indexer_k_quantizer`` for one vLLM indexer layout."""
 
     def _setup(self):
+        self.indexer_q_quantizer = TensorQuantizer()
         self.indexer_k_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
 
@@ -163,29 +173,56 @@ class _QuantVLLMIndexerBase(QuantModule):
 
 
 class _QuantVLLMDeepseekV4Indexer(_QuantVLLMIndexerBase):
-    """DeepSeek-V4 indexer: the compressor kernel FP8-quantizes and caches the compressed key.
+    """DeepSeek-V4 indexer: fused kernels FP8-quantize the query and cache the compressed key.
 
-    After the compressor ran, the entries it wrote (one per ``compress_ratio`` tokens) are
-    re-quantized through ``indexer_k_quantizer``. vLLM caches the key without the Hadamard rotation
-    that the DeepSeek reference applies.
+    After the forward, the cache entries the compressor wrote (one per ``compress_ratio`` tokens)
+    are re-quantized through ``indexer_k_quantizer`` and the returned query through
+    ``indexer_q_quantizer``. vLLM uses both without the Hadamard rotation that the DeepSeek
+    reference applies.
     """
 
     def _setup(self):
         super()._setup()
         self._positions_pos = _native_positional_index(self, "forward", "positions")
+        self._indexer_weights_pos = _native_positional_index(self, "forward", "indexer_weights")
 
     def forward(self, *args, **kwargs):
-        out = super().forward(*args, **kwargs)
+        q, q_scale, weights = super().forward(*args, **kwargs)
         if self.indexer_k_quantizer.is_enabled:
+            self._check_fp8_indexer()
             self._requantize_written_keys(_get_arg(args, kwargs, "positions", self._positions_pos))
-        return out
+        if self.indexer_q_quantizer.is_enabled and q is not None:  # None: short-context shortcut
+            self._check_fp8_indexer()
+            indexer_weights = _get_arg(args, kwargs, "indexer_weights", self._indexer_weights_pos)
+            q, weights = self._requantize_query(q, weights, indexer_weights)
+        return q, q_scale, weights
 
-    def _requantize_written_keys(self, positions: torch.Tensor) -> None:
+    def _check_fp8_indexer(self) -> None:
         if getattr(self, "use_fp4_kv", False):
             raise NotImplementedError(
-                "indexer_k_quantizer re-quantizes the FP8 indexer cache; serve with the default "
-                "indexer_kv_dtype instead of 'mxfp4'."
+                "The indexer quantizers re-quantize the FP8 indexer query and cache; serve with "
+                "the default indexer_kv_dtype instead of 'mxfp4'."
             )
+
+    def _requantize_query(
+        self, q: torch.Tensor, weights: torch.Tensor, indexer_weights: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Re-quantize the FP8 query; the kernel folds its power-of-two scale into ``weights``.
+
+        The kernel returns ``indexer_weights * q_scale * softmax_scale * n_head**-0.5`` as
+        ``weights`` and no ``q_scale``: divide the other factors out, round to the power of two and
+        swap in the new scale.
+        """
+        base = indexer_weights.float() * self.softmax_scale * self.n_head**-0.5
+        # A head with zero weight does not score; zero its row instead of recovering its scale.
+        live = (weights != 0) & (base != 0)
+        ratio = torch.where(live, weights / torch.where(live, base, 1.0), 1.0)
+        old_scale = torch.exp2(torch.round(torch.log2(ratio)))
+        x = torch.where(live[..., None], q.float() * old_scale[..., None], 0.0)
+        q, new_scale = _fake_quantize_fp8_rows(x, self.indexer_q_quantizer)
+        return q, weights * (new_scale / old_scale)
+
+    def _requantize_written_keys(self, positions: torch.Tensor) -> None:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):  # profiling run: nothing was written
             return
@@ -271,20 +308,53 @@ def _install_kpool_cache_hooks(kpool_ops: ModuleType) -> None:
     )
 
 
+# GLM-5.3-Flash's fused Hadamard + FP8 quantization of the indexer query.
+_GLM5NEXT_QUERY_KERNEL = "fwht128_quant_fp8"
+
+
 class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
-    """GLM-5.3-Flash indexer: kpool kernels Hadamard-rotate, FP8-quantize and cache the pooled keys.
+    """GLM-5.3-Flash indexer: kernels Hadamard-rotate and FP8-quantize the query and pooled keys.
 
     The kernel entry points that write the indexer K cache are wrapped process-wide and re-quantize
-    the pools they wrote, on prefill and on decode pool completion.
+    the pools they wrote, on prefill and on decode pool completion. The query kernel is swapped for
+    a re-quantizing wrapper while ``forward`` runs; CUDA graph capture records the wrapper.
     """
 
     kpool_ops: ModuleType | None = _glm5next_kpool_ops
+    # The native forward looks up its query kernel in this module.
+    indexer_module: ModuleType | None = (
+        inspect.getmodule(VllmGlm5NextIndexer) if VllmGlm5NextIndexer is not None else None
+    )
 
     def _setup(self):
         super()._setup()
         assert self.kpool_ops is not None  # imported together with the registered indexer class
         _glm5next_indexers.add(self)
         _install_kpool_cache_hooks(self.kpool_ops)
+
+    def forward(self, *args, **kwargs):
+        if not self.indexer_q_quantizer.is_enabled:
+            return super().forward(*args, **kwargs)
+        module = self.indexer_module
+        quant_fn = getattr(module, _GLM5NEXT_QUERY_KERNEL, None)
+        if quant_fn is None:
+            raise NotImplementedError(
+                "indexer_q_quantizer: this vLLM version's GLM-5.3-Flash indexer does not quantize "
+                f"the query with {_GLM5NEXT_QUERY_KERNEL}."
+            )
+        # Swap the module global for this call only; vLLM runs one forward at a time.
+        setattr(module, _GLM5NEXT_QUERY_KERNEL, functools.partial(self._quantize_query, quant_fn))
+        try:
+            return super().forward(*args, **kwargs)
+        finally:
+            setattr(module, _GLM5NEXT_QUERY_KERNEL, quant_fn)
+
+    def _quantize_query(
+        self, quant_fn: Callable, q: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q_fp8, q_scale = quant_fn(q)  # rotated query [rows, 128] and its [rows, 1] scales
+        q_fp8, q_scale = _fake_quantize_fp8_rows(q_fp8.float() * q_scale, self.indexer_q_quantizer)
+        return q_fp8, q_scale[:, None]
 
 
 if VllmDeepseekV4Indexer is not None:

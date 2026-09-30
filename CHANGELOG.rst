@@ -26,7 +26,7 @@ Changelog
 - Add support for quantizing and calibrating enabled operators outside the transformer layers, such as ``lm_head``, when using layerwise calibration.
 - Add an end-to-end BEVFormer ONNX PTQ example with temporal calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and nuScenes accuracy evaluation. See `examples/onnx_ptq/bevformer/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/bevformer>`_ for details.
 - Add a reusable local-Hessian NVFP4 PTQ recipe and the quantization recipe used for ``nvidia/Qwen3.8-27B-NVFP4``.
-- Add fake quantization of the sparse-attention indexer key cache for DeepSeek-V4 (vLLM and Megatron-Core) and GLM-5.3-Flash (vLLM) through the new ``indexer_k_quantizer``. Enable it by importing the ``configs/ptq/units/indexer_k_nvfp4`` unit (NVFP4 with its global scale fixed to 1) into a recipe.
+- Add fake quantization of the sparse-attention indexer key cache and query for DeepSeek-V4 (vLLM and Megatron-Core) and GLM-5.3-Flash (vLLM) through the new ``indexer_k_quantizer`` and ``indexer_q_quantizer``. Enable them by importing the ``configs/ptq/units/indexer_k_nvfp4`` and ``configs/ptq/units/indexer_q_nvfp4`` units (NVFP4 with the global scale fixed to 1) into a recipe.
 
 *Speculative Decoding*
 

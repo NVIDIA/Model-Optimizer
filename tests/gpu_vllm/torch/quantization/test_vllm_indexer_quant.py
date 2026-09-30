@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake quantization of the sparse-attention indexer K cache in the vLLM plugin.
+"""Fake quantization of the sparse-attention indexer query and K cache in the vLLM plugin.
 
-Covers the FP8 cache read-back/re-quantization shared by the fused indexer layouts and the wiring
-of each layout adapter on stand-in modules, without booting an ``LLM`` (see
-``test_vllm_dynamic_modules.py`` for the end-to-end DeepSeek-V4 and GLM-5.3-Flash runs).
+Covers the FP8 cache read-back/re-quantization shared by the fused indexer layouts, the query
+re-quantization and the wiring of each layout adapter on stand-in modules, without booting an
+``LLM`` (see ``test_vllm_dynamic_modules.py`` for the end-to-end DeepSeek-V4 and GLM-5.3-Flash
+runs).
 """
 
+import sys
 import weakref
 from types import SimpleNamespace
 
@@ -45,7 +47,7 @@ def _write_fp8_indexer_cache(k: torch.Tensor, kv_cache: torch.Tensor, slots: lis
         if slot < 0:
             continue
         block, pos = divmod(slot, BLOCK_SIZE)
-        scale = vllm_indexer._indexer_k_ue8m0_scale(row.float().abs().max())
+        scale = vllm_indexer._indexer_ue8m0_scale(row.float().abs().max())
         values = (row.float() / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
         flat[block, pos * HEAD_DIM : (pos + 1) * HEAD_DIM] = values.view(torch.uint8)
         flat[block, scale_base + pos * 4 : scale_base + (pos + 1) * 4] = scale.reshape(1).view(
@@ -160,19 +162,24 @@ def test_indexer_shared_by_two_parents_is_converted_once(parallel_state_stub):
 
 
 class _NativeV4Indexer(torch.nn.Module):
-    """Stand-in for ``DeepseekV4Indexer``: the compressor kernel wrote the cache in forward."""
+    """Stand-in for ``DeepseekV4Indexer``: in forward, the compressor kernel wrote the cache and
+    the query kernel returns ``outputs`` (FP8 query, no scale, weights with the scale folded in).
+    """
 
-    def __init__(self, kv_cache):
+    def __init__(self, kv_cache=None):
         super().__init__()
+        self.n_head = 4
+        self.softmax_scale = HEAD_DIM**-0.5
         self.compress_ratio = 4
         self.use_fp4_kv = False
         self.k_cache = SimpleNamespace(prefix="idx", kv_cache=kv_cache)
         self.compressor = SimpleNamespace(state_cache=SimpleNamespace(prefix="state"))
+        self.outputs = (None, None, None)  # the short-context shortcut computes no query
 
     def forward(
         self, hidden_states, qr, compressed_kv_score, indexer_weights, positions, rotary_emb
     ):
-        return "out"
+        return self.outputs
 
 
 class _TestV4Indexer(vllm_indexer._QuantVLLMDeepseekV4Indexer, _NativeV4Indexer):
@@ -197,29 +204,121 @@ def test_deepseek_v4_indexer_requantizes_compressed_keys(
         vllm_indexer, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata)
     )
 
-    assert indexer(None, None, None, None, positions, None) == "out"
+    assert indexer(None, None, None, None, positions, None) == (None, None, None)
 
     written = [9, 17, 30]  # slot 18 is mid-group, slot 3 has no compressor-state slot
     _assert_requantized(before, kv_cache, torch.tensor(written), indexer.indexer_k_quantizer)
 
 
-def test_deepseek_v4_indexer_rejects_mxfp4_cache(parallel_state_stub, monkeypatch):
+def _fused_indexer_q_quant(q, indexer_weights, softmax_scale, head_scale):
+    """Torch reference of the FP8 path of vLLM's ``fused_indexer_q_rope_quant`` without RoPE."""
+    scale = vllm_indexer._indexer_ue8m0_scale(q.float().abs().amax(dim=-1))
+    q_fp8 = (q.float() / scale[..., None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return q_fp8, indexer_weights.float() * scale * softmax_scale * head_scale
+
+
+def test_deepseek_v4_indexer_requantizes_query(parallel_state_stub):
+    torch.manual_seed(0)
+    indexer = _TestV4Indexer.convert(_NativeV4Indexer())
+    indexer.indexer_k_quantizer.disable()
+    quantizer = indexer.indexer_q_quantizer = _fp8_quantizer(amax=2.0)
+    n_head, head_scale = indexer.n_head, indexer.n_head**-0.5
+    # Rows spanning several power-of-two scales; the query kernel folds each into the weights.
+    q = torch.randn(3, n_head, HEAD_DIM) * torch.tensor([0.01, 1.0, 30.0])[:, None, None]
+    indexer_weights = torch.randn(3, n_head, dtype=torch.bfloat16)
+    indexer_weights[1, 2] = 0  # a head that does not score
+    q_fp8, weights = _fused_indexer_q_quant(q, indexer_weights, indexer.softmax_scale, head_scale)
+    indexer.outputs = (q_fp8, None, weights)
+
+    new_q, q_scale, new_weights = indexer(None, None, None, indexer_weights, None, None)
+
+    # The kernel's output for the fake-quantized dequantized query.
+    old_scale = vllm_indexer._indexer_ue8m0_scale(q.abs().amax(dim=-1))
+    expected_q, expected_weights = _fused_indexer_q_quant(
+        quantizer(q_fp8.float() * old_scale[..., None]),
+        indexer_weights,
+        indexer.softmax_scale,
+        head_scale,
+    )
+    live = indexer_weights != 0
+    assert q_scale is None
+    assert torch.equal(new_q.view(torch.uint8)[live], expected_q.view(torch.uint8)[live])
+    assert torch.equal(new_weights[live], expected_weights[live])
+    assert not new_q.float()[~live].any() and not new_weights[~live].any()
+
+    indexer.outputs = (None, None, None)  # short context: no query to quantize
+    assert indexer(None, None, None, indexer_weights, None, None) == (None, None, None)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="vLLM's query kernel needs a GPU")
+def test_deepseek_v4_query_scale_matches_vllm_kernel(parallel_state_stub):
+    """The query kernel folds its power-of-two scale into the weights as the plugin assumes."""
+    fused_indexer_q = pytest.importorskip("vllm.models.deepseek_v4.common.ops.fused_indexer_q")
+    torch.manual_seed(0)
+    indexer = _TestV4Indexer.convert(_NativeV4Indexer())
+    indexer.n_head = n_head = 64
+    head_scale = n_head**-0.5
+    q = torch.randn(5, n_head, HEAD_DIM, device="cuda")
+    q = (q * torch.logspace(-2, 2, 5, device="cuda")[:, None, None]).to(torch.bfloat16)
+    indexer_weights = torch.randn(5, n_head, device="cuda", dtype=torch.bfloat16)
+    # cos 1 and sin 0: RoPE leaves the query unchanged, so the torch reference applies exactly.
+    cos_sin_cache = torch.cat([torch.ones(8, 32), torch.zeros(8, 32)], dim=-1).cuda()
+    q_fp8, weights = fused_indexer_q.fused_indexer_q_rope_quant(
+        torch.arange(5, device="cuda"),
+        q,
+        cos_sin_cache,
+        indexer_weights,
+        indexer.softmax_scale,
+        head_scale,
+    )
+    ref_q, ref_weights = _fused_indexer_q_quant(
+        q, indexer_weights, indexer.softmax_scale, head_scale
+    )
+    assert torch.equal(q_fp8.view(torch.uint8), ref_q.view(torch.uint8))
+    torch.testing.assert_close(weights, ref_weights, rtol=1e-6, atol=0)
+
+    # With the quantizer disabled, re-quantizing keeps what the scores see: query times weight.
+    indexer.indexer_q_quantizer.disable()
+    new_q, new_weights = indexer._requantize_query(q_fp8, weights, indexer_weights)
+    assert torch.equal(new_q.float() * new_weights[..., None], q_fp8.float() * weights[..., None])
+
+
+@pytest.mark.parametrize("quantizer_name", ["indexer_k_quantizer", "indexer_q_quantizer"])
+def test_deepseek_v4_indexer_rejects_mxfp4(parallel_state_stub, monkeypatch, quantizer_name):
     indexer = _TestV4Indexer.convert(
         _NativeV4Indexer(torch.zeros(NUM_BLOCKS, BLOCK_SIZE, HEAD_DIM + 4, dtype=torch.uint8))
     )
-    indexer.indexer_k_quantizer = _fp8_quantizer(amax=2.0)
+    indexer.indexer_k_quantizer.disable()
+    indexer.indexer_q_quantizer.disable()
+    setattr(indexer, quantizer_name, _fp8_quantizer(amax=2.0))
     indexer.use_fp4_kv = True
+    # MXFP4 query: packed E2M1 values and their ue8m0 block scales.
+    indexer.outputs = (
+        torch.zeros(2, 4, HEAD_DIM // 2, dtype=torch.uint8),
+        torch.zeros(2, 4, dtype=torch.int32),
+        torch.ones(2, 4),
+    )
     monkeypatch.setattr(
         vllm_indexer, "get_forward_context", lambda: SimpleNamespace(attn_metadata={})
     )
-    with pytest.raises(NotImplementedError, match="FP8 indexer cache"):
+    with pytest.raises(NotImplementedError, match="indexer_kv_dtype"):
         indexer(None, None, None, None, torch.zeros(2, dtype=torch.int64), None)
 
 
+def fwht128_quant_fp8(q):
+    """Stand-in for GLM-5.3-Flash's fused Hadamard + FP8 query kernel (rotation left out)."""
+    scale = vllm_indexer._indexer_ue8m0_scale(q.float().abs().amax(dim=-1, keepdim=True))
+    return (q.float() / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn), scale
+
+
 class _NativeGlm5NextIndexer(torch.nn.Module):
-    def __init__(self, kv_cache):
+    def __init__(self, kv_cache=None):
         super().__init__()
         self.k_cache = SimpleNamespace(kv_cache=kv_cache)
+
+    def forward(self, q):
+        # Like vLLM's forward, look the query kernel up in the module globals on every call.
+        return fwht128_quant_fp8(q)
 
 
 class _TestGlm5NextIndexer(vllm_indexer._QuantVLLMGlm5NextIndexer, _NativeGlm5NextIndexer):
@@ -295,3 +394,35 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
     _assert_requantized(before, kv_cache, torch.tensor([17, 30]), quantizer)
     assert kernel_calls == ["prefill", "prefill", "prefill", "decode"]
     assert getattr(kpool_ops.kpool_compress_and_write_cache, "_modelopt_indexer_k_wrapped", False)
+
+
+def test_glm5next_indexer_requantizes_query(parallel_state_stub, monkeypatch):
+    kpool_ops = SimpleNamespace(
+        kpool_compress_and_write_cache=lambda kv_cache, loc: None,
+        kpool_decode_update_and_maybe_write_cache_batched=lambda kv_cache, slot_mapping: None,
+    )
+    monkeypatch.setattr(_TestGlm5NextIndexer, "kpool_ops", kpool_ops)
+    monkeypatch.setattr(_TestGlm5NextIndexer, "indexer_module", sys.modules[__name__])
+    monkeypatch.setattr(vllm_indexer, "_glm5next_indexers", weakref.WeakSet())
+    indexer = _TestGlm5NextIndexer.convert(_NativeGlm5NextIndexer())
+    indexer.indexer_k_quantizer.disable()
+    torch.manual_seed(0)
+    q = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16) * 3
+    kernel = fwht128_quant_fp8
+    ref_q, ref_scale = kernel(q)
+
+    indexer.indexer_q_quantizer.disable()
+    q_fp8, q_scale = indexer(q)
+    assert torch.equal(q_fp8.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(q_scale, ref_scale)
+
+    quantizer = indexer.indexer_q_quantizer = _fp8_quantizer(amax=2.0)
+    q_fp8, q_scale = indexer(q)
+    expected_q, expected_scale = kernel(quantizer(ref_q.float() * ref_scale))
+    assert torch.equal(q_fp8.view(torch.uint8), expected_q.view(torch.uint8))
+    assert torch.equal(q_scale, expected_scale)
+    assert fwht128_quant_fp8 is kernel  # the module global is restored
+
+    monkeypatch.setattr(_TestGlm5NextIndexer, "indexer_module", SimpleNamespace())
+    with pytest.raises(NotImplementedError, match="fwht128_quant_fp8"):
+        indexer(q)
