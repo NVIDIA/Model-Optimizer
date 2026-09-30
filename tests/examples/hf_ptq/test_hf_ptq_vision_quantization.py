@@ -49,7 +49,8 @@ def test_image_calibration_model_target_follows_recipe(
         use_fsdp2=False,
         specdec_offline_dataset=None,
         low_memory_mode=False,
-        pyt_ckpt_path="dummy",
+        hf_model_path="dummy",
+        hf_model_name=None,
         dist_state=SimpleNamespace(device=torch.device("cpu")),
         gpu_max_mem_percentage=0.8,
         trust_remote_code=False,
@@ -184,7 +185,5 @@ def test_vision_recipe_requires_image_calibration(hf_ptq, recipe):
             calibration_only=False,
             processor=None,
             tokenizer=None,
-            default_padding_side=None,
-            default_pad_token=None,
             device=torch.device("cpu"),
         )

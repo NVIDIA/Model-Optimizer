@@ -216,7 +216,8 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
         batch_size=1,
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        hf_model_path="dummy",
+        hf_model_name=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
         specdec_offline_dataset=None,
@@ -262,7 +263,8 @@ def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     args = SimpleNamespace(
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        pyt_ckpt_path="dummy",
+        hf_model_path="dummy",
+        hf_model_name=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
     )
@@ -746,12 +748,6 @@ def test_only_the_main_rank_clears_an_inherited_pointer(monkeypatch, example_uti
     assert inherited.exists()
 
 
-def test_experiment_json_is_export_owned(example_utils):
-    """copy_custom_model_files copies source sidecars including dotfiles, so without this
-    the source checkpoint's pointer would follow it into every derived checkpoint."""
-    assert example_utils.EXPERIMENT_JSON in example_utils._HF_PTQ_EXPORT_OWNED_FILES
-
-
 def test_untracked_runs_write_no_experiment_json(monkeypatch, example_utils, tmp_path):
     _, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(tmp_path)
@@ -854,8 +850,6 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
             generated_ids_before_ptq=torch.zeros(1, 4, dtype=torch.long),
             is_nemotron_vl_model=False,
             first_text_speech_dataset=None,
-            default_padding_side="right",
-            default_pad_token=None,
             calib_dataloader=None,
         )
 

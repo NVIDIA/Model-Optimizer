@@ -15,14 +15,13 @@
 
 import argparse
 import copy
-import glob
 import hashlib
 import inspect
 import json
 import logging
 import os
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -48,70 +47,13 @@ from transformers import (
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.models import hf_model_type
-from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
-    copy_non_safetensor_files_from_ckpt,
-    copy_off_index_safetensors,
-)
-from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
-
-try:
-    from huggingface_hub import snapshot_download
-except ImportError:
-    snapshot_download = None
-
 from modelopt.torch.utils import distributed as dist_utils
-from modelopt.torch.utils.mlflow import EXPERIMENT_JSON, Tool, resolved_recipe_texts, tracked_run
+from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
+from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
 
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
-
-_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
-    "*.jinja",
-    "*.json",
-    "*.md",
-    "*.model",
-    "*.py",
-    "*.tiktoken",
-    "*.txt",
-    "LICENSE*",
-    "NOTICE*",
-]
-_HF_PTQ_WEIGHT_FILE_PATTERNS = (
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.bin.index.json",
-    "*.ckpt",
-    "*.gguf",
-    "*.h5",
-    "*.msgpack",
-    "*.npy",
-    "*.npz",
-    "*.onnx",
-    "*.pb",
-    "*.pickle",
-    "*.pkl",
-    "*.pt",
-    "*.pth",
-    "*.tar",
-    "*.tar.bz2",
-    "*.tar.gz",
-    "*.tar.xz",
-    "*.tflite",
-    "*.tgz",
-    "*.zip",
-)
-_HF_PTQ_EXPORT_OWNED_FILES = {
-    EXPERIMENT_JSON,
-    "config.json",
-    "hf_quant_config.json",
-    "quant_config.json",
-    "quantization_config.json",
-    "quantize_config.json",
-    "recipe.yaml",
-    "recipe.yml",
-}
 
 
 @dataclass
@@ -150,7 +92,7 @@ def cleanup_distributed(args):
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.pyt_ckpt_path.lower():
+    if "vila" in args.hf_model_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
     if is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
@@ -451,18 +393,9 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
     if not ckpt_path:
         return
 
-    from huggingface_hub import hf_hub_download
-
-    is_local = os.path.isdir(ckpt_path)
-
     def _resolve_file(filename):
-        if is_local:
-            local = os.path.join(ckpt_path, filename)
-            return local if os.path.exists(local) else None
-        try:
-            return hf_hub_download(repo_id=ckpt_path, filename=filename)
-        except Exception:
-            return None
+        local = os.path.join(ckpt_path, filename)
+        return local if os.path.exists(local) else None
 
     # Load non-expert weights and metadata from safetensors
     checkpoint_weights = {}
@@ -598,25 +531,6 @@ def _fmt_max_memory(max_memory: dict) -> str:
     return "\n".join(parts)
 
 
-def _resolved_local_dir(ckpt_path: str) -> str:
-    """Return the local directory ``ckpt_path`` names, resolving a hub id to its snapshot.
-
-    The export re-reads the source checkpoint by path to carry over the weights the loader could
-    not place. Recording the hub id instead would leave it reading ``org/model``, which is not a
-    directory -- so every carried weight would be dropped with a warning. ``from_pretrained`` has
-    already populated the cache by the time this runs, so the lookup is local and offline.
-    """
-    if Path(ckpt_path).is_dir():
-        return str(ckpt_path)
-    if snapshot_download is None:
-        return str(ckpt_path)
-    try:
-        return snapshot_download(ckpt_path, local_files_only=True)
-    except Exception:
-        # No snapshot to point at; the export falls back to its own provenance handling.
-        return str(ckpt_path)
-
-
 def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     """``from_pretrained`` that records what the loader could not place.
 
@@ -629,7 +543,7 @@ def _from_pretrained_recording(auto_class, ckpt_path, **kwargs):
     """
     model, loading_info = auto_class.from_pretrained(ckpt_path, output_loading_info=True, **kwargs)
     unexpected = loading_info.get("unexpected_keys") or []
-    record_unplaced_source_keys(model, _resolved_local_dir(ckpt_path), unexpected)
+    record_unplaced_source_keys(model, str(ckpt_path), unexpected)
     if unexpected:
         print(
             f"✓ {len(unexpected)} checkpoint key(s) the model has no parameter for "
@@ -915,175 +829,13 @@ def generate_excludes_prompt(model) -> bool:
     return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
 
 
-def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
-    """Resolve a model name or path to a local directory path.
-
-    If the input is already a local directory, returns it as-is.
-    If the input is a HuggingFace model ID, attempts to resolve it to the local cache path.
-
-    Args:
-        model_name_or_path: Either a local directory path or HuggingFace model ID
-        trust_remote_code: Whether to trust remote code when loading the model
-
-    Returns:
-        Local directory path to the model files
-    """
-    # If it's already a local directory, return as-is
-    if os.path.isdir(model_name_or_path):
-        return model_name_or_path
-
-    # Try to resolve HuggingFace model ID to local cache path
-    try:
-        # First try to load the config to trigger caching
-        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
-
-        # The config object should have the local path information
-        # Try different ways to get the cached path
-        if hasattr(config, "_name_or_path") and os.path.isdir(config._name_or_path):
-            return config._name_or_path
-
-        # Alternative: use snapshot_download if available
-        if snapshot_download is not None:
-            try:
-                local_path = snapshot_download(
-                    repo_id=model_name_or_path,
-                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
-                )
-                return local_path
-            except Exception as e:
-                print(
-                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
-                )
-
-        # Fallback: try to find in HuggingFace cache
-        from transformers.utils import TRANSFORMERS_CACHE
-
-        # Look for the model in the cache directory
-        cache_pattern = os.path.join(TRANSFORMERS_CACHE, "models--*")
-        cache_dirs = glob.glob(cache_pattern)
-
-        # Convert model name to cache directory format
-        model_cache_name = model_name_or_path.replace("/", "--")
-        for cache_dir in cache_dirs:
-            if model_cache_name in cache_dir:
-                # Look for the snapshots directory
-                snapshots_dir = os.path.join(cache_dir, "snapshots")
-                if os.path.exists(snapshots_dir):
-                    # Get the latest snapshot
-                    snapshot_dirs = [
-                        d
-                        for d in os.listdir(snapshots_dir)
-                        if os.path.isdir(os.path.join(snapshots_dir, d))
-                    ]
-                    if snapshot_dirs:
-                        latest_snapshot = max(snapshot_dirs)  # Use lexicographically latest
-                        snapshot_path = os.path.join(snapshots_dir, latest_snapshot)
-                        return snapshot_path
-
-    except Exception as e:
-        print(f"Warning: Could not resolve model path for {model_name_or_path}: {e}")
-
-    # If all else fails, return the original path
-    # This will cause the copy function to skip with a warning
-    return model_name_or_path
-
-
-def copy_custom_model_files(
-    source_path: str,
-    export_path: str,
-    trust_remote_code: bool = False,
-    exclude_files: Iterable[str] | None = None,
-    copy_off_index_weights: bool = True,
-):
-    """Copy source checkpoint sidecar files to an HF PTQ export.
-
-    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
-    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
-    README assets, parser plugins, and similar deployment files are preserved for both
-    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
-    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
-    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
-    Source tokenizer and processor files intentionally still win because Transformers may
-    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
-    wins when it has a separate chat template. Callers that write a generation config can
-    exclude it; the TensorRT-LLM export retains the source generation config.
-
-    Args:
-        source_path: Path to the original model directory or HuggingFace model ID
-        export_path: Path to the exported model directory
-        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
-        exclude_files: Additional source file names to skip.
-        copy_off_index_weights: Copy safetensors the loader never opens (GLM-4.7's
-            ``mtp.safetensors``). Only the unified-HF export gives them meaning -- it seeds their
-            tensor names into ``quantization_config.ignore`` -- so a TensorRT-LLM export, whose
-            checkpoint is ``rank<N>.safetensors`` plus its own ``config.json``, should pass False
-            rather than carry gigabytes nothing there reads.
-    """
-    # Resolve the source path (handles both local paths and HF model IDs)
-    resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
-
-    source_dir = Path(resolved_source_path)
-    export_dir = Path(export_path)
-
-    if not source_dir.exists():
-        if resolved_source_path != source_path:
-            print(
-                f"Warning: Could not find local cache for HuggingFace model '{source_path}' "
-                f"(resolved to '{resolved_source_path}')"
-            )
-        else:
-            print(f"Warning: Source directory '{source_path}' does not exist")
-        return
-
-    if not export_dir.exists():
-        print(f"Warning: Export directory {export_path} does not exist")
-        return
-
-    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
-    if (export_dir / "chat_template.jinja").is_file():
-        exclude_files.add("tokenizer_config.json")
-
-    copied_files = copy_non_safetensor_files_from_ckpt(
-        source_dir,
-        export_dir,
-        exclude_files=exclude_files,
-        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
-    )
-
-    # Safetensors the loader never opens are sidecars too: untouched by quantization and absent
-    # from the export, so copy them rather than leave them behind. Skipped by the call above,
-    # which excludes every *.safetensors to avoid re-emitting the unquantized source weights.
-    copied_weights = (
-        copy_off_index_safetensors(source_dir, export_dir) if copy_off_index_weights else []
-    )
-    copied_files = [*copied_files, *copied_weights]
-    if copied_files:
-        for file_name in copied_files:
-            print(f"Copied checkpoint sidecar file: {file_name}")
-        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
-    else:
-        print("No checkpoint sidecar files found to copy")
-
-
 def save_source_config(args, export_path) -> None:
     """Copy the source model's config to the export path, for VLMs the exporters skip."""
     print(f"Saving original model config to {export_path}")
     config_kwargs = {"trust_remote_code": args.trust_remote_code}
     if args.attn_implementation is not None:
         config_kwargs["attn_implementation"] = args.attn_implementation
-    AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
-
-
-def save_processor_config(args, export_path) -> None:
-    """Copy the processor config, without which a VLM checkpoint cannot preprocess images."""
-    try:
-        print(f"Saving processor config to {export_path}")
-        AutoProcessor.from_pretrained(
-            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
-        ).save_pretrained(export_path)
-    except Exception as e:
-        print(f"Warning: Could not save processor config: {e}")
-        print("This is normal for some VLM architectures that don't use AutoProcessor")
+    AutoConfig.from_pretrained(args.hf_model_path, **config_kwargs).save_pretrained(export_path)
 
 
 def _prepare_quant_cfg(
@@ -1106,7 +858,10 @@ def _prepare_quant_cfg(
             )
 
     if needs_checkpoint_path_update(quant_cfg):
-        quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+        # Named after the Hub ID when there is one: a cache path would name it by commit hash.
+        quant_cfg, resolved_dir = resolve_checkpoint_dir(
+            quant_cfg, args.hf_model_name or args.hf_model_path
+        )
         print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
 
     if args.cast_mxfp4_to_nvfp4:
