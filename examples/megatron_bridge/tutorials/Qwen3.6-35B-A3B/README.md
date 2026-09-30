@@ -328,12 +328,14 @@ The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outsi
 
 | Model | Capped sub-steps | SciCode (Subtask) | Mean tokens | Median tokens |
 | --- | --- | --- | --- | --- |
-| **BF16** (teacher) | 20 → **0** | 39.9 → 39.9 | 5,337 → 3,586 | 1,817 → 1,927 |
-| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 6,559 → 3,834 | 1,917 → 1,978 |
-| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 6,701 → 4,048 | 2,116 → 2,184 |
-| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 10,186 → 4,634 | 3,482 → 3,302 |
+| **BF16** (teacher) | 20 → **0** | 39.9 → 39.9 | 5,348 → 3,590 | 1,817 → 1,927 |
+| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 6,572 → 3,838 | 1,917 → 1,978 |
+| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 6,713 → 4,052 | 2,116 → 2,184 |
+| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 10,209 → 4,641 | 3,482 → 3,302 |
 
 Accuracy is neutral — the deltas span −0.59 to +0.89, run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy, and wall-clock generation drops 12-44%.
+
+Means are `avg_completion_tokens`, so the left-hand column matches the table above; medians come from the per-response `output.jsonl`, which is the only place they exist.
 
 **Read the two token columns together: the penalty removes the tail, it does not make the model concise.** The median is flat or slightly *up* on three of four builds, so a typical response is unchanged; the mean falls 33-55% purely because the runaway generations are gone. And the underlying shift survives — QAD's median is still **+71%** over BF16 with the penalty on, against +91.6% without. This suppresses the pathology, not the verbosity QAD introduced.
 
