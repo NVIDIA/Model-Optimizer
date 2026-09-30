@@ -24,6 +24,7 @@ Changelog
 - Speed up NVFP4 QAT and QAD of Hugging Face fused MoE experts: all experts of a projection are now fake-quantized in one kernel launch instead of one per expert, about 2x faster per MoE layer on Qwen3-30B-A3B with FSDP2.
 - ``hf_ptq.py`` calibrates Qwen3.8 (``qwen4_exp``) without running its QSA indexer's per-query Python loop when every visible key fits the indexer's token budget, with bit-identical results. On Qwen3.8-Flash-Next this saves about two hours of layerwise calibration.
 - Speed up Hugging Face QAT and QAD with ``QATTrainer``, ``QADTrainer`` or ``--manual_gc``: the ``gc.collect()`` run before each training step now skips the model and optimizer state, saving about 1 s per step (30%) on Qwen3-30B-A3B.
+- GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
 
 *Speculative Decoding*
 

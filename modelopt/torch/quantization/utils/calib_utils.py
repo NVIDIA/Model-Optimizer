@@ -46,6 +46,7 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.utils import (
     get_available_gpu_memory,
     get_process_gpus,
@@ -53,6 +54,8 @@ from modelopt.torch.utils import (
     warn_rank_0,
 )
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+
+from .numeric_utils import E4M3_MAX, fp8_max_for_normalization
 
 # A GPU takes a new Hessian only if enough memory stays available after it for the calibration
 # forward that follows. Until GPTQ has measured that forward on the GPU, keep this share free.
@@ -490,9 +493,8 @@ class GPTQHelper:
     def _blockwise_update(self, block_size):
         """Column-wise GPTQ update.
 
-        When ``self.fused`` is True and the weight quantizer is an
-        ``NVFP4StaticQuantizer``, uses :func:`gptq_blockwise_update_fused_scalar`
-        (a fused Triton kernel).  Otherwise falls back to
+        When ``self.fused`` is True and :meth:`_fused_supported` holds, uses
+        :func:`gptq_blockwise_update_fused_scalar` (a fused Triton kernel).  Otherwise falls back to
         :func:`gptq_blockwise_update` (unfused column-by-column loop).
         """
         assert self.weight is not None and self.h_inv is not None, (
@@ -500,7 +502,7 @@ class GPTQHelper:
         )
         quantizer = self.weight_quantizer
 
-        if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
+        if self.fused and self._fused_supported(quantizer, self.weight):
             block_sizes = quantizer.block_sizes
             quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
             if quant_block_size is not None and block_size % quant_block_size != 0:
@@ -517,6 +519,16 @@ class GPTQHelper:
             )
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
+
+    def _fused_supported(self, quantizer, weight):
+        # The fused kernel needs FP8 Triton casts (SM89+) and the default FP8 scale range (no 4/6).
+        return (
+            getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and fp8_max_for_normalization(quantizer) == E4M3_MAX
+            and triton_kernel.IS_AVAILABLE
+            and weight.is_cuda
+            and torch.cuda.get_device_capability(weight.device) >= (8, 9)
+        )
 
     def _print_mse_error(self, hessian, weight):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original ``weight``."""
