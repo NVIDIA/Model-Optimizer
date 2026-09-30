@@ -301,13 +301,6 @@ def _wrap_kpool_cache_writer(kpool_ops: ModuleType, name: str, written_slots: Ca
     setattr(kpool_ops, name, wrapper)
 
 
-def _install_kpool_cache_hooks(kpool_ops: ModuleType) -> None:
-    _wrap_kpool_cache_writer(kpool_ops, "kpool_compress_and_write_cache", _kpool_prefill_written)
-    _wrap_kpool_cache_writer(
-        kpool_ops, "kpool_decode_update_and_maybe_write_cache_batched", _kpool_decode_written
-    )
-
-
 # GLM-5.3-Flash's fused Hadamard + FP8 quantization of the indexer query.
 _GLM5NEXT_QUERY_KERNEL = "fwht128_quant_fp8"
 
@@ -330,7 +323,15 @@ class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
         super()._setup()
         assert self.kpool_ops is not None  # imported together with the registered indexer class
         _glm5next_indexers.add(self)
-        _install_kpool_cache_hooks(self.kpool_ops)
+        # Every layer calls these; only the first call wraps.
+        _wrap_kpool_cache_writer(
+            self.kpool_ops, "kpool_compress_and_write_cache", _kpool_prefill_written
+        )
+        _wrap_kpool_cache_writer(
+            self.kpool_ops,
+            "kpool_decode_update_and_maybe_write_cache_batched",
+            _kpool_decode_written,
+        )
 
     def forward(self, *args, **kwargs):
         if not self.indexer_q_quantizer.is_enabled:

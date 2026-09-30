@@ -361,7 +361,10 @@ def test_glm5next_kpool_cache_writers_requantize_written_pools(
     monkeypatch.setattr(_TestGlm5NextIndexer, "kpool_ops", kpool_ops)
     monkeypatch.setattr(vllm_indexer, "_glm5next_indexers", weakref.WeakSet())
     indexer = _TestGlm5NextIndexer.convert(_NativeGlm5NextIndexer(kv_cache))
-    vllm_indexer._install_kpool_cache_hooks(kpool_ops)  # a second indexer must not double-wrap
+    # A second layer's conversion must not wrap the writers again.
+    other = _TestGlm5NextIndexer.convert(_NativeGlm5NextIndexer(torch.zeros_like(kv_cache)))
+    other.indexer_k_quantizer.disable()
+    assert kpool_ops.kpool_compress_and_write_cache.__wrapped__ is kpool_compress_and_write_cache
 
     # No enabled quantizer: the kernel runs and the wrapper returns before looking up the cache.
     indexer.indexer_k_quantizer.disable()
