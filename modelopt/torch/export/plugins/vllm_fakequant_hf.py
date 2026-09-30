@@ -48,10 +48,16 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
 
 from ..layer_utils import get_experts_list
 from ..quant_utils import get_quantization_format
-from ..unified_export_hf import collect_shared_input_modules, read_unplaced_weights
+from ..unified_export_hf import (
+    _copy_non_model_files_from_source,
+    _source_checkpoint,
+    collect_shared_input_modules,
+    read_unplaced_weights,
+)
 
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
@@ -755,6 +761,8 @@ def export_hf_vllm_fq_checkpoint(
         # inplace_mem_efficient branch (it deliberately omits state_dict= there -- see the
         # comment above -- so there is no state_dict to merge extras into).
         _carry_over_unplaced_weights(export_dir, model)
+        copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+        _copy_non_model_files_from_source(model, export_dir)
 
     finally:
         if not inplace_mem_efficient:
