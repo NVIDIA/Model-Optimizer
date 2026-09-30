@@ -245,7 +245,8 @@ Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidi
 > the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
 > mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
 > through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept —
-> that is why the other five configs omit them.
+> that is why the other five configs omit them. To set them on an `ns_*` task, inject them through
+> the adapter's `params_to_add` instead.
 
 > [!IMPORTANT]
 > Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]` with no spread. GPQA is the deliberate exception.
@@ -308,12 +309,12 @@ Accuracy is only half the serving cost — a model that scores the same while em
 | MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
 | GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
 
-**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
+**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this. The SciCode figure is a termination failure with a **decode-time mitigation** — see below.
 
 <details>
-<summary><b>What the SciCode number actually is — worth reading before running QAD on another model</b></summary>
+<summary><b>What the SciCode number actually is, and how to fix it — worth reading before running QAD on another model</b></summary>
 
-It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps**:
+It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps** — SciCode splits its 80 problems into 338 sub-steps, and `Subtask` scores the fraction of those whose code passes:
 
 - Sub-steps that hit the 131,072-token cap inside `<think>` go from **0.7% (20/2704, BF16) to 3.6% (96/2704, QAD 500)**. Almost all return **zero answer tokens** (93 of those 96) — the model writes a complete solution, says *"I think I've been going in circles"*, and writes it again. In the case we inspected, a 20-word window repeats **352 times** and 97.7% of the trace's 20-word windows are duplicates.
 - Those 3.6% of sub-steps burn **45.7% of all completion tokens**, so they dominate the mean: excluding them it is **+30.4%** rather than +90.9%.
@@ -322,7 +323,22 @@ It is not verbosity. It is a **failure to terminate on a small fraction of sub-s
 
 The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
 
+**It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token, so the sub-step returns nothing and scores zero; the denominator is ~2,700 sub-steps:
+
+| Model | Capped sub-steps | SciCode (Subtask) | Generation time (s) |
+| --- | --- | --- | --- |
+| **BF16** (teacher) | 20 → **0** | 40.8 → 39.9 | 1,312 → 1,158 |
+| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 2,081 → 1,394 |
+| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 1,674 → 1,476 |
+| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 2,340 → 1,316 |
+
+Accuracy is neutral — the deltas span −0.95 to +0.89, which is run-to-run noise in both directions — and generation gets 12-44% faster.
+
+**Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged while making generation **4.2× slower** — pure cost. Use it where runaway generation actually occurs; do not make it a global default.
+
 **For the next QAD run**, three things follow: track the **length-capped rate** as a first-class metric alongside accuracy (a benchmark score can stay flat while 3.6% of responses return nothing); consider **top-p instead of top-k** for the KD loss so coverage adapts to the teacher's entropy rather than a fixed rank; and if memory allows, **full-vocab KL** — at 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here, but more GPU memory or a smaller model or shorter sequence may afford it.
+
+[Lotfi et al., *Quantized Reasoning Models Think They Need to Think Longer, but They Do Not*](https://arxiv.org/abs/2606.00206) reports a related effect — PTQ amplifies "overthinking", where the model reaches a correct answer and then talks itself out of it — and proposes a logit penalty on hesitation markers ("Wait", "But", "Alternatively"). We tested their penalty here: it helps, but less than `presence_penalty` and at a small accuracy cost, and their marker-density signature does not reproduce on our W4A4 PTQ. Their failure opens *new* reasoning branches; ours repeats a finished solution.
 
 </details>
 
