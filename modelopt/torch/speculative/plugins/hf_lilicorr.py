@@ -59,8 +59,8 @@ The objective adds weighted terms to the DFlash loss::
 - ``L_pen``: the head's own probability mass on the competing candidates, each
   weighted by the target model's logit gap to the ground truth — so a candidate the
   target finds plausible is penalized lightly and a confident wrong one hard.
-- ``L_cal`` (optional, off by default): cross-entropy from the target's distribution
-  renormalized over the ``k`` candidates onto the head's. An alternative to ``L_pen``
+- ``L_cal`` (optional, off by default): KL divergence from the target's distribution
+  renormalized over the ``k`` candidates to the head's. An alternative to ``L_pen``
   whose gradient does not scale with the target's logit gap.
 
 The weights are absolute, with no outer multiplier, so
@@ -576,10 +576,12 @@ class HFLiLiCorrModel(HFDFlashModel):
         supervised,
         denominator,
     ):
-        """Cross-entropy ``H(p|K, q)`` from the target's candidate distribution to the head's.
+        """``KL(p|K || q)`` from the target's candidate distribution to the head's.
 
         ``p|K`` is the target renormalized over the ``k`` candidates, so the gathered
-        candidate logits suffice and the full-vocabulary normalizer is not needed.
+        candidate logits suffice and the full-vocabulary normalizer is not needed. The
+        gradient is the cross-entropy's, and the logged value floors at 0 rather than at
+        ``H(p|K)``, which varies with the data and the temperature.
         """
         candidate_target_logits = self._candidate_target_logits(
             candidate_ids=candidate_ids,
@@ -588,10 +590,11 @@ class HFLiLiCorrModel(HFDFlashModel):
             requested_by="dflash_lilicorr_w_cal",
         )
         target_probs = F.softmax(candidate_target_logits, dim=-1)
+        target_log_probs = F.log_softmax(candidate_target_logits, dim=-1)
         potentials = torch.stack(node_potentials, dim=1)
         head_log_probs = F.log_softmax(potentials.float(), dim=-1)
 
-        per_slot = -(target_probs * head_log_probs).sum(dim=-1)
+        per_slot = (target_probs * (target_log_probs - head_log_probs)).sum(dim=-1)
         return (per_slot * supervised).sum() / denominator
 
     @torch.no_grad()

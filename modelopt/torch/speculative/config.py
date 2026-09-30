@@ -382,8 +382,8 @@ class DFlashConfig(ModeloptBaseConfig):
         ge=0.0,
         allow_inf_nan=False,
         description=(
-            "LiLiCorr only: absolute weight of the optional calibration term, a cross-entropy "
-            "from the target's distribution renormalized over each slot's k candidates onto "
+            "LiLiCorr only: absolute weight of the optional calibration term, a KL divergence "
+            "from the target's distribution renormalized over each slot's k candidates to "
             "the reranker's. An alternative to w_pen whose gradient does not scale with the "
             "target's logit gap. Requires the target's logits, like w_pen. 0.0 (default) is a "
             "no-op, and it is not part of the three weights' all-or-nothing validation. "

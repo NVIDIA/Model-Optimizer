@@ -336,7 +336,7 @@ class TestLiLiCorrForward:
         )
 
     def test_calibration_loss_is_minimal_when_the_head_matches_the_target(self):
-        """Zero gradient when the reranker's candidate distribution already matches the target's."""
+        """Zero loss and gradient when the reranker's candidate distribution matches the target's."""
         model = _converted(dflash_lilicorr_w_cal=0.5)
         torch.manual_seed(0)
         num_slots = BLOCK_SIZE - 1
@@ -351,20 +351,71 @@ class TestLiLiCorrForward:
         }
         at_target = model._candidate_target_logits(**inputs, requested_by="test")
 
-        def grad_at(potentials):
+        def loss_and_grad_at(potentials):
             potentials = potentials.clone().requires_grad_(True)
             supervised = torch.ones(2, num_slots)
-            model._calibration_loss(
+            loss = model._calibration_loss(
                 node_potentials=list(potentials.unbind(1)),
                 supervised=supervised,
                 denominator=supervised.sum(),
                 **inputs,
-            ).backward()
-            return potentials.grad
+            )
+            loss.backward()
+            return loss.item(), potentials.grad
 
         # A per-slot shift leaves the softmax, and so the optimum, unchanged.
-        assert grad_at(at_target + 3.0).abs().max() < 1e-6
-        assert grad_at(torch.zeros_like(at_target)).abs().max() > 1e-3
+        loss, grad = loss_and_grad_at(at_target + 3.0)
+        assert loss == pytest.approx(0.0, abs=1e-6)
+        assert grad.abs().max() < 1e-6
+        loss, grad = loss_and_grad_at(torch.zeros_like(at_target))
+        assert loss > 1e-3
+        assert grad.abs().max() > 1e-3
+
+    def test_offline_forward_matches_online(self):
+        """Target logits rebuilt from a captured hidden state give the online loss.
+
+        The hidden state is stored in float64, wider than the target's weights.
+        """
+        models = []
+        for offline in (False, True):
+            model = get_tiny_llama(num_hidden_layers=4)
+            model.config.num_orig_hidden_layers = model.config.num_hidden_layers
+            config = _get_lilicorr_config(
+                topk=VOCAB_SIZE, dflash_lilicorr_w_cal=0.5, dflash_offline=offline
+            )
+            mtsp.convert(model, [("dflash", config)])
+            models.append(model)
+        online, offline = models
+        assert not offline.load_state_dict(online.state_dict(), strict=False).missing_keys
+
+        batch = _make_batch(VOCAB_SIZE)
+        online.eval()
+        with torch.no_grad():
+            hidden_states = online(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                output_hidden_states=True,
+            ).hidden_states
+        base_model_outputs = {
+            "aux_hidden_states": torch.cat(
+                [hidden_states[lid + 1] for lid in online.target_layer_ids], dim=-1
+            ),
+            "base_model_hidden_states": hidden_states[-1].double(),
+        }
+
+        online.train()
+        offline.train()
+        torch.manual_seed(1)
+        online_out = online(**batch)
+        torch.manual_seed(1)
+        offline_out = offline(**batch, base_model_outputs=base_model_outputs)
+
+        assert offline_out.loss.item() == pytest.approx(online_out.loss.item(), abs=1e-5)
+        for term in ("lilicorr_penalty", "lilicorr_calibration"):
+            assert online_out.lilicorr_metrics[term] > 0.0
+            assert offline_out.lilicorr_metrics[term] == pytest.approx(
+                online_out.lilicorr_metrics[term], abs=1e-5
+            )
 
     @pytest.mark.parametrize(
         ("kwargs", "degenerate"),
