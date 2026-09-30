@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity as mts
-from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.export import ensure_local_checkpoint, export_hf_checkpoint
 
 DEFAULT_PAD_TOKEN = "[PAD]"
 
@@ -91,9 +91,13 @@ def main(args):
     random.seed(1234)
     np.random.seed(1234)
 
-    model = get_model(args.model_name_or_path, args.dtype, trust_remote_code=args.trust_remote_code)
+    # --model_name_or_path stays as given. Later steps read the local copy of the whole checkpoint
+    # in hf_model_path, since exporters read the source's files from local disk only; hf_model_name
+    # is the Hub ID, or None for a local path.
+    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.model_name_or_path)
+    model = get_model(args.hf_model_path, args.dtype, trust_remote_code=args.trust_remote_code)
     tokenizer = get_tokenizer(
-        args.model_name_or_path, args.model_max_length, trust_remote_code=args.trust_remote_code
+        args.hf_model_path, args.model_max_length, trust_remote_code=args.trust_remote_code
     )
 
     if tokenizer.pad_token is None:
@@ -114,6 +118,8 @@ def main(args):
     with torch.inference_mode():
         model = mts.export(model)
         export_hf_checkpoint(model, export_dir=args.output_dir)
+        # After the export, so it replaces the source tokenizer files the export copied: a pad token
+        # added above changes the vocabulary.
         tokenizer.save_pretrained(args.output_dir)
 
 
