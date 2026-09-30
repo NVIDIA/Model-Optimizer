@@ -60,18 +60,20 @@ def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_
     (src_dir / "reasoning_parser.py").write_text("parser")
 
     default_dst = tmp_path / "default"
-    copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
+    with pytest.deprecated_call():
+        copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
     assert not (default_dst / "model.safetensors").exists()
     assert not (default_dst / "model.safetensors.index.json").exists()
     assert (default_dst / "pytorch_model.bin").exists()
     assert (default_dst / "stats.npy").exists()
 
     filtered_dst = tmp_path / "filtered"
-    copy_non_safetensor_files_from_ckpt(
-        src_dir,
-        filtered_dst,
-        exclude_patterns=("*.bin", "*.npy"),
-    )
+    with pytest.deprecated_call():
+        copy_non_safetensor_files_from_ckpt(
+            src_dir,
+            filtered_dst,
+            exclude_patterns=("*.bin", "*.npy"),
+        )
     assert (filtered_dst / "reasoning_parser.py").exists()
     assert not (filtered_dst / "pytorch_model.bin").exists()
     assert not (filtered_dst / "stats.npy").exists()
@@ -91,7 +93,7 @@ def test_copy_non_safetensor_files_from_ckpt_continues_after_copy_failure(tmp_pa
         return original_copy2(source, *args, **kwargs)
 
     monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
-    with pytest.warns(UserWarning, match="bad.py"):
+    with pytest.deprecated_call(), pytest.warns(UserWarning, match="bad.py"):
         copied_files = copy_non_safetensor_files_from_ckpt(src_dir, tmp_path / "dst")
 
     assert copied_files == ["good.py"]

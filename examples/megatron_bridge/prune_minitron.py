@@ -58,7 +58,7 @@ from transformers import (
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.export import copy_non_model_files, ensure_local_checkpoint
 from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
     get_supported_datasets,
@@ -438,8 +438,13 @@ def main(args: argparse.Namespace):
         warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
         return
 
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in hf_model_path, since exporters read the source's files from local disk only;
+    # hf_model_name is the Hub ID, or None for a local path.
+    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.hf_model_name_or_path)
+
     bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.hf_model_path,
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
@@ -510,7 +515,7 @@ def main(args: argparse.Namespace):
     # the full VLM forward over image-text pairs.
     if use_image_calib:
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.hf_model_path, trust_remote_code=args.trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -643,7 +648,8 @@ def main(args: argparse.Namespace):
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
-            hf_tokenizer_path=args.hf_model_name_or_path,
+            # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
+            hf_tokenizer_path=args.hf_model_name or args.hf_model_path,
             hf_tokenizer_kwargs=tokenizer_kwargs,
         )
         args.checkpoint_exported = True
@@ -752,7 +758,7 @@ def main(args: argparse.Namespace):
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
             pruned_bridge.trust_remote_code = args.trust_remote_code
             pruned_bridge.save_hf_pretrained(
-                model, args.output_hf_path, source_path=args.hf_model_name_or_path
+                model, args.output_hf_path, source_path=args.hf_model_path
             )
         else:
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
@@ -764,7 +770,9 @@ def main(args: argparse.Namespace):
             )
             pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
-        copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
+        # Every rank gets here (save_hf_weights is collective); one writer is enough.
+        if dist.is_master():
+            copy_non_model_files(args.hf_model_path, args.output_hf_path)
         args.checkpoint_exported = True
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 

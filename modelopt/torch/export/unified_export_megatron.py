@@ -39,8 +39,7 @@ from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin, warn_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
-    copy_hf_ckpt_remote_code,
-    copy_non_safetensor_files_from_ckpt,
+    copy_non_model_files,
     load_multimodal_components,
 )
 
@@ -82,7 +81,6 @@ from .quant_utils import (
 
 with import_plugin("transformers", verbose=False):
     import transformers
-    from transformers import AutoProcessor
 
 
 has_mcore = False
@@ -386,47 +384,20 @@ class GPTModelExporter:
 
         if is_last_stage_main_rank:
             if is_writer_rank:
+                self._hf_config.save_pretrained(save_directory)
+                # Everything else the source ships -- tokenizer, processor, generation config,
+                # remote code -- is carried over verbatim rather than regenerated, from local disk
+                # only: a Hub ID's cache holds just what loading needed.
                 if self._hf_pretrained_model_name is not None:
                     if os.path.isdir(self._hf_pretrained_model_name):
-                        copy_non_safetensor_files_from_ckpt(
-                            self._hf_pretrained_model_name, save_directory
-                        )
+                        copy_non_model_files(self._hf_pretrained_model_name, save_directory)
                     else:
-                        copy_hf_ckpt_remote_code(self._hf_pretrained_model_name, save_directory)
-                self._hf_config.save_pretrained(save_directory)
-                try:
-                    generation_config = transformers.GenerationConfig.from_pretrained(
-                        self._hf_pretrained_model_name,
-                        trust_remote_code=self.trust_remote_code,
-                    )
-                    # Pass it through unvalidated: save_pretrained rejects some shipped configs
-                    # (e.g. GLM-5.3-Flash sets top_p without do_sample) on newer transformers.
-                    generation_config.to_json_file(
-                        os.path.join(save_directory, "generation_config.json")
-                    )
-                except OSError:
-                    pass
-                # Hub-ID / None source: fetch tokenizer files via AutoTokenizer.
-                if self._hf_pretrained_model_name is None or not os.path.isdir(
-                    self._hf_pretrained_model_name
-                ):
-                    try:
-                        tokenizer = transformers.AutoTokenizer.from_pretrained(
-                            self._hf_pretrained_model_name,
-                            trust_remote_code=self.trust_remote_code,
+                        warn_rank_0(
+                            f"{self._hf_pretrained_model_name!r} is not a local directory, so its "
+                            "non-model files (tokenizer, processor, remote code, ...) were not "
+                            "copied into the export. Get a local copy first with "
+                            "modelopt.torch.export.ensure_local_checkpoint and pass that directory."
                         )
-                        tokenizer.save_pretrained(save_directory)
-                    except (OSError, TypeError, ValueError, ImportError):
-                        pass
-                try:
-                    # Load and save preprocessor config from the original model
-                    processor = AutoProcessor.from_pretrained(
-                        self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
-                    )
-                    if hasattr(processor, "image_processor"):
-                        processor.image_processor.save_pretrained(save_directory)
-                except (OSError, ValueError, ImportError):
-                    pass
 
             # The live MTP export runs EP collectives, so every last-stage main rank joins it; the
             # collective-free copy from the source checkpoint only runs on the writer.

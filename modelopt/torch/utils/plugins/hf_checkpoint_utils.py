@@ -724,7 +724,16 @@ def copy_non_safetensor_files_from_ckpt(
 
     Returns:
         File names copied into ``dst``.
+
+    .. deprecated::
+        Use :func:`copy_non_model_files`, which also skips non-safetensors weights, keeps files the
+        export already wrote, and copies subdirectories.
     """
+    warnings.warn(
+        "copy_non_safetensor_files_from_ckpt is deprecated; use copy_non_model_files.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
     exclude_files = set(exclude_files or ())

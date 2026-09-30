@@ -76,6 +76,7 @@ from modelopt.recipe.presets import (
     QUANT_CFG_CHOICES,
     RecipeSupersededAction,
 )
+from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.mlflow import Tool, masked_args, resolved_recipe_texts
@@ -307,18 +308,21 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in hf_model_path; hf_model_name is the Hub ID, or None for a local path.
+    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.hf_model_name_or_path)
     trust_remote_code = is_safe_repo(
-        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_path
     )
 
     moe_grouped_gemm = use_moe_grouped_gemm(
-        args.hf_model_name_or_path,
+        args.hf_model_path,
         trust_remote_code=trust_remote_code,
         force_sequential=args.no_moe_grouped_gemm,
     )
 
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.hf_model_path,
         trust_remote_code=trust_remote_code,
         moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
@@ -418,7 +422,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
+            args.hf_model_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -452,7 +456,8 @@ def main(args: argparse.Namespace):
     bridge.save_megatron_model(
         model,
         args.export_megatron_path,
-        hf_tokenizer_path=args.hf_model_name_or_path,
+        # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
+        hf_tokenizer_path=args.hf_model_name or args.hf_model_path,
         hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
     args.checkpoint_exported = True
