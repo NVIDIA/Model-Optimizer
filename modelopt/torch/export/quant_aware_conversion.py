@@ -274,9 +274,29 @@ def _sub_scoped(pattern: re.Pattern, repl: str, key: str, scope_prefixes: tuple[
 
 
 def _apply_rename_rules(key: str, compiled) -> str:
-    """Apply all compiled rename rules to ``key``, in order."""
+    """Apply renames in order, keeping quantization scales with their weight."""
     for pattern, repl, scope_prefixes in compiled:
-        key = _sub_scoped(pattern, repl, key, scope_prefixes)
+        renamed = _sub_scoped(pattern, repl, key, scope_prefixes)
+        for suffix in _QUANT_STATE_SUFFIXES:
+            if not key.endswith(suffix):
+                continue
+            # Weight-specific patterns (e.g. ``^head\.weight$``) need not match
+            # scale keys. Derive their module path from the same weight rename.
+            weight_key = key.removesuffix(suffix) + ".weight"
+            renamed_weight = _sub_scoped(pattern, repl, weight_key, scope_prefixes)
+            if renamed_weight != weight_key:
+                if not renamed_weight.endswith(".weight"):
+                    raise QuantConversionUnsupportedError(
+                        f"cannot align scale '{key}' with renamed weight '{renamed_weight}'"
+                    )
+                aligned = renamed_weight.removesuffix(".weight") + suffix
+                if renamed not in (key, aligned):
+                    raise QuantConversionUnsupportedError(
+                        f"conflicting scale rename for '{key}': '{renamed}' vs '{aligned}'"
+                    )
+                renamed = aligned
+            break
+        key = renamed
     return key
 
 

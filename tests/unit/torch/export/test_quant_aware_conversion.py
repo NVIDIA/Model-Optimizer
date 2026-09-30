@@ -136,6 +136,33 @@ def test_rename_carries_scale_siblings():
         assert out[base + leaf] is old
 
 
+@pytest.mark.parametrize(
+    ("pattern", "replacement", "error"),
+    [
+        (r"^head\.weight$", "in_proj_weight", "cannot align scale"),
+        (r"^head\.(weight|input_scale)$", "output.weight", "conflicting scale rename"),
+    ],
+)
+def test_weight_specific_scale_rename_rejects_ambiguous_targets(pattern, replacement, error):
+    """Unsupported or conflicting weight/scale mappings leave the input untouched."""
+    state = _nvfp4_linear("head", 8, 16)
+    before = dict(state)
+    with pytest.raises(QuantConversionUnsupportedError, match=error):
+        apply_reverse_rules(state, [], [RenameRule(pattern, replacement)])
+    assert state.keys() == before.keys()
+    assert all(state[key] is value for key, value in before.items())
+
+
+def test_scale_specific_rename_without_weight_mapping():
+    """An explicit scale-only mapping retains its original regex behavior."""
+    scale = torch.tensor(0.5)
+    assert apply_reverse_rules(
+        {"head.input_scale": scale},
+        [],
+        [RenameRule(r"^head\.input_scale$", "head.activation_scale")],
+    ) == {"head.activation_scale": scale}
+
+
 def test_split_unfuses_dense_gate_up_with_scales():
     """gate_up_proj -> gate_proj + up_proj: weight/scale split on dim 0, scalars duplicated."""
     out_dim, in_dim = 8, 32  # fused output dim = 8 -> 4 per part
@@ -684,6 +711,51 @@ def test_per_tensor_export_accepts_rename_only():
     assert mapper("model.language_model.layers.0.weight") == "model.language_model.layers.0.weight"
 
 
+@pytest.mark.parametrize("export_mode", ["resident", "streaming"])
+@pytest.mark.parametrize("scope", ["", "vision_model"])
+def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_mode, scope):
+    """Weight-only patterns carry every scale leaf through subsequent scoped renames."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    weight_rename = WeightRenaming(r"^head\.weight$", "lm_head.weight")
+    container_rename = WeightRenaming("output", "head")
+    for rule in (weight_rename, container_rename):
+        rule.scope_prefix = scope
+    model = types.SimpleNamespace(_weight_conversions=[container_rename, weight_rename])
+    prefix = f"{scope}." if scope else ""
+    state = _nvfp4_linear(prefix + "lm_head", 8, 16)
+    state[prefix + "lm_head.weight_scale_inv"] = torch.ones(8, 1)
+    state["unrelated.weight"] = torch.ones(8, 16)
+
+    if export_mode == "resident":
+        written = revert_weight_conversion_quant_aware(model, state)
+    else:
+        writer = _StreamingShardWriter(tmp_path, max_shard_size=4096)
+        sink = _make_tensor_sink(
+            writer,
+            _build_reverse_name_mapper_or_none(model),
+            tied_alias_keys=set(),
+            kv_cache_max_bound=448.0,
+            kv_cache_format=None,
+            is_modelopt_qlora=False,
+        )
+        for key, value in state.items():
+            sink(key, value)
+        writer.finalize()
+        written = load_file(tmp_path / "model.safetensors")
+
+    config = {"quantized_layers": {prefix + "lm_head": {"quant_algo": "NVFP4"}}}
+    revert_quant_config_names(config, build_reverse_name_mapper(model))
+    assert config["quantized_layers"] == {prefix + "output": {"quant_algo": "NVFP4"}}
+    assert set(written) == {key.replace(prefix + "lm_head.", prefix + "output.") for key in state}
+    for key, value in state.items():
+        torch.testing.assert_close(
+            written[key.replace(prefix + "lm_head.", prefix + "output.")], value
+        )
+
+
 def test_streaming_weight_specific_rename_keeps_config_aligned(tmp_path):
     """Complete tensor keys and module exclusions must use the same checkpoint namespace."""
     pytest.importorskip("transformers.core_model_loading")
@@ -714,7 +786,8 @@ def test_streaming_weight_specific_rename_keeps_config_aligned(tmp_path):
     torch.testing.assert_close(written["head.weight"], model.lm_head.weight)
 
 
-def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path):
+@pytest.mark.parametrize("quantized_head", [False, True])
+def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_head):
     """Layer and tail shards use tensor-key mapping, while exclusions use module mapping."""
     pytest.importorskip("transformers.core_model_loading")
     # Local imports: transformers and its test fixtures are optional dependencies.
@@ -734,6 +807,11 @@ def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path):
                     "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
                     "enable": True,
                 },
+                {
+                    "quantizer_name": "lm_head.*quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": quantized_head,
+                },
             ],
             "algorithm": None,
         },
@@ -749,10 +827,16 @@ def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path):
         for key, value in load_file(shard).items()
     }
 
-    assert "head" in config["quantization"]["exclude_modules"]
+    assert ("head" in config["quantization"]["exclude_modules"]) is not quantized_head
     assert "lm_head" not in config["quantization"]["exclude_modules"]
     assert "lm_head.weight" not in written
-    torch.testing.assert_close(written["head.weight"], original_head)
+    if quantized_head:
+        assert written["head.weight"].dtype == torch.float8_e4m3fn
+        assert "head.weight_scale" in written
+        assert "head.input_scale" in written
+        assert not any(key.startswith("lm_head.") for key in written)
+    else:
+        torch.testing.assert_close(written["head.weight"], original_head)
 
 
 def test_radio_merge_requires_converter_rename_source_key():
