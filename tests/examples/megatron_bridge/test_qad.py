@@ -40,12 +40,6 @@ try:
 
     HAS_MROPE_CP_FIX = True
 except ImportError:  # Megatron-Bridge that still CP-shards mrope position ids
-    warnings.warn(
-        "Megatron-Bridge lacks the mrope context-parallel fix (NVIDIA-NeMo/Megatron-Bridge#6243, shipping "
-        "in nemo:26.10), so the VLM QAD case runs at cp_size=1 and does not cover context parallelism. "
-        "If the installed Megatron-Bridge should carry the fix, this probe is stale.",
-        stacklevel=1,
-    )
     HAS_MROPE_CP_FIX = False
 
 
@@ -78,6 +72,13 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     # position ids must stay full-length. The LLM case stays on tensor parallelism.
     cp_size = num_gpus if is_vlm and HAS_MROPE_CP_FIX else 1
     tp_size = 1 if cp_size > 1 else num_gpus
+    # Warn only where CP coverage is actually lost: on a single GPU there is none to lose.
+    if is_vlm and num_gpus > 1 and not HAS_MROPE_CP_FIX:
+        warnings.warn(
+            "Megatron-Bridge lacks the mrope context-parallel fix (NVIDIA-NeMo/Megatron-Bridge#6243, "
+            "shipping in nemo:26.10), so this case runs at cp_size=1 and does not cover context "
+            "parallelism. If the installed Megatron-Bridge should carry the fix, this probe is stale."
+        )
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 3
