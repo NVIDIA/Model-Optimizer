@@ -23,10 +23,14 @@ across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
 import types
+from fnmatch import fnmatchcase
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.quant_aware_conversion import (
     QuantConversionUnsupportedError,
     RenameRule,
@@ -37,9 +41,16 @@ from modelopt.torch.export.quant_aware_conversion import (
     revert_quant_config_names,
     revert_weight_conversion_quant_aware,
 )
+from modelopt.torch.export.quant_utils import _prefix_wildcard_summarize_exclude_modules
+from modelopt.torch.export.unified_export_hf import (
+    _revert_hf_quant_config_names,
+    _revert_quant_config_names_best_effort,
+)
 from modelopt.torch.export.unified_export_hf_streaming import (
     _assert_no_split_rules,
     _build_reverse_name_mapper_or_none,
+    _make_tensor_sink,
+    _StreamingShardWriter,
 )
 
 BLOCK = 16
@@ -548,6 +559,47 @@ def test_radio_merge_that_matches_no_keys_raises():
         revert_weight_conversion_quant_aware(model, state_dict)
 
 
+@pytest.mark.parametrize("pattern_suffix", ["", ".weight$"])
+def test_radio_merge_preserves_summarized_exclusion_coverage(pattern_suffix):
+    """A summarized attention wildcard must still exclude the re-fused BF16 QKV module."""
+    model = types.SimpleNamespace(
+        _weight_conversions=[_radio_qkv_conversion(pattern_suffix=pattern_suffix)]
+    )
+    parent = "vision_model.encoder.layer.0"
+    excluded = [f"{parent}.attention.{part}_proj" for part in ("q", "k", "v")]
+    quantized = f"{parent}.mlp.fc1"
+    patterns = sorted(_prefix_wildcard_summarize_exclude_modules(excluded, [quantized]))
+    assert patterns == [f"{parent}.attention*"]
+    config = {
+        "quantization": {
+            "exclude_modules": patterns,
+            "quantized_layers": {quantized: {"quant_algo": "FP8"}},
+            "kv_cache_quantized_layers": {"language_model.layers.0": {"quant_algo": "FP8"}},
+        }
+    }
+    state = {name + ".weight": torch.ones(2, 3, dtype=torch.bfloat16) for name in excluded}
+    state[quantized + ".weight"] = torch.ones(2, 3, dtype=torch.uint8)
+    state[quantized + ".weight_scale"] = torch.ones(2, 1)
+
+    out = revert_weight_conversion_quant_aware(model, state)
+    mapped_config = _revert_hf_quant_config_names(
+        config,
+        build_reverse_name_mapper(model),
+        module_names=(key.removesuffix(".weight") for key in state if key.endswith(".weight")),
+    )["quantization"]
+
+    fused = f"{parent}.attn.qkv"
+    assert fused + ".weight" in out
+    assert mapped_config["exclude_modules"] == [fused]
+    assert not any(fnmatchcase(quantized, p) for p in mapped_config["exclude_modules"])
+    assert mapped_config["quantized_layers"] == config["quantization"]["quantized_layers"]
+    assert (
+        mapped_config["kv_cache_quantized_layers"]
+        == config["quantization"]["kv_cache_quantized_layers"]
+    )
+    assert config["quantization"]["exclude_modules"] == patterns
+
+
 @pytest.mark.parametrize(
     ("leaf", "tensors", "message"),
     [
@@ -632,6 +684,77 @@ def test_per_tensor_export_accepts_rename_only():
     assert mapper("model.language_model.layers.0.weight") == "model.language_model.layers.0.weight"
 
 
+def test_streaming_weight_specific_rename_keeps_config_aligned(tmp_path):
+    """Complete tensor keys and module exclusions must use the same checkpoint namespace."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency for ModelOpt.
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.lm_head = torch.nn.Linear(3, 2, bias=False, dtype=torch.bfloat16)
+    model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
+    writer = _StreamingShardWriter(tmp_path, max_shard_size=1024)
+    sink = _make_tensor_sink(
+        writer,
+        _build_reverse_name_mapper_or_none(model),
+        tied_alias_keys=set(),
+        kv_cache_max_bound=448.0,
+        kv_cache_format=None,
+        is_modelopt_qlora=False,
+    )
+    sink("lm_head.weight", model.lm_head.weight)
+    writer.finalize()
+    written = load_file(tmp_path / "model.safetensors")
+    config = _revert_quant_config_names_best_effort(
+        model, {"quantization": {"exclude_modules": ["lm_head"]}}
+    )
+
+    assert config["quantization"]["exclude_modules"] == ["head"]
+    assert set(written) == {"head.weight"}
+    torch.testing.assert_close(written["head.weight"], model.lm_head.weight)
+
+
+def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path):
+    """Layer and tail shards use tensor-key mapping, while exclusions use module mapping."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local imports: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+    from transformers.core_model_loading import WeightRenaming
+
+    model = get_tiny_llama(num_hidden_layers=1)
+    model.config.architectures = ["LlamaForCausalLM"]
+    model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "model.layers.0.self_attn.q_proj.weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    original_head = model.lm_head.weight.detach().clone()
+    exporter = LayerwiseExporter(model, tmp_path)
+    exporter.bind(list(model.model.layers))
+    exporter.export_layer(0, model.model.layers[0])
+    config = exporter.finalize()
+    written = {
+        key: value
+        for shard in tmp_path.glob("*.safetensors")
+        for key, value in load_file(shard).items()
+    }
+
+    assert "head" in config["quantization"]["exclude_modules"]
+    assert "lm_head" not in config["quantization"]["exclude_modules"]
+    assert "lm_head.weight" not in written
+    torch.testing.assert_close(written["head.weight"], original_head)
+
+
 def test_radio_merge_requires_converter_rename_source_key():
     """A transformers version without the bound rename helper must fall back cleanly."""
     pytest.importorskip("transformers.core_model_loading")
@@ -708,7 +831,9 @@ def test_revert_quant_config_names_mapper():
         "quantized_layers": {"model.layers.0.mlp.experts.0.w1": {"quant_algo": "NVFP4"}},
         "kv_cache_quantized_layers": {"model.layers.0.mlp.experts.0": {"quant_algo": "FP8"}},
     }
-    revert_quant_config_names(quant, mapper)
+    revert_quant_config_names(
+        quant, mapper, module_names=(name for name, _ in model.named_modules())
+    )
     assert quant["exclude_modules"] == [
         "model.layers.0.self_attn*",
         "model.layers.0.block_sparse_moe.experts.0*",

@@ -239,7 +239,7 @@ def _build_reverse_name_mapper_or_none(model):
     """
     _assert_no_split_rules(model)
     try:
-        return build_reverse_name_mapper(model)
+        return build_reverse_name_mapper(model, tensor_keys=True)
     except Exception as exc:
         warnings.warn(
             f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "

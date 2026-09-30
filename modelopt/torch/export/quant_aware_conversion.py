@@ -63,7 +63,9 @@ Reverse rules are derived from the model's conversion mapping via transformers'
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Any
 
 import torch
@@ -323,7 +325,7 @@ def revert_weight_conversion_quant_aware(model, state_dict: dict[str, torch.Tens
     return apply_reverse_rules(state_dict, split_rules, rename_rules, merge_rules)
 
 
-def build_reverse_name_mapper(model):
+def build_reverse_name_mapper(model, *, tensor_keys: bool = False):
     """Build a ``str -> str`` mapper for reverse renames and unquantized merges.
 
     The exported weight tensors are reverted to the original hub names by
@@ -336,6 +338,9 @@ def build_reverse_name_mapper(model):
     keeps them aligned with the weights. Merge-source names also map to the fused module
     so exact BF16 exclusions stay aligned. Quantized merges are rejected by the weight
     conversion; splits have no single target name and are not mapped here.
+
+    Set ``tensor_keys=True`` for complete state-dict keys instead of module references.
+    Per-tensor exporters must separately reject split and merge rules.
 
     Returns ``None`` when no renaming applies. Raises
     :class:`QuantConversionUnsupportedError` when the mapping can't be reversed, so the
@@ -352,6 +357,8 @@ def build_reverse_name_mapper(model):
         return _apply_rename_rules(text, compiled)
 
     def _map(name: str) -> str:
+        if tensor_keys:
+            return _apply(name)
         base, suffix = name, ""
         if name.endswith(".*"):
             base, suffix = name[:-2], ".*"
@@ -366,19 +373,38 @@ def build_reverse_name_mapper(model):
     return _map
 
 
-def revert_quant_config_names(quantization: dict, mapper) -> None:
+def revert_quant_config_names(
+    quantization: dict, mapper, *, module_names: Iterable[str] = ()
+) -> None:
     """Revert layer-reference keys to hub names, in place.
 
     ``mapper`` is the callable from :func:`build_reverse_name_mapper` (a no-op when
     ``None``). Applies to the ModelOpt ``{"quantization": {...}}`` sub-dict before it is
     written / format-converted, so both ``hf_quant_config.json`` and the embedded
     ``config.json`` ``quantization_config`` inherit the reverted names.
+
+    ``module_names`` supplies concrete pre-conversion names to expand exclusions whose
+    wildcard coverage changes during conversion (e.g. ``attention*`` -> ``attn.qkv``).
     """
     if mapper is None or not isinstance(quantization, dict):
         return
     exclude = quantization.get("exclude_modules")
     if exclude:
-        quantization["exclude_modules"] = [mapper(e) for e in exclude]
+        module_mapping = {name: mapper(name) for name in module_names}
+        mapped_exclude = []
+        for pattern in exclude:
+            mapped_pattern = mapper(pattern)
+            matches = [
+                mapped for name, mapped in module_mapping.items() if fnmatchcase(name, pattern)
+            ]
+            if matches and any(
+                fnmatchcase(name, pattern) != fnmatchcase(mapped, mapped_pattern)
+                for name, mapped in module_mapping.items()
+            ):
+                mapped_exclude.extend(dict.fromkeys(matches))
+            else:
+                mapped_exclude.append(mapped_pattern)
+        quantization["exclude_modules"] = mapped_exclude
     quantized_layers = quantization.get("quantized_layers")
     if isinstance(quantized_layers, dict) and quantized_layers:
         quantization["quantized_layers"] = {mapper(k): v for k, v in quantized_layers.items()}
