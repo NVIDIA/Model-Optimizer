@@ -16,19 +16,14 @@ QAT versus QAD
 into the model graph and then fine-tunes the model so its weights learn to
 compensate for quantization error. During training, quantization scales are frozen
 while weights are updated. QAT is a general technique — it learns from labeled
-data on a quantized model.
-
-Training uses the usual cross-entropy (CE) loss against labeled data.
+data on a quantized model using the usual cross-entropy (CE) loss.
 
 **Quantization Aware Distillation (QAD)** is a special case of QAT that uses a
-teacher model (typically the original unquantized model) to guide the quantized
-student via a distillation loss. QAD is a **pure accuracy recovery technique** —
-its goal is to recover accuracy lost from quantization, not to teach the model a
-new task.
-
-A frozen BF16 teacher guides the quantized student with a logit-level
-KL-divergence loss. QAD requires the teacher during training and therefore uses
-more memory and compute than QAT.
+frozen BF16 teacher (typically the original unquantized model) to guide the
+quantized student via a logit-level KL-divergence loss. QAD is a **pure accuracy
+recovery technique** — its goal is to recover accuracy lost from quantization, not
+to teach the model a new task. It requires the teacher during training and
+therefore uses more memory and compute than QAT.
 
 In both cases, start from a PTQ checkpoint and retain its quantization configuration
 during training.
