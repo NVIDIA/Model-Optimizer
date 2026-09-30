@@ -1152,7 +1152,7 @@ def assert_layerwise_export_compatible(
             "export_tensorrt_llm_checkpoint()",
         ),
         (
-            "an encoder-decoder model_type (t5/bart/whisper)",
+            "an encoder-decoder model_type",
             is_enc_dec(hf_model_type(full_model)),
             "export_tensorrt_llm_checkpoint()",
         ),

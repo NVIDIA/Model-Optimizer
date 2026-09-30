@@ -507,9 +507,11 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        # Nemotron VL remote-code model_types (NemotronH_Nano_VL_V2, Llama_Nemotron_Nano_VL,
-        # nemotron_parse) are mixed-case, so match case-insensitively.
-        if is_vl_model and "nemotron" in (model_hf_type or "").lower():
+        # Nemotron VL checkpoints are remote-code models: match on config.architectures, the
+        # field the loader dispatches on, as is_multimodal_model does.
+        architectures = getattr(getattr(model, "config", None), "architectures", None) or []
+        is_nemotron = any("nemotron" in arch.lower() for arch in architectures)
+        if is_vl_model and is_nemotron:
             # For Nemotron VL models, run optimization on just the language model/decoder.
             # This avoids needing pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
@@ -523,7 +525,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_hf_type}). "
+                    f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )

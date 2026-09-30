@@ -120,7 +120,8 @@ def torch_to_tensorrt_llm_checkpoint(
         model: the torch model.
         decoder_type: the TensorRT-LLM decoder type, e.g. gpt, gptj, llama. Detected from the
             model class name if None, falling back to the generic decoder export for an
-            unrecognized Hugging Face model. Required for Megatron-Core models.
+            unrecognized model that has ``config.architectures``. Required for Megatron-Core
+            models.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         inference_tensor_parallel: The target inference time tensor parallel.
             We will merge or split the calibration tensor parallelism to inference.
@@ -167,8 +168,14 @@ def _torch_to_tensorrt_llm_checkpoint(
     if decoder_type is None:
         decoder_type = get_decoder_type(model)
         if decoder_type is None:
-            # A Hugging Face model's TensorRT-LLM architecture comes from its config, so an
-            # unrecognized decoder_type still exports through the generic decoder path.
+            # The generic decoder path takes the TensorRT-LLM architecture from the Hugging Face
+            # config, so it only works for a model that has config.architectures.
+            if not getattr(getattr(model, "config", None), "architectures", None):
+                raise ValueError(
+                    f"Cannot detect decoder_type for {type(model).__name__}, and it has no "
+                    "config.architectures to fall back on. Pass decoder_type explicitly "
+                    "(required for Megatron-Core models)."
+                )
             warn(f"Unknown decoder_type for {type(model).__name__}. Continue exporting...")
             decoder_type = f"unknown:{type(model).__name__}"
     if dtype is None:
@@ -508,7 +515,8 @@ def export_tensorrt_llm_checkpoint(
         model: the torch model.
         decoder_type: the TensorRT-LLM decoder type, e.g. gpt, gptj, llama. Detected from the
             model class name if None, falling back to the generic decoder export for an
-            unrecognized Hugging Face model. Required for Megatron-Core models.
+            unrecognized model that has ``config.architectures``. Required for Megatron-Core
+            models.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         export_dir: the target export path.
         inference_tensor_parallel: The target inference time tensor parallel.

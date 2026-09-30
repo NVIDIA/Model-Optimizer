@@ -14,6 +14,8 @@
 # limitations under the License.
 """Unit tests for :mod:`modelopt.torch.export.trtllm.decoder_type` and its deprecated aliases."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch.nn as nn
 
@@ -72,13 +74,23 @@ def test_exporter_detects_decoder_type(monkeypatch: pytest.MonkeyPatch):
     assert seen["decoder_type"] == "gpt"
 
 
-def test_exporter_falls_back_for_undetectable_decoder_type(monkeypatch: pytest.MonkeyPatch):
+def test_exporter_falls_back_for_undetectable_hf_decoder_type(monkeypatch: pytest.MonkeyPatch):
+    """An unrecognized model with config.architectures exports through the generic path."""
+
     def fake_dtype(model: nn.Module):
         raise RuntimeError("stop after decoder_type resolution")
 
     monkeypatch.setattr(model_config_export, "get_dtype", fake_dtype)
+    model = _named_module("Unknown")
+    model.config = SimpleNamespace(architectures=["UnknownForCausalLM"])
     with (
         pytest.warns(UserWarning, match="Unknown decoder_type for Unknown"),
         pytest.raises(RuntimeError, match="stop after"),
     ):
-        next(model_config_export._torch_to_tensorrt_llm_checkpoint(_named_module("Unknown")))
+        next(model_config_export._torch_to_tensorrt_llm_checkpoint(model))
+
+
+def test_exporter_rejects_undetectable_decoder_type_without_architectures():
+    """Without config.architectures (e.g. Megatron-Core) the generic path cannot work."""
+    with pytest.raises(ValueError, match="Pass decoder_type explicitly"):
+        next(model_config_export._torch_to_tensorrt_llm_checkpoint(_named_module("GPTModel")))
