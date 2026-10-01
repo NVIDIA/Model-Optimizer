@@ -64,12 +64,13 @@ fi
 mkdir -p "$OUTPUT_PATH"
 
 # Set CONTAINER_IMAGE to a local .sqsh image to avoid pulling from the registry.
+# Cosmos3-Edge DFlash needs the split-block aux remap. Released tags through
+# v0.27.1 do not include it.
 if [ "$BACKEND" = "vllm" ]; then
-    DEFAULT_CONTAINER_IMAGE="vllm/vllm-openai:v0.27.0"
+    : "${CONTAINER_IMAGE:?Set CONTAINER_IMAGE to a vLLM build that includes 146c8c5}"
 else
-    DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
+    CONTAINER_IMAGE="${CONTAINER_IMAGE:-lmsysorg/sglang:v0.5.3-cu129}"
 fi
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-$DEFAULT_CONTAINER_IMAGE}"
 
 counter=$START_SHARD
 worker_pids=()
