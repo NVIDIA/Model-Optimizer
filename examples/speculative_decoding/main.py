@@ -53,6 +53,7 @@ from modelopt.recipe import load_recipe
 from modelopt.recipe.config import (
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
+    ModelOptExternalDraftRecipe,
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
@@ -62,6 +63,7 @@ from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
 from modelopt.torch.speculative.plugins.master_weight_adamw import VerifyMasterWeightsCallback
+from modelopt.torch.speculative.plugins.modeling_fakebase import _FINAL_NORM_PATHS
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master, local_rank
@@ -175,7 +177,7 @@ def train():
     recipe = load_recipe(config_path, overrides=overrides)
     if not isinstance(recipe, ModelOptSpeculativeRecipeBase):
         raise ValueError(
-            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa); "
+            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa / external); "
             f"got {type(recipe).__name__} from {config_path!r}."
         )
 
@@ -273,6 +275,51 @@ def train():
                 )
             dflash_cfg: dict = recipe.dflash.model_dump()
             mtsp.convert(model, [("dflash", dflash_cfg)])
+        elif isinstance(recipe, ModelOptExternalDraftRecipe):
+            # This mode inverts the usual relationship: we train a pretrained draft, and
+            # `model` loaded above is the base, kept only for its lm_head and vocabulary.
+            if recipe.draft_model_name_or_path is None:
+                raise ValueError(
+                    "draft_model_name_or_path must be set in the recipe YAML "
+                    "or via a dotlist override."
+                )
+            base_model = model
+            base_vocab_size = base_model.config.vocab_size
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                recipe.draft_model_name_or_path,
+                dtype="auto",
+                device_map="cpu",
+                trust_remote_code=recipe.model.trust_remote_code,
+            )
+            external_cfg: dict = recipe.external.model_dump()
+            # The draft's own tokenizer; the base's is used only for its lm_head.
+            tokenizer = transformers.AutoTokenizer.from_pretrained(
+                recipe.draft_model_name_or_path,
+                model_max_length=training_args.training_seq_len,
+                trust_remote_code=recipe.model.trust_remote_code,
+            )
+            mtsp.convert(model, [("external", external_cfg)])
+            # Fail before training: a vocab mismatch yields a plausible loss curve and
+            # a draft with no acceptance. Equal sizes are not enough -- different
+            # tokenizers are routinely padded to the same width -- so also check that
+            # the two actually agree on what the ids mean.
+            model.validate_against_base(base_vocab_size)
+            base_tokenizer = transformers.AutoTokenizer.from_pretrained(
+                recipe.model.model_name_or_path,
+                trust_remote_code=recipe.model.trust_remote_code,
+            )
+            model.validate_tokenizer_against_base(tokenizer, base_tokenizer)
+            # The norm is not always at base_model.model.norm -- FakeBaseModel keeps it
+            # at .norm -- so search the same paths the other offline modes use. It stays
+            # optional; _teacher_logits raises only if the dump declares a pre-norm hidden.
+            base_final_norm = None
+            for norm_path in _FINAL_NORM_PATHS:
+                try:
+                    base_final_norm = base_model.get_submodule(norm_path)
+                    break
+                except AttributeError:
+                    continue
+            model.attach_base_lm_head(base_model.get_output_embeddings(), base_final_norm)
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 

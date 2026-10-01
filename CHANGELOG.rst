@@ -128,6 +128,7 @@ Changelog
 
 *Speculative Decoding*
 
+- Add the **external draft** speculative-decoding mode: train a pretrained standalone draft model against a cached base model, instead of grafting a draft head onto the target. Select it with ``mtsp.convert(draft, [("external", cfg)])`` or the ``speculative_external`` recipe; the draft keeps its own embeddings and lm_head and exports as an ordinary HF checkpoint.
 - Add **LiLiCorr** speculative-decoding training (`arXiv:2608.20530 <https://arxiv.org/abs/2608.20530>`_): a candidate-lattice reranker on top of the DFlash draft backbone, selected via ``dflash_architecture_config.projector_type=lilicorr``. Requires online training; recipe at ``modelopt_recipes/general/speculative_decoding/lilicorr.yaml``. Training and export only — serving is in the companion SGLang PR.
 - Add ``dflash_fp32_master_weights`` (default ``False``): keep the DFlash draft's parameters and Adam moments in fp32 while its matmuls run in bf16 (classic mixed precision). Requires a bf16 autocast around the forward, which HF ``Trainer`` supplies under ``TrainingArguments.bf16``. Yields 7–14% acceptance-length improvement over bf16-only training across all ``projector_type`` variants; both LiLiCorr recipes set it to ``true``. The cost is memory, plus a doubled gradient all-reduce under DDP.
 - Fix ``training.gradient_checkpointing`` to reach the DFlash draft. Previously the flag applied only to the frozen target model, saving no activations; the draft now honours it in its decoder-layer loop.
