@@ -45,6 +45,7 @@ from modelopt.torch.export.quant_aware_conversion import (
 )
 from modelopt.torch.export.quant_utils import _prefix_wildcard_summarize_exclude_modules
 from modelopt.torch.export.unified_export_hf import (
+    _export_transformers_checkpoint,
     _revert_hf_quant_config_names,
     _revert_quant_config_names_best_effort,
     export_hf_checkpoint,
@@ -108,6 +109,53 @@ def _nvfp4_linear(module: str, out: int, in_features: int) -> dict[str, torch.Te
         f"{module}.weight_scale_2": torch.tensor(0.037, dtype=torch.float32),  # 0-d
         f"{module}.input_scale": torch.tensor(1.0, dtype=torch.float32),  # 0-d
     }
+
+
+def _stream_tensors(model, state, export_dir):
+    writer = _StreamingShardWriter(export_dir, max_shard_size=4096)
+    sink = _make_tensor_sink(
+        writer,
+        _build_reverse_name_mapper_or_none(model),
+        tied_alias_keys=set(),
+        kv_cache_max_bound=448.0,
+        kv_cache_format=None,
+        is_modelopt_qlora=False,
+    )
+    for key, value in state.items():
+        sink(key, value)
+    writer.finalize()
+
+
+def _load_shards(export_dir):
+    return {
+        key: value
+        for shard in export_dir.glob("*.safetensors")
+        for key, value in load_file(shard).items()
+    }
+
+
+def _fp8_llama(*quantizer_names):
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+
+    model = get_tiny_llama(num_hidden_layers=1, num_key_value_heads=16)
+    model.config.architectures = ["LlamaForCausalLM"]
+    return mtq.quantize(
+        model,
+        {
+            "quant_cfg": [{"quantizer_name": "*", "enable": False}]
+            + [
+                {
+                    "quantizer_name": name,
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": True,
+                }
+                for name in quantizer_names
+            ],
+            "algorithm": None,
+        },
+    )
 
 
 def test_rename_carries_scale_siblings():
@@ -513,75 +561,23 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
     assert not any("language_model.visual" in k for k in reverted)
 
 
-@pytest.mark.parametrize("with_renames", [False, True])
-@pytest.mark.parametrize("pattern_suffix", ["", ".weight", ".weight$"])
-def test_scoped_radio_qkv_converter_restores_hub_layout(with_renames, pattern_suffix):
-    """RADIO Q/K/V tensors are re-fused in scope before hub-name renames run."""
+@pytest.mark.parametrize(
+    ("base_prefix", "pattern_suffix", "with_renames"),
+    [("", "", False), ("model", ".weight", True), ("model", ".weight$", True)],
+)
+def test_scoped_vlm_conversion_keeps_tensors_and_config_aligned(
+    base_prefix, pattern_suffix, with_renames
+):
+    """Scoped vision merges and expert renames preserve scales, exclusions, and siblings."""
     pytest.importorskip("transformers.core_model_loading")
     # Local import: optional dependency, guarded by the importorskip above.
-    from transformers.core_model_loading import WeightRenaming
-
-    qkv = _radio_qkv_conversion(base_model_prefix="model", pattern_suffix=pattern_suffix)
-    radio_blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
-    radio_blocks.scope_prefix = qkv.scope_prefix
-    _set_scope_attr(radio_blocks, "base_model_prefix", "model")
-    projector = WeightRenaming("mlp1", "vision_projector.mlp1")
-
-    conversions = [qkv, radio_blocks, projector] if with_renames else [qkv]
-    model = types.SimpleNamespace(_weight_conversions=conversions)
-
-    q = torch.full((2, 3), 1.0)
-    k = torch.full((2, 3), 2.0)
-    v = torch.full((2, 3), 3.0)
-    language_q = torch.full((2, 3), 4.0)
-    sd = {
-        "model.vision_model.encoder.layer.0.attention.q_proj.weight": q,
-        "model.vision_model.encoder.layer.0.attention.k_proj.weight": k,
-        "model.vision_model.encoder.layer.0.attention.v_proj.weight": v,
-        "vision_projector.mlp1.0.weight": torch.randn(3, 3),
-        # Same leaf outside the converter's scope must not start an incomplete group.
-        "model.language_model.layers.0.attention.q_proj.weight": language_q,
-    }
-
-    out = revert_weight_conversion_quant_aware(model, sd)
-
-    vision_prefix = "model.vision_model."
-    block_prefix = vision_prefix + ("radio_model.model.blocks" if with_renames else "encoder.layer")
-    qkv_module = block_prefix + ".0.attn.qkv"
-    qkv_key = qkv_module + ".weight"
-    assert torch.equal(out[qkv_key], torch.cat((q, k, v), dim=0))
-    assert ("mlp1.0.weight" if with_renames else "vision_projector.mlp1.0.weight") in out
-    assert out["model.language_model.layers.0.attention.q_proj.weight"] is language_q
-    if with_renames:
-        assert not any("model.vision_model.encoder" in key for key in out)
-        assert not any("vision_projector.mlp1" in key for key in out)
-
-    mapper = build_reverse_name_mapper(model)
-    assert mapper is not None
-    language_module = "model.language_model.layers.0.attention.q_proj"
-    quant = {
-        "exclude_modules": [
-            f"{vision_prefix}encoder.layer.0.attention.{part}_proj" for part in ("q", "k", "v")
-        ],
-        "quantized_layers": {language_module: {"quant_algo": "FP8"}},
-    }
-    revert_quant_config_names(quant, mapper)
-    assert quant["exclude_modules"] == [qkv_module] * 3
-    assert quant["quantized_layers"] == {language_module: {"quant_algo": "FP8"}}
-    for suffix in ("*", ".*"):
-        assert mapper(vision_prefix + "encoder.layer.0.attention.q_proj" + suffix) == (
-            qkv_module + suffix
-        )
-    assert mapper(vision_prefix + "*") == vision_prefix + "*"
-
-
-@pytest.mark.parametrize("base_prefix", ["", "model"])
-def test_scoped_experts_do_not_disable_vision_reversal(base_prefix):
-    """Nested MoE leaf/scale renames coexist with vision merges without reaching siblings."""
-    pytest.importorskip("transformers.core_model_loading")
-    # Local import: transformers is an optional dependency.
     from transformers.core_model_loading import MergeModulelist, WeightConverter, WeightRenaming
 
+    qkv = _radio_qkv_conversion(base_model_prefix=base_prefix, pattern_suffix=pattern_suffix)
+    radio_blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
+    radio_blocks.scope_prefix = qkv.scope_prefix
+    _set_scope_attr(radio_blocks, "base_model_prefix", base_prefix)
+    projector = WeightRenaming("mlp1", "vision_projector.mlp1")
     expert = WeightConverter(
         source_patterns="mixer.experts.*.w1.weight",
         target_patterns="mixer.experts.up_proj",
@@ -591,39 +587,68 @@ def test_scoped_experts_do_not_disable_vision_reversal(base_prefix):
     if base_prefix and not hasattr(expert, "base_model_prefix"):
         expert.scope_prefix = f"{base_prefix}.language_model"
     _set_scope_attr(expert, "base_model_prefix", base_prefix)
-    qkv = _radio_qkv_conversion(base_model_prefix=base_prefix)
-    blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
-    blocks.scope_prefix = qkv.scope_prefix
-    _set_scope_attr(blocks, "base_model_prefix", base_prefix)
-    model = types.SimpleNamespace(_weight_conversions=[expert, qkv, blocks])
+    conversions = [expert, qkv, radio_blocks, projector] if with_renames else [expert, qkv]
+    model = types.SimpleNamespace(_weight_conversions=conversions)
+
     prefix = f"{base_prefix}." if base_prefix else ""
     language = prefix + "language_model.model.layers.0.mixer.experts.0.up_proj"
     sibling = prefix + "other_model.layers.0.mixer.experts.0.up_proj"
-    state = {**_nvfp4_linear(language, 8, 16), **_nvfp4_linear(sibling, 8, 16)}
-    vision = prefix + "vision_model.encoder.layer.0.attention"
-    parts = [torch.full((2, 3), float(i)) for i in range(3)]
-    state.update({f"{vision}.{part}_proj.weight": tensor for part, tensor in zip("qkv", parts)})
-
-    restored = revert_weight_conversion_quant_aware(model, state)
-    for key, value in state.items():
-        if key.startswith(language):
-            assert restored[key.replace(".up_proj.", ".w1.")] is value
-        elif key.startswith(sibling):
-            assert restored[key] is value
-    fused = prefix + "vision_model.radio_model.model.blocks.0.attn.qkv"
-    torch.testing.assert_close(restored[fused + ".weight"], torch.cat(parts))
+    parent = prefix + "vision_model.encoder.layer.0"
+    excluded = [f"{parent}.attention.{part}_proj" for part in "qkv"]
+    quantized = parent + ".mlp.fc1"
+    state = {
+        **_nvfp4_linear(language, 8, 16),
+        **_nvfp4_linear(sibling, 8, 16),
+        **_nvfp4_linear(quantized, 8, 16),
+    }
+    parts = [torch.full((2, 3), float(i), dtype=torch.bfloat16) for i in range(3)]
+    state.update({name + ".weight": tensor for name, tensor in zip(excluded, parts)})
+    state["vision_projector.mlp1.0.weight"] = torch.ones(3, 3)
+    state[prefix + "language_model.attention.q_proj.weight"] = torch.ones(2, 3)
+    out = revert_weight_conversion_quant_aware(model, state)
     mapper = build_reverse_name_mapper(model)
-    quantization = {
-        "quantized_layers": {language: {"quant_algo": "NVFP4"}},
-        "exclude_modules": [vision + "*"],
-    }
-    revert_quant_config_names(
-        quantization, mapper, module_names=[f"{vision}.{p}_proj" for p in "qkv"]
+    fused = (
+        prefix
+        + "vision_model."
+        + ("radio_model.model.blocks" if with_renames else "encoder.layer")
+        + ".0.attn.qkv"
     )
-    assert quantization["quantized_layers"] == {
-        language.replace(".up_proj", ".w1"): {"quant_algo": "NVFP4"}
-    }
-    assert any(fnmatchcase(fused, pattern) for pattern in quantization["exclude_modules"])
+    torch.testing.assert_close(out[fused + ".weight"], torch.cat(parts))
+    assert len(out) == len(state) - 2
+    assert not any(name + ".weight" in out for name in excluded)
+    for key, value in state.items():
+        if key not in {name + ".weight" for name in excluded}:
+            expected = key.replace(language, language.replace(".up_proj", ".w1"))
+            if with_renames:
+                expected = expected.replace("vision_projector.mlp1", "mlp1").replace(
+                    "vision_model.encoder.layer", "vision_model.radio_model.model.blocks"
+                )
+            assert out[expected] is value
+    for suffix in ("*", ".*"):
+        assert mapper(excluded[0] + suffix) == fused + suffix
+    assert mapper(prefix + "vision_model.*") == prefix + "vision_model.*"
+
+    patterns = sorted(_prefix_wildcard_summarize_exclude_modules(excluded, [quantized]))
+    assert patterns == [parent + ".attention*"]
+    quantized_out = fused.rsplit(".attn.qkv", 1)[0] + ".mlp.fc1"
+    for excludes in (excluded, patterns):
+        quant = {
+            "quantized_layers": {name: {"quant_algo": "NVFP4"} for name in (language, quantized)},
+            "exclude_modules": excludes,
+            "kv_cache_quantized_layers": {sibling: {"quant_algo": "FP8"}},
+        }
+        mapped = _revert_hf_quant_config_names(
+            {"quantization": quant}, mapper, module_names=[*excluded, language, sibling, quantized]
+        )["quantization"]
+        assert mapped["exclude_modules"] == [fused] * (3 if excludes == excluded else 1)
+        assert not any(fnmatchcase(quantized_out, p) for p in mapped["exclude_modules"])
+        assert mapped["quantized_layers"] == {
+            language.replace(".up_proj", ".w1"): {"quant_algo": "NVFP4"},
+            quantized_out: {"quant_algo": "NVFP4"},
+        }
+        assert all(name + ".weight" in out for name in mapped["quantized_layers"])
+        assert mapped["kv_cache_quantized_layers"] == quant["kv_cache_quantized_layers"]
+        assert quant["exclude_modules"] == excludes
 
 
 def test_radio_merge_that_matches_no_keys_raises():
@@ -636,47 +661,6 @@ def test_radio_merge_that_matches_no_keys_raises():
         match=r"matched no state-dict key .*scope_prefix=.*base_model_prefix=",
     ):
         revert_weight_conversion_quant_aware(model, state_dict)
-
-
-@pytest.mark.parametrize("pattern_suffix", ["", ".weight$"])
-def test_radio_merge_preserves_summarized_exclusion_coverage(pattern_suffix):
-    """A summarized attention wildcard must still exclude the re-fused BF16 QKV module."""
-    model = types.SimpleNamespace(
-        _weight_conversions=[_radio_qkv_conversion(pattern_suffix=pattern_suffix)]
-    )
-    parent = "vision_model.encoder.layer.0"
-    excluded = [f"{parent}.attention.{part}_proj" for part in ("q", "k", "v")]
-    quantized = f"{parent}.mlp.fc1"
-    patterns = sorted(_prefix_wildcard_summarize_exclude_modules(excluded, [quantized]))
-    assert patterns == [f"{parent}.attention*"]
-    config = {
-        "quantization": {
-            "exclude_modules": patterns,
-            "quantized_layers": {quantized: {"quant_algo": "FP8"}},
-            "kv_cache_quantized_layers": {"language_model.layers.0": {"quant_algo": "FP8"}},
-        }
-    }
-    state = {name + ".weight": torch.ones(2, 3, dtype=torch.bfloat16) for name in excluded}
-    state[quantized + ".weight"] = torch.ones(2, 3, dtype=torch.uint8)
-    state[quantized + ".weight_scale"] = torch.ones(2, 1)
-
-    out = revert_weight_conversion_quant_aware(model, state)
-    mapped_config = _revert_hf_quant_config_names(
-        config,
-        build_reverse_name_mapper(model),
-        module_names=(key.removesuffix(".weight") for key in state if key.endswith(".weight")),
-    )["quantization"]
-
-    fused = f"{parent}.attn.qkv"
-    assert fused + ".weight" in out
-    assert mapped_config["exclude_modules"] == [fused]
-    assert not any(fnmatchcase(quantized, p) for p in mapped_config["exclude_modules"])
-    assert mapped_config["quantized_layers"] == config["quantization"]["quantized_layers"]
-    assert (
-        mapped_config["kv_cache_quantized_layers"]
-        == config["quantization"]["kv_cache_quantized_layers"]
-    )
-    assert config["quantization"]["exclude_modules"] == patterns
 
 
 @pytest.mark.parametrize(
@@ -747,22 +731,6 @@ def test_per_tensor_export_rejects_merge_rules():
             guard(model)
 
 
-def test_per_tensor_export_accepts_rename_only():
-    """A converter-free name mapping remains supported in per-tensor export."""
-    pytest.importorskip("transformers.core_model_loading")
-    # Local import: transformers is an optional dependency for ModelOpt.
-    from transformers.core_model_loading import WeightRenaming
-
-    model = types.SimpleNamespace(
-        _weight_conversions=[WeightRenaming("mlp1", "vision_projector.mlp1")]
-    )
-    _assert_no_split_rules(model)
-    mapper = _build_reverse_name_mapper_or_none(model)
-    assert mapper is not None
-    assert mapper("vision_projector.mlp1.0.weight") == "mlp1.0.weight"
-    assert mapper("model.language_model.layers.0.weight") == "model.language_model.layers.0.weight"
-
-
 @pytest.mark.parametrize("export_mode", ["resident", "streaming"])
 @pytest.mark.parametrize("scope", ["", "vision_model"])
 def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_mode, scope):
@@ -785,19 +753,8 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     if export_mode == "resident":
         written = revert_weight_conversion_quant_aware(model, state)
     else:
-        writer = _StreamingShardWriter(tmp_path, max_shard_size=4096)
-        sink = _make_tensor_sink(
-            writer,
-            _build_reverse_name_mapper_or_none(model),
-            tied_alias_keys=set(),
-            kv_cache_max_bound=448.0,
-            kv_cache_format=None,
-            is_modelopt_qlora=False,
-        )
-        for key, value in state.items():
-            sink(key, value)
-        writer.finalize()
-        written = load_file(tmp_path / "model.safetensors")
+        _stream_tensors(model, state, tmp_path)
+        written = _load_shards(tmp_path)
 
     config = {"quantized_layers": {prefix + "lm_head": {"quant_algo": "NVFP4"}}}
     revert_quant_config_names(config, build_reverse_name_mapper(model))
@@ -809,85 +766,39 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
         )
 
 
-def test_streaming_weight_specific_rename_keeps_config_aligned(tmp_path):
-    """Complete tensor keys and module exclusions must use the same checkpoint namespace."""
-    pytest.importorskip("transformers.core_model_loading")
-    # Local import: transformers is an optional dependency for ModelOpt.
-    from transformers.core_model_loading import WeightRenaming
-
-    model = torch.nn.Module()
-    model.lm_head = torch.nn.Linear(3, 2, bias=False, dtype=torch.bfloat16)
-    model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
-    writer = _StreamingShardWriter(tmp_path, max_shard_size=1024)
-    sink = _make_tensor_sink(
-        writer,
-        _build_reverse_name_mapper_or_none(model),
-        tied_alias_keys=set(),
-        kv_cache_max_bound=448.0,
-        kv_cache_format=None,
-        is_modelopt_qlora=False,
-    )
-    sink("lm_head.weight", model.lm_head.weight)
-    writer.finalize()
-    written = load_file(tmp_path / "model.safetensors")
-    config = _revert_quant_config_names_best_effort(
-        model, {"quantization": {"exclude_modules": ["lm_head"]}}
-    )
-
-    assert config["quantization"]["exclude_modules"] == ["head"]
-    assert set(written) == {"head.weight"}
-    torch.testing.assert_close(written["head.weight"], model.lm_head.weight)
-
-
+@pytest.mark.parametrize("export_mode", ["resident", "streaming", "layerwise"])
 @pytest.mark.parametrize("quantized_head", [False, True])
-def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_head):
-    """Layer and tail shards use tensor-key mapping, while exclusions use module mapping."""
-    pytest.importorskip("transformers.core_model_loading")
-    # Local imports: transformers and its test fixtures are optional dependencies.
-    from _test_utils.torch.transformers_models import get_tiny_llama
+def test_export_weight_specific_rename_keeps_config_aligned(tmp_path, quantized_head, export_mode):
+    """Every export path keeps renamed BF16/FP8 weights, scales, and config aligned."""
+    names = ["model.layers.0.self_attn.q_proj.weight_quantizer"]
+    model = _fp8_llama(*names, *(["lm_head.*quantizer"] if quantized_head else []))
+    # Local import: _fp8_llama guards the optional dependency.
     from transformers.core_model_loading import WeightRenaming
 
-    model = get_tiny_llama(num_hidden_layers=1)
-    model.config.architectures = ["LlamaForCausalLM"]
     model._weight_conversions = [WeightRenaming(r"^head\.weight$", "lm_head.weight")]
-    mtq.quantize(
-        model,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "model.layers.0.self_attn.q_proj.weight_quantizer",
-                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                    "enable": True,
-                },
-                {
-                    "quantizer_name": "lm_head.*quantizer",
-                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                    "enable": quantized_head,
-                },
-            ],
-            "algorithm": None,
-        },
-    )
     original_head = model.lm_head.weight.detach().clone()
-    exporter = LayerwiseExporter(model, tmp_path)
-    exporter.bind(list(model.model.layers))
-    exporter.export_layer(0, model.model.layers[0])
-    config = exporter.finalize()
-    written = {
-        key: value
-        for shard in tmp_path.glob("*.safetensors")
-        for key, value in load_file(shard).items()
-    }
+    if export_mode == "layerwise":
+        exporter = LayerwiseExporter(model, tmp_path)
+        exporter.bind(list(model.model.layers))
+        exporter.export_layer(0, model.model.layers[0])
+        config = exporter.finalize()
+    elif export_mode == "streaming":
+        state, config = _export_transformers_checkpoint(model)
+        _stream_tensors(model, state, tmp_path)
+        config = _revert_quant_config_names_best_effort(model, config)
+    else:
+        export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
+        config = json.loads((tmp_path / "hf_quant_config.json").read_text())
+    written = _load_shards(tmp_path)
 
     assert ("head" in config["quantization"]["exclude_modules"]) is not quantized_head
     assert "lm_head" not in config["quantization"]["exclude_modules"]
-    assert "lm_head.weight" not in written
+    assert not any(key.startswith("lm_head.") for key in written)
+    assert "model.layers.0.self_attn.q_proj.weight" in written
     if quantized_head:
         assert written["head.weight"].dtype == torch.float8_e4m3fn
         assert "head.weight_scale" in written
         assert "head.input_scale" in written
-        assert not any(key.startswith("lm_head.") for key in written)
     else:
         torch.testing.assert_close(written["head.weight"], original_head)
 
@@ -895,14 +806,12 @@ def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path, quantiz
 @pytest.mark.parametrize("quantized_merge", [False, True])
 def test_resident_export_merge_fallback_warns_and_keeps_names_aligned(tmp_path, quantized_merge):
     """Export applies supported merges or warns and retains all weight/config namespaces."""
-    pytest.importorskip("transformers.core_model_loading")
-    # Local imports: transformers and its test fixtures are optional dependencies.
-    from _test_utils.torch.transformers_models import get_tiny_llama
+    attention = "model.layers.0.self_attn"
+    names = ["lm_head.*quantizer"]
+    model = _fp8_llama(*names, *([f"{attention}.q_proj.*quantizer"] if quantized_merge else []))
+    # Local import: _fp8_llama guards the optional dependency.
     from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
 
-    model = get_tiny_llama(num_hidden_layers=1, num_key_value_heads=16)
-    model.config.architectures = ["LlamaForCausalLM"]
-    attention = "model.layers.0.self_attn"
     # This unscoped converter also exercises merges on versions without scope support.
     model._weight_conversions = [
         WeightConverter(
@@ -912,36 +821,13 @@ def test_resident_export_merge_fallback_warns_and_keeps_names_aligned(tmp_path, 
         ),
         WeightRenaming(r"^head\.weight$", "lm_head.weight"),
     ]
-    mtq.quantize(
-        model,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "lm_head.*quantizer",
-                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                    "enable": True,
-                },
-                {
-                    "quantizer_name": f"{attention}.q_proj.*quantizer",
-                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                    "enable": quantized_merge,
-                },
-            ],
-            "algorithm": None,
-        },
-    )
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
     messages = [
         str(w.message) for w in captured if "reverse weight conversion skipped" in str(w.message)
     ]
-    written = {
-        key: value
-        for shard in tmp_path.glob("*.safetensors")
-        for key, value in load_file(shard).items()
-    }
+    written = _load_shards(tmp_path)
     config = json.loads((tmp_path / "hf_quant_config.json").read_text())["quantization"]
     if quantized_merge:
         assert len(messages) == 1
