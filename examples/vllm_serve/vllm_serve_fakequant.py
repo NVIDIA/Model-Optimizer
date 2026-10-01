@@ -52,9 +52,9 @@
 
 """Translate ModelOpt CLI flags to environment variables, then delegate to vLLM.
 
-Run this example directly with python3. When fakequant settings are present, the
-launcher selects FakeQuantWorker unless --worker-cls explicitly overrides it.
-Without fakequant settings, the launcher delegates to stock vLLM.
+Run this example directly with python3. When fakequant settings or local export
+sidecars are present, the launcher selects FakeQuantWorker unless --worker-cls
+explicitly overrides it. Otherwise it delegates to stock vLLM.
 """
 
 import os
@@ -168,7 +168,8 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-quant-file-path",
         default=os.environ.get("QUANT_FILE_PATH"),
         help=(
-            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export "
+            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export. "
+            "Auto-detected from a local model directory with its recipe YAML if omitted "
             "[env: QUANT_FILE_PATH]"
         ),
     )
@@ -176,14 +177,16 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-state-path",
         default=os.environ.get("MODELOPT_STATE_PATH"),
         help=(
-            "Path to vllm_fq_modelopt_state.pth in an HF vLLM fakequant export "
-            "[env: MODELOPT_STATE_PATH]"
+            "Path to full ModelOpt state (vllm_fq_modelopt_state.pth) in an HF "
+            "vLLM fakequant export. Auto-detected from a local model directory "
+            "if omitted [env: MODELOPT_STATE_PATH]"
         ),
     )
     g.add_argument(
         "--modelopt-recipe-path",
         default=os.environ.get("RECIPE_PATH"),
-        help="Path to a PTQ recipe YAML or exported quant_recipe.yaml [env: RECIPE_PATH]",
+        help="Path to a PTQ recipe YAML or exported quant_recipe.yaml. "
+        "Auto-detected from a local model directory when omitted [env: RECIPE_PATH]",
     )
     g.add_argument(
         "--modelopt-quant-dataset",
@@ -212,6 +215,32 @@ def _fakequant_requested(modelopt_args) -> bool:
         or modelopt_args.modelopt_state_path
         or modelopt_args.modelopt_recipe_path
     )
+
+
+def _autodetect_fakequant_paths(args) -> None:
+    """Fill in --modelopt-state-path / --modelopt-recipe-path / --modelopt-quant-file-path
+    from the model dir's standard export sidecar files, when unset. state-path wins over
+    recipe-path if both are present; quant-file-path (amax override) only applies when no
+    state path is in play.
+    """
+    model = args.model
+    manual_ptq_requested = bool(
+        args.modelopt_quant_cfg
+        or args.modelopt_kv_quant_cfg
+        or args.modelopt_quant_file_path
+        or args.modelopt_recipe_path
+    )
+    if manual_ptq_requested:
+        return
+    if not args.modelopt_state_path and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth"):
+        args.modelopt_state_path = str(Path(model) / "vllm_fq_modelopt_state.pth")
+
+    if not args.modelopt_quant_file_path and not args.modelopt_state_path:
+        if os.path.exists(f"{model}/quantizer_state.pth") and os.path.exists(
+            f"{model}/quant_recipe.yaml"
+        ):
+            args.modelopt_quant_file_path = str(Path(model) / "quantizer_state.pth")
+            args.modelopt_recipe_path = str(Path(model) / "quant_recipe.yaml")
 
 
 def _apply_fakequant_env(args, rest_argv: list) -> None:
@@ -317,12 +346,13 @@ def main():
     # Settled before the engine starts, so an unusable tracking URI fails here rather than
     # in a worker that has already loaded the weights.
     modelopt_args.model = _find_serve_model(rest_argv) or "unknown-model"
+    _autodetect_fakequant_paths(modelopt_args)
     use_fakequant = _fakequant_requested(modelopt_args)
     if use_fakequant:
         # vLLM's compile cache is not keyed on serve-time fake quantization.
         os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
-        # MLflow names the default experiment from these effective settings.
         _apply_fakequant_env(modelopt_args, rest_argv)
+    # MLflow names the default experiment from these effective settings.
     resolve_mlflow_args(modelopt_args, modelopt_parser)
     if use_fakequant:
         # Fakequant only actually runs inside FakeQuantWorker; default to it here so
