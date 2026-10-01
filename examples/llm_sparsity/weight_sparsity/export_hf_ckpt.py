@@ -92,12 +92,14 @@ def main(args):
     np.random.seed(1234)
 
     # --model_name_or_path stays as given. Later steps read the local copy of the whole checkpoint
-    # in hf_model_path, since exporters read the source's files from local disk only; hf_model_name
-    # is the Hub ID, or None for a local path.
-    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.model_name_or_path)
-    model = get_model(args.hf_model_path, args.dtype, trust_remote_code=args.trust_remote_code)
+    # in local_checkpoint_path, since exporters read the source's files from local disk only;
+    # hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.model_name_or_path)
+    model = get_model(
+        args.local_checkpoint_path, args.dtype, trust_remote_code=args.trust_remote_code
+    )
     tokenizer = get_tokenizer(
-        args.hf_model_path, args.model_max_length, trust_remote_code=args.trust_remote_code
+        args.local_checkpoint_path, args.model_max_length, trust_remote_code=args.trust_remote_code
     )
 
     if tokenizer.pad_token is None:
