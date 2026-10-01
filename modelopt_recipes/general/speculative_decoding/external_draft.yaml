@@ -25,6 +25,9 @@ data:
   mode:
   data_path:
   offline_data_path:
+  # Dumped top-k teacher deployment policy. Selects data.mode=sparse, which needs no
+  # base lm_head at train time and requires a TVD objective (tvd or tvd_deploy).
+  sparse_data_path:
   draft_vocab_cache:
   vlm_img_dir:
   vlm_processor:
@@ -54,5 +57,11 @@ external:
   # soft_ce matches the EAGLE offline objective. tvd is plain total-variation
   # distance; tvd_deploy filters both sides to the serving policy first and is the
   # acceptance the deployed pair sees.
+  #
+  # How much of the base's distribution the loss can see depends on the data:
+  #   offline_data_path  hidden states -> base lm_head -> the FULL distribution,
+  #                      so tvd is untruncated total-variation distance
+  #   sparse_data_path   only the dumped top-k policy, so the base side is
+  #                      truncated by the dump no matter which objective is used
   external_loss: tvd
   external_report_acc: true
