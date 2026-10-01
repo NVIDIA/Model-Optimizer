@@ -183,7 +183,9 @@ class HFExternalDraftModel(ExternalDraftModel):
         if draft_vocab_size != int(base_vocab_size):
             raise ValueError(
                 "External draft and base model must share a vocabulary: draft "
-                f"vocab_size={draft_vocab_size}, base vocab_size={int(base_vocab_size)}."
+                f"vocab_size={draft_vocab_size}, base vocab_size={int(base_vocab_size)}. "
+                "Set external_vocab_swap=true to re-index the draft onto the base "
+                "vocabulary, which rebuilds its embeddings and lm_head."
             )
 
     def validate_tokenizer_against_base(self, draft_tokenizer, base_tokenizer, sample: int = 256):

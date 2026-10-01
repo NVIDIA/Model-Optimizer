@@ -482,6 +482,17 @@ class ExternalDraftConfig(ModeloptBaseConfig):
         ),
     )
 
+    external_vocab_swap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Re-index the draft onto the base model's vocabulary when the two tokenizers "
+            "differ, instead of raising. Rebuilds the draft's embeddings, carrying over "
+            "rows for tokens both tokenizers spell identically. The replacement matrix is "
+            "``base_vocab_size * hidden_size`` parameters, so this is a large change to a "
+            "small draft; validate with an acceptance measurement, not a loss curve."
+        ),
+    )
+
     external_tvd_alpha: float = ModeloptField(
         default=0.9,
         description=("Weight on the TVD term when ``external_loss='tvd_ce'``."),

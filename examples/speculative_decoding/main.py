@@ -57,6 +57,7 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.external.vocab_swap import swap_draft_vocabulary
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
@@ -293,12 +294,30 @@ def train():
                 trust_remote_code=recipe.model.trust_remote_code,
             )
             external_cfg: dict = recipe.external.model_dump()
-            # The draft's own tokenizer; the base's is used only for its lm_head.
+            # The draft's own tokenizer, needed before conversion if its vocabulary
+            # has to be re-indexed onto the base's.
             tokenizer = transformers.AutoTokenizer.from_pretrained(
                 recipe.draft_model_name_or_path,
                 model_max_length=training_args.training_seq_len,
                 trust_remote_code=recipe.model.trust_remote_code,
             )
+            # Gate on the flag alone, not on a size difference: different tokenizers are
+            # routinely padded to the same width, and that is exactly the case the swap
+            # exists for. swap_draft_vocabulary is a no-op relabel when they already agree.
+            if external_cfg.get("external_vocab_swap"):
+                # Must precede convert: the converted module and the saved ModelOpt
+                # state have to describe the post-swap architecture.
+                base_tokenizer = transformers.AutoTokenizer.from_pretrained(
+                    recipe.model.model_name_or_path,
+                    trust_remote_code=recipe.model.trust_remote_code,
+                )
+                stats = swap_draft_vocabulary(model, tokenizer, base_tokenizer, base_vocab_size)
+                print_rank_0(
+                    f"[external] vocabulary swapped onto the base: "
+                    f"{stats['matched']}/{stats['total']} rows carried over, "
+                    f"{stats['frequent_coverage']:.1%} of the first 50k ids"
+                )
+                tokenizer = base_tokenizer
             # Sparse data carries only the teacher's truncated policy. Objectives
             # that need full teacher logits would silently train against a
             # zero-padded distribution, so gate on the list the plugin exports.
