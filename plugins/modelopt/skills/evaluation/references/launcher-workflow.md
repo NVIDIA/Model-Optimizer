@@ -65,7 +65,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 Ask the 5 questions via AskUserQuestion (categories must match `nel skills build-config --help` — **run that first** to confirm the current option names; CLI options override this list).
 
 1. **Execution:** Local / SLURM
-2. **Deployment:** None (External) / vLLM / SGLang / NIM / TRT-LLM. Prefer vLLM unless the user/card says otherwise.
+2. **Deployment:** NEL-managed vLLM / SGLang / NIM / TRT-LLM for both canary and full runs. Prefer vLLM unless the user/card says otherwise. Use None (External) only when the user explicitly requests an external endpoint; never reuse the PTQ smoke-test service.
 3. **Auto-export:** None / MLflow / wandb
 4. **Model type:** Base / Chat / Reasoning
 5. **Benchmarks** (multi-select): standard / code / math_reasoning / safety / multilingual

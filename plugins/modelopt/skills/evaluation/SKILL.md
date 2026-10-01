@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone launching-evals analysis. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone launching-evals analysis. Not for quantizing models (use ptq), standalone serving (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -8,7 +8,7 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL owns deployment for both evaluation canaries and full runs; do not start separate serving jobs or reuse PTQ smoke-test endpoints. External endpoints require an explicit user request.
 
 ### Completed-run analysis
 
@@ -16,7 +16,7 @@ For completed runs, skip launch/config; use launching-evals for artifacts/analys
 
 ### Workspace integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
+If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (PTQ → checkpoint smoke test → NEL evaluation; carry compatibility requirements into NEL's deployment config).
 
 ### Workflow
 

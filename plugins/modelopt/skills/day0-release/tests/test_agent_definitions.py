@@ -78,6 +78,7 @@ def test_agent_definitions_are_synchronized():
 
     links = {path.stem: path for path in _CLAUDE_LINKS.glob("*.md")}
     assert codex.keys() == claude.keys() == links.keys()
+    assert "modelopt-model-deployer" not in codex
 
     for name, (codex_path, codex_instructions) in codex.items():
         claude_path, claude_instructions = claude[name]
@@ -89,3 +90,14 @@ def test_agent_definitions_are_synchronized():
         link = links[name]
         assert link.is_symlink(), f"{link} must be a symlink"
         assert link.resolve() == claude_path.resolve(), f"{link} must target {claude_path}"
+
+
+def test_serving_ownership_preserves_deployment_skill():
+    skills = _ROOT / "plugins/modelopt/skills"
+    assert (skills / "deployment/SKILL.md").is_file()
+    quantizer = tomllib.loads((_CODEX_AGENTS / "modelopt_model_quantizer.toml").read_text())
+    evaluator = tomllib.loads((_CODEX_AGENTS / "modelopt_model_evaluator.toml").read_text())
+    assert "Own the temporary serving canary" in quantizer["developer_instructions"]
+    assert "stop the service before handoff" in quantizer["developer_instructions"]
+    assert "Let NEL own deployment" in evaluator["developer_instructions"]
+    assert "both evaluation canaries and full runs" in evaluator["developer_instructions"]
