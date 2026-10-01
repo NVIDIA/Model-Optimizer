@@ -371,10 +371,12 @@ class TestLiLiCorrForward:
         assert loss > 1e-3
         assert grad.abs().max() > 1e-3
 
-    def test_offline_forward_matches_online(self):
+    @pytest.mark.parametrize("prenorm", [False, True], ids=["post_norm", "pre_norm"])
+    def test_offline_forward_matches_online(self, prenorm):
         """Target logits rebuilt from a captured hidden state give the online loss.
 
-        The hidden state is stored in float64, wider than the target's weights.
+        The hidden state is stored in float64, wider than the target's weights. A pre-norm
+        capture also runs the target's final norm on it.
         """
         models = []
         for offline in (False, True):
@@ -389,6 +391,10 @@ class TestLiLiCorrForward:
         assert not offline.load_state_dict(online.state_dict(), strict=False).missing_keys
 
         batch = _make_batch(VOCAB_SIZE)
+        norm_inputs = []
+        hook = online._base_model_norm.register_forward_pre_hook(
+            lambda _module, args: norm_inputs.append(args[0])
+        )
         online.eval()
         with torch.no_grad():
             hidden_states = online(
@@ -396,11 +402,14 @@ class TestLiLiCorrForward:
                 attention_mask=batch["attention_mask"],
                 output_hidden_states=True,
             ).hidden_states
+        hook.remove()
+        final_hidden = norm_inputs[-1] if prenorm else hidden_states[-1]
         base_model_outputs = {
             "aux_hidden_states": torch.cat(
                 [hidden_states[lid + 1] for lid in online.target_layer_ids], dim=-1
             ),
-            "base_model_hidden_states": hidden_states[-1].double(),
+            "base_model_hidden_states": final_hidden.double(),
+            "base_hidden_prenorm": prenorm,
         }
 
         online.train()
