@@ -114,10 +114,22 @@ def gather_mcore_vllm_fq_quantized_state_dict(
                 quantizer_state_dict[k] = v.detach().clone().cpu()
 
     def _merge_quantizer_states(objs: list) -> dict:
-        merged: dict = {}
-        for d in objs:
-            if d is not None:
-                merged.update(d)
+        merged: dict[str, torch.Tensor] = {}
+        first_rank_by_name: dict[str, int] = {}
+        for rank, state in enumerate(objs):
+            if state is None:
+                continue
+            for name, tensor in state.items():
+                if name in merged:
+                    previous = merged[name]
+                    if previous.dtype != tensor.dtype or not torch.equal(previous, tensor):
+                        raise ValueError(
+                            f"Conflicting quantizer tensors for {name} between ranks "
+                            f"{first_rank_by_name[name]} and {rank}"
+                        )
+                else:
+                    merged[name] = tensor
+                    first_rank_by_name[name] = rank
         return merged
 
     merged_quantizer_state_dict = DistributedProcessGroup.get_dist_syncd_obj(
