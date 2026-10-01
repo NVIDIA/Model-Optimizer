@@ -309,20 +309,22 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 def main(args: argparse.Namespace):
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
-    # checkpoint in hf_model_path; hf_model_name is the Hub ID, or None for a local path.
-    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.hf_model_name_or_path)
+    # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
     trust_remote_code = is_safe_repo(
-        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_path
+        trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )
 
     moe_grouped_gemm = use_moe_grouped_gemm(
-        args.hf_model_path,
+        args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         force_sequential=args.no_moe_grouped_gemm,
     )
 
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
@@ -422,7 +424,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_path, trust_remote_code=trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -457,7 +459,7 @@ def main(args: argparse.Namespace):
         model,
         args.export_megatron_path,
         # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
-        hf_tokenizer_path=args.hf_model_name or args.hf_model_path,
+        hf_tokenizer_path=args.hub_model_id or args.local_checkpoint_path,
         hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
     args.checkpoint_exported = True

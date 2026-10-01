@@ -148,19 +148,21 @@ def get_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace):
     # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
-    # checkpoint in hf_model_path, since exporters read the source's files from local disk only;
-    # hf_model_name is the Hub ID, or None for a local path.
-    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.hf_model_name_or_path)
+    # checkpoint in local_checkpoint_path, since exporters read the source's files from local disk
+    # only; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
     trust_remote_code = is_safe_repo(
-        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_path
+        trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )
 
     # Build the model structure from HF
     _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         moe_grouped_gemm=use_moe_grouped_gemm(
-            args.hf_model_path,
+            args.local_checkpoint_path,
             trust_remote_code=trust_remote_code,
             force_sequential=args.no_moe_grouped_gemm,
         ),
@@ -203,7 +205,7 @@ def main(args: argparse.Namespace):
     # TODO: Gemma3-VL is not in export_mcore_gpt_to_hf's per-arch mappings yet.
     export_mcore_gpt_to_hf(
         unwrapped_model,
-        args.hf_model_path,
+        args.local_checkpoint_path,
         export_extra_modules=export_extra_modules,
         dtype=torch.bfloat16,
         export_dir=args.export_unified_hf_path,

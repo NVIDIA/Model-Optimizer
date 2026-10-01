@@ -272,9 +272,9 @@ def get_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace):
     # --student_hf_path stays as given. Later steps read the local copy of the whole checkpoint in
-    # student_hf_model_path, since exporters read the source's files from local disk only;
-    # student_hf_model_name is the Hub ID, or None for a local path.
-    args.student_hf_model_name, args.student_hf_model_path = ensure_local_checkpoint(
+    # student_local_checkpoint_path, since exporters read the source's files from local disk only;
+    # student_hub_model_id is the Hub ID, or None for a local path.
+    args.student_hub_model_id, args.student_local_checkpoint_path = ensure_local_checkpoint(
         args.student_hf_path
     )
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
@@ -286,14 +286,16 @@ def main(args: argparse.Namespace):
             f"{quantized[0]} is quantized; this script exports full precision only and would drop "
             "the quantizers. Use export_quantized_megatron_to_hf.py instead."
         )
-    is_vlm = is_vlm_config(args.student_hf_model_path, trust_remote_code=args.trust_remote_code)
+    is_vlm = is_vlm_config(
+        args.student_local_checkpoint_path, trust_remote_code=args.trust_remote_code
+    )
 
     if is_vlm:
         # Build the full VLM (vision tower / projector + original LM from HF), then overwrite the LM
         # with the distilled checkpoint weights, then export the assembled VLM.
         print_rank_0("Reassembling distilled VLM and exporting to HF format")
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
-            hf_model_name_or_path=args.student_hf_model_path,
+            hf_model_name_or_path=args.student_local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             # Mirrors distill.py's unquantized branch
             moe_grouped_gemm=not args.no_moe_grouped_gemm,
@@ -318,7 +320,7 @@ def main(args: argparse.Namespace):
             save_vlm_to_hf(
                 full_model,
                 str(hf_export_path),
-                args.student_hf_model_path,
+                args.student_local_checkpoint_path,
                 trust_remote_code=args.trust_remote_code,
             )
             record_exported_checkpoint(args, hf_export_path, dist.is_master())
@@ -336,7 +338,7 @@ def main(args: argparse.Namespace):
                 export_llm_to_hf(
                     megatron_path=str(megatron_path),
                     hf_export_path=str(hf_export_path),
-                    student_hf_path=args.student_hf_model_path,
+                    student_hf_path=args.student_local_checkpoint_path,
                     template_hf=args.student_hf_model,
                     trust_remote_code=args.trust_remote_code,
                 )
