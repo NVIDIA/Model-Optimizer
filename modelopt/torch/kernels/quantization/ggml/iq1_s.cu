@@ -54,6 +54,19 @@ struct Format {
       payload[kMetadataOffset + 2 * tid + 1] = static_cast<uint8_t>(qh >> 8);
     }
   }
+
+  // Vector v is index byte v plus three high bits from its group's metadata word, which also
+  // holds the group's 3-bit local scale (bits 12..14) and delta sign (bit 15).
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    const uint32_t qh = load_u16(block + kMetadataOffset + 2 * (vector / kVectorsPerGroup));
+    const uint32_t entry =
+        block[kIndexOffset + vector] | (((qh >> (3 * (vector % kVectorsPerGroup))) & 0x7) << 8);
+    const float d = half_bits_to_float(load_u16(block + kScaleOffset));
+    const float scale = __fmul_rn(d, static_cast<float>(2 * ((qh >> 12) & 0x7) + 1));
+    shifted_scaled(grid + entry * kVectorSize, (qh & 0x8000) ? -kIq1Delta : kIq1Delta, scale,
+                   values);
+  }
 };
 
 static_assert(Format::kPayloadBytes == 50, "IQ1_S blocks are 50 bytes");
@@ -97,4 +110,8 @@ at::Tensor iq1_s_pack_cuda(at::Tensor input, at::Tensor grid) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
   return iq1_encode_blocks<Format>(values, grid, scales);
+}
+
+at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Format>("IQ1_S", packed, grid, dtype);
 }

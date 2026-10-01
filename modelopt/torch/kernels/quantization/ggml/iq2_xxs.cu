@@ -51,6 +51,20 @@ struct Format {
     for (int j = 0; j < 4; ++j)
       record[kVectorsPerGroup + j] = static_cast<uint8_t>(aux >> (8 * j));
   }
+
+  // Vector v is entry byte v % 4 of record v / 4, whose uint32 holds the four vectors' 7-bit sign
+  // indices and, in its top nibble, the record's local scale.
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    const uint8_t *record = block + kCodeOffset + kRecordBytes * (vector / kVectorsPerGroup);
+    const uint32_t aux = load_u32(record + kVectorsPerGroup);
+    const int slot = vector % kVectorsPerGroup;
+    const float d = half_bits_to_float(load_u16(block + kScaleOffset));
+    const float scale =
+        __fmul_rn(__fmul_rn(d, __fadd_rn(0.5f, static_cast<float>(aux >> 28))), 0.25f);
+    signed_scaled(grid + record[slot] * kVectorSize, with_parity_bit((aux >> (7 * slot)) & 0x7F),
+                  scale, values);
+  }
 };
 
 static_assert(Format::kPayloadBytes == 66, "IQ2_XXS blocks are 66 bytes");
@@ -60,4 +74,8 @@ static_assert(Format::kPayloadBytes == 66, "IQ2_XXS blocks are 66 bytes");
 at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   check_scaled_pack_inputs("IQ2_XXS", input, grid, Format::kEntries, scales);
   return iq2_encode_blocks<Format>(input, grid, scales);
+}
+
+at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Format>("IQ2_XXS", packed, grid, dtype);
 }

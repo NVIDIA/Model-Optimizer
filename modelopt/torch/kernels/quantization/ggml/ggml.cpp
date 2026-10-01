@@ -18,7 +18,7 @@
 // Every GGML IQ format shares common.cuh, the same CUDA version gate, and the same build flags,
 // so they compile into one extension and bind here. Each IQ format keeps its block layout in its
 // own translation unit, on the encoder its family shares (iq1_family.cuh or iq2_family.cuh), and
-// exposes its packer.
+// exposes a packer and an unpacker.
 
 #include "common.cuh"
 
@@ -28,6 +28,11 @@ at::Tensor iq2_xxs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scale
 at::Tensor iq2_s_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
 at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales);
 at::Tensor q8_0_pack_cuda(at::Tensor input);
+at::Tensor iq1_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_xxs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_xs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
+at::Tensor iq2_s_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype);
 
 namespace {
 
@@ -82,4 +87,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "dimension is a multiple of 32. Returns uint8 [numel / 32, 34] on the input device. "
              "Non-finite input elements are treated as zero during packing, and finite elements "
              "outside the float32 range saturate.");
+  module.def("iq1_s_unpack", &iq1_s_unpack_cuda,
+             "Decode uint8 [blocks, 50] IQ1_S payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [2048, 8].");
+  module.def("iq1_m_unpack", &iq1_m_unpack_cuda,
+             "Decode uint8 [blocks, 56] IQ1_M payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [2048, 8].");
+  module.def("iq2_xxs_unpack", &iq2_xxs_unpack_cuda,
+             "Decode uint8 [blocks, 66] IQ2_XXS payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [256, 8].");
+  module.def("iq2_xs_unpack", &iq2_xs_unpack_cuda,
+             "Decode uint8 [blocks, 74] IQ2_XS payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [512, 8].");
+  module.def("iq2_s_unpack", &iq2_s_unpack_cuda,
+             "Decode uint8 [blocks, 82] IQ2_S payloads on CUDA into [blocks, 256] of the given "
+             "floating-point dtype, bit-identical to the PyTorch decoder. The grid must be "
+             "float32 [1024, 8].");
 }

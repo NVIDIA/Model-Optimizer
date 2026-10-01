@@ -46,6 +46,18 @@ struct Format {
     if (tid < kGroups / 2)
       payload[kLocalScaleOffset + tid] = locals[2 * tid] | (locals[2 * tid + 1] << 4);
   }
+
+  // Vector v is uint16 code v, a 9-bit entry under a 7-bit sign index. Its local scale is nibble
+  // (v / 2) % 2 of byte v / 4 in the trailing scale array.
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    const uint32_t code = load_u16(block + kCodeOffset + 2 * vector);
+    const uint32_t local =
+        (block[kLocalScaleOffset + vector / 4] >> (4 * ((vector / 2) % 2))) & 0xF;
+    const float d = half_bits_to_float(load_u16(block + kScaleOffset));
+    const float scale = __fdiv_rn(__fmul_rn(d, static_cast<float>(2 * local + 1)), 8.0f);
+    signed_scaled(grid + (code & 0x1FF) * kVectorSize, with_parity_bit(code >> 9), scale, values);
+  }
 };
 
 static_assert(Format::kPayloadBytes == 74, "IQ2_XS blocks are 74 bytes");
@@ -55,4 +67,8 @@ static_assert(Format::kPayloadBytes == 74, "IQ2_XS blocks are 74 bytes");
 at::Tensor iq2_xs_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   check_scaled_pack_inputs("IQ2_XS", input, grid, Format::kEntries, scales);
   return iq2_encode_blocks<Format>(input, grid, scales);
+}
+
+at::Tensor iq2_xs_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Format>("IQ2_XS", packed, grid, dtype);
 }

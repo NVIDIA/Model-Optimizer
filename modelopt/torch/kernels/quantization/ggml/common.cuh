@@ -250,6 +250,93 @@ __device__ __forceinline__ bool store_block_scale(uint8_t *payload, uint16_t d_b
   return true;
 }
 
+// Decoders run one thread per 8-value vector and follow the PyTorch decoders operation for
+// operation. Every float operation is explicitly rounded so the compiler cannot fuse a multiply
+// into an add, which keeps them bit-identical to that reference. A format's layout type supplies
+// kPayloadBytes, kEntries and decode(block, vector, grid, values), and binds decode_blocks.
+
+__device__ __forceinline__ uint32_t load_u16(const uint8_t *bytes) {
+  return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8);
+}
+
+__device__ __forceinline__ uint32_t load_u32(const uint8_t *bytes) {
+  return load_u16(bytes) | (load_u16(bytes + 2) << 16);
+}
+
+__device__ __forceinline__ float half_bits_to_float(uint32_t bits) {
+  return __half2float(__ushort_as_half(static_cast<unsigned short>(bits)));
+}
+
+// IQ2_XS and IQ2_XXS store seven sign bits; the eighth makes the count of negatives even.
+__device__ __forceinline__ uint32_t with_parity_bit(uint32_t sign_index) {
+  return sign_index | ((__popc(sign_index) & 1u) << 7);
+}
+
+// x * scale, with coordinate j negated where bit j of sign_mask is set.
+__device__ __forceinline__ void signed_scaled(const float *q, uint32_t sign_mask, float scale,
+                                              float (&values)[kVectorSize]) {
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j)
+    values[j] = __fmul_rn((sign_mask >> j) & 1 ? -q[j] : q[j], scale);
+}
+
+// (q + delta) * scale, the IQ1 formats' shifted ternary grid.
+__device__ __forceinline__ void shifted_scaled(const float *q, float delta, float scale,
+                                               float (&values)[kVectorSize]) {
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j)
+    values[j] = __fmul_rn(__fadd_rn(q[j], delta), scale);
+}
+
+template <typename Format, typename out_t>
+__global__ void decode_vectors(const uint8_t *packed, int64_t num_vectors, const float *grid,
+                               out_t *output) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= num_vectors)
+    return;
+  float values[kVectorSize];
+  Format::decode(packed + (index / kVectorsPerBlock) * Format::kPayloadBytes,
+                 static_cast<int>(index % kVectorsPerBlock), grid, values);
+  out_t *out = output + index * kVectorSize;
+#pragma unroll
+  for (int j = 0; j < kVectorSize; ++j)
+    out[j] = static_cast<out_t>(values[j]);
+}
+
+// Decodes uint8 [blocks, kPayloadBytes] into [blocks, 256] of dtype on the payload's device.
+template <typename Format>
+at::Tensor decode_blocks(const char *format, const at::Tensor &packed, const at::Tensor &grid,
+                         at::ScalarType dtype) {
+  constexpr int kPayloadBytes = Format::kPayloadBytes;
+  constexpr int kEntries = Format::kEntries;
+  TORCH_CHECK(packed.is_cuda() && grid.is_cuda(), format, " decoding requires CUDA tensors");
+  TORCH_CHECK(packed.get_device() == grid.get_device(), "payload and grid must share a device");
+  TORCH_CHECK(packed.scalar_type() == at::kByte && packed.dim() == 2 &&
+                  packed.size(1) == kPayloadBytes,
+              format, " payloads must be uint8 [blocks, ", kPayloadBytes, "]");
+  TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == kEntries &&
+                  grid.size(1) == kVectorSize,
+              format, " grid must be float32 [", kEntries, ", ", kVectorSize, "]");
+  TORCH_CHECK(at::isFloatingType(dtype), format, " decodes to a floating-point dtype");
+  c10::cuda::CUDAGuard guard(packed.device());
+  const auto payload = packed.contiguous();
+  const auto table = grid.contiguous();
+  auto output = at::empty({packed.size(0), kBlockSize}, packed.options().dtype(dtype));
+  const int64_t num_vectors = packed.size(0) * kVectorsPerBlock;
+  if (num_vectors == 0)
+    return output;
+  const auto launch_blocks = static_cast<unsigned>((num_vectors + kThreads - 1) / kThreads);
+  const auto stream = c10::cuda::getCurrentCUDAStream();
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, dtype, "ggml_decode", [&] {
+        decode_vectors<Format, scalar_t><<<launch_blocks, kThreads, 0, stream>>>(
+            payload.data_ptr<uint8_t>(), num_vectors, table.data_ptr<float>(),
+            output.data_ptr<scalar_t>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      });
+  return output;
+}
+
 #endif // __CUDACC__
 
 } // namespace modelopt::ggml
