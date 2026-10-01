@@ -28,6 +28,7 @@ from safetensors import safe_open
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
+    gather_mcore_vllm_fq_quantized_state_dict,
     gather_mcore_vllm_fq_quantizer_state,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -208,3 +209,25 @@ def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
 def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path, conflicting):
     """Matching TP/EP recipes merge, while conflicting ranks fail together."""
     dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, tmp_path, conflicting))
+
+
+def _test_cross_rank_tensor_merge(tmp_path, conflicting, rank, size):
+    assert size == 2
+    name = "model.layers.0.self_attn.q_proj.input_quantizer._amax"
+    tensor = torch.tensor([1.0 + rank if conflicting else 1.0])
+    with (
+        pytest.raises(ValueError, match="Conflicting quantizer tensors")
+        if conflicting
+        else nullcontext()
+    ):
+        gather_mcore_vllm_fq_quantized_state_dict(None, {1: {name: tensor}}, tmp_path)
+    if not conflicting:
+        torch.distributed.barrier()
+        state = torch.load(tmp_path / "quantizer_state.pth", weights_only=True)
+        torch.testing.assert_close(state[name], tensor, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path, conflicting):
+    """Equal duplicate tensors merge, while conflicting ranks fail together."""
+    dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, tmp_path, conflicting))
