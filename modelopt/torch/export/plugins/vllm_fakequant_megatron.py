@@ -21,13 +21,74 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
+from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
+
+
+def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
+    """Return a dictionary of quantizer configs, keyed by name relative to *module*.
+
+    Args:
+        module: The module to save the quantizer configs.
+
+    Returns:
+        A dictionary of quantizer configs, keyed by name relative to *module*, with each value
+        containing the quantizer's num_bits, axis, block_sizes, and is_enabled state.
+    """
+    return {
+        get_unwrapped_name(name, module): {
+            "_num_bits": m.num_bits,
+            "_axis": m.axis,
+            "_block_sizes": m.block_sizes,
+            "_disabled": not m.is_enabled,
+        }
+        for name, m in module.named_modules()
+        if isinstance(m, TensorQuantizer)
+    }
+
+
+def gather_mcore_vllm_fq_quantizer_state(
+    quantizer_state_by_name: dict[str, dict],
+    save_directory: str | os.PathLike,
+) -> None:
+    """Sync each rank's captured quantizer configs and save as ``vllm_fq_quantizer_state.yaml``.
+
+    Args:
+        quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
+            ``VllmFqGPTModelExporter._get_quantized_state``.
+        save_directory: Directory for ``vllm_fq_quantizer_state.yaml``.
+    """
+
+    def _merge_quantizer_states(objs: list) -> dict:
+        merged: dict = {}
+        for rank, recipes in enumerate(objs):
+            if recipes is None:
+                continue
+            for name, recipe in recipes.items():
+                if name in merged and merged[name] != recipe:
+                    raise ValueError(
+                        f"Conflicting quantizer recipes for {name} across ranks "
+                        f"(including rank {rank})"
+                    )
+                merged[name] = recipe
+        return merged
+
+    merged = DistributedProcessGroup.get_dist_syncd_obj(
+        quantizer_state_by_name,
+        DistributedProcessGroup(None),
+        _merge_quantizer_states,
+    )
+    if is_master():
+        with open(Path(save_directory) / "vllm_fq_quantizer_state.yaml", "w") as f:
+            yaml.safe_dump(merged, f, sort_keys=False)
 
 
 def gather_mcore_vllm_fq_quantized_state_dict(
@@ -71,6 +132,42 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 class VllmFqGPTModelExporter(GPTModelExporter):
     """VLLM fakequant GPTModel exporter."""
 
+    _RECIPE_MARKER_SUFFIX = "._vllm_fq_recipe_marker"
+
+    def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
+        """Store one resolved recipe, requiring repeated routes to agree."""
+        previous = self._quantizer_state_for_recipe.get(name)
+        if previous is not None and previous != recipe:
+            raise ValueError(f"Conflicting quantizer recipes routed to {name}")
+        self._quantizer_state_for_recipe[name] = recipe
+
+    def _extract_quantizer_recipe_markers(
+        self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
+    ) -> None:
+        """Resolve temporary recipe markers after the normal export mapping has routed them."""
+        routed_marker_ids: set[int] = set()
+        for state_dict in layer_state_dicts.values():
+            for key in list(state_dict):
+                if not key.endswith(self._RECIPE_MARKER_SUFFIX):
+                    continue
+
+                marker = state_dict.pop(key)
+                marker_ids = [int(i) for i in marker.detach().cpu().reshape(-1).tolist()]
+                recipes = [self._quantizer_recipe_markers[i][1] for i in marker_ids]
+                if any(recipe != recipes[0] for recipe in recipes[1:]):
+                    raise ValueError(f"Conflicting packed quantizer recipes routed to {key}")
+
+                recipe_name = key[: -len(self._RECIPE_MARKER_SUFFIX)]
+                self._store_quantizer_recipe(recipe_name, recipes[0])
+                routed_marker_ids.update(marker_ids)
+
+        # Packed expert mappings currently consume only selected tensor fields instead of
+        # forwarding arbitrary name_to_value entries. Their supplied prefix is already final,
+        # so use the normalized source name for markers that were not emitted into a shard.
+        for marker_id, (source_name, recipe) in enumerate(self._quantizer_recipe_markers):
+            if marker_id not in routed_marker_ids:
+                self._store_quantizer_recipe(source_name, recipe)
+
     @staticmethod
     def _pop_quantizer_keys(state_dict: dict) -> None:
         """Remove quantizer tensors from an export shard (OrderedDict-safe)."""
@@ -82,10 +179,11 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save HF shards + sidecar ``quantizer_state.pth``; then delegate to base export.
+        """Save ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` before delegating to base export.
 
-        Pipeline-parallel placement of ``config.json``, tokenizer, and multimodal tensors
-        remains handled by ``GPTModelExporter.save_pretrained`` (via ``super()``).
+        Args:
+            save_directory: The directory to save the exported model.
+            pretrained_model_name_or_path: The name or path of the pretrained model.
         """
         save_dir = os.fspath(save_directory)
         os.makedirs(save_dir, exist_ok=True)
@@ -98,11 +196,19 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             "Exporting extra modules is not supported for vLLM fakequant"
         )
 
-        gather_mcore_vllm_fq_quantized_state_dict(self.model, self.layer_state_dicts, save_dir)
+        # Temporary scalar markers carry each recipe through the same export mapping as amax.
+        self._quantizer_state_for_recipe: dict[str, dict] = {}
+        self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        layer_state_dicts = self.layer_state_dicts
+        self._extract_quantizer_recipe_markers(layer_state_dicts)
 
-        self._pop_quantizer_keys(self.state_dict)
-        for _layer_sd in self.layer_state_dicts.values():
+        gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_dir)
+        gather_mcore_vllm_fq_quantizer_state(self._quantizer_state_for_recipe, save_dir)
+
+        # Avoid rebuilding nonfinal PP stages whose trailing state is empty.
+        for _layer_sd in layer_state_dicts.values():
             self._pop_quantizer_keys(_layer_sd)
+        self._pop_quantizer_keys(self._state_dict)
 
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
@@ -129,6 +235,14 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             Tuple: state_dict, quantization format, and block_size of the module.
         """
         name_to_value = {}
+        source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
+        for qname, qstate in _quantizer_configs(module).items():
+            marker_id = len(self._quantizer_recipe_markers)
+            self._quantizer_recipe_markers.append((source_prefix + qname, qstate))
+            name_to_value[qname + self._RECIPE_MARKER_SUFFIX] = torch.tensor(
+                marker_id, dtype=torch.int64
+            )
+
         qformat: str = self._get_quantization_format(module)
         if qformat is None and "norm" not in prefix:
             # Add exclude layers for vllm fakequant config. Note that if the prefix is not an empty
@@ -179,7 +293,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             if "weight_quantizer" in name:
                 continue
             for key, value in param.items():
-                name_to_value[name + "." + key] = value.to(dtype).cpu()
+                name_to_value[name + "." + key] = value.detach().cpu().clone()
         return name_to_value, qformat, block_size
 
 
@@ -193,6 +307,9 @@ def export_mcore_gpt_to_hf_vllm_fq(
     trust_remote_code: bool = False,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
+
+    Also saves ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` sidecars,
+    for later fakequant reload.
 
     Args:
         model: The Megatron Core GPTModel instance.
