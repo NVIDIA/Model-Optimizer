@@ -831,6 +831,7 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
     assert "notes.txt" in warned and "gone.txt" in warned
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
     repo = tmp_path / "models--org--model"
     snapshot, blobs = repo / "snapshots" / "abc123", repo / "blobs"

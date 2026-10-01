@@ -892,7 +892,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         export_dir: Export directory; created if missing.
 
     Returns:
-        The copied paths, relative to the checkpoint root.
+        The copied paths, relative to the checkpoint root and ``/``-separated on every platform.
     """
     source_dir = Path(source)
     if not source_dir.is_dir():
@@ -927,6 +927,6 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
         except OSError as error:
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
             continue
-        copied.append(str(rel))
+        copied.append(rel.as_posix())
     print(f"Copied {len(copied)} source checkpoint file(s) to {export_dir}: {copied}")
     return copied
