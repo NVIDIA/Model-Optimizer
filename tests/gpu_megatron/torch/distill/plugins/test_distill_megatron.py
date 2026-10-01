@@ -520,25 +520,12 @@ def test_loss_balancer_convex_combination():
         DistillationConfig(kd_loss_alpha=-0.1)
 
 
-def test_distillation_config_deprecations():
-    """skip_lm_loss is derived from kd_loss_alpha; legacy fields warn with FutureWarning."""
-    assert DistillationConfig().kd_loss_alpha == 0.9
-    assert DistillationConfig(kd_loss_alpha=1.0).skip_lm_loss is True
+def test_distillation_config_removed_fields():
+    """skip_lm_loss is derived from kd_loss_alpha; the removed fields raise."""
+    cfg = DistillationConfig()
+    assert cfg.kd_loss_alpha == 1.0 and cfg.skip_lm_loss is True  # pure KD by default
     assert DistillationConfig(kd_loss_alpha=0.9).skip_lm_loss is False
 
-    # skip_lm_loss alone is translated to an equivalent kd_loss_alpha.
-    with pytest.warns(FutureWarning, match="translating skip_lm_loss=True to kd_loss_alpha=1.0"):
-        cfg = DistillationConfig(skip_lm_loss=True)
-    assert cfg.kd_loss_alpha == 1.0 and cfg.skip_lm_loss is True
-    with pytest.warns(FutureWarning, match="translating skip_lm_loss=False to kd_loss_alpha=0.9"):
-        cfg = DistillationConfig(skip_lm_loss=False)
-    assert cfg.kd_loss_alpha == 0.9 and cfg.skip_lm_loss is False
-
-    # An explicit kd_loss_alpha always wins over the deprecated field.
-    with pytest.warns(FutureWarning, match="ignored when `kd_loss_alpha` is set"):
-        cfg = DistillationConfig(kd_loss_alpha=0.5, skip_lm_loss=True)
-    assert cfg.kd_loss_alpha == 0.5 and cfg.skip_lm_loss is False
-
-    with pytest.warns(FutureWarning, match="kd_loss_scale is deprecated"):
-        cfg = DistillationConfig(kd_loss_scale=2.0)
-    assert cfg.kd_loss_alpha == 0.9
+    for removed in ({"skip_lm_loss": True}, {"skip_lm_loss": False}, {"kd_loss_scale": 2.0}):
+        with pytest.raises(ValueError, match="have been removed"):
+            DistillationConfig(**removed)

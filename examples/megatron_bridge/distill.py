@@ -23,7 +23,6 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
-import warnings
 from pathlib import Path
 
 import torch
@@ -209,21 +208,9 @@ def get_args():
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
     parser.add_argument(
-        "--no_skip_lm_loss",
-        action="store_true",
-        help="DEPRECATED and ignored. Whether the LM loss is skipped is derived from --kd_loss_alpha "
-        "(skipped iff alpha == 1.0).",
-    )
-    parser.add_argument(
-        "--kd_loss_scale",
-        type=float,
-        default=None,
-        help="DEPRECATED and ignored. Use --kd_loss_alpha.",
-    )
-    parser.add_argument(
         "--kd_loss_alpha",
         type=float,
-        default=0.9,
+        default=1.0,
         help="KD loss weight alpha in (1 - alpha) * lm_loss + alpha * kd_loss. 1.0 skips the LM loss entirely.",
     )
     parser.add_argument(
@@ -501,17 +488,6 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
             f"sizes differ ({padded['student']} vs {padded['teacher']})."
         )
 
-    if args.kd_loss_scale is not None:
-        warnings.warn(
-            "--kd_loss_scale is deprecated and ignored; use --kd_loss_alpha instead.",
-            FutureWarning,
-        )
-    if args.no_skip_lm_loss:
-        warnings.warn(
-            "--no_skip_lm_loss is deprecated and ignored; whether the LM loss is skipped is derived "
-            "from --kd_loss_alpha (skipped iff 1.0).",
-            FutureWarning,
-        )
     kd_config = ModelOptDistillConfig(
         kd_loss_alpha=args.kd_loss_alpha,
         logit_kl_topk=args.logit_kl_topk,
