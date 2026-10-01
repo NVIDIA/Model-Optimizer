@@ -746,7 +746,7 @@ def copy_non_safetensor_files_from_ckpt(
     return copied_files
 
 
-def _snapshot_download(model_name: str) -> str:
+def _snapshot_download(hub_model_id: str) -> str:
     """``snapshot_download``, but warn when it unexpectedly falls back to the cache.
 
     ``snapshot_download`` silently returns whatever snapshot is cached when the Hub cannot be
@@ -755,51 +755,55 @@ def _snapshot_download(model_name: str) -> str:
     """
     if _is_hf_hub_offline():
         try:
-            return snapshot_download(model_name, local_files_only=True)
+            return snapshot_download(hub_model_id, local_files_only=True)
         except LocalEntryNotFoundError as error:
             raise RuntimeError(
-                f"HF_HUB_OFFLINE is set and {model_name!r} is not in the local cache."
+                f"HF_HUB_OFFLINE is set and {hub_model_id!r} is not in the local cache."
             ) from error
     try:
-        HfApi().repo_info(model_name)
+        HfApi().repo_info(hub_model_id)
     except (RepositoryNotFoundError, RevisionNotFoundError):
         raise
     except Exception as error:  # offline, unreachable, or refused: only the cache is left
         hub_error = f"{type(error).__name__}: {error}"
         try:
-            model_path = snapshot_download(model_name, local_files_only=True)
+            local_checkpoint_path = snapshot_download(hub_model_id, local_files_only=True)
         except LocalEntryNotFoundError:
             raise RuntimeError(
-                f"Could not reach the Hugging Face Hub for {model_name!r} ({hub_error}), and it "
+                f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}), and it "
                 "is not in the local cache."
             ) from error
         warnings.warn(
-            f"Could not reach the Hugging Face Hub for {model_name!r} ({hub_error}); using its "
+            f"Could not reach the Hugging Face Hub for {hub_model_id!r} ({hub_error}); using its "
             "cached snapshot as it is. It may lack files, e.g. non-model files an earlier "
             "from_pretrained did not need."
         )
-        return model_path
-    return snapshot_download(model_name)
+        return local_checkpoint_path
+    return snapshot_download(hub_model_id)
 
 
 def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]:
-    """``(model_name, model_path)`` on this rank alone; see :func:`ensure_local_checkpoint`."""
+    """``(hub_model_id, local_checkpoint_path)`` on this rank alone.
+
+    See :func:`ensure_local_checkpoint`.
+    """
     if os.path.isdir(model_name_or_path):
         return None, str(model_name_or_path)
-    model_name = str(model_name_or_path)
-    return model_name, _snapshot_download(model_name)
+    hub_model_id = str(model_name_or_path)
+    return hub_model_id, _snapshot_download(hub_model_id)
 
 
 def ensure_local_checkpoint(
     model_name_or_path: str | os.PathLike,
     group: "torch.distributed.ProcessGroup | None" = None,
 ) -> tuple[str | None, str]:
-    """Ensure the whole checkpoint is on local storage; return ``(model_name, model_path)``.
+    """Ensure the whole checkpoint is on local storage.
 
-    ``model_name`` is the Hub model ID, or ``None`` when ``model_name_or_path`` is already a local
-    directory; ``model_path`` is the local checkpoint directory. Read checkpoint files from
-    ``model_path``, and use ``model_name`` where a portable name is wanted (a record that outlives
-    this host's cache), falling back to ``model_path`` for a local checkpoint.
+    Returns ``(hub_model_id, local_checkpoint_path)``: the Hub model ID, or ``None`` when
+    ``model_name_or_path`` is already a local directory, and the local checkpoint directory. Read
+    checkpoint files from ``local_checkpoint_path``; use ``hub_model_id`` where a portable name is
+    wanted (a record that outlives this host's cache), falling back to ``local_checkpoint_path``
+    for a local checkpoint.
 
     A local directory is returned as-is. A Hub model ID resolves to its snapshot in the Hugging
     Face cache, downloading only what is not cached yet. The whole repo is made local, not a
@@ -824,7 +828,7 @@ def ensure_local_checkpoint(
             a temporary gloo group whose timeout does.
 
     Returns:
-        ``(model_name, model_path)``.
+        ``(hub_model_id, local_checkpoint_path)``.
     """
     if group is None and not (
         torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -840,7 +844,7 @@ def ensure_local_checkpoint(
     if own_group:
         group = torch.distributed.new_group(backend="gloo", timeout=_CHECKPOINT_DOWNLOAD_TIMEOUT)
     try:
-        # (model_name, model_path, error): model_path or error is set.
+        # (hub_model_id, local_checkpoint_path, error): local_checkpoint_path or error is set.
         result: list[tuple[str | None, str | None, str | None]] = [(None, None, None)]
         if torch.distributed.get_rank(group) == 0:
             try:
@@ -851,18 +855,18 @@ def ensure_local_checkpoint(
     finally:
         if own_group:
             torch.distributed.destroy_process_group(group)
-    model_name, model_path, error_message = result[0]
-    if model_path is None:
+    hub_model_id, local_checkpoint_path, error_message = result[0]
+    if local_checkpoint_path is None:
         raise RuntimeError(
             f"Rank 0 could not make {str(model_name_or_path)!r} local: {error_message}"
         )
-    if not os.path.isdir(model_path):
+    if not os.path.isdir(local_checkpoint_path):
         raise RuntimeError(
-            f"Rank 0 has {str(model_name_or_path)!r} at {model_path}, which this rank cannot see. "
-            "Put the checkpoint, or the Hugging Face cache (HF_HOME) it downloads into, on storage "
-            "shared by every node."
+            f"Rank 0 has {str(model_name_or_path)!r} at {local_checkpoint_path}, which this rank "
+            "cannot see. Put the checkpoint, or the Hugging Face cache (HF_HOME) it downloads "
+            "into, on storage shared by every node."
         )
-    return model_name, model_path
+    return hub_model_id, local_checkpoint_path
 
 
 def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLike) -> list[str]:
