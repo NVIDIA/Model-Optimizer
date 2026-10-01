@@ -22,7 +22,9 @@ uses float32 here (real checkpoints use float8_e4m3, whose CPU ops are not porta
 across platforms) — only shapes and the scalar-vs-blocked distinction matter.
 """
 
+import json
 import types
+import warnings
 from fnmatch import fnmatchcase
 
 import pytest
@@ -45,6 +47,7 @@ from modelopt.torch.export.quant_utils import _prefix_wildcard_summarize_exclude
 from modelopt.torch.export.unified_export_hf import (
     _revert_hf_quant_config_names,
     _revert_quant_config_names_best_effort,
+    export_hf_checkpoint,
 )
 from modelopt.torch.export.unified_export_hf_streaming import (
     _assert_no_split_rules,
@@ -57,18 +60,12 @@ BLOCK = 16
 
 
 def _set_scope_attr(transform, name, value):
-    """Set an optional scoped-match attribute that only some transformers versions expose.
-
-    Some transformers versions omit ``base_model_prefix`` from ``WeightTransform``'s
-    ``__slots__`` and match only ``scope_prefix``. Callers must include any parent path
-    in ``scope_prefix`` on those versions.
-
-    The suppression is scoped to that one known version-dependent slot: a setattr failure for
-    any other name (a typo or a future rename) still raises instead of silently no-op-ing.
-    """
+    """Skip unsupported scope tests; callers fold an absent base prefix into the scope."""
     try:
         setattr(transform, name, value)
     except AttributeError:
+        if name == "scope_prefix":
+            pytest.skip("Transformers weight transforms do not support scope_prefix")
         if name != "base_model_prefix":
             raise
 
@@ -84,7 +81,7 @@ def _radio_qkv_conversion(base_model_prefix="", pattern_suffix=""):
         target_patterns=[f"attention.{part}_proj{pattern_suffix}" for part in ("q", "k", "v")],
         operations=[Chunk(dim=0)],
     )
-    qkv.scope_prefix = "vision_model"
+    _set_scope_attr(qkv, "scope_prefix", "vision_model")
     if base_model_prefix and not hasattr(qkv, "base_model_prefix"):
         qkv.scope_prefix = f"{base_model_prefix}.{qkv.scope_prefix}"
     _set_scope_attr(qkv, "base_model_prefix", base_model_prefix)
@@ -405,7 +402,9 @@ def test_scoped_submodel_prefix_change_does_not_capture_siblings():
     ``vision_model.language_model.*`` / ``vision_model.lm_head.*`` and vLLM fails with
     "There is no module or parameter named 'vision_model'".
     """
-    pytest.importorskip("transformers.core_model_loading")
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "PrefixChange"):
+        pytest.skip("Transformers does not expose PrefixChange")
     # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import PrefixChange
 
@@ -418,7 +417,7 @@ def test_scoped_submodel_prefix_change_does_not_capture_siblings():
     model.lm_head = torch.nn.Linear(2, 2, bias=False)
 
     prefix_change = PrefixChange(prefix_to_remove="vision_model")
-    prefix_change.scope_prefix = "model.vision_tower"
+    _set_scope_attr(prefix_change, "scope_prefix", "model.vision_tower")
     _set_scope_attr(prefix_change, "base_model_prefix", "model")
     model._weight_conversions = [prefix_change]
 
@@ -446,7 +445,9 @@ def test_scoped_rule_maps_config_module_names_consistently():
     different namespace than the weights and a deployment loader silently treats an
     excluded layer as quantized.
     """
-    pytest.importorskip("transformers.core_model_loading")
+    core = pytest.importorskip("transformers.core_model_loading")
+    if not hasattr(core, "PrefixChange"):
+        pytest.skip("Transformers does not expose PrefixChange")
     # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import PrefixChange
 
@@ -458,7 +459,7 @@ def test_scoped_rule_maps_config_module_names_consistently():
     model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
 
     prefix_change = PrefixChange(prefix_to_remove="vision_model")
-    prefix_change.scope_prefix = "model.vision_tower"
+    _set_scope_attr(prefix_change, "scope_prefix", "model.vision_tower")
     _set_scope_attr(prefix_change, "base_model_prefix", "model")
     model._weight_conversions = [prefix_change]
 
@@ -497,7 +498,7 @@ def test_root_scoped_rule_still_faces_shadowing_guard():
         target_patterns=r"^model.(?!language_model.)",
     )
     # Root scope: reaches every key, exactly like an unscoped rule.
-    renaming.scope_prefix = ""
+    _set_scope_attr(renaming, "scope_prefix", "")
     _set_scope_attr(renaming, "base_model_prefix", "")
     model._weight_conversions = [renaming]
 
@@ -572,6 +573,57 @@ def test_scoped_radio_qkv_converter_restores_hub_layout(with_renames, pattern_su
             qkv_module + suffix
         )
     assert mapper(vision_prefix + "*") == vision_prefix + "*"
+
+
+@pytest.mark.parametrize("base_prefix", ["", "model"])
+def test_scoped_experts_do_not_disable_vision_reversal(base_prefix):
+    """Nested MoE leaf/scale renames coexist with vision merges without reaching siblings."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: transformers is an optional dependency.
+    from transformers.core_model_loading import MergeModulelist, WeightConverter, WeightRenaming
+
+    expert = WeightConverter(
+        source_patterns="mixer.experts.*.w1.weight",
+        target_patterns="mixer.experts.up_proj",
+        operations=[MergeModulelist(dim=0)],
+    )
+    _set_scope_attr(expert, "scope_prefix", "language_model")
+    if base_prefix and not hasattr(expert, "base_model_prefix"):
+        expert.scope_prefix = f"{base_prefix}.language_model"
+    _set_scope_attr(expert, "base_model_prefix", base_prefix)
+    qkv = _radio_qkv_conversion(base_model_prefix=base_prefix)
+    blocks = WeightRenaming("radio_model.model.blocks", "encoder.layer")
+    blocks.scope_prefix = qkv.scope_prefix
+    _set_scope_attr(blocks, "base_model_prefix", base_prefix)
+    model = types.SimpleNamespace(_weight_conversions=[expert, qkv, blocks])
+    prefix = f"{base_prefix}." if base_prefix else ""
+    language = prefix + "language_model.model.layers.0.mixer.experts.0.up_proj"
+    sibling = prefix + "other_model.layers.0.mixer.experts.0.up_proj"
+    state = {**_nvfp4_linear(language, 8, 16), **_nvfp4_linear(sibling, 8, 16)}
+    vision = prefix + "vision_model.encoder.layer.0.attention"
+    parts = [torch.full((2, 3), float(i)) for i in range(3)]
+    state.update({f"{vision}.{part}_proj.weight": tensor for part, tensor in zip("qkv", parts)})
+
+    restored = revert_weight_conversion_quant_aware(model, state)
+    for key, value in state.items():
+        if key.startswith(language):
+            assert restored[key.replace(".up_proj.", ".w1.")] is value
+        elif key.startswith(sibling):
+            assert restored[key] is value
+    fused = prefix + "vision_model.radio_model.model.blocks.0.attn.qkv"
+    torch.testing.assert_close(restored[fused + ".weight"], torch.cat(parts))
+    mapper = build_reverse_name_mapper(model)
+    quantization = {
+        "quantized_layers": {language: {"quant_algo": "NVFP4"}},
+        "exclude_modules": [vision + "*"],
+    }
+    revert_quant_config_names(
+        quantization, mapper, module_names=[f"{vision}.{p}_proj" for p in "qkv"]
+    )
+    assert quantization["quantized_layers"] == {
+        language.replace(".up_proj", ".w1"): {"quant_algo": "NVFP4"}
+    }
+    assert any(fnmatchcase(fused, pattern) for pattern in quantization["exclude_modules"])
 
 
 def test_radio_merge_that_matches_no_keys_raises():
@@ -722,7 +774,8 @@ def test_quantized_weight_specific_rename_keeps_scales_aligned(tmp_path, export_
     weight_rename = WeightRenaming(r"^head\.weight$", "lm_head.weight")
     container_rename = WeightRenaming("output", "head")
     for rule in (weight_rename, container_rename):
-        rule.scope_prefix = scope
+        if scope:
+            _set_scope_attr(rule, "scope_prefix", scope)
     model = types.SimpleNamespace(_weight_conversions=[container_rename, weight_rename])
     prefix = f"{scope}." if scope else ""
     state = _nvfp4_linear(prefix + "lm_head", 8, 16)
@@ -837,6 +890,78 @@ def test_layerwise_weight_specific_rename_keeps_config_aligned(tmp_path, quantiz
         assert not any(key.startswith("lm_head.") for key in written)
     else:
         torch.testing.assert_close(written["head.weight"], original_head)
+
+
+@pytest.mark.parametrize("quantized_merge", [False, True])
+def test_resident_export_merge_fallback_warns_and_keeps_names_aligned(tmp_path, quantized_merge):
+    """Export applies supported merges or warns and retains all weight/config namespaces."""
+    pytest.importorskip("transformers.core_model_loading")
+    # Local imports: transformers and its test fixtures are optional dependencies.
+    from _test_utils.torch.transformers_models import get_tiny_llama
+    from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
+
+    model = get_tiny_llama(num_hidden_layers=1, num_key_value_heads=16)
+    model.config.architectures = ["LlamaForCausalLM"]
+    attention = "model.layers.0.self_attn"
+    # This unscoped converter also exercises merges on versions without scope support.
+    model._weight_conversions = [
+        WeightConverter(
+            source_patterns=f"{attention}.qkv.weight",
+            target_patterns=[f"{attention}.{part}_proj.weight" for part in "qkv"],
+            operations=[Chunk(dim=0)],
+        ),
+        WeightRenaming(r"^head\.weight$", "lm_head.weight"),
+    ]
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "lm_head.*quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": True,
+                },
+                {
+                    "quantizer_name": f"{attention}.q_proj.*quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": quantized_merge,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        export_hf_checkpoint(model, export_dir=tmp_path, save_modelopt_state=False)
+    messages = [
+        str(w.message) for w in captured if "reverse weight conversion skipped" in str(w.message)
+    ]
+    written = {
+        key: value
+        for shard in tmp_path.glob("*.safetensors")
+        for key, value in load_file(shard).items()
+    }
+    config = json.loads((tmp_path / "hf_quant_config.json").read_text())["quantization"]
+    if quantized_merge:
+        assert len(messages) == 1
+        assert attention + ".q_proj" in messages[0]
+        assert "including unrelated submodels" in messages[0]
+        assert "may fail to load or skip these weights" in messages[0]
+        assert attention + ".qkv.weight" not in written
+        assert all(f"{attention}.{part}_proj.weight" in written for part in "qkv")
+        assert any(fnmatchcase(attention + ".k_proj", p) for p in config["exclude_modules"])
+        assert not any(fnmatchcase(attention + ".q_proj", p) for p in config["exclude_modules"])
+        head, other_head = "lm_head", "head"
+    else:
+        assert not messages
+        assert written[attention + ".qkv.weight"].shape == (96, 32)
+        assert not any(f"{attention}.{part}_proj.weight" in written for part in "qkv")
+        assert any(fnmatchcase(attention + ".qkv", p) for p in config["exclude_modules"])
+        head, other_head = "head", "lm_head"
+    assert all(head + leaf in written for leaf in (".weight", ".weight_scale", ".input_scale"))
+    assert not any(key.startswith(other_head + ".") for key in written)
+    assert not any(fnmatchcase(head, p) for p in config["exclude_modules"])
 
 
 def test_radio_merge_requires_converter_rename_source_key():

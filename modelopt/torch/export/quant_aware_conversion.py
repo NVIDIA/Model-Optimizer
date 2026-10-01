@@ -602,10 +602,6 @@ def _build_reverse_rules(
             ops = list(rev.operations)
             scope_prefixes = _scope_prefixes(rev)
             if any(isinstance(op, SplitModulelist) for op in ops):
-                if scope_prefixes:
-                    raise QuantConversionUnsupportedError(
-                        "scoped expert WeightConverter cannot be reversed scope-aware"
-                    )
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to
                 # per-expert 2-D linears, so only per-expert leaf names remain to map.
                 leaf_renamings.extend(_expert_leaf_renames(rev))
@@ -672,7 +668,11 @@ def _expert_leaf_renames(rev) -> list[RenameRule]:
             f"expert converter arity mismatch: {part_leaves} vs {hub_leaves}"
         )
     return [
-        RenameRule(rf"(\.experts\.\d+\.){re.escape(part)}\b", rf"\g<1>{hub}")
+        RenameRule(
+            rf"(\.experts\.\d+\.){re.escape(part)}\b",
+            rf"\g<1>{hub}",
+            scope_prefixes=_scope_prefixes(rev),
+        )
         for part, hub in zip(part_leaves, hub_leaves)
     ]
 
