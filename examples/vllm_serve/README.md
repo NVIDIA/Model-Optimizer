@@ -73,6 +73,12 @@ For vLLM versions that expose `--moe-backend`, this launcher defaults to `--moe-
 ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are visible during
 calibration.
 
+A pre-quantized checkpoint (for example FP8) can be served with a recipe that leaves its quantized
+layers alone, such as a KV-cache-only recipe: those layers run unchanged, and a recipe that
+fake-quantizes their weights or activations raises an error instead. Pass `--moe-backend auto` for
+such MoE checkpoints: the `triton` default is only needed to fake-quantize experts, and vLLM
+rejects it for NVFP4 experts.
+
 Step 3: test the API server with curl:
 
 ```bash
@@ -330,4 +336,4 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
 2. KV cache quantization export and reload is not supported in MCore yet.
-3. **`NVFP4_KV_CFG` and `NVFP4_AFFINE_KV_CFG` require `--enforce-eager`**; these configs use a dynamic-block Triton kernel for KV-cache quantization that is incompatible with CUDA graph capture (the kernel grid is computed from Python-level tensor shapes, which get baked in at capture time). Without `--enforce-eager`, the captured grid will be wrong for different batch sizes, producing incorrect outputs.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which this launcher sets by default). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
