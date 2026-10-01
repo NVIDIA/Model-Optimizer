@@ -492,8 +492,8 @@ def export_mcore_gpt_to_hf_vllm_fq(
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
-    Also saves ``quantizer_state.pth`` and ``quant_recipe.yaml`` files,
-    for later fakequant reload.
+    Also saves ``quantizer_state.pth`` and ``quant_recipe.yaml`` sidecars,
+    auto-detected by the vLLM fakequant reload path.
 
     Args:
         model: The Megatron Core GPTModel instance.
