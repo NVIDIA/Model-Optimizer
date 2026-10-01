@@ -62,9 +62,28 @@ def _get_calibration_block_count(
             return num_blocks
 
     else:
+        try:
+            from vllm.v1.kv_cache_interface import KpoolTailSpec, UniformTypeKVCacheSpecs
+        except ImportError:
+            kpool_tail_spec_types = ()
+            uniform_kv_cache_spec_types = ()
+        else:
+            kpool_tail_spec_types = (KpoolTailSpec,)
+            uniform_kv_cache_spec_types = (UniformTypeKVCacheSpecs,)
 
         def block_count(num_tokens: int, kv_cache_spec: Any) -> int:
             """Calculate the current vLLM warmup block reservation."""
+            # KpoolTailSpec is a one-block circular scratch cache. The generic
+            # vLLM warmup helper sees its SlidingWindowSpec base and reserves
+            # one block per block_size tokens, overflowing the one-block table.
+            unwrapped_spec = (
+                kv_cache_spec.first_spec
+                if isinstance(kv_cache_spec, uniform_kv_cache_spec_types)
+                else kv_cache_spec
+            )
+            if isinstance(unwrapped_spec, kpool_tail_spec_types):
+                return 1
+
             # Calibration runs before model_state is initialized, so call the
             # underlying reservation policy rather than _warmup_block_counter.
             return _reserved_block_count(

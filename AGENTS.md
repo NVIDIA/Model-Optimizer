@@ -48,11 +48,12 @@ These instructions apply to AI-assisted work in this repository.
 
 ## Sizing and splitting PRs
 
-- **Keep each PR that goes up for review under ~500 changed lines of source.**
+- **Keep each PR that goes up for review under ~500 added lines of source.**
   Large PRs stall in review; exceed the budget only when the change genuinely
   cannot be split — a mechanical rename, generated files, or a self-contained
   drop such as a new example or a new model/backend that has no working
-  intermediate state. Check the size with `git diff --stat <base>...HEAD`
+  intermediate state. Deletions, tests, and docs don't count; check the
+  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
   before opening.
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already over budget, offer a series of smaller PRs and, once the user
