@@ -27,7 +27,7 @@ import yaml
 
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
@@ -204,6 +204,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._quantizer_recipe_markers: list[dict] = []
         self._quantizer_validation_failure = ""
         self._packing_experts = False
+        self._grouped_fq_modules: set[torch.nn.Module] = set()
 
     def _gather_exclude_modules(self) -> list[str]:
         """Validate settings before gathering excluded modules."""
@@ -259,6 +260,37 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             for key in list(state_dict)
             if "quantizer" in key or key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX)
         }
+
+    def _get_state_dict(self):
+        """Fold grouped expert weights whenever lazy export shards are built."""
+        self._grouped_fq_modules.clear()
+
+        def grouped_state_hook(module, state_dict, prefix, local_metadata):
+            quantizers = module.weight_quantizer
+            for i in range(module.num_gemms):
+                key = f"{prefix}weight{i}"
+                if key not in state_dict:
+                    continue  # The parent slicer checks missing weights collectively.
+                state_dict[key] = self._fakequant_weight(
+                    getattr(module, f"weight{i}"),
+                    quantizers[min(i, len(quantizers) - 1)],
+                    self.dtype,
+                )
+            self._grouped_fq_modules.add(module)
+
+        handles = []
+        try:
+            for module in self.model.modules():
+                if hasattr(module, "num_gemms") and isinstance(
+                    getattr(module, "weight_quantizer", None), GroupedQuantizer
+                ):
+                    handle = module.register_state_dict_post_hook(grouped_state_hook)
+                    handles.append(handle)
+            super()._get_state_dict()
+        finally:
+            for handle in handles:
+                handle.remove()
+            self._grouped_fq_modules.clear()
 
     def save_pretrained(
         self,
@@ -327,6 +359,38 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         state, _, _ = self._get_quantized_state(module, prefix=prefix)
         self._state_dict.update({prefix + name: value for name, value in state.items()})
 
+    @staticmethod
+    def _fakequant_weight(weight, weight_quantizer, dtype):
+        """Return a CPU QDQ weight while preserving the quantizer's device."""
+        weight = weight.to(dtype)
+        # Fold the weight_quantizer into the weight by applying fake-quantization
+        # (quantize then dequantize). The weight_quantizer amax is not exported;
+        # the vLLM fakequant reload path disables the weight quantizer when absent.
+        # Disabled weight quantizers can still apply scaling or rotation.
+        if weight_quantizer is not None:
+            with torch.no_grad():
+                # NVFP4-like kernels may need CUDA; if weights are CPU after gather, run on
+                # CUDA then ``weight_quantizer.to`` back (full module round-trip).
+                quant_device = (
+                    torch.device("cuda", torch.cuda.current_device())
+                    if weight.device.type == "cpu" and torch.cuda.is_available()
+                    else weight.device
+                )
+                # TensorQuantizer does not expose nn.Module.device (custom __getattr__).
+                tensor = next(
+                    chain(weight_quantizer.parameters(), weight_quantizer.buffers()), None
+                )
+                wq_dev = tensor.device if tensor is not None else torch.device("cpu")
+                need_move = wq_dev != quant_device
+                if need_move:
+                    weight_quantizer.to(quant_device)
+                try:
+                    weight = weight_quantizer(weight.to(quant_device)).to(dtype)
+                finally:
+                    if need_move:
+                        weight_quantizer.to(wq_dev)
+        return weight.cpu()
+
     def _get_quantized_state(
         self,
         module: torch.nn.Module,
@@ -379,36 +443,11 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             self.exclude_modules.append(prefix.removesuffix("."))
         block_size = 0
         name_to_value = self._get_weight_bias(module, dtype, name_to_value, keep_weight_device=True)
-        if "weight" in name_to_value:
-            weight = name_to_value["weight"]
-            # Fold the weight_quantizer into the weight by applying fake-quantization
-            # (quantize then dequantize). The weight_quantizer amax is not exported;
-            # the vLLM fakequant reload path disables the weight quantizer when absent.
-            weight_quantizer = getattr(module, "weight_quantizer", None)
-            # Disabled weight quantizers can still apply scaling or rotation.
-            if weight_quantizer is not None:
-                with torch.no_grad():
-                    # NVFP4-like kernels may need CUDA; if weights are CPU after gather, run on
-                    # CUDA then ``weight_quantizer.to`` back (full module round-trip).
-                    quant_device = (
-                        torch.device("cuda", torch.cuda.current_device())
-                        if weight.device.type == "cpu" and torch.cuda.is_available()
-                        else weight.device
-                    )
-                    # TensorQuantizer does not expose nn.Module.device (custom __getattr__).
-                    tensor = next(
-                        chain(weight_quantizer.parameters(), weight_quantizer.buffers()), None
-                    )
-                    wq_dev = tensor.device if tensor is not None else torch.device("cpu")
-                    need_move = wq_dev != quant_device
-                    if need_move:
-                        weight_quantizer.to(quant_device)
-                    try:
-                        weight = weight_quantizer(weight.to(quant_device)).to(dtype)
-                    finally:
-                        if need_move:
-                            weight_quantizer.to(wq_dev)
-            name_to_value["weight"] = weight.cpu()
+        # Grouped slicing reads QDQ weights from the hooked module.state_dict().
+        if "weight" in name_to_value and module not in self._grouped_fq_modules:
+            name_to_value["weight"] = self._fakequant_weight(
+                name_to_value["weight"], getattr(module, "weight_quantizer", None), dtype
+            )
 
         # Save activation ranges; weight quantizers are folded into the weights above.
         for name, quantizer in module.named_modules():
