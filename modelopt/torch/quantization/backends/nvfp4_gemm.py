@@ -232,7 +232,10 @@ def _nvfp4_availability_check(module, input, args, kwargs):
 
     # Check input quantizer config
     for key, value in input_cfg.items():
-        if key == "enable":
+        # "enable" maps to a custom quantizer flag, and "effective_bits" is an
+        # AutoQuantize cost-model hint stored as _effective_bits — neither is a
+        # public quantizer attribute to compare.
+        if key in ("enable", "effective_bits"):
             continue
         if (
             not hasattr(module.input_quantizer, key)
@@ -242,7 +245,7 @@ def _nvfp4_availability_check(module, input, args, kwargs):
 
     # Check weight quantizer config
     for key, value in weight_cfg.items():
-        if key == "enable":
+        if key in ("enable", "effective_bits"):
             continue
         if (
             not hasattr(module.weight_quantizer, key)
