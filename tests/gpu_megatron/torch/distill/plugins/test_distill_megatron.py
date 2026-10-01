@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 from functools import partial
 from types import SimpleNamespace
 
@@ -232,7 +233,7 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
 
 
 def _test_skip_lm_loss_with_mtp(rank, size):
-    """Test that skip_lm_loss only zeroes the main LM head and not MTP heads."""
+    """Test that skipping the LM loss (kd_loss_alpha=1.0) only zeroes the main LM head and not MTP heads."""
     set_seed(SEED)
 
     num_layers = 2
@@ -320,8 +321,8 @@ def _test_skip_lm_loss_with_mtp(rank, size):
         f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
-        assert loss.any(), f"MTP head {i} loss should be non-zero with skip_lm_loss=True"
-    assert not recorded_losses[-1].any(), "Main LM head loss should be zero with skip_lm_loss=True"
+        assert loss.any(), f"MTP head {i} loss should be non-zero with kd_loss_alpha=1.0"
+    assert not recorded_losses[-1].any(), "Main LM head loss should be zero with kd_loss_alpha=1.0"
 
 
 def test_logits_kl_loss(dist_workers):
@@ -447,7 +448,7 @@ def test_distillation_config_top_p_validation():
 
 
 def test_skip_lm_loss_with_mtp(dist_workers):
-    """Test that skip_lm_loss only zeroes the main LM head, not MTP heads."""
+    """Test that skipping the LM loss (kd_loss_alpha=1.0) only zeroes the main LM head, not MTP heads."""
     dist_workers.run(_test_skip_lm_loss_with_mtp)
 
 
@@ -521,11 +522,14 @@ def test_loss_balancer_convex_combination():
 
 
 def test_distillation_config_removed_fields():
-    """skip_lm_loss is derived from kd_loss_alpha; the removed fields raise."""
-    cfg = DistillationConfig()
-    assert cfg.kd_loss_alpha == 1.0 and cfg.skip_lm_loss is True  # pure KD by default
-    assert DistillationConfig(kd_loss_alpha=0.9).skip_lm_loss is False
+    """The removed fields raise, and a config can be rebuilt from itself."""
+    assert DistillationConfig().kd_loss_alpha == 1.0  # pure KD by default
 
     for removed in ({"skip_lm_loss": True}, {"skip_lm_loss": False}, {"kd_loss_scale": 2.0}):
         with pytest.raises(ValueError, match="have been removed"):
             DistillationConfig(**removed)
+
+    # Nothing is written back into the removed fields, so round-trips do not trip the check.
+    cfg = dataclasses.replace(DistillationConfig(kd_loss_alpha=0.9), logit_kl_topk=4)
+    assert cfg.kd_loss_alpha == 0.9 and cfg.logit_kl_topk == 4
+    assert DistillationConfig(**dataclasses.asdict(cfg)).kd_loss_alpha == 0.9

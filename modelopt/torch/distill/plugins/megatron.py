@@ -59,7 +59,7 @@ class DistillationConfig:
         kd_loss_alpha: Weight of the distillation loss in the convex combination
             ``(1 - alpha) * lm_loss + alpha * kd_loss``. Must be in [0, 1]. Default: ``1.0``. When ``1.0``,
             the standard language model loss is skipped entirely.
-        skip_lm_loss: REMOVED; passing it raises. Set internally to ``kd_loss_alpha == 1.0``.
+        skip_lm_loss: REMOVED; passing it raises. The LM loss is skipped iff ``kd_loss_alpha == 1.0``.
         kd_loss_scale: REMOVED; passing it raises. Use ``kd_loss_alpha`` instead.
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
         logit_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
@@ -72,7 +72,7 @@ class DistillationConfig:
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
     logit_layers: tuple[str, str] = ("output_layer", "output_layer")
     kd_loss_alpha: float = 1.0
-    skip_lm_loss: bool | None = None  # removed as an input; derived from kd_loss_alpha
+    skip_lm_loss: bool | None = None  # removed; kept only to raise a helpful error
     kd_loss_scale: float | None = None  # removed; kept only to raise a helpful error
     logit_kl_temperature: float = 1.0
     logit_kl_topk: int | None = None
@@ -94,7 +94,6 @@ class DistillationConfig:
                 "(the default, equivalent to the old skip_lm_loss=True)."
             )
         assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
-        self.skip_lm_loss = self.kd_loss_alpha == 1.0
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
         if self.logit_kl_top_p is not None:
             assert self.logit_kl_topk is not None, "logit_kl_top_p requires logit_kl_topk"
@@ -183,7 +182,7 @@ def setup_distillation_config(
     if cfg.loss_balancer is None:
         cfg.loss_balancer = LogitsAndIntermediatesLossBalancer(
             kd_loss_alpha=cfg.kd_loss_alpha,
-            skip_original_loss=bool(cfg.skip_lm_loss),  # always set by __post_init__
+            skip_original_loss=cfg.kd_loss_alpha == 1.0,
         )
 
     return cfg
@@ -389,7 +388,9 @@ class TopKLogitsKLLoss(LogitsKLLoss):
     """Calculates KL-Divergence loss restricted to the Teacher's Top-K vocabulary entries.
 
     Calculates using the global Top-K entries without gathering full logits.
-    NOTE: Will gather Top-K logits per rank, so mind the value of K for memory and communication.
+    NOTE: Will gather Top-K logits per rank, so mind the value of K for communication. The full-vocab
+    normalizers still allocate fp32 copies of the local logit shards (the teacher's is freed right
+    away; the student's is retained for backward), and add two TP all-reduces per distribution.
 
     Both distributions are normalized over the *full* vocabulary (not re-normalized over the
     Top-K), matching the offline cached-logits KD loss in Megatron-LM. A "ghost" token holding the
@@ -447,15 +448,21 @@ class TopKLogitsKLLoss(LogitsKLLoss):
             f"top_k ({self.top_k}) is larger than total vocab size ({targets.size(-1) * tp_size})"
         )
 
-        # Divide by temperature first
-        output_teacher = targets.float() / self._temperature
-        output_student = predictions.float() / self._temperature
-
         # Extract local Top-K
         # We take K from each rank and then find the global Top-K of all those.
         local_top_k = min(self.top_k, targets.size(-1))
+
+        # Teacher: full-vocab normalizer and local Top-K, then free its fp32 copy before the student's.
+        output_teacher = targets.float() / self._temperature
+        teacher_lse = self._tp_logsumexp(output_teacher)
         top_teacher_vals, top_idx = torch.topk(output_teacher, local_top_k, dim=-1)
+        del output_teacher
+
+        # Student: the full-vocab normalizer is inherent to the ghost-token formulation.
+        output_student = predictions.float() / self._temperature
+        student_lse = self._tp_logsumexp(output_student)
         top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
+        del output_student
 
         if tp_size > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
@@ -483,8 +490,8 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         # Log-probs of the Top-K entries under the full-vocab distributions, using global
         # (full-vocab) log-normalizers so the entries carry true probabilities.
         # NOTE: ``torch.topk`` returns entries sorted descending by teacher value.
-        teacher_logp = final_teacher_logits - self._tp_logsumexp(output_teacher)
-        student_logp = final_student_logits - self._tp_logsumexp(output_student)
+        teacher_logp = final_teacher_logits - teacher_lse
+        student_logp = final_student_logits - student_lse
 
         # Top-P (nucleus) mask over the sorted Top-K: keep entry i iff cumulative mass *before* it
         # is < p. This always keeps the entry that crosses the threshold (and thus top-1).
@@ -499,7 +506,11 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         # Ghost token: residual probability mass outside the kept entries, for both distributions.
         # Computed in log space as log(1 - exp(log_kept)) = log(-expm1(log_kept)), which stays
         # accurate and differentiable when the kept mass is close to 1.
-        neg_tiny = -1e-7  # keep log(kept_mass) strictly below 0 so expm1 stays negative
+        # The floor keeps log(kept_mass) strictly below 0 so expm1 stays negative. Deliberate side
+        # effects once kept mass exceeds 1 - eps: the ghost bucket is pinned at ~eps (so the loss can
+        # dip below 0 by O(eps)), and the clamp stops the ghost term's gradient. Both are negligible,
+        # and the latter is the correct limit when the kept entries hold all of the mass.
+        neg_tiny = -torch.finfo(student_logp.dtype).eps
         student_log_kept = torch.logsumexp(
             student_logp.masked_fill(~mask, float("-inf")), dim=-1, keepdim=True
         ).clamp(max=neg_tiny)
@@ -657,7 +668,7 @@ def adjust_distillation_model_for_mcore(
     # Skip `lm_loss` bypassing it when training if not needed for backprop.
     # Uses a per-forward call counter so that MTP head calls (which always precede the
     # main LM head call in _postprocess) still receive real CE loss even when
-    # skip_lm_loss=True — only the final main-head call is zeroed.
+    # kd_loss_alpha == 1.0 — only the final main-head call is zeroed.
     # An MTP head left out of quantization is exempt from that: there is no quantization
     # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_mtp_loss = _mtp_excluded_from_quantization(model)
@@ -666,7 +677,8 @@ def adjust_distillation_model_for_mcore(
         self._lm_loss_call_count += 1
         mtp_num_layers = self.config.mtp_num_layers or 0
         is_mtp_call = self._lm_loss_call_count <= mtp_num_layers
-        if distill_cfg.skip_lm_loss and self.training and (not is_mtp_call or skip_mtp_loss):
+        skip_lm_loss = distill_cfg.kd_loss_alpha == 1.0
+        if skip_lm_loss and self.training and (not is_mtp_call or skip_mtp_loss):
             return torch.zeros_like(labels, dtype=logits.dtype)
         return type(self).compute_language_model_loss(self, labels, logits)
 
