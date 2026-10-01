@@ -448,14 +448,7 @@ def _done_raising_handler(seq, n_layers, hidden, *, fail_first_n, calls):
 
 
 def test_failed_done_is_treated_as_a_miss(monkeypatch):
-    """A /done that errors must not be read as "the slot is still ours".
-
-    The gen check /done performs is the only thing between a lapped ring slot and training
-    on another prompt's activations: the token_ids comparison that follows compares the
-    server's per-request record, not the bytes just read, so it passes on a mis-slotted
-    read. Trusting the read when /done is unreachable trades a visible resample for silent
-    corruption, so the failure must fail closed like an explicit lap does.
-    """
+    """A /done that errors fails closed, like an explicit lap: the read is discarded."""
     seq, n_layers, hidden = 8, 3, 16
     calls: list[str] = []
     _mock_rdma(
@@ -479,11 +472,7 @@ def test_failed_done_is_treated_as_a_miss(monkeypatch):
 
 
 def test_failed_done_resamples_instead_of_returning_the_read(monkeypatch):
-    """The discard is a resample, not a hard failure: the next entry is fetched and returned.
-
-    Pins that failing closed costs one extra round trip rather than breaking the epoch --
-    the cheap half of the asymmetry that justifies discarding.
-    """
+    """The discard is a resample, not a hard failure: the next entry is fetched and returned."""
     seq, n_layers, hidden = 8, 3, 16
     calls: list[str] = []
     _mock_rdma(

@@ -120,10 +120,7 @@ class DFlashBaseModelOutput:
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
     logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
-    # Post-final-norm base hidden [B, seq, H], i.e. lm_head's input. Consumers that only
-    # need the base distribution at a handful of positions project THIS at those rows
-    # instead of materialising (and then gathering out of) full-sequence logits.
-    base_hidden: torch.Tensor | None = None
+    base_hidden: torch.Tensor | None = None  # post-final-norm base hidden [B, seq, H]
 
     @classmethod
     def from_offline_dict(
@@ -163,8 +160,7 @@ class DFlashBaseModelOutput:
             out_hiddens = out_hiddens.to(base_model_lm_head.weight.dtype)
             base_hidden = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
             if defer_lm_head:
-                # Caller will project only the rows it needs; skip the full-sequence
-                # [B, seq, vocab] materialisation entirely.
+                # The caller projects only the rows it needs; skip full-sequence logits.
                 return cls(target_hidden=d["aux_hidden_states"], base_hidden=base_hidden)
             logits = base_model_lm_head(base_hidden)
         return cls(
@@ -469,27 +465,15 @@ class DFlashModule(nn.Module):
 
     def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
         """Forward with feature fusion, KV injection, and position embeddings."""
-        # Lazy rotary construction mutates the module, so it stays outside the compiled
-        # region below: Dynamo would either graph-break on it or bake in the first call's
-        # state.
+        # Outside the compiled body: lazy rotary init mutates the module.
         self._maybe_init_rotary_emb(device=noise_embedding.device)
         return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
 
     def _body(self):
         """Return the draft stack, Inductor-compiled on first use when asked for.
 
-        The layer loop is where the step's small-kernel tail lives: at the Gemma-4-E4B
-        shape a profiled step ran ~1500 pointwise launches, 403 ``aten::copy_`` and 205
-        device-to-device memcpys, individually microseconds and collectively about a third
-        of the step. Fusing them is a compiler's job.
-
-        ``dynamic=False`` is only affordable because ``_sample_anchor_positions`` pins the
-        block count; while n_blocks tracked the batch, every new width cost a fresh
-        multi-minute compile.
-
-        Training only. Generation (AR validation, drafting) runs the same module at a
-        different and varying shape, which under ``dynamic=False`` would mint a compile per
-        length -- exactly the trade the pinned block count was introduced to avoid.
+        Training only: ``dynamic=False`` relies on the pinned block count, while generation
+        runs at varying lengths and would recompile for each.
         """
         if not self.training or not getattr(self, "_dflash_compile_stack", False):
             return self._forward_body

@@ -83,23 +83,13 @@ def _tvd_chunk(a, b):
     return (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
 
 
-# torch.compile of _tvd_chunk, built once per process and reused. Eager, this chain is
-# six separate passes over [chunk, vocab] tensors (two bf16->fp32 casts, two softmaxes, a
-# subtract, an abs) that are 1 GB each at the Gemma-4 shape; Inductor fuses it into a
-# couple of kernels. Profiling put softmax + the surrounding elementwise ops at ~50% of
-# the training step once FlexAttention removed the attention bottleneck.
+# Compiled _tvd_chunk, built once per process: fuses its six vocab-wide elementwise passes.
 _compiled_tvd_chunk = None
 _tvd_compile_failed = False
 
 
 def _get_tvd_chunk(use_compile: bool):
-    """Return the TVD chunk fn, compiled when asked for and when compilation succeeds.
-
-    Deliberately NOT wrapped in ``torch._dynamo.config.suppress_errors = True`` (which the
-    Eagle plugin sets globally): that turns a compile failure into a silent fallback to
-    eager, i.e. a performance feature that reports success while doing nothing. Here a
-    failure is warned about once and then remembered.
-    """
+    """Return the TVD chunk fn, compiled when asked for and when compilation succeeds."""
     global _compiled_tvd_chunk, _tvd_compile_failed
     if not use_compile or _tvd_compile_failed:
         return _tvd_chunk
@@ -122,27 +112,8 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None)
     rather than held — peak memory ~ chunk_size*vocab instead of N*vocab. The math
     is identical to ``(softmax(final)-softmax(teacher)).abs().sum(-1)``.
 
-    Chunking goes through ``Tensor.split``, NOT ``final_logits[i : i + chunk_size]``.
-    Both produce the same views over the same rows, so the forward values are
-    identical — but the backward graphs are not, and the difference is large. A slice
-    per chunk creates one ``SliceBackward0`` each, and every one of those allocates a
-    zero tensor of the FULL [N, vocab] shape and scatters its own chunk's gradient
-    into it, so the cost is O(n_chunks * N * vocab). ``split`` creates a single
-    ``SplitBackward0`` whose backward is one ``cat``, i.e. O(N * vocab).
-
-    At the Gemma-4-E4B shape (N = bsz 4 * n_blocks 512 * block_size 8 = 16384,
-    vocab = 262144 -> 8 GiB per [N, vocab] bf16 tensor, 16 chunks) that is not a
-    micro-optimization: measured on a B300, backward went 198.0 ms -> 107.9 ms, and
-    kernel attribution on the training profile put 93.2 ms/step -- 15% of a 614 ms
-    step, the second-largest item after the DDP all-reduce -- on ``SliceBackward0``.
-    Peak memory is unchanged (41.9 -> 42.1 GiB). Outputs and gradients are bitwise
-    identical: verified elementwise at the production shape for the returned
-    per-token TVD, grad(hidden) and grad(markov_w2.weight).
-
-    Do NOT substitute ``torch.chunk`` or ``torch.tensor_split``. Those split into a
-    fixed NUMBER of pieces and so pick different boundaries (ceil(N/k)), which changes
-    the shapes handed to ``chunk_fn`` -- and ``chunk_fn`` may be a
-    ``torch.compile(..., dynamic=False)`` build that recompiles per shape.
+    Chunks with ``Tensor.split``, not slicing (each slice's backward zero-fills a full
+    [N, vocab] tensor) nor ``torch.chunk`` (different chunk shapes, so recompiles).
     """
     _chunk = chunk_fn or _tvd_chunk
     outs = []
@@ -201,11 +172,8 @@ class HFDSparkModel(HFDFlashModel):
     ):
         """Add the Markov transition bias to the backbone base logits.
 
-        ``inplace`` folds the bias into ``backbone_logits`` instead of allocating a third
-        [B, N, bs, vocab] tensor (8.6 GB at the Gemma-4 shape). Safe for autograd -- neither
-        ``lm_head`` nor ``markov_w2`` saves its OUTPUT for backward -- but it leaves
-        ``backbone_logits`` holding the corrected logits, so the caller must not still need
-        the uncorrected ones (they are only used for the ``base_accuracy`` metric).
+        ``inplace`` adds the bias into ``backbone_logits`` instead of a new vocab-wide tensor,
+        so the caller must not need the uncorrected logits afterwards.
 
         Returns ``(final_logits [B, N, bs, V], confidence_logits [B, N, bs] | None)``.
         """
@@ -248,15 +216,9 @@ class HFDSparkModel(HFDFlashModel):
         at anchor+k+1; the aligned target distribution is the base model's own
         next-token distribution at position anchor+k (= label index - 1).
 
-        The teacher distribution can arrive two ways. ``teacher_hidden`` ([B, seq, H], the
-        base model's post-final-norm hidden) is preferred: only the N*block_size rows the
-        loss actually reads are gathered and projected, so the full-sequence
-        [B, seq, vocab] tensor is never built and never gathered out of -- at the Gemma-4
-        shape that is ~17 GB/step of memory traffic. ``target_model_logits`` is the
-        fallback for producers that hand over logits directly.
-
-        ``backbone_logits`` may be None, which skips the ``base_accuracy`` diagnostic (and
-        with it a second full-vocab argmax); see ``dflash_report_acc``.
+        The teacher comes from ``teacher_hidden`` (post-final-norm, projected only at the rows
+        the loss reads) or, failing that, ``target_model_logits``. ``backbone_logits=None``
+        skips the ``base_accuracy`` metric.
         """
         bsz, seq_len = input_ids.shape
         bs = self.dflash_block_size
@@ -322,11 +284,8 @@ class HFDSparkModel(HFDFlashModel):
         flat_teacher = flat_teacher.detach()
 
         if valid_count <= 1.0:
-            # Every draft parameter must receive a gradient, not just the ones behind
-            # final_logits: the confidence head hangs off compute_confidence_logits, which
-            # this branch skips, so `flat_final.sum() * 0` alone leaves it unused and DDP
-            # with find_unused_parameters=False aborts the run on the first such batch.
-            # Mirrors the same guard in forward()'s no-valid-anchor early return.
+            # Touch every draft parameter, as forward()'s early return does, so DDP with
+            # find_unused_parameters=False still sees the confidence head's gradient.
             loss = (
                 flat_final.sum() * 0.0 + sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
             )
@@ -370,9 +329,7 @@ class HFDSparkModel(HFDFlashModel):
                 if flat_base is None
                 else ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
             )
-            # ONE device sync for all five scalars. Each .item() is a full synchronize, and
-            # five of them per step chop up the window in which DDP's all-reduce can hide
-            # behind backward -- measured comm exposure is 18% of the step post-FlexAttention.
+            # One device sync for all five scalars instead of one per .item().
             acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
                 [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
             ).tolist()
@@ -442,9 +399,6 @@ class HFDSparkModel(HFDFlashModel):
                 self._base_model_norm,
                 self._base_model_lm_head,
                 need_logits=True,
-                # Hand back the normed hidden instead of full-sequence logits; the loss
-                # projects only the rows it reads. Producers that supply base_model_logits
-                # directly still come back with logits and take the fallback path.
                 defer_lm_head=True,
             )
             target_hidden = base_outputs.target_hidden
@@ -512,10 +466,7 @@ class HFDSparkModel(HFDFlashModel):
         )
 
         # 6. Backbone logits → Markov correction → three-term loss.
-        # dflash_report_acc gates the base_accuracy diagnostic (the draft's accuracy BEFORE
-        # the Markov correction). With it off, the uncorrected logits are dead after the
-        # bias is added, so the bias folds in place and a second full-vocab argmax is
-        # skipped -- two [N, vocab] tensors' worth of traffic per step.
+        # Without dflash_report_acc the uncorrected logits are unused, so the bias folds in place.
         report_base_acc = getattr(self, "dflash_report_acc", True)
         backbone_logits = self._base_model_lm_head(hidden).reshape(bsz, n_blocks, block_size, -1)
         final_logits, confidence_logits = self._apply_markov_head(

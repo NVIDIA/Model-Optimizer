@@ -151,11 +151,7 @@ class DSparkModule(DFlashModule):
         return self.markov_w1(prev_ids.long())
 
     def compute_markov_latent(self, prev_ids: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        """Rank-``r`` state the transition bias is projected from, BEFORE ``markov_w2``.
-
-        Every head type ends in ``markov_w2(<width r>)``; this returns that argument so a
-        caller can defer the vocab-wide projection (which materialises a
-        ``[B, N, block_size, vocab]`` tensor) to the point where it is actually needed.
+        """Rank-``r`` latent that ``markov_w2`` projects into the transition bias.
 
         Args:
             prev_ids: Teacher-forced previous-token ids per block position [B, N, block_size].
@@ -192,10 +188,7 @@ class DSparkModule(DFlashModule):
         return self.markov_w2(self.compute_markov_latent(prev_ids, hidden))
 
     def _rnn_step(self, state, prev_emb, hidden):
-        """One GRU-like recurrent step. Returns (new_state [.., r], latent [.., r]).
-
-        The latent is ``markov_w2``'s input, not the bias -- see compute_markov_latent.
-        """
+        """One GRU-like recurrent step. Returns (new_state [.., r], latent [.., r])."""
         z = torch.cat([state, prev_emb, hidden], dim=-1)
         gate_raw, candidate_raw, output_raw = self.joint_proj(z).chunk(3, dim=-1)
         gate = torch.sigmoid(gate_raw)

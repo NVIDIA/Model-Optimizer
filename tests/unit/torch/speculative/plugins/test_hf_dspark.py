@@ -775,11 +775,7 @@ class TestExplicitTargetLayerIds:
 class TestTvdPerTokenChunking:
     """``_tvd_per_token`` must be chunk-size-invariant, and must chunk via ``split``.
 
-    No other DSpark test reaches a second chunk: the tiny fixture yields N = 2 * 12 * 4
-    = 96 rows against the default ``chunk_size=1024``, so every existing test runs in a
-    single chunk and any chunk-boundary bug -- a mis-ordered ``cat``, a ragged tail
-    handled wrong, a row/label misalignment -- passes CI silently. These tests call the
-    helper directly so they can force many chunks on a tiny tensor.
+    Calls the helper directly: the model fixtures never reach a second chunk.
     """
 
     @staticmethod
@@ -803,25 +799,13 @@ class TestTvdPerTokenChunking:
         assert torch.equal(grad, ref_grad), f"TVD grad changed at chunk_size={chunk_size}"
 
     def test_chunks_via_split_not_slice(self):
-        """Pin the optimization itself, not just its result.
-
-        Slicing and splitting agree on every value, so no numerical test can tell them
-        apart -- only the backward graph can. Slicing costs O(n_chunks * N * vocab)
-        because each ``SliceBackward0`` zero-fills a full [N, vocab] tensor; at the
-        Gemma-4 shape that was 93.2 ms/step. This test is what stops the loop being
-        "simplified" back to ``final_logits[i : i + chunk_size]``.
-        """
+        """Pin the split itself: slicing gives identical values, only the graph differs."""
         final = torch.randn(8, 4, requires_grad=True)
         teacher = torch.randn(8, 4)
         out = _tvd_per_token(final, teacher, chunk_size=2)
 
-        # `alive` is load-bearing, not debris: accessing `.next_functions` hands back a
-        # FRESH python wrapper for each node every time, so a node we do not hold a
-        # reference to is freed the moment we pop it -- and CPython happily reuses that
-        # address for a later, different node. Without `alive` the id() check reports a
-        # false "already visited" and the walk truncates after three nodes, missing the
-        # Split/Slice node entirely (verified: both variants returned the same
-        # ['AbsBackward0', 'CatBackward0', 'SumBackward1']).
+        # `alive` keeps visited nodes referenced: `.next_functions` returns fresh wrappers,
+        # and a freed wrapper's id() can be reused, which would truncate the walk.
         seen, visited, alive, stack = set(), set(), [], [out.grad_fn]
         while stack:
             fn = stack.pop()
@@ -851,13 +835,7 @@ class TestTvdPerTokenChunking:
 
 
 def _draft_args(model, n_blocks=2, bsz=1):
-    """Build the draft module's inputs the way the training forward does.
-
-    Worth going through the model's own helpers: the draft attends over the context as
-    keys but only its own blocks as queries, so target_hidden is seq_len long while
-    noise_embedding is n_blocks * block_size, and position_ids spans both. Hand-rolled
-    shapes silently disagree inside apply_rotary_pos_emb.
-    """
+    """Build the draft module's inputs with the model's own helpers, as training does."""
     m = model.dflash_module
     dt = m.fc.weight.dtype  # the draft carries the base model's dtype, not fp32
     torch.manual_seed(0)
@@ -890,8 +868,7 @@ class TestDraftStackCompile:
         assert m._body() == m._forward_body
 
     def test_eval_keeps_the_eager_body(self):
-        """Generation runs this module at a varying length; under dynamic=False that would
-        mint one compile per length -- the cost the pinned block count exists to avoid."""
+        """Generation runs at varying lengths, which dynamic=False would recompile for."""
         m = _dspark_model(use_compile=True).dflash_module
         m.eval()
         assert m._body() == m._forward_body
@@ -913,18 +890,15 @@ class TestDraftStackCompile:
             ref = m._forward_body(*args)
             got = m._body()(*args)
         assert m._body() != m._forward_body, "fixture did not actually compile"
-        # Inductor may fuse and reassociate, so this is agreement to the dtype's precision,
-        # not bitwise equality.
+        # Inductor may reassociate, so compare to the dtype's precision, not bitwise.
         torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
 
 
 class TestDdpGradientCoverage:
     """Every draft parameter must get a gradient on every batch, degenerate ones included.
 
-    This is the precondition for ddp_find_unused_parameters=false: DDP aborts the run the
-    first time a parameter that joined the reduction produces no gradient. The confidence
-    head is the one at risk -- it hangs off its own projection and never appears in
-    final_logits, so the branches that skip the loss terms have to reach it deliberately.
+    Needed for ddp_find_unused_parameters=false; the confidence head is the one at risk,
+    since it is not behind final_logits.
     """
 
     @staticmethod
@@ -953,11 +927,7 @@ class TestDdpGradientCoverage:
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"
 
     def test_loss_branch_with_zero_total_weight(self):
-        """Anchors exist but every label position is masked, so the three terms are skipped.
-
-        Driven through the real module rather than synthetic logits: a gradient assertion
-        is only meaningful if the graph actually reaches the parameters.
-        """
+        """Anchors exist but every label position is masked, so the three terms are skipped."""
         model = self._model()
         m = model.dflash_module
         n_blocks, bsz = 2, 1
@@ -965,8 +935,7 @@ class TestDdpGradientCoverage:
         hidden = m(*args)
         vocab = model.dflash_config.vocab_size
         backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        # The teacher distribution is gathered before the degenerate branch is reached, so
-        # it has to be present even though this batch contributes nothing to the loss.
+        # The teacher is gathered before the degenerate branch, so it must still be passed.
         target_model_logits = torch.randn(bsz, SEQ_LEN, vocab, dtype=hidden.dtype)
         final_logits, confidence_logits = model._apply_markov_head(
             hidden, backbone_logits, input_ids, anchors, n_blocks

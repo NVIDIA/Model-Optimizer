@@ -15,45 +15,13 @@
 
 """Block-sparse FlexAttention path for the DFlash/DSpark draft.
 
-The draft's attention mask is dense in shape but sparse in content. Query block ``b``
-with anchor ``a_b`` attends to
+Query block ``b`` with anchor ``a_b`` sees only the context prefix ``kv < a_b`` and its own
+draft block, so most of the dense ``[B, 1, Q, KV]`` mask is empty. SDPA computes all of it,
+on its memory-efficient fallback (the fused kernels reject arbitrary masks and cap
+``head_dim`` at 256); FlexAttention takes the mask as a predicate and skips empty tiles.
 
-    context:  kv < a_b                     -- a prefix, and anchors are sorted, so
-                                              across blocks this is a staircase
-    draft:    kv in [S + Bb, S + Bb + B)   -- the block diagonal, ``block_size`` wide
-                                              (lower-triangular within the block under
-                                              ``dflash_draft_attention="causal"``)
-
-Handing SDPA a materialized ``[B, 1, Q, KV]`` float mask makes it compute all of it,
-and disqualifies every fused backend on the way: PyTorch's FlashAttention kernels
-reject arbitrary masks *and* cap ``head_dim`` at 256, while a Gemma-4 draft's
-``global_head_dim`` is 512. What is left is the cutlass memory-efficient backend,
-whose only kernel is **sm80** -- an Ampere kernel on Blackwell. Profiling the
-Gemma-4-E4B DSpark run on B300 put that single backward kernel at 59% of the whole
-training step, running at roughly 2.5% of the GPU's bf16 peak.
-
-FlexAttention instead takes the mask as a predicate, compiles it into the kernel, and
-skips fully-masked tiles. Measured on B300 at the production shape
-(q[4,16,4096,512], kv[4,1->16,8192,512], 512 anchors x block 8, 33% mask density):
-
-    dense-mask SDPA   fwd 24.80 ms   fwd+bwd 225.37 ms
-    flex (this file)  fwd  6.84 ms   fwd+bwd  56.40 ms      4.0x
-
-Both are within bf16 rounding of each other on out/dq/dk/dv, including the
-fully-masked rows that invalid blocks produce.
-
-Two non-obvious requirements, both established by measurement rather than docs:
-
-* ``head_dim`` 512 overflows shared memory at FlexAttention's default tiles (263 KB
-  required against a 232 KB limit), so the tiles are pinned above ``head_dim`` 256.
-  Of the shapes that fit, only 32x32 runs at all on torch 2.11 / sm103: 64x32 and
-  64x64 fault with "misaligned address" and 128x32 with "unspecified launch
-  failure". At ``head_dim`` <= 256 the library defaults are far better than anything
-  pinned (9.8x over SDPA at 256), so they are left alone.
-* ``enable_gqa=True`` must NOT be used. Its forward matches the pre-repeated path
-  exactly, but its backward takes 568 ms -- 10x slower, and 2.5x worse than the SDPA
-  baseline it is meant to replace. K/V are repeated to the query head count first,
-  which is what HF's sdpa path does anyway.
+K/V are repeated to the query head count rather than using ``enable_gqa=True``, whose
+backward is ~10x slower.
 """
 
 import torch
@@ -74,26 +42,14 @@ _LARGE_HEAD_DIM_KERNEL_OPTIONS = {
 }
 _MAX_DEFAULT_TILE_HEAD_DIM = 256
 
-# Block granularity of the BlockMask itself. Finer granularity tracks the true 33%
-# density more closely (64 -> 65.7% sparsity vs 128 -> 64.2%) and measured 58.0 ms
-# against 61.4 ms; 32 is marginally better again but doubles the metadata for ~1 ms.
 _PINNED_TILE_MASK_BLOCK_SIZE = 64
 _DEFAULT_TILE_MASK_BLOCK_SIZE = 128
 
 
 def _mask_block_size(head_dim):
-    """Mask granularity, which is coupled to the kernel tiles and cannot be chosen freely.
+    """BlockMask block size, which must be divisible by the kernel's BLOCK_M/BLOCK_N.
 
-    FlexAttention requires the BlockMask's block size to be divisible by the kernel's
-    BLOCK_M/BLOCK_N, and raises "Q and KV block size must be divisible by BLOCK_M and
-    BLOCK_N" otherwise. So:
-
-    * head_dim > 256 pins 32x32 tiles (SMEM), so 64 is safe -- and finer granularity
-      tracks the true mask density better (65.7% sparsity vs 64.2% at 128, measured
-      58.0 ms vs 61.4 ms).
-    * head_dim <= 256 leaves the tiles to Inductor's autotuner, which may pick up to
-      128. Only FlexAttention's own default of 128 is guaranteed compatible with every
-      choice it can make.
+    The pinned 32x32 tiles allow the finer 64; the autotuner may pick tiles up to 128.
     """
     if head_dim > _MAX_DEFAULT_TILE_HEAD_DIM:
         return _PINNED_TILE_MASK_BLOCK_SIZE
@@ -110,8 +66,7 @@ def _flex_ops():
     if _flex_attention_compiled is None:
         from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-        # dynamic=False: shapes are fixed by (batch, num_anchors, block_size, seq_len)
-        # within a run, and dynamic shapes measurably deoptimize the generated kernel.
+        # dynamic=False: shapes are fixed within a run, and dynamic shapes slow the kernel.
         _flex_attention_compiled = torch.compile(flex_attention, dynamic=False)
         _create_block_mask_compiled = torch.compile(create_block_mask, dynamic=False)
     return _flex_attention_compiled, _create_block_mask_compiled
@@ -141,12 +96,8 @@ def build_draft_block_mask(
 ):
     """BlockMask equivalent of ``HFDFlashModel._build_draft_attention_mask``.
 
-    Same predicate, expressed for FlexAttention instead of materialized. Rebuilt every
-    step because anchors are resampled on every forward; the compiled builder costs
-    ~0.1 ms, against ~1.5 ms to materialize the dense mask it replaces. Every term of the
-    dense predicate must appear here too -- including ``causal``
-    (``dflash_draft_attention="causal"``) -- or the two paths silently train different
-    models.
+    Every term of the dense predicate must appear here too, or the two paths silently train
+    different models.
     """
     _, create_block_mask = _flex_ops()
     bsz = anchor_positions.shape[0]
@@ -162,13 +113,11 @@ def build_draft_block_mask(
         is_ctx = kv_idx < seq_len
         ctx_ok = is_ctx & (kv_idx < anchor)
         if window is not None:
-            # Same sliding window as the dense path: measured against the query's REAL
-            # position (anchor + position-in-block), not its index in the draft block.
+            # Window from the query's real position (anchor + position in block).
             ctx_ok = ctx_ok & (kv_idx > anchor + (q_idx % block_size) - window)
         draft_ok = (~is_ctx) & (q_block == (kv_idx - seq_len) // block_size)
         if causal:
-            # Same block-causal term as the dense path: the query at block position i sees
-            # draft positions <= i only.
+            # Block-causal: block position i sees draft positions <= i.
             draft_ok = draft_ok & (((kv_idx - seq_len) % block_size) <= (q_idx % block_size))
         return (ctx_ok | draft_ok) & keep[b, q_block]
 

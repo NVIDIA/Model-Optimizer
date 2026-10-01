@@ -314,15 +314,8 @@ class TestShardedBaseGeneration:
 class TestDFlashFlexAttentionGPU:
     """FlexAttention path must match the dense-mask SDPA path it replaces.
 
-    The block-sparse BlockMask encodes exactly the predicate
-    ``_build_draft_attention_mask`` materializes, so switching implementations may only
-    move results by float rounding -- not by a masked position becoming visible, and not
-    at the fully-masked query rows that invalid blocks produce.
-
-    These build a wider model than the rest of this file: ``get_tiny_llama`` defaults to
-    hidden_size 32 over 16 heads, i.e. head_dim 2, and FlexAttention's Triton templates
-    need head_dim >= 16 (below that Inductor finds no valid config and raises). 128/2
-    heads gives head_dim 64, the smallest standard size.
+    The model is wider than the rest of this file because FlexAttention's Triton templates
+    need head_dim >= 16 (``get_tiny_llama`` defaults to head_dim 2).
     """
 
     SEQ = 64
@@ -384,8 +377,7 @@ class TestDFlashFlexAttentionGPU:
         dense, flex = self._pair(**overrides)
         input_ids, attention_mask = self._inputs()
 
-        # Anchors are resampled from the RNG on every forward, so both models must draw
-        # from the same seed or they would see different anchors, not different kernels.
+        # Anchors are resampled every forward: same seed, so only the kernel differs.
         torch.manual_seed(1234)
         out_dense = dense(input_ids=input_ids, attention_mask=attention_mask)
         torch.manual_seed(1234)
@@ -394,17 +386,11 @@ class TestDFlashFlexAttentionGPU:
         torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
 
     def test_matches_dense_mask_path_with_invalid_blocks(self):
-        """Fully-masked query rows (invalid blocks) must not diverge either.
-
-        A row of all -inf is the one place the two kernels could legitimately disagree
-        (softmax of nothing), and answer_only_loss produces such rows whenever a sample
-        has fewer valid anchors than the batch maximum.
-        """
+        """Fully-masked query rows (invalid blocks), a softmax over nothing, match too."""
         pytest.importorskip("torch.nn.attention.flex_attention")
         dense, flex = self._pair()
         input_ids, attention_mask = self._inputs()
-        # Row 1 keeps far fewer supervised positions than row 0, so its trailing blocks
-        # come back with block_keep_mask False.
+        # Row 1 has few supervised positions, so its trailing blocks are invalid.
         labels = input_ids.clone()
         labels[1, : self.SEQ - BLOCK_SIZE] = -100
 

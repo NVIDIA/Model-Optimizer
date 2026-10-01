@@ -1176,14 +1176,7 @@ def _legacy_sample_anchor_positions(model, seq_len, loss_mask, device):
 
 
 class TestAnchorSamplingStaticShape:
-    """n_blocks is fixed by the config, and the anchors it picks are still the legacy ones.
-
-    A data-dependent n_blocks made the draft's q_len/kv_len data-dependent, and both the
-    block-mask builder and the attention are compiled with ``dynamic=False`` -- so every
-    new batch shape cost a multi-minute recompile, indefinitely. These tests pin both
-    halves of the fix: the shape no longer moves with the data, and what the model trains
-    on did not change.
-    """
+    """n_blocks is fixed by the config, and the anchors it picks are still the legacy ones."""
 
     DEVICE = torch.device("cpu")
 
@@ -1229,12 +1222,7 @@ class TestAnchorSamplingStaticShape:
         assert not anchors[:, n_old:].any()
 
     def test_sort_is_truncated_before_it_widens(self):
-        """The surplus columns must not pull unsampled anchors to the front of the row.
-
-        Slicing to the static width *after* sorting would do exactly that: anchors past
-        the legacy bound would sort in among the kept ones and silently move which
-        positions are trained on, while every shape assertion still passed.
-        """
+        """The surplus columns must not pull unsampled anchors in among the kept ones."""
         model = self._model(num_anchors=8)
         # One long row, so the legacy bound (valid_counts.max() - 1) sits below the static
         # width and there really are surplus columns to get wrong.
@@ -1269,11 +1257,7 @@ class TestAnchorSamplingStaticShape:
         assert anchors.shape[1] == SEQ_LEN - BLOCK_SIZE + 1, "the sequence should bind here"
 
     def test_sampling_does_not_sync_on_the_batch(self):
-        """The old bound read valid_counts back to the host, stalling the pipeline.
-
-        Parsed rather than grepped: the prose explaining the removal names the call it
-        removed, so a substring search over the source matches its own docstring.
-        """
+        """Anchor sampling must not read the batch back to the host."""
         import ast
         import inspect
         import textwrap
@@ -1291,9 +1275,7 @@ class TestAnchorSamplingStaticShape:
     def test_trailing_padding_blocks_do_not_change_the_loss(self):
         """The padding the static shape introduces is weightless in the loss and accuracy.
 
-        Mathematically exact -- block_keep_mask zeroes those rows in both the numerator
-        and the normalizer -- but the reduction is over more elements, so compare at
-        float tolerance rather than bitwise.
+        Exact in math, but the reduction runs over more elements, so compare to tolerance.
         """
         model = self._model(num_anchors=8)
         vocab, bsz, n_blocks, pad = 32, 1, 2, 3
