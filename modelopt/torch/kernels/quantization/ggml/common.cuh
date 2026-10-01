@@ -74,10 +74,13 @@ inline void check_scalar_pack_input(const char *format, const at::Tensor &input,
 }
 
 // Validates the codebook contract every IQ format shares, once, at each format's CUDA entry point.
+// A format that takes block scales passes them so their device is checked with the others', before
+// any shape or dtype rule.
 inline void check_pack_inputs(const char *format, const at::Tensor &input, const at::Tensor &grid,
-                              int64_t entries) {
+                              int64_t entries, const at::Tensor *scales = nullptr) {
   TORCH_CHECK(input.is_cuda(), format, " packing requires a CUDA input");
   TORCH_CHECK(grid.is_cuda(), format, " packing requires a CUDA grid");
+  TORCH_CHECK(scales == nullptr || scales->is_cuda(), format, " packing requires CUDA scales");
   check_scalar_pack_input(format, input, kBlockSize);
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == entries &&
                   grid.size(1) == kVectorSize,
@@ -93,8 +96,7 @@ inline void check_pack_inputs(const char *format, const at::Tensor &input, const
 inline void check_scaled_pack_inputs(const char *format, const at::Tensor &input,
                                      const at::Tensor &grid, int64_t entries,
                                      const at::Tensor &scales) {
-  TORCH_CHECK(scales.is_cuda(), format, " packing requires CUDA scales");
-  check_pack_inputs(format, input, grid, entries);
+  check_pack_inputs(format, input, grid, entries, &scales);
   TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
                   scales.numel() == input.numel() / kBlockSize,
               "scales must be float16 [numel / 256]");
