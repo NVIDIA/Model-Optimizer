@@ -40,11 +40,12 @@ from example_utils import (
     cleanup_distributed,
     copy_custom_model_files,
     create_vlm_calibration_loop,
+    generate_excludes_prompt,
     get_model,
     get_processor,
     get_tokenizer,
-    is_enc_dec,
     is_nemotron_vl,
+    is_trtllm_enc_dec_export,
     mlflow_run,
     recipe_layerwise_blocks,
     run_nemotron_vl_preview,
@@ -655,7 +656,7 @@ def export_quantized(
 
         start_time = time.time()
         is_tensorrt_llm_export = (
-            is_enc_dec(model_type)
+            is_trtllm_enc_dec_export(model_type)
             or args.sparsity_fmt != "dense"
             or "int8_smoothquant" in args.qformat
         )
@@ -908,7 +909,7 @@ def post_quantize(
         if hasattr(generated_ids, "sequences"):
             generated_ids = generated_ids.sequences
 
-        if is_enc_dec(model_type):
+        if generate_excludes_prompt(full_model):
             if processor is not None and isinstance(processor, WhisperProcessor):
                 return processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             elif tokenizer is not None:

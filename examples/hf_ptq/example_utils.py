@@ -895,15 +895,24 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_enc_dec(model_type: str | None) -> bool:
-    """Return whether the Hugging Face model_type is an encoder-decoder model.
+def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
+    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
 
-    These models use encoder-decoder-style preview decode (``hf_ptq.py`` does not slice off
-    the prompt prefix from ``.generate()`` output) and still export TensorRT-LLM checkpoints.
-    ``diffusion_gemma`` is structurally encoder-decoder but returns prompt+canvas concatenated,
-    so it stays OFF this list (AR-style decode applies).
+    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
+    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
     """
     return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
+
+
+def generate_excludes_prompt(model) -> bool:
+    """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
+
+    True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
+    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
+    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    """
+    config = model.config
+    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
 
 
 def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
@@ -1153,7 +1162,7 @@ def assert_layerwise_export_compatible(
         ),
         (
             "an encoder-decoder model_type",
-            is_enc_dec(hf_model_type(full_model)),
+            is_trtllm_enc_dec_export(hf_model_type(full_model)),
             "export_tensorrt_llm_checkpoint()",
         ),
     ):

@@ -29,7 +29,9 @@ __all__ = [
 ]
 
 # Deprecated in 0.48.0, scheduled for removal in 0.49.0 together with the TensorRT-LLM checkpoint
-# export, the only consumer of these TensorRT-LLM model names.
+# export, the only consumer of these TensorRT-LLM model names. The shims below import from
+# .trtllm lazily: importing it here is circular, since trtllm/__init__ loads model_config_export,
+# which imports ..quant_utils, which imports TiedWeightMap from this module before it is defined.
 _MODEL_TYPE_DEPRECATION_MSG = (
     "{name} returns TensorRT-LLM model names and is deprecated as of 0.48.0; it will be removed "
     "in 0.49.0. Use the Hugging Face model type, model.config.model_type, instead. "
