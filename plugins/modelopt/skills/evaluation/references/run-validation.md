@@ -25,10 +25,10 @@ For each completed invocation/run directory, whether baseline, quantized, or a
 single-model run:
 
 1. Inspect client, server/deployment, SLURM, judge, and task-specific/code-execution logs as applicable. Search for `Traceback`, `Exception`, `ERROR`, `FAILED`, `OOM`, `Killed`, `timeout`, `rate limit`, `unauthorized`, `connection refused/reset`, `health check`, `sandbox`, `container`, `judge`, `parse`, `scoring`, and task-specific failure strings.
-2. Confirm the inference server loaded the intended checkpoint/model and stayed healthy through the run: no startup failure, mid-run crash/restart, OOM, request validation failure, input/context clipping, quantization load error, or repeated 4xx/5xx responses.
-3. For judge-backed tasks, confirm judge calls succeeded and were parsed/scored correctly: no auth/rate-limit failures, malformed judge responses, invalid JSON, missing scores, or fallback/default scores.
-4. For code-execution tasks, inspect executor/sandbox/container logs for setup failures, package install failures, timeouts, thread/process exhaustion, permission errors, harness crashes, or skipped tests that would make scores non-comparable.
-5. Confirm coverage separately at every available level: expected, selected, evaluated, and scored samples/repeats/trajectories must match. No response may be missing or unscored, and no unexpected dropped/skipped/failed sample, `unknown_agent_error`, `failed_samples_policy` abort, or partial result file is allowed.
+2. Verify the intended checkpoint loaded; inspect startup failures, crashes/restarts, OOMs, request errors, input/context clipping, and quantization load errors. Classify attributable per-trial failures under the policy below; systemic serving failures remain blockers.
+3. For judge-backed tasks, inspect authentication, rate limits, malformed responses, parsing, and scoring. Distinguish protocol-valid failed scores from missing scores or undocumented fallback/default scores.
+4. For code-execution tasks, inspect executor/sandbox/container setup, installation, timeout, resource, permission, harness, and skipped-test diagnostics. Verify each failed trial's protocol-defined outcome rather than treating every error as invalid.
+5. Confirm coverage at every available level: expected, selected, accounted-for, and scored samples/repeats/trajectories must match. Explicit protocol-valid failed trials count as accounted-for; missing/unscored trials, dropped submissions, `failed_samples_policy` aborts leaving gaps, and partial results do not.
 6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Assess unusable model outputs under the policy below. Check for parser or fallback errors, unmatched reasoning delimiters, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 7. Complete the **Timeout and Output-Limit Accounting** below for every task,
    including non-reasoning models and successful runs.
@@ -39,11 +39,13 @@ independent validation item fails, label the result incomplete or invalid and
 return findings and a recommendation to the parent (or user); do not
 automatically resubmit a completed run.
 
-### Aggregate Model-Output-Fault Policy (Parent and Evaluator)
+### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
 For each benchmark/run, report category counts, their deduplicated union, the
-verified denominator, and `rate = 100 × union / denominator`. Calculate with
-unrounded counts; round only the displayed percentage.
+verified denominators, and `rate = 100 × union / denominator` for each applicable
+gate below. Calculate with unrounded counts; round only the displayed percentage.
+
+**Response gate (model-output faults).** Preserve unique-response accounting:
 
 The denominator is the deduplicated set of unique, successful raw evaluated-model
 responses selected for evaluation. Count a cached response reused by multiple
@@ -62,34 +64,65 @@ model output behavior:
 Count a response in every applicable category for reporting, but once in the
 union. To qualify, the successful raw response must exist, remain preserved in
 the artifacts, and be deterministically retained and scored incorrect. A parser
-exception, parser fallback/default score, missing parsed record, or scorer/harness
-failure is not automatically a model-output fault; it remains invalid unless the
-preserved raw response's malformed answer is explicitly retained and scored
-incorrect under the benchmark protocol.
+exception, parser fallback/default score, or missing parsed record is not
+automatically a model-output fault. A malformed answer qualifies only if the
+preserved raw response is explicitly retained and scored incorrect under the
+benchmark protocol. Runtime scorer/harness failures require trial-gate assessment
+and protocol-valid scoring instead.
 
+**Trial gate (runtime failures).** Use the expected benchmark trial/repeat count,
+not successful trials, HTTP attempts, or the number of records found. Its numerator
+is the deduplicated union of attributable terminal request/transport/server,
+judge, executor/sandbox/verifier, terminal action, solver, and harness failures,
+including timeouts, that the benchmark explicitly records and scores incorrect
+or zero under its existing protocol. A failed request without a raw response may
+qualify here only through such a scored trial; it cannot enter the response gate.
+Ordinary wrong answers are not runtime failures.
+
+Preserve diagnostics and original raw evidence privately, including failed
+submissions. Verify failure type and scoring from structured artifacts and logs;
+an exception string or a summary zero alone is insufficient. Deduplicate overlaps
+and resumes by invocation, benchmark, task, trial, and repeat identity. Count
+overlapping categories once within each gate; never add response and trial rates
+or pool benchmarks. Both applicable gates must pass. A shared fault may affect
+both gates, but is counted once within each. Mark an inapplicable gate explicitly;
+an unknown applicable denominator is not an exemption.
+
+Continue other trials after a harness crash only when the harness can record the
+affected trial as a protocol-valid scored failure. If it cannot, report a blocker.
+Do not fabricate zeros, modify scoring semantics, treat missing/unscored trials
+as completed, select passing repetitions, or silently regrade old runs. Keep the
+original trial and score denominators; omitted zero-scored failures leave coverage
+incomplete. Never average incomplete data.
+
+- **rate = 0%:** no failure warning for that gate; independent checks still apply.
 - **0 < rate ≤ 2.0% (inclusive, before rounding):** valid with a visible warning
-  when expected/selected/evaluated/scored coverage is complete and all independent
-  gates pass. Retain the affected responses and their incorrect scores; do not
-  invalidate or retry solely for these faults. A low rate does **not** imply
-  negligible score impact.
+  only when coverage is complete and all independent gates pass. Retain failures
+  and their protocol-defined scores; do not invalidate, abort the invocation, or
+  retry solely for bounded failures. A low rate does **not** imply negligible
+  score impact or leaderboard comparability.
 - **rate > 2.0%:** return category counts, union, rate, findings, and a
   recommendation to the parent (or user); do not automatically retry or declare
   success.
-- The tolerance never waives missing or unscored responses; exhausted request,
-  transport, server, or authentication failures; incomplete coverage; parser,
-  harness, sandbox, or scorer failures; wrong benchmark, model, configuration, or
-  version; secret issues; input/context clipping; benchmark-specific validity
-  rules; or an unverified denominator. A score above a reference does not establish
-  validity.
+- The tolerance never waives secret leaks (scanning remains fail-closed), wrong
+  model/task/version/configuration, falsified or provenance-less output,
+  cross-invocation contamination, input/context clipping, systemic serving or
+  broken scoring, incomplete coverage, or benchmark-specific validity rules.
+  These are independent integrity failures, not ordinary per-trial failures.
+  Undocumented parser/judge fallback scores remain invalid. A score above a
+  reference does not establish validity.
 - Check configured and effective output limits against the reference evaluation
   protocol and deployed context capacity, including prompt/history plus output
   space. Report mismatches or unavailable reference settings. Do not remove or
   tune token limits merely to pass; propose protocol-justified changes for
   parent/user approval instead.
 
-The parent must preserve the category and rate warning and apply the same policy
-to evaluator handoffs rather than treating any nonzero model-output fault as a
-failed run.
+Keep score, run validation, and MLflow delivery separate: a valid score does not
+prove export succeeded, and export cannot validate scoring. In a day0 run summary,
+keep policy-validated failure diagnostics in `warnings`; `errors` contains
+unresolved blockers and still fails `gate_run.py`. That summary gate does not
+compute these rates or verify raw evidence; perform this policy check first.
+The parent must retain both gates' counts, rates, and warnings in handoffs.
 
 ## Timeout and Output-Limit Accounting
 
@@ -111,12 +144,13 @@ Missing termination metadata, sampled-only artifacts, or omitted failures make
 full-run rates **unknown**, not zero. Report coverage and what evidence is missing;
 do not extrapolate sampled rates.
 
-- **Model-output faults:** apply the aggregate policy above. Output-limit stops
-  qualify only when the response is preserved and scored incorrect; terminal
-  request, task, judge, sandbox, or harness timeouts remain invalid.
+- **Terminal failures:** apply the bounded policy above to output faults and
+  protocol-valid scored runtime/trial failures, including harness timeouts.
+  Report timeout type, effective limits, concurrency/queueing, and protocol
+  differences; tolerance alone does not establish comparability.
 - **Recovered retries:** report them separately. They do not enter the fault
   numerator or denominator as extra responses, and they do not excuse a terminal
-  failure or missing coverage.
+  unscored failure or missing coverage.
 - **Provisional/inconclusive:** unknown accounting leaves validation incomplete.
   Investigate infrastructure failures, unexpected exclusions, or mismatched
   limits before a model-quality verdict. A valid run alone does not establish

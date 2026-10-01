@@ -1,5 +1,66 @@
 [
   {
+    "name": "runtime-trial-failure-boundaries",
+    "skills": ["evaluation"],
+    "query": "Classify four independent synthetic benchmark runs with 10000 expected and protocol-scored trials each. Their attributable terminal failures are respectively 0, 100, 200, and 201 unique trials; the benchmark records and scores each failure zero. Failures include solver/harness timeouts, terminal transport/action errors, exhausted requests, judge and sandbox/verifier errors. Original artifacts and diagnostics are preserved privately. Coverage and independent gates pass; the applicable response gate is 0/12000 for each run. A fifth complete run has 20001 failures of 1000000 expected scored trials; its rate displays as 2.00% after rounding. Do not launch jobs or change settings.",
+    "files": [],
+    "expected_behavior": [
+      "Reports separate trial rates 0%, 1%, 2%, and 2.01% using expected trials, without pooling benchmarks or adding response and trial rates",
+      "Accepts zero without a failure warning and 1% and exactly 2% with visible warnings, retaining all failures and original score denominators",
+      "Above 2% returns findings for parent review without automatic retry, tuning, or success; 20001/1000000 = 2.0001% fails before rounding",
+      "Does not equate bounded failure rates with negligible score impact or leaderboard comparability"
+    ]
+  },
+  {
+    "name": "runtime-overlap-resume-and-both-gates",
+    "skills": ["evaluation"],
+    "query": "Review runs A and B, each with 1000 expected scored trials and 10000 unique successful model responses. In A, solver timeouts affect trial IDs 1-12, harness timeouts 9-16, and terminal action errors 15-20. Duplicate resumed records repeat those IDs. All failures are protocol-valid zeros, retained in the merged score and raw artifacts. A also has 201 unique malformed model responses scored incorrect. B has no model-output faults but 21 unique protocol-valid runtime failures. Both have complete coverage and independent gates pass. Should either pass? Do not launch jobs.",
+    "files": [],
+    "expected_behavior": [
+      "A category counts are 12, 8, 6; resumed overlaps deduplicate to 20/1000 = 2% trial failures, with response rate 201/10000 = 2.01%",
+      "B trial rate is 21/1000 = 2.1% even though its response rate is zero",
+      "Neither passes because both applicable gates must pass; rates with different denominators are never added",
+      "Retains warnings and returns above-tolerance findings to the parent without retry"
+    ]
+  },
+  {
+    "name": "runtime-coverage-and-integrity-blockers",
+    "skills": ["evaluation"],
+    "query": "Six runs claim only 1% timeout failures. A expected 1000 trials but a harness crash left 999 scored and one unscored. B has 1000 records but its report omitted ten zero-scored failures and averaged only passing repetitions. C inserted fabricated zeros for missing trials. D has a secret leak. E used the wrong model/task/version/config and cross-invocation records. F has falsified or provenance-less output and systemic broken scoring. Can any pass? Do not rerun or silently regrade.",
+    "files": [],
+    "expected_behavior": [
+      "Blocks every run independently of apparent rate: missing/unscored coverage, omitted zeros/selected repetitions, fabricated scoring, secrets, identity/contamination, and provenance/systemic scoring",
+      "Keeps secret scanning fail-closed and original raw evidence private",
+      "Requires original expected trial and score denominators, not observed records or successful-only trials",
+      "Reports blockers rather than fabricating scores, averaging incomplete data, or retroactively declaring success"
+    ]
+  },
+  {
+    "name": "harness-continuation-and-delivery-separation",
+    "skills": ["evaluation"],
+    "query": "In synthetic run A a harness action crashed on one trial of 100 expected; the harness retained diagnostics and recorded a protocol-valid zero. It can continue the other trials safely under unchanged scoring. Run B has the same crash but no protocol-valid failure record or score. After A completes all 100 scored trials its MLflow export fails. What should the evaluator and parent do? No job submissions authorized.",
+    "files": [],
+    "expected_behavior": [
+      "Allows continuation of A without aborting solely for a 1% failure, conditional on eventual complete scored coverage and both applicable tolerance gates passing",
+      "B is blocked; does not invent zero or patch scoring semantics",
+      "A completed score may be valid with a warning while MLflow delivery remains failed; export success is an independent handoff requirement",
+      "For day0 summaries retains accepted diagnostics in warnings, keeps unresolved blockers in errors, and does not treat gate_run.py as raw-evidence/rate validation"
+    ]
+  },
+  {
+    "name": "terminal-bench-concurrency-eight-and-protocol",
+    "skills": ["evaluation"],
+    "query": "Prepare guidance only for a future Terminal-Bench 2.1 comparison with four shards. The former template used concurrency 50 and a later run used 15 per shard; lower the starting concurrency to 8. Can this be called a proven score improvement, or should timeouts also be raised? No canary, Harbor, or benchmark rerun is authorized.",
+    "files": [],
+    "expected_behavior": [
+      "Reads the canonical recipe/example and sets max_concurrent and sandbox.concurrency equally to 8 per shard; four shards permit 32 simultaneous trials",
+      "Calls 8 a conservative starting point, not a benchmark mandate or proven improvement; endpoints are shared within each shard",
+      "Requires latency/queueing evidence for capacity changes and matches effective concurrency, timeout type/limits, temperature/top_p/output settings across comparisons",
+      "Keeps benchmark-prescribed limits fixed, does not raise timeouts to improve scores, and surfaces protocol/leaderboard differences",
+      "Does not submit a rerun or claim live validation"
+    ]
+  },
+  {
     "name": "standalone-kimi-scicode-model-output-fault",
     "skills": ["launching-evals"],
     "query": "Analyze Kimi SciCode attempt 15 in a fresh repository session, without an evaluator role or prior evaluation skill context. Coverage is complete: 65/65 samples and 338/338 selected, evaluated, and scored trajectories. Provenance verifies 337 unique successful HTTP model responses as the response denominator. One preserved response is both finish_reason=length and empty-final after reasoning consumed its token budget; it was retained and scored incorrect. There are zero HTTP, infrastructure, parser, scorer, sandbox, or harness failures. The measured score is 53.25443786982248. Is this run valid, or should it be rerun? Do not launch jobs.",
@@ -27,11 +88,11 @@
   {
     "name": "model-output-tolerance-does-not-waive-independent-failures",
     "skills": ["evaluation", "launching-evals"],
-    "query": "Review five separate runs whose apparent model-output-fault rate is below 2%. A selected 1000 responses but evaluated and scored only 999. B exhausted an HTTP/server request and has no successful raw response for one item. C raised a parser exception and assigned a fallback score without retaining the malformed answer as an explicit incorrect result; its harness also failed. D used the wrong benchmark version, model, and config. E has an authentication/secret failure and no verifiable response denominator. All reported scores exceed the reference. Can the parent accept any under the tolerance?",
+    "query": "Review five separate runs whose apparent model-output-fault rate is below 2%. A selected 1000 responses but evaluated and scored only 999. B exhausted an HTTP/server request and has no successful raw response for one item and no protocol-valid scored trial. C raised a parser exception and assigned a fallback score without retaining the malformed answer as an explicit incorrect result; its harness also failed without recording a protocol-valid scored trial. D used the wrong benchmark version, model, and config. E has a secret leak and no verifiable response denominator. All reported scores exceed the reference. Can the parent accept any under the tolerance?",
     "files": [],
     "expected_behavior": [
       "Marks every run invalid rather than using the model-output tolerance",
-      "Separately identifies missing/unscored coverage, exhausted HTTP/server request, parser fallback and harness failure, wrong protocol identity, authentication/secret failure, and unverified denominator",
+      "Separately identifies missing/unscored coverage, exhausted HTTP/server request, parser fallback and harness failure, wrong protocol identity, secret leak, and unverified denominator",
       "Does not reclassify C as a model-output fault because no preserved successful raw malformed answer was deterministically retained and scored incorrect",
       "Returns findings and recommendations without automatically retrying; exceeding the reference is not proof of validity"
     ]
