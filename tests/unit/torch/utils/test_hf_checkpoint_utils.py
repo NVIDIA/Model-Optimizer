@@ -691,7 +691,7 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
         assert (export_dir / file_name).read_text() == source_files[file_name]
     for file_name, contents in export_files.items():
         assert (export_dir / file_name).read_text() == contents
-    exported = {str(p.relative_to(export_dir)) for p in export_dir.rglob("*") if p.is_file()}
+    exported = {p.relative_to(export_dir).as_posix() for p in export_dir.rglob("*") if p.is_file()}
     assert exported == {*expected, *export_files}
 
 
