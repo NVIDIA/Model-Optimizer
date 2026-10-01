@@ -21,9 +21,10 @@ is grafted onto it: it contributes only per-token hidden states, which are
 projected by the base lm_head to obtain teacher logits.
 
 ``external_loss`` selects the objective: ``soft_ce`` matches the Eagle offline
-objective, ``tvd`` is total-variation distance between the two distributions, and
+objective, ``tvd`` is total-variation distance between the two distributions,
 ``tvd_deploy`` applies the serving filter to both sides first so the loss is the
-acceptance the deployed pair sees.
+acceptance the deployed pair sees, and ``tvd_ce`` adds a cross-entropy ranking
+term to ``tvd``.
 """
 
 import json
@@ -43,7 +44,7 @@ from .modeling_final_norm import _maybe_apply_base_final_norm
 # On the sparse path the base's truncation is baked into the dump, so both TVD
 # variants are computable there; they differ only in whether the *draft* is put
 # through the serving filter too. soft_ce needs full base logits and is dense-only.
-SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy")
+SPARSE_CAPABLE_LOSSES = ("tvd", "tvd_deploy", "tvd_ce")
 
 __all__ = ["SPARSE_CAPABLE_LOSSES", "HFExternalDraftModel"]
 
@@ -56,10 +57,10 @@ class HFExternalDraftModel(ExternalDraftModel):
         """Configure the draft and validate that it can score against this base."""
         super().modify(config)
 
-        if self.external_loss not in ("soft_ce", "tvd", "tvd_deploy"):
+        if self.external_loss not in ("soft_ce", "tvd", "tvd_deploy", "tvd_ce"):
             raise ValueError(
                 f"external_loss must be one of 'soft_ce', 'tvd', 'tvd_deploy', "
-                f"got {self.external_loss!r}."
+                f"'tvd_ce', got {self.external_loss!r}."
             )
 
     def attach_base_lm_head(self, base_lm_head, base_final_norm=None) -> None:
@@ -259,6 +260,19 @@ class HFExternalDraftModel(ExternalDraftModel):
         denom = mask.sum() + 1e-5
         tvd = self._tvd_sparse(draft, tok, prob)
         loss = (tvd * mask).sum() / denom
+        if self.external_loss == "tvd_ce":
+            # TVD is bounded, so it is weak on which token inside the base's
+            # support should win; cross-entropy's log penalty is not.
+            target = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
+            ce = torch.nn.functional.cross_entropy(
+                draft.reshape(-1, draft.shape[-1]).float(),
+                target.reshape(-1),
+                reduction="none",
+            ).reshape(mask.shape)
+            loss = self.external_tvd_alpha * loss + self.external_ce_alpha * (
+                (ce * mask).sum() / denom
+            )
+
         accuracy = None
         if self.external_report_acc:
             with torch.no_grad():
@@ -282,7 +296,7 @@ class HFExternalDraftModel(ExternalDraftModel):
         mask = loss_mask[:, :seq_len].to(draft_logits.dtype)
         denom = mask.sum() + 1e-5
 
-        if self.external_loss in ("tvd", "tvd_deploy"):
+        if self.external_loss in ("tvd", "tvd_deploy", "tvd_ce"):
             if self.external_loss == "tvd_deploy":
                 # Both sides through the serving filter, so the loss is the
                 # acceptance the deployed pair will actually see.
@@ -292,6 +306,15 @@ class HFExternalDraftModel(ExternalDraftModel):
                 p = torch.softmax(base_logits.float(), dim=-1)
                 q = torch.softmax(draft_logits.float(), dim=-1)
             loss = (0.5 * (p - q).abs().sum(-1) * mask).sum() / denom
+            if self.external_loss == "tvd_ce":
+                ce = torch.nn.functional.cross_entropy(
+                    draft_logits.reshape(-1, draft_logits.shape[-1]).float(),
+                    base_logits.reshape(-1, base_logits.shape[-1]).argmax(-1),
+                    reduction="none",
+                ).reshape(mask.shape)
+                loss = self.external_tvd_alpha * loss + self.external_ce_alpha * (
+                    (ce * mask).sum() / denom
+                )
         else:
             # Identical in form to hf_eagle._eagle_loss so switching modes does not
             # silently change the objective.
