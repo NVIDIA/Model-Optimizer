@@ -113,15 +113,34 @@ class OfflineSupervisedDataset(Dataset):
         dumped_files,
         answer_only_loss: bool = False,
         tokenizer=None,
+        aux_hidden_states_optional: bool = False,
     ):
-        """Initialize with a list of .pt file paths."""
+        """Initialize with a list of .pt file paths.
+
+        Args:
+            aux_hidden_states_optional: tolerate dumps written with
+                ``--no-aux-hidden-states``. Only modes that never read the aux planes
+                may set this; for the others a missing key must still raise.
+        """
         super().__init__()
         self.dumped_files = dumped_files
         self.answer_only_loss = answer_only_loss
         self.tokenizer = tokenizer
+        self.aux_hidden_states_optional = aux_hidden_states_optional
 
     def __len__(self):
         return len(self.dumped_files)
+
+    def _aux_hidden_states(self, offline_data):
+        """Aux planes from the dump, or an empty plane when the consumer never reads them."""
+        if "aux_hidden_states" in offline_data:
+            return offline_data["aux_hidden_states"]
+        if not self.aux_hidden_states_optional:
+            raise KeyError(
+                "aux_hidden_states missing from the offline dump. Re-dump without "
+                "--no-aux-hidden-states, or use a mode that does not read them."
+            )
+        return offline_data["hidden_states"].new_zeros((offline_data["hidden_states"].shape[0], 0))
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
         offline_data = torch.load(self.dumped_files[i], weights_only=True)
@@ -152,7 +171,7 @@ class OfflineSupervisedDataset(Dataset):
         ret = {
             "input_ids": offline_data["input_ids"],
             "base_model_hidden_states": offline_data["hidden_states"],
-            "aux_hidden_states": offline_data["aux_hidden_states"],
+            "aux_hidden_states": self._aux_hidden_states(offline_data),
             "attention_mask": torch.ones_like(offline_data["input_ids"]),
             "loss_mask": loss_mask,
             "labels": labels,
