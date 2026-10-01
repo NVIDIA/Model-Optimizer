@@ -324,7 +324,7 @@ It is not verbosity. It is a **failure to terminate on a small fraction of sub-s
 
 The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
 
-**It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token; almost all such sub-steps return nothing and score zero. The denominator is 2,704 sub-steps:
+**It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token; almost all such sub-steps return nothing and score zero. Counts are pooled over all 8 runs, so the denominator is 338 × 8 = 2,704 sub-steps:
 
 | Model | Capped sub-steps | SciCode (Subtask) | Mean tokens | Median tokens |
 | --- | --- | --- | --- | --- |
@@ -339,7 +339,7 @@ Means are `avg_completion_tokens`, so the left-hand column matches the table abo
 
 **Read the two token columns together: the penalty removes the tail, it does not make the model concise.** The median is flat or slightly *up* on three of four builds, so a typical response is unchanged; the mean falls 33-55% purely because the runaway generations are gone. And the underlying shift survives — QAD's median is still **+71%** over BF16 with the penalty on, against +91.6% without. This suppresses the pathology, not the verbosity QAD introduced.
 
-The shipped `eval_configs/scicode.yaml` deliberately leaves it out so it reproduces the results table above; add it under `adapter_config.params_to_add` to get the right-hand column.
+The shipped `eval_configs/scicode.yaml` carries the line already, commented out, so it reproduces the results table above — uncomment `presence_penalty: 1.5` in its `params_to_add` block to get the right-hand column.
 
 **Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged while making generation **4.2× slower** — pure cost. Use it where runaway generation actually occurs; do not make it a global default.
 
