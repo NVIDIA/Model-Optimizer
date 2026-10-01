@@ -216,8 +216,8 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
         batch_size=1,
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        hf_model_path="dummy",
-        hf_model_name=None,
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
         specdec_offline_dataset=None,
@@ -263,8 +263,8 @@ def test_fixed_ptq_then_kv_rejects_explicit_kv_before_calibration(monkeypatch):
     args = SimpleNamespace(
         auto_quantize_checkpoint=None,
         kv_auto_quantize_checkpoint=None,
-        hf_model_path="dummy",
-        hf_model_name=None,
+        local_checkpoint_path="dummy",
+        hub_model_id=None,
         cast_mxfp4_to_nvfp4=False,
         layerwise_export=False,
     )

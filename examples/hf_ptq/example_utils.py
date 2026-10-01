@@ -92,7 +92,7 @@ def cleanup_distributed(args):
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
-    if "vila" in args.hf_model_path.lower():
+    if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
     if is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
@@ -835,7 +835,9 @@ def save_source_config(args, export_path) -> None:
     config_kwargs = {"trust_remote_code": args.trust_remote_code}
     if args.attn_implementation is not None:
         config_kwargs["attn_implementation"] = args.attn_implementation
-    AutoConfig.from_pretrained(args.hf_model_path, **config_kwargs).save_pretrained(export_path)
+    AutoConfig.from_pretrained(args.local_checkpoint_path, **config_kwargs).save_pretrained(
+        export_path
+    )
 
 
 def _prepare_quant_cfg(
@@ -860,7 +862,7 @@ def _prepare_quant_cfg(
     if needs_checkpoint_path_update(quant_cfg):
         # Named after the Hub ID when there is one: a cache path would name it by commit hash.
         quant_cfg, resolved_dir = resolve_checkpoint_dir(
-            quant_cfg, args.hf_model_name or args.hf_model_path
+            quant_cfg, args.hub_model_id or args.local_checkpoint_path
         )
         print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
 

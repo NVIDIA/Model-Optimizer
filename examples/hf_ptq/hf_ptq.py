@@ -307,11 +307,11 @@ def load_model(args: argparse.Namespace):
         raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
-            args.hf_model_path, trust_remote_code=args.trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
         )
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
-            args.hf_model_path,
+            args.local_checkpoint_path,
             args.dist_state.device,
             args.dist_state.rank,
             args.dist_state.world_size,
@@ -322,7 +322,7 @@ def load_model(args: argparse.Namespace):
         )
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
-            args.hf_model_path,
+            args.local_checkpoint_path,
             args.dist_state.device,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
@@ -351,7 +351,7 @@ def load_model(args: argparse.Namespace):
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
             full_model = AutoModelForCausalLM.from_pretrained(
-                args.hf_model_path,
+                args.local_checkpoint_path,
                 **model_kwargs,
             )
         calibration_only = True
@@ -385,14 +385,14 @@ def load_model(args: argparse.Namespace):
 
     if model_type == "whisper":
         processor = get_processor(
-            args.hf_model_path,
+            args.local_checkpoint_path,
             model_type,
             trust_remote_code=args.trust_remote_code,
         )
     elif args.calib_with_images:
         # For VLM image calibration, we need an AutoProcessor to build multimodal inputs.
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_path,
+            args.local_checkpoint_path,
             trust_remote_code=args.trust_remote_code,
             padding_side="left",
         )
@@ -400,12 +400,16 @@ def load_model(args: argparse.Namespace):
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             tokenizer = processor.tokenizer
         else:
-            tokenizer = get_tokenizer(args.hf_model_path, trust_remote_code=args.trust_remote_code)
+            tokenizer = get_tokenizer(
+                args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+            )
 
         # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        assert tokenizer.pad_token is not None, f"Pad token for {args.hf_model_path} cannot be set!"
+        assert tokenizer.pad_token is not None, (
+            f"Pad token for {args.local_checkpoint_path} cannot be set!"
+        )
 
         tokenizer.padding_side = "left"
 
@@ -439,7 +443,9 @@ def load_model(args: argparse.Namespace):
                 if extracted_lm is not None:
                     language_model = extracted_lm
 
-        tokenizer = get_tokenizer(args.hf_model_path, trust_remote_code=args.trust_remote_code)
+        tokenizer = get_tokenizer(
+            args.local_checkpoint_path, trust_remote_code=args.trust_remote_code
+        )
 
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
@@ -671,7 +677,7 @@ def export_quantized(
             # The unified exporters copy the source's non-model files themselves; this deprecated
             # one does not.
             if args.dist_state.is_main:
-                copy_non_model_files(args.hf_model_path, export_path)
+                copy_non_model_files(args.local_checkpoint_path, export_path)
         else:
             # Check arguments for unified_hf export format and set to default if unsupported arguments are provided
             assert args.sparsity_fmt == "dense", (
@@ -759,7 +765,7 @@ def pre_quantize(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.hf_model_path,
+            args.local_checkpoint_path,
             "before quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -835,7 +841,7 @@ def post_quantize(
             full_model,
             tokenizer,
             preview_input_ids,
-            args.hf_model_path,
+            args.local_checkpoint_path,
             "after quantization",
             allow_fallback=False,
             trust_remote_code=args.trust_remote_code,
@@ -1092,7 +1098,7 @@ def quantize_main(
     if args.cast_mxfp4_to_nvfp4:
         # The cast reads the source MXFP4 ``*_scales``/``*_blocks`` tensors from the local
         # checkpoint directory main() downloaded.
-        apply_cast_mxfp4_to_nvfp4(language_model, args.hf_model_path)
+        apply_cast_mxfp4_to_nvfp4(language_model, args.local_checkpoint_path)
 
     post_quantize(
         args,
@@ -1465,8 +1471,11 @@ def main(args: argparse.Namespace):
         # until the NCCL timeout.
         with mlflow_run(args):
             # --pyt_ckpt_path stays as given. Every later step reads the local copy of the whole
-            # checkpoint in hf_model_path; hf_model_name is the Hub ID, or None for a local path.
-            args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.pyt_ckpt_path)
+            # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local
+            # path.
+            args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+                args.pyt_ckpt_path
+            )
 
             # launch a memory monitor to read the currently used GPU memory.
             launch_memory_monitor()
