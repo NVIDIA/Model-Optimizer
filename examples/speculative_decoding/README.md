@@ -145,6 +145,22 @@ Training consumes dumped base hidden states, as in the offline flow above. Pass
 `--no-aux-hidden-states` when dumping: this mode never reads them and they
 dominate the dump size.
 
+The TVD objectives only ever need the base's *truncated* next-token distribution,
+not a full hidden state, so they can instead read a much smaller dump of the
+base's top-k deployment policy. Produce one with:
+
+```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+```
+
+and train against it with `data.sparse_data_path=$POLICY_DIR` in place of
+`data.offline_data_path`. Keep `--top-k` / `--top-p` equal to
+`external.external_top_k` / `external.external_top_p`: the stored policy *is* the
+teacher distribution, so a dump narrower than the objective expects silently
+under-penalises the draft's out-of-support mass.
+
 ```bash
 torchrun --nproc_per_node 8 main.py \
   --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
