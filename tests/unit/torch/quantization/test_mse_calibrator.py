@@ -333,6 +333,13 @@ class TestMseCalibrator:
         a_after_reset = cal.compute_amax()
         assert a_after_reset is None
 
+        # reset() must leave the instance reusable: `_initial_amax` is only ever set in
+        # __init__, so dropping it would make a second search impossible. A later
+        # calibration stage that re-enters this calibrator depends on this.
+        assert cal._initial_amax is not None
+        cal.collect(x)
+        assert cal.compute_amax() is not None
+
     def test_per_channel_basic(self):
         """Test per-channel MSE calibration with axis=0."""
         torch.manual_seed(0)
