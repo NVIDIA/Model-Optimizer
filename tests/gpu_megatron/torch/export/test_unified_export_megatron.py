@@ -767,7 +767,7 @@ def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size
     original_get_mtp_state_dict = GPTModelExporter._get_mtp_state_dict
 
     # Simulate stage-local MTP tensors (only on the last PP rank).
-    def _fake_get_mtp_state_dict(self):
+    def _fake_get_mtp_state_dict(self, copy_from_pretrained=True):
         if rank != size - 1:
             return {}
         return {f"mtp.injected.rank{rank}.weight": torch.ones(8, dtype=torch.bfloat16).cpu()}
@@ -918,6 +918,9 @@ def test_mtp_state_dict_single_safetensors(tmp_path):
     save_file(tensors, str(model_dir / "model.safetensors"))
 
     exporter = _make_exporter_for_mtp(model_dir)
+    # Non-writer ranks skip the copy.
+    assert exporter._get_mtp_state_dict(copy_from_pretrained=False) == {}
+    assert exporter.exclude_modules == []
     mtp_state_dict = exporter._get_mtp_state_dict()
 
     assert "mtp.0.enorm.weight" in mtp_state_dict
