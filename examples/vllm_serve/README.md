@@ -18,8 +18,8 @@ docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
 
 ```bash
-docker build --build-arg VLLM_VERSION=0.26.0 \
-  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.26.0 .
+docker build --build-arg VLLM_VERSION=0.29.0 \
+  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.29.0 .
 ```
 
 For a direct installation from the ModelOpt repository root, install the tested vLLM
@@ -35,23 +35,38 @@ for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
-Step 1: Configure quantization settings.  
-You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, or set the following environment variables to control quantization behavior:
+Step 1: Configure fakequant with ModelOpt CLI flags. Each flag falls back to its
+corresponding environment variable when omitted:
 
-| Variable        | Description                                      | Default             |
-|-----------------|--------------------------------------------------|---------------------|
-| QUANT_DATASET   | Dataset name for calibration                     | cnn_dailymail       |
-| QUANT_CALIB_SIZE| Number of samples used for calibration           | 512                 |
-| QUANT_CFG       | Quantization config                              | None                |
-| KV_QUANT_CFG    | KV-cache quantization config                     | None                |
-| QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
-| MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
-| CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
-| RECIPE_PATH      | Optional path to a ModelOpt PTQ recipe YAML  | None |
+| CLI flag | Environment fallback | Description |
+| --- | --- | --- |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Quantizer tensor state; requires a quantization config or recipe |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Full ModelOpt state checkpoint |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML |
+| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
+| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
+| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
 
-Set these variables in your shell or Docker environment as needed to customize calibration.
+Install the shim to expose these options through the ordinary `vllm` command:
 
-Step 2: Run the following command, with all supported flag as `vllm serve`:
+```bash
+pip install -e examples/vllm_serve
+```
+
+Step 2: Serve with any stock vLLM options plus the ModelOpt flags:
+
+```bash
+vllm serve <model_path> -tp 8 --host 0.0.0.0 --port 8000 \
+  --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
+  --modelopt-quant-dataset cnn_dailymail \
+  --modelopt-quant-calib-size 512
+```
+
+When fakequant is requested, the shim selects `fakequant_worker.FakeQuantWorker`
+unless `--worker-cls` is supplied. Without ModelOpt quantization settings,
+the shim delegates to the stock vLLM CLI. The direct invocation remains available:
 
 ```bash
 python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000

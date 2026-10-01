@@ -14,6 +14,7 @@ Changelog
 *Quantization*
 
 - Backfill checkpoint aliases for nine more published NVFP4 releases, so each is reachable from its source model's hub path: ``zai-org/GLM-5.1`` and ``GLM-5.2``, ``MiniMaxAI/MiniMax-M2.5`` and ``MiniMax-M3``, ``deepseek-ai/DeepSeek-V3.1`` and ``DeepSeek-V3.2``, ``Qwen/Qwen3-235B-A22B-Instruct-2507`` and ``-Thinking-2507``, and ``Qwen/Qwen3.6-27B``. Each imports an existing general or architecture recipe wholesale rather than copying its body.
+- Add ``--modelopt-*`` options to the ``examples/vllm_serve`` vLLM CLI for fakequant calibration and checkpoint reload. Pass a quantization config or recipe with a quantizer-state file, or use ``--modelopt-state-path`` to restore a full ModelOpt state.
 - Add composed Hugging Face AutoQuantize recipes that run fixed PTQ or weight AutoQuantize before
   a separate KV-cache AutoQuantize stage, with independent resumable checkpoints for the weight and
   KV searches. Uniform-weight plus layer-wise mixed-KV exports are marked unsupported for deployment
