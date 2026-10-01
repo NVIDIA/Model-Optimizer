@@ -2104,6 +2104,7 @@ def test_registered_megatron_quant_modules_checkpoint_quantizer_state():
 
 def _get_tiny_dsa_gpt_model():
     """Tiny GPT with DSA sparse attention (AbsorbedMLASelfAttention + DSAttention + indexer)."""
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
     from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
         get_transformer_block_with_experimental_attention_variant_spec,
     )
@@ -2143,6 +2144,7 @@ def _get_tiny_dsa_gpt_model():
 
 
 def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
     from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
 
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)

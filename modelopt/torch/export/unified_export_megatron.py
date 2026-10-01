@@ -961,6 +961,8 @@ class GPTModelExporter:
             self.exclude_modules.append(dst + "*")
         if mtp_state_dict:
             print(f"Copied {len(mtp_state_dict)} MTP tensors from {source}")
+        else:
+            warn_rank_0(f"No MTP tensors under {src_prefixes} in {source}; exporting without MTP.")
         return mtp_state_dict
 
     @staticmethod
