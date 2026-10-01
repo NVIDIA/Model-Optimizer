@@ -122,17 +122,18 @@ def flux_convert_rope_weight_type(onnx_graph):
     return gs.export_onnx(graph)
 
 
-def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1):
+def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1, latent_shape=None):
     assert isinstance(backbone, UNet2DConditionModel) or isinstance(
         backbone._orig_mod, UNet2DConditionModel
     )
     cfg = backbone.config
     assert cfg.addition_embed_type == "text_time"
+    latent_height, latent_width = latent_shape or (cfg.sample_size, cfg.sample_size)
 
     dynamic_shapes = {
         "sample": {
-            "min": [min_bs, cfg.in_channels, cfg.sample_size, cfg.sample_size],
-            "opt": [opt_bs, cfg.in_channels, cfg.sample_size, cfg.sample_size],
+            "min": [min_bs, cfg.in_channels, latent_height, latent_width],
+            "opt": [opt_bs, cfg.in_channels, latent_height, latent_width],
         },
         "timestep": {"min": [1], "opt": [1]},
         "encoder_hidden_states": {
@@ -169,21 +170,24 @@ def _gen_dummy_inp_and_dyn_shapes_sdxl(backbone, min_bs=1, opt_bs=1):
     return dummy_kwargs, dynamic_shapes
 
 
-def _gen_dummy_inp_and_dyn_shapes_sd3(backbone, min_bs=1, opt_bs=1):
+def _gen_dummy_inp_and_dyn_shapes_sd3(
+    backbone, min_bs=1, opt_bs=1, latent_shape=None, text_maxlen=333
+):
     assert isinstance(backbone, SD3Transformer2DModel) or isinstance(
         backbone._orig_mod, SD3Transformer2DModel
     )
     cfg = backbone.config
+    latent_height, latent_width = latent_shape or (cfg.sample_size, cfg.sample_size)
 
     dynamic_shapes = {
         "hidden_states": {
-            "min": [min_bs, cfg.in_channels, cfg.sample_size, cfg.sample_size],
-            "opt": [opt_bs, cfg.in_channels, cfg.sample_size, cfg.sample_size],
+            "min": [min_bs, cfg.in_channels, latent_height, latent_width],
+            "opt": [opt_bs, cfg.in_channels, latent_height, latent_width],
         },
-        "timestep": {"min": [2], "opt": [16]},
+        "timestep": {"min": [min_bs], "opt": [opt_bs]},
         "encoder_hidden_states": {
-            "min": [min_bs, 333, cfg.joint_attention_dim],
-            "opt": [opt_bs, 333, cfg.joint_attention_dim],
+            "min": [min_bs, text_maxlen, cfg.joint_attention_dim],
+            "opt": [opt_bs, text_maxlen, cfg.joint_attention_dim],
         },
         "pooled_projections": {
             "min": [min_bs, cfg.pooled_projection_dim],
@@ -203,14 +207,11 @@ def _gen_dummy_inp_and_dyn_shapes_sd3(backbone, min_bs=1, opt_bs=1):
     return dummy_kwargs, dynamic_shapes
 
 
-def _gen_dummy_inp_and_dyn_shapes_flux(backbone, min_bs=1, opt_bs=1):
+def _gen_dummy_inp_and_dyn_shapes_flux(backbone, min_bs=1, opt_bs=1, img_dim=4096, text_maxlen=512):
     assert isinstance(backbone, FluxTransformer2DModel) or isinstance(
         backbone._orig_mod, FluxTransformer2DModel
     )
     cfg = backbone.config
-    text_maxlen = 512
-    img_dim = 4096
-
     dynamic_shapes = {
         "hidden_states": {
             "min": [min_bs, img_dim, cfg.in_channels],
@@ -224,12 +225,12 @@ def _gen_dummy_inp_and_dyn_shapes_flux(backbone, min_bs=1, opt_bs=1):
             "min": [min_bs, cfg.pooled_projection_dim],
             "opt": [opt_bs, cfg.pooled_projection_dim],
         },
-        "timestep": {"min": [1], "opt": [1]},
+        "timestep": {"min": [min_bs], "opt": [opt_bs]},
         "img_ids": {"min": [img_dim, 3], "opt": [img_dim, 3]},
         "txt_ids": {"min": [text_maxlen, 3], "opt": [text_maxlen, 3]},
     }
     if cfg.guidance_embeds:  # flux-dev
-        dynamic_shapes["guidance"] = {"min": [1], "opt": [1]}
+        dynamic_shapes["guidance"] = {"min": [min_bs], "opt": [opt_bs]}
 
     dtype = backbone.dtype
     dummy_kwargs = {
@@ -240,13 +241,15 @@ def _gen_dummy_inp_and_dyn_shapes_flux(backbone, min_bs=1, opt_bs=1):
         "pooled_projections": torch.randn(
             *dynamic_shapes["pooled_projections"]["min"], dtype=dtype
         ),
-        "timestep": torch.ones(1, dtype=dtype),
+        "timestep": torch.ones(*dynamic_shapes["timestep"]["min"], dtype=dtype),
         "img_ids": torch.randn(*dynamic_shapes["img_ids"]["min"], dtype=torch.float32),
         "txt_ids": torch.randn(*dynamic_shapes["txt_ids"]["min"], dtype=torch.float32),
         "return_dict": False,
     }
     if cfg.guidance_embeds:  # flux-dev
-        dummy_kwargs["guidance"] = torch.full((1,), 3.5, dtype=torch.float32)
+        dummy_kwargs["guidance"] = torch.full(
+            dynamic_shapes["guidance"]["min"], 3.5, dtype=torch.float32
+        )
 
     return dummy_kwargs, dynamic_shapes
 
@@ -367,19 +370,48 @@ def _create_trt_dynamic_shapes(dynamic_shapes):
     }
 
 
-def generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_id, backbone):
-    """Generate dummy inputs, dynamic axes, and dynamic shapes for the given model."""
+def generate_dummy_kwargs_and_dynamic_axes_and_shapes(
+    model_id,
+    backbone,
+    *,
+    height=None,
+    width=None,
+    max_sequence_length=None,
+    vae_scale_factor=8,
+    opt_batch_size=None,
+):
+    """Generate export inputs and profiles, optionally overriding image and text dimensions."""
+    latent_shape = None
+    if height is not None or width is not None:
+        divisor = vae_scale_factor * (2 if model_id.startswith("flux") else 1)
+        if any(size is None or size <= 0 or size % divisor for size in (height, width)):
+            raise ValueError(f"Height and width must both be positive multiples of {divisor}")
+        latent_shape = (height // vae_scale_factor, width // vae_scale_factor)
+    if max_sequence_length is not None and max_sequence_length <= 0:
+        raise ValueError("max_sequence_length must be positive")
+    min_bs = 1 if model_id.startswith("flux") else 2
+    if opt_batch_size is not None and opt_batch_size < min_bs:
+        raise ValueError(f"opt_batch_size must be at least {min_bs}")
     if model_id in ["sdxl-1.0", "sdxl-turbo"]:
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_sdxl(
-            backbone, min_bs=2, opt_bs=16
+            backbone, min_bs=2, opt_bs=opt_batch_size or 16, latent_shape=latent_shape
         )
     elif model_id in ["sd3-medium", "sd3.5-medium"]:
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_sd3(
-            backbone, min_bs=2, opt_bs=16
+            backbone,
+            min_bs=2,
+            opt_bs=opt_batch_size or 16,
+            latent_shape=latent_shape,
+            # SD3 concatenates the 77 CLIP tokens with the T5 sequence.
+            text_maxlen=77 + max_sequence_length if max_sequence_length is not None else 333,
         )
     elif model_id in ["flux-dev", "flux-schnell"]:
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_flux(
-            backbone, min_bs=1, opt_bs=1
+            backbone,
+            min_bs=1,
+            opt_bs=opt_batch_size or 1,
+            img_dim=latent_shape[0] * latent_shape[1] // 4 if latent_shape else 4096,
+            text_maxlen=max_sequence_length or 512,
         )
     elif model_id == "ltx-video-dev":
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_ltx(
@@ -449,7 +481,7 @@ def save_onnx(onnx_model, output):
     print(f"ONNX model saved to {output}")
 
 
-def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
+def modelopt_export_sd(backbone, onnx_dir, model_name, precision, **input_shapes):
     model_file_name = "model.onnx"
     os.makedirs(f"{onnx_dir}", exist_ok=True)
     tmp_subfolder = tempfile.mkdtemp(prefix="myapp_")
@@ -460,7 +492,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
     )
 
     dummy_kwargs, dynamic_axes, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
-        model_name, backbone
+        model_name, backbone, **input_shapes
     )
 
     if model_name in ["sdxl-1.0", "sdxl-turbo"]:

@@ -334,10 +334,21 @@ class ExportManager:
         backbone.to("cuda")
         # Export to ONNX
         backbone.eval()
+        extra_params = self.pipeline_manager.config.extra_params if self.pipeline_manager else {}
+        input_shapes = {
+            key: extra_params[key]
+            for key in ("height", "width", "max_sequence_length")
+            if key in extra_params
+        }
         with torch.no_grad():
             self.logger.info("Exporting to ONNX...")
             modelopt_export_sd(
-                backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
+                backbone,
+                str(self.config.onnx_dir),
+                model_type.value,
+                quant_format.value,
+                vae_scale_factor=getattr(pipe, "vae_scale_factor", 8),
+                **input_shapes,
             )
 
         self.logger.info("ONNX export completed successfully")

@@ -96,11 +96,15 @@ class Calibrator:
                     # Special handling for WAN video models
                     self._run_wan_video_calibration(prompt_batch, extra_args)
                 else:
+                    image_args = dict(extra_args)
+                    for key in ("height", "width", "max_sequence_length"):
+                        if key in self.pipeline_manager.config.extra_params:
+                            image_args[key] = self.pipeline_manager.config.extra_params[key]
                     common_args = {
                         "prompt": prompt_batch,
                         "num_inference_steps": self.config.n_steps,
                     }
-                    self.pipe(**common_args, **extra_args).images
+                    self.pipe(**common_args, **image_args).images
                 pbar.update(1)
                 self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
         self.logger.info("Calibration completed successfully")
@@ -114,6 +118,8 @@ class Calibrator:
         kwargs["height"] = extra_params.get("height", extra_args["height"])
         kwargs["width"] = extra_params.get("width", extra_args["width"])
         kwargs["num_frames"] = extra_params.get("num_frames", extra_args["num_frames"])
+        if "max_sequence_length" in extra_params:
+            kwargs["max_sequence_length"] = extra_params["max_sequence_length"]
         kwargs["guidance_scale"] = extra_args["guidance_scale"]
         if "guidance_scale_2" in extra_args:
             kwargs["guidance_scale_2"] = extra_args["guidance_scale_2"]

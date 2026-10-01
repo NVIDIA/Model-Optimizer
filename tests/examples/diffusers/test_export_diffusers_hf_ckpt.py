@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SDXL_PATH
+from _test_utils.examples.models import TINY_FLUX_SCHNELL_PATH, TINY_SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 from safetensors import safe_open
@@ -43,6 +43,10 @@ class DiffuserHfExportModel(NamedTuple):
             self.name,
             "--override-model-path",
             self.path,
+            "--extra-param",
+            "height=64",
+            "--extra-param",
+            "width=64",
             "--calib-size",
             "4",
             "--batch-size",
@@ -66,6 +70,8 @@ class DiffuserHfExportModel(NamedTuple):
             "--hf-ckpt-dir",
             str(hf_ckpt_dir),
         ]
+        if self.name != "sdxl-1.0":
+            cmd_args.extend(["--extra-param", "max_sequence_length=64"])
         run_example_command(cmd_args, "diffusers/quantization")
         return hf_ckpt_dir
 
@@ -75,7 +81,7 @@ class DiffuserHfExportModel(NamedTuple):
     [
         DiffuserHfExportModel(
             name="sdxl-1.0",
-            path=SDXL_PATH,
+            path=TINY_SDXL_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -83,7 +89,7 @@ class DiffuserHfExportModel(NamedTuple):
         ),
         DiffuserHfExportModel(
             name="flux-schnell",
-            path=FLUX_SCHNELL_PATH,
+            path=TINY_FLUX_SCHNELL_PATH,
             dtype="BFloat16",
             format_type="int8",
             quant_algo="smoothquant",
@@ -93,7 +99,7 @@ class DiffuserHfExportModel(NamedTuple):
         pytest.param(
             DiffuserHfExportModel(
                 name="sdxl-1.0",
-                path=SDXL_PATH,
+                path=TINY_SDXL_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",
@@ -104,7 +110,7 @@ class DiffuserHfExportModel(NamedTuple):
         pytest.param(
             DiffuserHfExportModel(
                 name="flux-schnell",
-                path=FLUX_SCHNELL_PATH,
+                path=TINY_FLUX_SCHNELL_PATH,
                 dtype="BFloat16",
                 format_type="fp4",
                 quant_algo="max",
@@ -147,6 +153,12 @@ class QwenHfExportModel(NamedTuple):
             "qwen-image",
             "--override-model-path",
             str(tiny_qwen_image_path),
+            "--extra-param",
+            "height=64",
+            "--extra-param",
+            "width=64",
+            "--extra-param",
+            "max_sequence_length=64",
             "--format",
             self.format_type,
             "--quant-algo",
@@ -352,6 +364,8 @@ class Wan22HfExportModel(NamedTuple):
             "width=16",
             "--extra-param",
             "num_frames=5",
+            "--extra-param",
+            "max_sequence_length=64",
             "--hf-ckpt-dir",
             str(hf_ckpt_dir),
         ]

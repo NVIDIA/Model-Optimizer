@@ -54,22 +54,7 @@ QWEN_VL_PATH = _select_path(
 )
 
 # Diffusers
-SDXL_PATH = _select_path(
-    remote_id="hf-internal-testing/tiny-sdxl-pipe",
-    local_id="stable-diffusion-xl-base-1.0",
-)
-
-SD3_PATH = _select_path(
-    remote_id="hf-internal-testing/tiny-sd3-pipe",
-    local_id="stable-diffusion-3-medium-diffusers",
-)
-
-FLUX_SCHNELL_PATH = _select_path(
-    remote_id="hf-internal-testing/tiny-flux-pipe",
-    local_id="FLUX.1-schnell",
-)
-
-PIXART_PATH = _select_path(
-    remote_id="PixArt-alpha/PixArt-XL-2-1024-MS",
-    local_id="PixArt-XL-2-1024-MS",
-)
+# These IDs stay tiny even when other example tests use a local full-model checkout.
+TINY_SDXL_PATH = "hf-internal-testing/tiny-sdxl-pipe"
+TINY_SD3_PATH = "hf-internal-testing/tiny-sd3-pipe"
+TINY_FLUX_SCHNELL_PATH = "hf-internal-testing/tiny-flux-pipe"

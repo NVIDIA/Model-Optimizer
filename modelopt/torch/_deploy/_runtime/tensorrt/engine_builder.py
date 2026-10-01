@@ -144,7 +144,7 @@ def build_engine(
     calib_cache: str | None = None,
     dynamic_shapes: dict | None = None,
     plugin_config: dict | None = None,
-    builder_optimization_level: str = "3",
+    builder_optimization_level: str | None = None,
     output_dir: Path | None = None,
     verbose: bool = False,
 ) -> tuple[bytes | None, bytes]:
@@ -179,7 +179,8 @@ def build_engine(
                 "setPluginsToSerialize": ["dynamicPluginOne.so", "pluginSerializeOne.so", ...],
                 "ignoreParsedPluginLibs": False
             }
-        builder_optimization_level: Optimization level for the TensorRT builder.
+        builder_optimization_level: Explicit TensorRT builder optimization level.
+            If omitted, use level 4 for low-bit/strongly typed modes and 3 otherwise.
             For more details, please refer to:
             https://docs.nvidia.com/deeplearning/tensorrt/latest/_static/python-api/infer/Core/BuilderConfig.html
         output_dir: Directory to save the engine file and trtexec artifacts.
@@ -216,7 +217,9 @@ def build_engine(
                 elif isinstance(plugins, list):
                     cmd.extend([f"--{key}={plugin}" for plugin in plugins])
 
-        opt_level = "4" if _is_low_bit_mode(trt_mode) else builder_optimization_level
+        opt_level = builder_optimization_level
+        if opt_level is None:
+            opt_level = "4" if _is_low_bit_mode(trt_mode) else "3"
         cmd += _get_trtexec_params(engine_path, opt_level, timing_cache_path, verbose=verbose)
 
         return cmd

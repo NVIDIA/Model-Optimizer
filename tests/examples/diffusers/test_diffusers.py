@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_PATH
+from _test_utils.examples.models import TINY_FLUX_SCHNELL_PATH, TINY_SD3_PATH, TINY_SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
@@ -43,7 +43,12 @@ class DiffuserModel(NamedTuple):
         run_example_command(cmd_args, "diffusers/quantization")
 
     def _format_args(self) -> list[str]:
-        return [
+        image_size = 32 if self.name == "sd3-medium" else 64
+        args = [
+            "--extra-param",
+            f"height={image_size}",
+            "--extra-param",
+            f"width={image_size}",
             "--calib-size",
             "4",
             "--percentile",
@@ -61,6 +66,9 @@ class DiffuserModel(NamedTuple):
             "--quant-algo",
             self.quant_algo,
         ]
+        if self.name != "sdxl-1.0":
+            args.extend(["--extra-param", "max_sequence_length=64"])
+        return args
 
     def quantize(self, tmp_path: Path) -> None:
         self._run_cmd(
@@ -87,6 +95,7 @@ class DiffuserModel(NamedTuple):
         )
 
     def inference(self, tmp_path: Path) -> None:
+        image_size = 32 if self.name == "sd3-medium" else 64
         self._run_cmd(
             "diffusion_trt.py",
             "--onnx-load-path",
@@ -95,6 +104,15 @@ class DiffuserModel(NamedTuple):
             "--torch-autocast",
             "--num-inference-steps",
             "2",
+            "--height",
+            str(image_size),
+            "--width",
+            str(image_size),
+            "--trt-builder-optimization-level",
+            "0",
+            "--trt-opt-batch-size",
+            "1" if self.name == "flux-schnell" else "4",
+            *(["--max-sequence-length", "64"] if self.name != "sdxl-1.0" else []),
         )
 
 
@@ -103,7 +121,7 @@ class DiffuserModel(NamedTuple):
     [
         DiffuserModel(
             name="flux-schnell",
-            path=FLUX_SCHNELL_PATH,
+            path=TINY_FLUX_SCHNELL_PATH,
             dtype="BFloat16",
             format_type="int8",
             quant_algo="smoothquant",
@@ -111,7 +129,7 @@ class DiffuserModel(NamedTuple):
         ),
         DiffuserModel(
             name="sd3-medium",
-            path=SD3_PATH,
+            path=TINY_SD3_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -120,7 +138,7 @@ class DiffuserModel(NamedTuple):
         pytest.param(
             DiffuserModel(
                 name="sd3-medium",
-                path=SD3_PATH,
+                path=TINY_SD3_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",
@@ -131,7 +149,7 @@ class DiffuserModel(NamedTuple):
         pytest.param(
             DiffuserModel(
                 name="sdxl-1.0",
-                path=SDXL_PATH,
+                path=TINY_SDXL_PATH,
                 dtype="Half",
                 format_type="fp8",
                 quant_algo="max",
@@ -142,7 +160,7 @@ class DiffuserModel(NamedTuple):
         pytest.param(
             DiffuserModel(
                 name="sdxl-1.0",
-                path=SDXL_PATH,
+                path=TINY_SDXL_PATH,
                 dtype="Half",
                 format_type="fp4",
                 quant_algo="max",
@@ -152,7 +170,7 @@ class DiffuserModel(NamedTuple):
         ),
         DiffuserModel(
             name="sdxl-1.0",
-            path=SDXL_PATH,
+            path=TINY_SDXL_PATH,
             dtype="Half",
             format_type="int8",
             quant_algo="smoothquant",
@@ -220,6 +238,8 @@ class Wan22Model(NamedTuple):
             "width=16",
             "--extra-param",
             "num_frames=5",
+            "--extra-param",
+            "max_sequence_length=64",
         ]
         if self.backbone is not None:
             cmd_args.extend(["--backbone", self.backbone])
@@ -293,12 +313,12 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
 @pytest.mark.parametrize(
     ("model_name", "model_path", "torch_compile"),
     [
-        ("flux-schnell", FLUX_SCHNELL_PATH, False),
-        ("flux-schnell", FLUX_SCHNELL_PATH, True),
-        ("sd3-medium", SD3_PATH, False),
-        ("sd3-medium", SD3_PATH, True),
-        ("sdxl-1.0", SDXL_PATH, False),
-        ("sdxl-1.0", SDXL_PATH, True),
+        ("flux-schnell", TINY_FLUX_SCHNELL_PATH, False),
+        ("flux-schnell", TINY_FLUX_SCHNELL_PATH, True),
+        ("sd3-medium", TINY_SD3_PATH, False),
+        ("sd3-medium", TINY_SD3_PATH, True),
+        ("sdxl-1.0", TINY_SDXL_PATH, False),
+        ("sdxl-1.0", TINY_SDXL_PATH, True),
     ],
     ids=[
         "flux_schnell_torch",
@@ -314,6 +334,7 @@ def test_diffusion_trt_torch(
     model_path: str,
     torch_compile: bool,
 ) -> None:
+    image_size = 32 if model_name == "sd3-medium" else 64
     cmd_args = [
         "python",
         "diffusion_trt.py",
@@ -324,7 +345,13 @@ def test_diffusion_trt_torch(
         "--torch",
         "--num-inference-steps",
         "2",
+        "--height",
+        str(image_size),
+        "--width",
+        str(image_size),
     ]
+    if model_name != "sdxl-1.0":
+        cmd_args.extend(["--max-sequence-length", "64"])
     if torch_compile:
         cmd_args.append("--torch-compile")
     run_example_command(cmd_args, "diffusers/quantization")

@@ -77,11 +77,28 @@ def _assert_engine_saved(tmp_path, dummy_hash, engine_bytes, out):
     assert out == "success"
 
 
-def test_build_engine(setup_mocks):
+@pytest.mark.parametrize(
+    ("trt_mode", "level", "expected_level"),
+    [
+        ("fp32", None, "3"),
+        ("stronglyTyped", None, "4"),
+        ("int8", None, "4"),
+        ("stronglyTyped", "0", "0"),
+        ("int8", "0", "0"),
+        ("fp8", "0", "0"),
+        ("fp32", "0", "0"),
+        ("stronglyTyped", "3", "3"),
+    ],
+)
+def test_build_engine(setup_mocks, trt_mode, level, expected_level):
     tmp_path, mock_run, mock_onnx, dummy_hash = setup_mocks
-    engine_bytes, out = build_engine(onnx_bytes=mock_onnx, verbose=True, output_dir=tmp_path)
+    kwargs = {"builder_optimization_level": level} if level is not None else {}
+    engine_bytes, out = build_engine(
+        onnx_bytes=mock_onnx, trt_mode=trt_mode, verbose=True, output_dir=tmp_path, **kwargs
+    )
 
     mock_run.assert_called_once()
+    assert f"--builderOptimizationLevel={expected_level}" in mock_run.call_args.args[0]
     _assert_engine_saved(tmp_path, dummy_hash, engine_bytes, out)
 
 

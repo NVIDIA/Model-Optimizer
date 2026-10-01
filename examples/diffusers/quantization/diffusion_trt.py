@@ -65,7 +65,9 @@ DTYPE_MAP = {
 
 
 @torch.inference_mode()
-def generate_image(pipe, prompt, image_name, torch_autocast=False, num_inference_steps=30):
+def generate_image(
+    pipe, prompt, image_name, torch_autocast=False, num_inference_steps=30, **pipeline_kwargs
+):
     context = torch.autocast("cuda") if torch_autocast else nullcontext()
     seed = 42
     with context:
@@ -74,6 +76,7 @@ def generate_image(pipe, prompt, image_name, torch_autocast=False, num_inference
             output_type="pil",
             num_inference_steps=num_inference_steps,
             generator=torch.Generator("cuda").manual_seed(seed),
+            **pipeline_kwargs,
         ).images[0]
     image.save(image_name)
     print(f"Image generated saved as {image_name}")
@@ -86,13 +89,16 @@ def benchmark_backbone_standalone(
     num_benchmark=100,
     model_name="flux-dev",
     torch_autocast=False,
+    **input_shapes,
 ):
     """Benchmark the backbone model directly without running the full pipeline."""
     context = torch.autocast("cuda") if torch_autocast else nullcontext()
     backbone = pipe.transformer if hasattr(pipe, "transformer") else pipe.unet
 
     # Generate dummy inputs for the backbone
-    dummy_kwargs, _, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_name, backbone)
+    dummy_kwargs, _, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
+        model_name, backbone, **input_shapes
+    )
 
     # Extract the dict from the tuple and move to cuda
     dummy_kwargs_cuda = {
@@ -192,7 +198,34 @@ def main():
         default=30,
         help="Number of denoising steps for image generation (lower is faster; tests use few).",
     )
+    parser.add_argument("--height", type=int, default=None, help="Image height; requires --width")
+    parser.add_argument("--width", type=int, default=None, help="Image width; requires --height")
+    parser.add_argument(
+        "--max-sequence-length",
+        type=int,
+        default=None,
+        help="Text sequence length for FLUX and SD3",
+    )
+    parser.add_argument(
+        "--trt-opt-batch-size",
+        type=int,
+        default=None,
+        help="Optimum and maximum TRT backbone batch",
+    )
+    parser.add_argument(
+        "--trt-builder-optimization-level",
+        choices=[str(level) for level in range(6)],
+        default=None,
+        help="TensorRT build optimization level (0 is fastest; default preserves runtime policy)",
+    )
     args = parser.parse_args()
+    if (args.height is None) != (args.width is None):
+        parser.error("--height and --width must be supplied together")
+    pipeline_kwargs = {
+        key: getattr(args, key)
+        for key in ("height", "width", "max_sequence_length")
+        if getattr(args, key) is not None
+    }
 
     image_name = args.save_image_as or f"{args.model}.png"
     model_dtype = DTYPE_MAP[args.model]
@@ -202,6 +235,11 @@ def main():
         torch_dtype=model_dtype,
         override_model_path=args.override_model_path,
     )
+    input_shapes = {
+        **pipeline_kwargs,
+        "vae_scale_factor": pipe.vae_scale_factor,
+        "opt_batch_size": args.trt_opt_batch_size,
+    }
 
     if args.torch_compile:
         assert args.torch, "Torch mode must be enabled when torch_compile is used"
@@ -238,11 +276,17 @@ def main():
                 num_benchmark=100,
                 model_name=args.model,
                 torch_autocast=args.torch_autocast,
+                **input_shapes,
             )
 
         if not args.skip_image:
             generate_image(
-                pipe, args.prompt, image_name, args.torch_autocast, args.num_inference_steps
+                pipe,
+                args.prompt,
+                image_name,
+                args.torch_autocast,
+                args.num_inference_steps,
+                **pipeline_kwargs,
             )
         return
 
@@ -250,7 +294,7 @@ def main():
 
     # Generate dummy inputs for the backbone
     dummy_inputs, dynamic_axes, dynamic_shapes = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
-        args.model, backbone
+        args.model, backbone, **input_shapes
     )
 
     # Postprocess the dynamic axes to match the input and output names with DeviceModel
@@ -291,7 +335,10 @@ def main():
     del backbone
     torch.cuda.empty_cache()
 
-    compilation_args = {"dynamic_shapes": trt_dynamic_shapes}
+    compilation_args = {
+        "dynamic_shapes": trt_dynamic_shapes,
+        "builder_optimization_level": args.trt_builder_optimization_level,
+    }
     if not args.trt_engine_load_path:
         # Compile the TRT engine from the exported ONNX model
         compiled_model = client.ir_to_compiled(onnx_bytes, compilation_args)
@@ -330,7 +377,14 @@ def main():
     pipe.to("cuda")
 
     if not args.skip_image:
-        generate_image(pipe, args.prompt, image_name, args.torch_autocast, args.num_inference_steps)
+        generate_image(
+            pipe,
+            args.prompt,
+            image_name,
+            args.torch_autocast,
+            args.num_inference_steps,
+            **pipeline_kwargs,
+        )
         print(f"Image generated using {args.model} model saved as {image_name}")
 
     if args.benchmark:

@@ -74,7 +74,8 @@ class TRTLocalClient(RuntimeClient):
         Args:
             ir_bytes: The ONNX model bytes.
             compilation_args: A dictionary of compilation arguments.
-                The following arguments are supported: dynamic_shapes, plugin_config, engine_path, timing_cache_path.
+                Supported arguments: dynamic_shapes, plugin_config, engine_path,
+                timing_cache_path, builder_optimization_level.
 
         Returns:
             The compiled TRT engine bytes.
@@ -88,6 +89,7 @@ class TRTLocalClient(RuntimeClient):
             plugin_config=compilation_args.get("plugin_config"),  # type: ignore[union-attr]
             engine_path=compilation_args.get("engine_path"),  # type: ignore[union-attr]
             timing_cache_path=compilation_args.get("timing_cache_path"),  # type: ignore[union-attr]
+            builder_optimization_level=compilation_args.get("builder_optimization_level"),  # type: ignore[union-attr]
             trt_mode=self.deployment["precision"],
             verbose=(self.deployment.get("verbose", "false").lower() == "true"),
         )

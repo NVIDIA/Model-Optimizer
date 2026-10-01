@@ -463,3 +463,65 @@ def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:
     save_dir = tmp_path / "tiny_qwen_image"
     pipe.save_pretrained(save_dir)
     return save_dir
+
+
+def get_tiny_pixart_pipeline():
+    """Build an offline PixArt pipeline with the production block count and tiny components."""
+    # Deferred: only cache-diffusion tests need the full pipeline/tokenizer dependencies.
+    from diffusers import (
+        AutoencoderKL,
+        DPMSolverMultistepScheduler,
+        PixArtAlphaPipeline,
+        PixArtTransformer2DModel,
+    )
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+    from transformers import PreTrainedTokenizerFast, T5Config, T5EncoderModel
+
+    tokenizer_backend = Tokenizer(
+        models.WordLevel({"<pad>": 0, "</s>": 1, "<unk>": 2}, unk_token="<unk>")
+    )
+    tokenizer_backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer_backend.post_processor = processors.TemplateProcessing(
+        single="$A </s>", special_tokens=[("</s>", 1)]
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer_backend,
+        pad_token="<pad>",
+        eos_token="</s>",
+        unk_token="<unk>",
+        model_max_length=120,
+    )
+    torch.manual_seed(0)
+    text_encoder = T5EncoderModel(
+        T5Config(vocab_size=3, d_model=32, d_kv=8, d_ff=64, num_layers=1, num_heads=4)
+    ).eval()
+    transformer = PixArtTransformer2DModel(
+        # Keep production block names and sample_size=128 microconditioning; tests use 16px inputs.
+        num_layers=28,
+        num_attention_heads=3,
+        attention_head_dim=8,
+        in_channels=4,
+        out_channels=8,
+        sample_size=128,
+        patch_size=2,
+        cross_attention_dim=24,
+        caption_channels=32,
+        norm_type="ada_norm_single",
+        num_embeds_ada_norm=1000,
+    ).eval()
+    vae = AutoencoderKL(
+        block_out_channels=(16, 32),
+        down_block_types=("DownEncoderBlock2D", "DownEncoderBlock2D"),
+        up_block_types=("UpDecoderBlock2D", "UpDecoderBlock2D"),
+        layers_per_block=1,
+        latent_channels=4,
+        norm_num_groups=8,
+        sample_size=16,
+    ).eval()
+    return PixArtAlphaPipeline(
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        vae=vae,
+        transformer=transformer,
+        scheduler=DPMSolverMultistepScheduler(),
+    )
