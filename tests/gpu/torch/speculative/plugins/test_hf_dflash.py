@@ -234,8 +234,11 @@ class TestDFlashOfflineForwardGPU:
         assert output.loss.requires_grad
         assert torch.isfinite(output.loss).item()
 
-    def test_offline_forward_self_logit_distillation_recomputes_logits(self, offline_model):
-        """When base_model_logits is absent, self-distillation path computes them from hidden states."""
+    def test_offline_forward_self_logit_distillation_reads_hidden_states(self, offline_model):
+        """Without base_model_logits, self-distillation projects the captured hidden states.
+
+        Only the rows the loss reads are projected, so no full-sequence logits come back.
+        """
         assert offline_model.dflash_self_logit_distillation
         bsz = 2
         input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
@@ -247,8 +250,8 @@ class TestDFlashOfflineForwardGPU:
             attention_mask=attention_mask,
             base_model_outputs=base_model_outputs,
         )
-        assert hasattr(output, "logits")
-        assert output.logits is not None
+        assert output.logits is None
+        assert output.loss.requires_grad
         assert torch.isfinite(output.loss).item()
 
 

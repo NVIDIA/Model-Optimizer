@@ -70,7 +70,6 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
 from .hf_dflash import HFDFlashModel
-from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
 
 logger = logging.getLogger(__name__)
@@ -207,18 +206,14 @@ class HFDSparkModel(HFDFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        target_model_logits=None,
-        teacher_hidden=None,
+        base_outputs,
     ):
         """Compute the three-term DSpark loss (CE + TVD + confidence BCE) and metrics.
 
         Uses next-token (shift_label) alignment: block position k predicts the token
         at anchor+k+1; the aligned target distribution is the base model's own
-        next-token distribution at position anchor+k (= label index - 1).
-
-        The teacher comes from ``teacher_hidden`` (post-final-norm, projected only at the rows
-        the loss reads) or, failing that, ``target_model_logits``. ``backbone_logits=None``
-        skips the ``base_accuracy`` metric.
+        next-token distribution at position anchor+k (= label index - 1), read from
+        ``base_outputs``. ``backbone_logits=None`` skips the ``base_accuracy`` metric.
         """
         bsz, seq_len = input_ids.shape
         bs = self.dflash_block_size
@@ -261,27 +256,7 @@ class HFDSparkModel(HFDFlashModel):
         # Aligned target distribution: base-model logits that predict token anchor+k+1
         # sit at position anchor+k (= label index - 1).
         teacher_indices = (safe_label_indices - 1).clamp(min=0)
-        with torch.no_grad():
-            if teacher_hidden is not None:
-                hdim = teacher_hidden.size(-1)
-                gathered_hidden = torch.gather(
-                    teacher_hidden.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-                    2,
-                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, hdim),
-                )
-                flat_teacher = self._base_model_lm_head(gathered_hidden.reshape(-1, hdim))
-            else:
-                if target_model_logits is None:
-                    raise ValueError(
-                        "DSpark loss needs the base distribution: pass teacher_hidden "
-                        "(preferred) or target_model_logits."
-                    )
-                flat_teacher = torch.gather(
-                    target_model_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-                    2,
-                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, vocab),
-                ).reshape(-1, vocab)
-        flat_teacher = flat_teacher.detach()
+        flat_teacher = self._teacher_logits(base_outputs, teacher_indices).reshape(-1, vocab)
 
         if valid_count <= 1.0:
             # Touch every draft parameter, as forward()'s early return does, so DDP with
@@ -385,41 +360,19 @@ class HFDSparkModel(HFDFlashModel):
                 f"Adjust training_seq_len or use padding."
             )
 
-        # 1. Target hidden states AND target-model logits (DSpark's L1/confidence
-        #    terms both need the base model's next-token distribution).
-        if self.dflash_offline:
-            assert "base_model_outputs" in kwargs
-            # Reconstruct base logits through the shared DFlash offline path so the base
-            # final norm is re-applied when the producer captured a pre-(final-)norm hidden
-            # (vLLM streaming) — feeding an un-normed hidden straight to lm_head would make a
-            # corrupt distillation target. DSpark always needs the base distribution (its
-            # TVD/confidence terms), so need_logits=True unconditionally.
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(
-                kwargs["base_model_outputs"],
-                self._base_model_norm,
-                self._base_model_lm_head,
-                need_logits=True,
-                defer_lm_head=True,
-            )
-            target_hidden = base_outputs.target_hidden
-            target_model_logits = base_outputs.logits
-            teacher_hidden = base_outputs.base_hidden
-        else:
-            # Call the inner base model directly (NOT super().forward(), which during
-            # training runs the full DFlash pipeline). Compute target-model logits via
-            # the lm_head — DSpark's TVD/confidence terms need the base distribution.
-            with torch.no_grad():
-                base_out = self._base_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                )
-                # lm_head is applied per-row inside the loss, not over the whole sequence.
-                teacher_hidden = base_out.last_hidden_state
-                target_model_logits = None
-            offset = 1
-            selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
-            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
+        # 1. Target hidden states, plus what the TVD/confidence terms read the base
+        #    distribution from.
+        base_outputs = self._base_outputs(
+            input_ids,
+            attention_mask,
+            position_ids,
+            past_key_values,
+            inputs_embeds,
+            output_attentions,
+            cache_position,
+            kwargs,
+        )
+        target_hidden = base_outputs.target_hidden
 
         # 2. Build loss mask (same convention as DFlash/Domino).
         if labels is not None:
@@ -485,8 +438,7 @@ class HFDSparkModel(HFDFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            target_model_logits=target_model_logits,
-            teacher_hidden=teacher_hidden,
+            base_outputs,
         )
 
         return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)

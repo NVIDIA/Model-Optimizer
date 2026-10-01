@@ -56,8 +56,6 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from transformers.models.qwen3.modeling_qwen3 import repeat_kv
 from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 
-from .modeling_final_norm import _maybe_apply_base_final_norm
-
 __all__ = ["DFlashBaseModelOutput", "DFlashModule", "build_target_layer_ids"]
 
 
@@ -116,57 +114,29 @@ def _get_sink_attention_fn():
 
 @dataclass
 class DFlashBaseModelOutput:
-    """Output container for base model forward pass in DFlash training."""
+    """What a DFlash-family draft takes from the base model in a training step.
+
+    The base distribution is never materialized here: a loss that needs it projects just
+    the rows it reads (``HFDFlashModel._teacher_logits``).
+    """
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
-    logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
-    base_hidden: torch.Tensor | None = None  # post-final-norm base hidden [B, seq, H]
+    base_hidden: torch.Tensor | None = None  # base final hidden, lm_head's input [B, seq, H]
+    base_hidden_prenorm: bool = False  # base_hidden was captured before the final norm
+    logits: torch.Tensor | None = None  # base logits [B, seq, vocab], when handed over as such
 
     @classmethod
-    def from_offline_dict(
-        cls,
-        d: dict,
-        base_model_norm=None,
-        base_model_lm_head=None,
-        need_logits=False,
-        defer_lm_head=False,
-    ):
+    def from_offline_dict(cls, d: dict):
         """Construct from a dict of pre-computed base model outputs (offline training).
 
         ``aux_hidden_states`` is required — missing it raises KeyError at the entry point
         rather than producing a cryptic failure deeper in the forward.
-
-        When ``need_logits`` (self-logit-distillation) and the producer didn't supply
-        ``base_model_logits``, logits are reconstructed from the captured final hidden via
-        ``base_model_lm_head`` — first re-applying the base final norm when the producer captured
-        a pre-(final-)norm hidden (``base_hidden_prenorm``), so the reconstruction is correct
-        regardless of capture format. Anything missing on that path raises rather than silently
-        yielding None logits: no ``base_model_lm_head`` (ValueError), no captured hidden
-        (KeyError), or a pre-norm hidden with no ``base_model_norm`` (feeding an un-normed hidden
-        to lm_head would be a corrupt distillation target).
         """
-        logits = d.get("base_model_logits")
-        base_hidden = None
-        if need_logits and logits is None:
-            out_hiddens = d.get("base_model_hidden_states")
-            if out_hiddens is None:
-                raise KeyError("base_model_hidden_states")
-            if base_model_lm_head is None:
-                raise ValueError(
-                    "need_logits=True but base_model_lm_head is None; cannot reconstruct logits."
-                )
-            # A producer can store the hidden states in a wider dtype than the target's weights.
-            # Cast before the final norm too, which online training runs in the target's dtype.
-            out_hiddens = out_hiddens.to(base_model_lm_head.weight.dtype)
-            base_hidden = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
-            if defer_lm_head:
-                # The caller projects only the rows it needs; skip full-sequence logits.
-                return cls(target_hidden=d["aux_hidden_states"], base_hidden=base_hidden)
-            logits = base_model_lm_head(base_hidden)
         return cls(
             target_hidden=d["aux_hidden_states"],
-            logits=logits,
-            base_hidden=base_hidden,
+            base_hidden=d.get("base_model_hidden_states"),
+            base_hidden_prenorm=bool(d.get("base_hidden_prenorm", False)),
+            logits=d.get("base_model_logits"),
         )
 
 

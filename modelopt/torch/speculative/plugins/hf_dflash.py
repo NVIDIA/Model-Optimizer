@@ -96,6 +96,7 @@ from .modeling_fakebase import (
     _FINAL_NORM_PATHS,
     _LM_HEAD_PATHS,
 )
+from .modeling_final_norm import _maybe_apply_base_final_norm
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,12 @@ def _multimodal_forward_kwargs(model_kwargs: dict) -> dict:
         for name, value in model_kwargs.items()
         if name in _MULTIMODAL_FORWARD_KWARGS and value is not None
     }
+
+
+def _gather_rows(x, positions):
+    """``x[b, positions[b, ...]]`` for ``x`` [B, seq, D] and ``positions`` [B, ...]."""
+    idx = positions.reshape(positions.shape[0], -1, 1).expand(-1, -1, x.size(-1))
+    return torch.gather(x, 1, idx).reshape(*positions.shape, x.size(-1))
 
 
 def _dpace_position_weights(
@@ -716,6 +723,112 @@ class HFDFlashModel(DFlashModel):
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
 
+    def _base_outputs(
+        self,
+        input_ids,
+        attention_mask,
+        position_ids,
+        past_key_values,
+        inputs_embeds,
+        output_attentions,
+        cache_position,
+        model_kwargs,
+    ):
+        """The base model's side of a training step: replayed offline, computed online.
+
+        Online text runs only the inner model; ``_teacher_logits`` applies lm_head to just
+        the rows a loss reads.
+        """
+        if self.dflash_offline:
+            assert "base_model_outputs" in model_kwargs
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(
+                model_kwargs["base_model_outputs"]
+            )
+            # Fail at the entry point rather than in the loss, after the draft has run.
+            if (
+                self._needs_base_logits
+                and base_outputs.logits is None
+                and base_outputs.base_hidden is None
+            ):
+                raise KeyError("base_model_hidden_states")
+            return base_outputs
+
+        base_forward_kwargs = _multimodal_forward_kwargs(model_kwargs)
+        with torch.no_grad():
+            if base_forward_kwargs:
+                # Multimodal models need the top-level conditional-generation forward so their
+                # image/video features are inserted before the language model runs. Its logits
+                # stay the teacher: for a multimodal model, hidden_states[-1] is not
+                # guaranteed to be lm_head's input.
+                outputs = super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=False,
+                    output_attentions=output_attentions,
+                    output_hidden_states=True,
+                    cache_position=cache_position,
+                    return_dict=True,
+                    **base_forward_kwargs,
+                )
+                base_hidden, logits = None, outputs.logits
+            else:
+                outputs = self._base_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+                base_hidden, logits = outputs.last_hidden_state, None
+
+        if not getattr(outputs, "hidden_states", None):
+            raise RuntimeError(
+                "The base model did not return hidden states required for DFlash training. "
+                "Ensure its top-level multimodal forward supports output_hidden_states=True."
+            )
+        offset = 1
+        selected = [outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
+        return DFlashBaseModelOutput(
+            target_hidden=torch.cat(selected, dim=-1),  # [B, seq, num_layers * H]
+            base_hidden=base_hidden,
+            logits=logits,
+        )
+
+    @torch.no_grad()
+    def _teacher_logits(self, base_outputs, positions, token_ids=None):
+        """Base-model logits at ``positions`` ([B, ...] sequence indices) -> [B, ..., vocab].
+
+        Only the requested rows of the base hidden go through the final norm and lm_head, so
+        no full-sequence logits are built; ``token_ids`` ([B, ..., k]) narrows the projection
+        to just those vocab entries.
+        """
+        if base_outputs.logits is not None:
+            if token_ids is None:
+                return _gather_rows(base_outputs.logits, positions)
+            batch = torch.arange(positions.shape[0], device=positions.device)
+            batch = batch.view(-1, *[1] * positions.dim())
+            return base_outputs.logits[batch, positions.unsqueeze(-1), token_ids]
+        if base_outputs.base_hidden is None:
+            raise ValueError(
+                "This objective needs the base model's distribution, but the batch carries "
+                "neither its logits nor its final hidden states (base_model_hidden_states)."
+            )
+        lm_head = self._base_model_lm_head
+        # A producer can store the hidden states in a wider dtype than the target's weights.
+        # Cast before the final norm too, which online training runs in the target's dtype.
+        rows = _gather_rows(base_outputs.base_hidden, positions).to(lm_head.weight.dtype)
+        rows = _maybe_apply_base_final_norm(
+            rows,
+            {"base_hidden_prenorm": base_outputs.base_hidden_prenorm},
+            self._base_model_norm,
+        )
+        if token_ids is None:
+            return lm_head(rows)
+        logits = torch.einsum("...h,...kh->...k", rows, lm_head.weight[token_ids])
+        bias = getattr(lm_head, "bias", None)
+        return logits if bias is None else logits + bias[token_ids]
+
     def _compute_loss(
         self,
         logits,
@@ -723,7 +836,7 @@ class HFDFlashModel(DFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        base_logits=None,
+        teacher=None,
         draft_hidden=None,
         base_outputs=None,
         return_terms=False,
@@ -736,9 +849,10 @@ class HFDFlashModel(DFlashModel):
             anchor_positions: Anchor positions per block [B, N].
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
-            base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
+            teacher: ``DFlashBaseModelOutput`` to distill from (KD), or None for CE.
             draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
                 Unused here; passed for variants whose head consumes them.
+            base_outputs: The step's ``DFlashBaseModelOutput``, for variants that read it.
             return_terms: Also return the unreduced pieces behind the loss, so a variant
                 can recompose the block objective from a different divergence without
                 rebuilding the target alignment and position weighting.
@@ -780,10 +894,10 @@ class HFDFlashModel(DFlashModel):
 
         # Non-KD loss is per-token cross-entropy; compute it once (grad enabled) so the
         # D-PACE confidences below can reuse it instead of a second CE pass. The KD path
-        # (base_logits is not None) optimizes KL, so its confidences need a dedicated
+        # (teacher is not None) optimizes KL, so its confidences need a dedicated
         # no_grad CE pass.
         loss_per_token = None
-        if base_logits is None:
+        if teacher is None:
             loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
 
         # Block-position loss weighting: dynamic D-PACE weights or static exponential decay.
@@ -813,15 +927,11 @@ class HFDFlashModel(DFlashModel):
         valid_count = flat_weights.sum() + 1e-6
 
         if valid_count > 1.0:
-            if base_logits is not None:
+            if teacher is not None:
                 # KD loss: teacher logits for token anchor+k are at position anchor+k-1
                 teacher_indices = (safe_label_indices - 1).clamp(min=0)
-                teacher_logits = torch.gather(
-                    base_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-                    2,
-                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, base_logits.size(-1)),
-                )
-                flat_teacher = teacher_logits.reshape(-1, base_logits.size(-1)).detach()
+                flat_teacher = self._teacher_logits(teacher, teacher_indices)
+                flat_teacher = flat_teacher.reshape(flat_logits.shape)
                 target_soft = torch.softmax(flat_teacher, dim=-1)
                 draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
                 kd_loss = -(target_soft * draft_logsoft).sum(dim=-1)
@@ -903,57 +1013,17 @@ class HFDFlashModel(DFlashModel):
             )
 
         # 1. Run base model → extract target hidden states
-        if self.dflash_offline:
-            assert "base_model_outputs" in kwargs
-            # When the loss needs them (see _needs_base_logits), from_offline_dict reconstructs
-            # base logits from the captured hidden (final norm re-applied as needed) when the producer didn't supply
-            # them, and raises if anything needed for that is missing.
-            base_outputs = DFlashBaseModelOutput.from_offline_dict(
-                kwargs["base_model_outputs"],
-                self._base_model_norm,
-                self._base_model_lm_head,
-                need_logits=self._needs_base_logits,
-            )
-            target_hidden = base_outputs.target_hidden
-        else:
-            # Multimodal models need the top-level conditional-generation forward so their
-            # image/video features are inserted before the language model runs.  Keep the
-            # long-standing narrow call for text-only models.
-            base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
-            use_top_level_forward = bool(base_forward_kwargs)
-            with torch.no_grad():
-                if use_top_level_forward:
-                    raw_outputs = super().forward(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_values=past_key_values,
-                        inputs_embeds=inputs_embeds,
-                        use_cache=False,
-                        output_attentions=output_attentions,
-                        output_hidden_states=True,
-                        cache_position=cache_position,
-                        return_dict=True,
-                        **base_forward_kwargs,
-                    )
-                else:
-                    raw_outputs = super().forward(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=True,
-                    )
-
-            if not getattr(raw_outputs, "hidden_states", None):
-                raise RuntimeError(
-                    "The base model did not return hidden states required for DFlash training. "
-                    "Ensure its top-level multimodal forward supports output_hidden_states=True."
-                )
-            offset = 1
-            selected = [raw_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
-            target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
-            base_outputs = DFlashBaseModelOutput(
-                target_hidden=target_hidden, logits=raw_outputs.logits
-            )
+        base_outputs = self._base_outputs(
+            input_ids,
+            attention_mask,
+            position_ids,
+            past_key_values,
+            inputs_embeds,
+            output_attentions,
+            cache_position,
+            kwargs,
+        )
+        target_hidden = base_outputs.target_hidden
 
         # 2. Build loss mask. Labels carry optional answer-only masking, but do
         # not in general mark padded tokens with -100 (the VLM collator creates
@@ -986,7 +1056,7 @@ class HFDFlashModel(DFlashModel):
                 ),
                 torch.zeros((), device=device),
             )
-            return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
+            return ModelOutput(loss=dummy, logits=None, train_acc=[[0.0]])
 
         # 4. Build draft inputs
         noise_embedding = self._build_noise_embedding(
@@ -1019,14 +1089,14 @@ class HFDFlashModel(DFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            base_outputs.logits if self.dflash_self_logit_distillation else None,
+            teacher=base_outputs if self.dflash_self_logit_distillation else None,
             draft_hidden=hidden,
             base_outputs=base_outputs,
         )
 
         return ModelOutput(
             loss=loss,
-            logits=base_outputs.logits,
+            logits=None,
             train_acc=[[accuracy]],
         )
 

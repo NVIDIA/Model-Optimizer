@@ -39,6 +39,7 @@ from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_per_token
 from modelopt.torch.speculative.plugins.modeling_dflash import (
+    DFlashBaseModelOutput,
     DFlashModule,
     build_target_layer_ids,
     repeat_kv,
@@ -935,8 +936,10 @@ class TestDdpGradientCoverage:
         hidden = m(*args)
         vocab = model.dflash_config.vocab_size
         backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        # The teacher is gathered before the degenerate branch, so it must still be passed.
-        target_model_logits = torch.randn(bsz, SEQ_LEN, vocab, dtype=hidden.dtype)
+        # The teacher is read before the degenerate branch, so it must still be passed.
+        base_outputs = DFlashBaseModelOutput(
+            args[1], base_hidden=torch.randn(bsz, SEQ_LEN, hidden.size(-1), dtype=hidden.dtype)
+        )
         final_logits, confidence_logits = model._apply_markov_head(
             hidden, backbone_logits, input_ids, anchors, n_blocks
         )
@@ -948,7 +951,7 @@ class TestDdpGradientCoverage:
             anchors,
             torch.ones(bsz, n_blocks),  # blocks are kept ...
             torch.zeros(bsz, SEQ_LEN),  # ... but no label position carries weight
-            target_model_logits=target_model_logits,
+            base_outputs,
         )
         loss.backward()
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"

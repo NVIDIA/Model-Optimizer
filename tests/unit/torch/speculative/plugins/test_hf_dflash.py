@@ -39,6 +39,7 @@ import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
+    DFlashBaseModelOutput,
     DFlashModule,
     HFDFlashModel,
     _dpace_position_weights,
@@ -278,12 +279,12 @@ class TestDPaceLossIntegration:
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_dpace_kd_branch(self):
-        """dpace + KD (base_logits given): confidences use a dedicated no_grad CE pass."""
+        """dpace + KD (teacher given): confidences use a dedicated no_grad CE pass."""
         vocab = 32
         model = self._converted_model("dpace")
         inputs = self._make_inputs(vocab=vocab)
-        base_logits = torch.randn(1, SEQ_LEN, vocab)
-        loss, acc = model._compute_loss(*inputs, base_logits=base_logits)
+        teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
+        loss, acc = model._compute_loss(*inputs, teacher=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
 
@@ -1296,3 +1297,107 @@ class TestAnchorSamplingStaticShape:
         )
         torch.testing.assert_close(padded_loss, base_loss)
         assert padded_acc == pytest.approx(base_acc)
+
+
+class TestTeacherLogits:
+    """The base distribution is projected only at the rows, and vocab entries, asked for."""
+
+    @staticmethod
+    def _model():
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        return model
+
+    @staticmethod
+    def _positions(bsz=2):
+        torch.manual_seed(0)
+        return torch.randint(0, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
+
+    @staticmethod
+    def _rows(full, positions):
+        return full[torch.arange(positions.shape[0]).view(-1, 1, 1), positions]
+
+    @staticmethod
+    def _hidden(model, bsz=2):
+        dtype = model._base_model_lm_head.weight.dtype
+        return torch.randn(bsz, SEQ_LEN, model.config.hidden_size, dtype=dtype)
+
+    def test_matches_the_full_sequence_projection(self):
+        model = self._model()
+        hidden = self._hidden(model)
+        positions = self._positions()
+        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), positions)
+        want = self._rows(model._base_model_lm_head(hidden), positions)
+        torch.testing.assert_close(got, want)
+
+    def test_prenorm_hidden_gets_the_base_final_norm(self):
+        model = self._model()
+        hidden = self._hidden(model)
+        positions = self._positions()
+        outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
+        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), positions)
+        torch.testing.assert_close(model._teacher_logits(outputs, positions), want)
+
+    def test_token_ids_pick_entries_of_the_full_rows(self):
+        model = self._model()
+        outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
+        positions = self._positions()
+        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
+        rows = model._teacher_logits(outputs, positions)
+        torch.testing.assert_close(
+            model._teacher_logits(outputs, positions, token_ids), rows.gather(-1, token_ids)
+        )
+
+    def test_handed_over_logits_are_gathered_not_recomputed(self):
+        model = self._model()
+        logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
+        outputs = DFlashBaseModelOutput(None, logits=logits)
+        positions = self._positions()
+        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
+        want = self._rows(logits, positions)
+        assert torch.equal(model._teacher_logits(outputs, positions), want)
+        assert torch.equal(
+            model._teacher_logits(outputs, positions, token_ids), want.gather(-1, token_ids)
+        )
+
+    def test_missing_base_distribution_raises(self):
+        model = self._model()
+        with pytest.raises(ValueError, match="base_model_hidden_states"):
+            model._teacher_logits(DFlashBaseModelOutput(None), self._positions())
+
+    def test_offline_dict_keeps_the_hidden_unprojected(self):
+        d = {
+            "aux_hidden_states": torch.randn(1, SEQ_LEN, 8),
+            "base_model_hidden_states": torch.randn(1, SEQ_LEN, 4),
+            "base_hidden_prenorm": True,
+        }
+        outputs = DFlashBaseModelOutput.from_offline_dict(d)
+        assert outputs.logits is None
+        assert outputs.base_hidden is d["base_model_hidden_states"]
+        assert outputs.base_hidden_prenorm
+
+    def test_kd_loss_matches_full_logits(self):
+        """KD read from the base hidden equals KD from the same logits built in full."""
+        model = self._model()
+        hidden = self._hidden(model, bsz=1)
+        inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
+        full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
+        loss_full, _ = model._compute_loss(*inputs, teacher=full)
+        loss, _ = model._compute_loss(
+            *inputs, teacher=DFlashBaseModelOutput(None, base_hidden=hidden)
+        )
+        torch.testing.assert_close(loss, loss_full)
+
+    def test_training_step_never_projects_the_full_sequence(self):
+        """Online with KD on, lm_head only ever sees draft rows and teacher rows."""
+        model = self._model()
+        assert model.dflash_self_logit_distillation
+        model.train()
+        seen = []
+        model._base_model_lm_head.register_forward_hook(
+            lambda _module, args, _out: seen.append(tuple(args[0].shape))
+        )
+        input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
+        model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids)).loss.backward()
+        assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
+        assert (2, SEQ_LEN, model.config.hidden_size) not in seen, seen
