@@ -662,13 +662,19 @@ def _convert_weight(
 
     axis = axis_map[op_type]
 
-    if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
+    # A scalar (or single-element) scale is per-tensor quantization: one value broadcast over the
+    # whole weight, which is the ONNX default for QuantizeLinear/DequantizeLinear. Only a scale
+    # with one entry per channel is per-axis, and only that shape is checked against the axis.
+    is_per_tensor = scale_array.size == 1
+    if not is_per_tensor and scale_array.shape[0] != weight_shape[axis]:
         raise ValueError(
-            f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} along axis {axis}"
+            f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} "
+            f"along axis {axis}"
         )
 
     reshape_dims = [1] * len(weight_shape)
-    reshape_dims[axis] = scale_array.shape[0]
+    if not is_per_tensor:
+        reshape_dims[axis] = scale_array.shape[0]
     scale_array = scale_array.reshape(*reshape_dims)
     zp_array = zp_array.reshape(*reshape_dims)
 
