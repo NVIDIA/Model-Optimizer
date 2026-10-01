@@ -41,22 +41,6 @@ constexpr float kScaleAnchor = 0.61f;
 static_assert(kEntries % kThreads == 0, "every thread must visit the same number of entries");
 static_assert((kEntries & (kEntries - 1)) == 0, "the codebook index mask assumes a power of two");
 
-__device__ __forceinline__ float quant_error(float xnorm, float xsum, const float *x,
-                                             const float *q, float scale, float delta) {
-  float dot = 0.0f;
-  float qnorm = 0.0f;
-  float qsum = 0.0f;
-#pragma unroll
-  for (int j = 0; j < kVectorSize; ++j) {
-    dot = fmaf(x[j], q[j], dot);
-    qnorm = fmaf(q[j], q[j], qnorm);
-    qsum += q[j];
-  }
-  const float shifted_dot = dot + delta * xsum;
-  const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
-  return clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale);
-}
-
 template <typename scalar_t>
 __global__ void find_scale(const scalar_t *input, int64_t num_blocks, int64_t *scale_bits) {
   const int64_t block = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -104,39 +88,23 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
 #pragma unroll
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
-      float xnorm = 0.0f;
-      float xsum = 0.0f;
-      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
-#pragma unroll
-      for (int j = 0; j < kVectorSize; ++j) {
-        x[j] = load_float(source + offset + j);
-        xnorm = fmaf(x[j], x[j], xnorm);
-        xsum += x[j];
-      }
+      float xnorm, xsum;
+      load_vector(source + group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize, x,
+                  xnorm, xsum);
       float local_best[kChoices];
 #pragma unroll
       for (int choice = 0; choice < kChoices; ++choice)
         local_best[choice] = FLT_MAX;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
-        const float *q = grid + entry * kVectorSize;
-        float dot = 0.0f;
-        float qnorm = 0.0f;
-        float qsum = 0.0f;
-#pragma unroll
-        for (int j = 0; j < kVectorSize; ++j) {
-          dot = fmaf(x[j], q[j], dot);
-          qnorm = fmaf(q[j], q[j], qnorm);
-          qsum += q[j];
-        }
+        float dot, qnorm, qsum;
+        grid_terms(x, grid + entry * kVectorSize, dot, qnorm, qsum);
 #pragma unroll
         for (int choice = 0; choice < kChoices; ++choice) {
           const int local = choice & 7;
           const float delta = choice < 8 ? kDelta : -kDelta;
           const float scale = d * (2 * local + 1);
-          const float shifted_dot = dot + delta * xsum;
-          const float shifted_norm = qnorm + 2.0f * delta * qsum + 8.0f * delta * delta;
-          local_best[choice] = fminf(local_best[choice],
-                                     clamped_quant_error(xnorm, shifted_dot, shifted_norm, scale));
+          local_best[choice] =
+              fminf(local_best[choice], shifted_error(xnorm, xsum, dot, qnorm, qsum, scale, delta));
         }
       }
       block_min_accumulate<kChoices>(local_best, warp_best, group_error);
@@ -161,19 +129,15 @@ __global__ void encode(const scalar_t *input, int64_t num_blocks, const float *g
 #pragma unroll
     for (int vector = 0; vector < kVectorsPerGroup; ++vector) {
       float x[kVectorSize];
-      float xnorm = 0.0f;
-      float xsum = 0.0f;
-      const int offset = group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize;
-#pragma unroll
-      for (int j = 0; j < kVectorSize; ++j) {
-        x[j] = load_float(source + offset + j);
-        xnorm = fmaf(x[j], x[j], xnorm);
-        xsum += x[j];
-      }
+      float xnorm, xsum;
+      load_vector(source + group * (kVectorsPerGroup * kVectorSize) + vector * kVectorSize, x,
+                  xnorm, xsum);
       unsigned long long key = ~0ULL;
       for (int entry = tid; entry < kEntries; entry += blockDim.x) {
+        float dot, qnorm, qsum;
+        grid_terms(x, grid + entry * kVectorSize, dot, qnorm, qsum);
         const float error =
-            quant_error(xnorm, xsum, x, grid + entry * kVectorSize, selected_scale, selected_delta);
+            shifted_error(xnorm, xsum, dot, qnorm, qsum, selected_scale, selected_delta);
         const unsigned long long candidate = error_key(error, entry);
         key = candidate < key ? candidate : key;
       }
