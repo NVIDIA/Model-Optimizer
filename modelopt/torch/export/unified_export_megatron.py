@@ -321,11 +321,6 @@ class GPTModelExporter:
         # medusa_heads and eagle_module only exist in the last stage.
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
-        # One writer per pipeline stage: other TP / DP / EP ranks hold the same layers (EP>1 ranks
-        # hold no gathered experts at all), and writing them too would race on the same files.
-        writes_layers = (
-            tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
-        )
 
         quantization_format = self._get_quantization_format(self.model)
         if self._any_rank_uses_iq_quantization():
@@ -345,6 +340,22 @@ class GPTModelExporter:
                     "Megatron IQ1_S/IQ2_XS unified export currently requires pipeline model "
                     "parallel size 1"
                 )
+        # SequentialMLP rules index experts by local position, so EP>1 would collide. Agreed across
+        # ranks so that stages without such experts don't block in the collectives below.
+        if (
+            torch.distributed.is_initialized()
+            and get_expert_model_parallel_world_size() > 1
+            and self._any_rank(any(hasattr(m, "local_experts") for m in self.model.modules()))
+        ):
+            raise NotImplementedError(
+                "Export at expert parallel size > 1 needs grouped-GEMM experts; "
+                "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
+            )
+        # One writer per pipeline stage: other TP / DP / EP ranks hold the same layers (EP>1 ranks
+        # hold no gathered experts at all), and writing them too would race on the same files.
+        writes_layers = (
+            tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
+        )
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -747,15 +758,6 @@ class GPTModelExporter:
                             layer.mlp.shared_experts.gate_weight, layer_id, is_mtp=is_mtp
                         )
                 if hasattr(layer.mlp.experts, "local_experts"):
-                    # SequentialMLP rules index experts by local position, so EP>1 would collide.
-                    if (
-                        torch.distributed.is_initialized()
-                        and get_expert_model_parallel_world_size() > 1
-                    ):
-                        raise NotImplementedError(
-                            "Export at expert parallel size > 1 needs grouped-GEMM experts; "
-                            "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
-                        )
                     if not self.rules.get("use_packed_local_experts", False):
                         for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
                             self.rules["local_experts.linear_fc1"](
@@ -1183,11 +1185,15 @@ class GPTModelExporter:
         holding no IQ layer would skip the raise and then block in the next collective while its
         peers exit. Agree across ranks first, mirroring ``_gather_exclude_modules``.
         """
-        local_uses_iq = uses_iq_quantization(self.model)
+        return self._any_rank(uses_iq_quantization(self.model))
+
+    @staticmethod
+    def _any_rank(local: bool) -> bool:
+        """Whether ``local`` holds on any rank, so callers can raise everywhere or nowhere."""
         if not torch.distributed.is_initialized():
-            return local_uses_iq
+            return local
         per_rank = [None] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(per_rank, local_uses_iq)
+        torch.distributed.all_gather_object(per_rank, local)
         return any(per_rank)
 
     def _get_quantization_format(self, module: torch.nn.Module):

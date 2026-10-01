@@ -590,7 +590,7 @@ def adjust_distillation_model_for_mcore(
     # An MTP head left out of quantization is exempt from that: there is no quantization
     # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_mtp_loss = _mtp_excluded_from_quantization(model)
-    if skip_mtp_loss:
+    if distill_cfg.skip_lm_loss and skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
         for name, param in model.named_parameters():
             if "mtp" in name.split("."):
