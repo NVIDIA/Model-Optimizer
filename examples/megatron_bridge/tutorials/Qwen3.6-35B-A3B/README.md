@@ -333,7 +333,7 @@ The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outsi
 | **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 6,713 → 4,052 | 2,116 → 2,184 |
 | **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 10,209 → 4,641 | 3,482 → 3,302 |
 
-Accuracy is neutral — the deltas span −0.59 to +0.89, run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy, and wall-clock generation drops 12-44%.
+Accuracy is neutral — the deltas span −0.59 to +0.89, run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy: SciCode wall-clock generation drops 12-44%, which the token columns explain — see the rate-cost table below.
 
 Means are `avg_completion_tokens`, so the left-hand column matches the table above; medians come from the per-response `output.jsonl`, which is the only place they exist.
 
@@ -341,7 +341,16 @@ Means are `avg_completion_tokens`, so the left-hand column matches the table abo
 
 The shipped `eval_configs/scicode.yaml` carries the line already, commented out, so it reproduces the results table above — uncomment `presence_penalty: 1.5` in its `params_to_add` block to get the right-hand column.
 
-**Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged while making generation **4.2× slower** — pure cost. Use it where runaway generation actually occurs; do not make it a global default.
+**Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged and costs **4.8× throughput**. Use it where runaway generation actually occurs; do not make it a global default.
+
+The two wall-clock results look contradictory and are not — the penalty has a *rate* cost that scales with concurrency, and SciCode pays it back in tokens it no longer emits:
+
+| Benchmark | `parallelism` | tok/s without → with | rate cost | tokens removed | net |
+| --- | --- | --- | --- | --- | --- |
+| SciCode | 8 | 1,475 → 1,192 | 1.24× | −55% | **faster** |
+| GPQA Diamond | 32 | 5,109 → 1,067 | 4.8× | −7% | **slower** |
+
+Measured on single-Slurm-segment runs on both sides, so neither figure includes requeue overhead. The likely cause is that the penalty is applied per sequence across the 248,320-token vocabulary on every decode step, so its cost grows with the number of concurrent sequences — at `parallelism: 8` it is a 24% tax, at 32 it dominates. We measured the correlation with `parallelism`, not the implementation, so treat the attribution as inference. The practical rule is the same either way: **the penalty pays for itself only where it removes enough tokens to cover its rate cost**, and that means workloads that actually cap.
 
 **For the next QAD run**, three things follow: track the **length-capped rate** as a first-class metric alongside accuracy (a benchmark score can stay flat while 3.6% of responses return nothing); consider **top-p instead of top-k** for the KD loss so coverage adapts to the teacher's entropy rather than a fixed rank; and if memory allows, **full-vocab KL** — at 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here, but more GPU memory or a smaller model or shorter sequence may afford it.
 
