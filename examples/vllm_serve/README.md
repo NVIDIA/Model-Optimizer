@@ -98,6 +98,46 @@ Step 4 (Optional): using lm_eval to run evaluation
 lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,base_url=http://127.0.0.1:8000/v1/completions,num_concurrent=1,max_retries=3,tokenized_requests=False,batch_size=128,tokenizer_backend=None
 ```
 
+## Fake-quantize the MLA KV cache
+
+MLA models such as DeepSeek-V3 and GLM-5.3-Flash cache one latent vector per token instead of
+separate keys and values. Its fake quantizer is `kv_c_bmm_quantizer` on vLLM's `MLAAttention`.
+`KV_QUANT_CFG` presets (e.g. `NVFP4_KV_CFG`) are extended to it automatically, but the KV-cache
+units in a recipe (`*[kv]_bmm_quantizer`) do not match it, so a recipe imports the
+`configs/ptq/units/kv_nvfp4_mla` unit instead. For example, `kv_nvfp4_mla_only.yaml` quantizes the
+latent KV cache alone (weights and activations stay unquantized):
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  kv_nvfp4_mla: configs/ptq/units/kv_nvfp4_mla
+
+metadata:
+  description: NVFP4 fake quantization of the MLA latent KV cache only.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: kv_nvfp4_mla
+```
+
+```bash
+RECIPE_PATH=kv_nvfp4_mla_only.yaml python vllm_serve_fakequant.py <model_path> -tp 8 \
+  --host 0.0.0.0 --port 8000
+```
+
+This recipe also runs on the FP8 GLM-5.3-Flash release, since it leaves the FP8 layers alone (add
+`--moe-backend auto`, see above).
+
+Notes:
+
+- The latent is fake-quantized before vLLM writes it to the cache, so attention over the tokens
+  of the current step sees the quantized values too.
+- Serve with a BF16 KV cache: an FP8 cache would quantize the fake-quantized latent a second time.
+  `--kv-cache-dtype auto` is BF16 unless the checkpoint declares a quantized KV cache (e.g. a
+  ModelOpt export with an FP8 KV cache); then pass `--kv-cache-dtype bfloat16`.
+
 ## Tracking a serve with MLflow
 
 Pass `--mlflow <tracking-uri>`, or set MLflow's own `MLFLOW_TRACKING_URI`, to record what

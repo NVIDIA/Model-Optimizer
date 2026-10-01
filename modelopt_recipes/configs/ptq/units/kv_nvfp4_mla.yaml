@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# QuantizerCfgList snippet that enables NVFP4 (E2M1, block 16, E4M3 scales) fake quantization of the
+# MLA latent KV cache in vLLM: `kv_c_bmm_quantizer` on MLAAttention, the normalized latent that vLLM
+# caches and attention reads as both K and V. The KV-cache units (`*[kv]_bmm_quantizer`) do not
+# match it. The RoPE key part (`k_pe_bmm_quantizer`) stays unquantized; NoPE MLA models such as
+# GLM-5.3-Flash have none.
+# The global scale is fixed to 1 (amax = 6 * 448) instead of calibrated, so the per-block E4M3 scales
+# carry the whole range and no scale has to be calibrated or exported.
+# The NVFP4 fake-quant kernel needs compute capability 8.9+ (Ada, Hopper or newer).
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*kv_c_bmm_quantizer'
+    cfg:
+      $import: nvfp4
+      constant_amax: 2688.0
