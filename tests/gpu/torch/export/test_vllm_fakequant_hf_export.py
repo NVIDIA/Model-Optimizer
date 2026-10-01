@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 import torch
@@ -28,7 +30,7 @@ from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 from modelopt.torch.utils import safe_load
 
 
-def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
+def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir, resize_vocab=False):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
@@ -39,7 +41,10 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     """
 
     # Load the model
+    source_config = (Path(model_dir) / "config.json").read_bytes()
     model = AutoModelForCausalLM.from_pretrained(model_dir)
+    if resize_vocab:
+        model.resize_token_embeddings(model.config.vocab_size + 8)
     model = model.cuda()
     model.eval()
 
@@ -83,6 +88,13 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
     export_dir.mkdir(exist_ok=True)
 
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
+
+    export_config = export_dir / "config.json"
+    if resize_vocab:
+        assert json.loads(export_config.read_text())["vocab_size"] == model.config.vocab_size
+    else:
+        # An unchanged config retains the source bytes for remote-code parity.
+        assert export_config.read_bytes() == source_config
 
     # Verify the input model is not mutated: all state dict values unchanged
     state_dict_after_export = model.state_dict()
@@ -220,6 +232,11 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
 def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
     tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
+
+
+def test_hf_vllm_export_resized_vocab(tmp_path):
+    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    _test_hf_vllm_export(tmp_path, mtq.FP8_DEFAULT_CFG, tiny_model_dir, resize_vocab=True)
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
