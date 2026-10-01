@@ -85,7 +85,8 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
     The formats share their packing helpers, CUDA version requirement, and build flags, so they
     build as a single extension: ``iq1_s_pack(input, grid)``,
     ``iq2_xs_pack(input, grid, scales)``, ``iq2_xxs_pack(input, grid, scales)``,
-    ``iq2_s_pack(input, grid, scales)``, and ``q8_0_pack(input)``.
+    ``iq2_s_pack(input, grid, scales)``, ``iq1_m_pack(input, grid, scales)``, and
+    ``q8_0_pack(input)``.
     """
     if not hasattr(get_cuda_ext_ggml, "extension") or (
         raise_if_failed and get_cuda_ext_ggml.extension is None
@@ -98,6 +99,7 @@ def get_cuda_ext_ggml(raise_if_failed: bool = False):
                 kernels_ggml / "iq2_xs.cu",
                 kernels_ggml / "iq2_xxs.cu",
                 kernels_ggml / "iq2_s.cu",
+                kernels_ggml / "iq1_m.cu",
                 kernels_ggml / "q8_0.cu",
             ],
             cuda_version_specifiers=">=11.8",

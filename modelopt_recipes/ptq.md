@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 30 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 31 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -59,6 +59,7 @@ supported combinations.
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 | `iq1_s` | IQ1_S W1A16, eligible linears | none | none (no calibration) |
+| `iq1_m` | IQ1_M W1A16 (1.75 bpw), eligible linears | none | none (no calibration) |
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), eligible linears | none | none (no calibration) |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), eligible linears | none | none (no calibration) |
 | `iq2_s` | IQ2_S W2A16 (2.56 bpw), eligible linears | none | none (no calibration) |
@@ -140,10 +141,10 @@ activations and tensor-core math are what deliver the throughput.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
-- **`iq1_s` / `iq2_xxs` / `iq2_xs` / `iq2_s`** — GGML-compatible IQ weights
+- **`iq1_s` / `iq1_m` / `iq2_xxs` / `iq2_xs` / `iq2_s`** — GGML-compatible IQ weights
   on the eligible linear layers, with BF16 activations; `lm_head`, MoE routers,
   `conv1d` and the vision branch stay in BF16 like every other preset. The formats
-  trade size against accuracy in order: 1.56, 2.06, 2.31 and 2.56 bits per weight. No calibration data is
+  trade size against accuracy in order: 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight. No calibration data is
   required. Quantized weights must have a final dimension divisible by 256.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
   requires tensor and pipeline parallel sizes of 1, and does not support

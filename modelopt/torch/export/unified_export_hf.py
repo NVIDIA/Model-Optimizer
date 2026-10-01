@@ -25,7 +25,7 @@ import tempfile
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -1587,10 +1587,17 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+def _revert_hf_quant_config_names(
+    hf_quant_config: dict,
+    name_mapper: Callable[[str], str],
+    *,
+    module_names: Iterable[str] = (),
+) -> dict:
     """Return a name-reverted copy, leaving the input untouched if mapping fails."""
     mapped_quant_config = copy.deepcopy(hf_quant_config)
-    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    revert_quant_config_names(
+        mapped_quant_config.get("quantization", {}), name_mapper, module_names=module_names
+    )
     return mapped_quant_config
 
 
@@ -1604,7 +1611,11 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
+            return _revert_hf_quant_config_names(
+                hf_quant_config,
+                name_mapper,
+                module_names=(name for name, _ in model.named_modules()),
+            )
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
@@ -1991,14 +2002,22 @@ def export_hf_checkpoint(
                 mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
                     mapped_quant_config = _revert_hf_quant_config_names(
-                        hf_quant_config, name_mapper
+                        hf_quant_config,
+                        name_mapper,
+                        module_names=(
+                            key.removesuffix(".weight")
+                            for key in export_state_dict
+                            if key.endswith(".weight")
+                        ),
                     )
                 export_state_dict = mapped_state_dict
                 hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
-                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                    "names may not match the original HF hub checkpoint."
+                    f"Quant-aware reverse weight conversion skipped ({exc}); all exported "
+                    "tensors and quantization config retain their in-memory names, including "
+                    "unrelated submodels. Deployment loaders expecting the original HF hub "
+                    "layout may fail to load or skip these weights."
                 )
 
             _sanitize_generation_config_for_save(model)

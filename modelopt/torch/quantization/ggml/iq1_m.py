@@ -39,8 +39,10 @@ https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015
 
 import torch
 
+from ..extensions import get_cuda_ext_ggml
 from .common import (
     GGML_BLOCK_SIZE,
+    IQFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -53,6 +55,7 @@ __all__ = [
     "IQ1_M_BLOCK_SIZE",
     "IQ1_M_EFFECTIVE_BITS",
     "dequantize_iq1_m",
+    "iq1_m_fake_quant",
     "iq1_m_grid",
     "quantize_iq1_m",
 ]
@@ -74,6 +77,7 @@ _IQ1_M_GROUPS = 32
 _IQ1_M_SUBBLOCKS = 8
 _DEFAULT_BLOCK_CHUNK_SIZE = 1024
 _DEFAULT_DECODE_CHUNK_SIZE = 4096
+_SCALE_BLOCK_CHUNK_SIZE = 4096
 
 
 def iq1_m_grid(device: torch.device | str | None = None) -> torch.Tensor:
@@ -156,6 +160,16 @@ def quantize_iq1_m(
     blocks = weight.contiguous().reshape(-1, IQ1_M_BLOCK_SIZE)
     grid = iq1_s_grid(weight.device)
     packed_shape = (*weight.shape[:-1], weight.shape[-1] // IQ1_M_BLOCK_SIZE, IQ1_M_BLOCK_BYTES)
+    if weight.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            scale_chunks = [
+                _predict_iq1_m_scales(blocks[start : start + _SCALE_BLOCK_CHUNK_SIZE])
+                for start in range(0, blocks.shape[0], _SCALE_BLOCK_CHUNK_SIZE)
+            ]
+            packed = extension.iq1_m_pack(blocks, grid, torch.cat(scale_chunks))
+            return packed.reshape(packed_shape), logical_shape
+
     chunks = [
         _encode_blocks(blocks[start : start + block_chunk_size], grid)
         for start in range(0, blocks.shape[0], block_chunk_size)
@@ -217,3 +231,19 @@ def dequantize_iq1_m(
         chunk_decoded = values * group_scale.unsqueeze(-1)
         decoded[start:stop] = chunk_decoded.reshape(-1, IQ1_M_BLOCK_SIZE)
     return decoded.reshape(shape)
+
+
+IQ1_M_FORMAT = IQFormat(
+    name="iq1_m",
+    block_size=IQ1_M_BLOCK_SIZE,
+    block_bytes=IQ1_M_BLOCK_BYTES,
+    quantize=quantize_iq1_m,
+    dequantize=dequantize_iq1_m,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq1_m and
+# dequantize_iq1_m when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+iq1_m_fake_quant = IQ1_M_FORMAT.fake_quant
