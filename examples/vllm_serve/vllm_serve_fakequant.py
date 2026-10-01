@@ -164,12 +164,18 @@ def _add_fakequant_args(parser) -> None:
     g.add_argument(
         "--modelopt-quant-file-path",
         default=os.environ.get("QUANT_FILE_PATH"),
-        help="Path to amax / quantizer state file (.pt) [env: QUANT_FILE_PATH]",
+        help=(
+            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export "
+            "[env: QUANT_FILE_PATH]"
+        ),
     )
     g.add_argument(
         "--modelopt-state-path",
         default=os.environ.get("MODELOPT_STATE_PATH"),
-        help="Path to full ModelOpt state checkpoint (.pt) [env: MODELOPT_STATE_PATH]",
+        help=(
+            "Path to vllm_fq_modelopt_state.pth in an HF vLLM fakequant export "
+            "[env: MODELOPT_STATE_PATH]"
+        ),
     )
     g.add_argument(
         "--modelopt-recipe-path",

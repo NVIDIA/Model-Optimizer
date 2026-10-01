@@ -42,8 +42,8 @@ corresponding environment variable when omitted:
 | --- | --- | --- |
 | `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config |
 | `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config |
-| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Quantizer tensor state; requires a quantization config or recipe |
-| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Full ModelOpt state checkpoint |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Path to `quantizer_state.pth` in a Megatron (MCore) vLLM fakequant export; requires a quantization config or recipe |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Path to `vllm_fq_modelopt_state.pth` in an HF vLLM fakequant export (full ModelOpt state) |
 | `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML |
 | `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
 | `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
