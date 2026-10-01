@@ -263,12 +263,29 @@ def _find_serve_model(rest_argv: list) -> str | None:
     return getattr(args, "model_tag", None) or getattr(args, "model", None)
 
 
+def _run_vllm_cli(argv: list[str]) -> None:
+    """Delegate arguments to the stock vLLM CLI."""
+    sys.argv = ["vllm", *argv]
+    from vllm.entrypoints.cli.main import main as vllm_main
+
+    vllm_main()
+
+
 def main():
+    argv = sys.argv[1:]
+    # Non-serve commands do not consume ModelOpt settings, including env defaults.
+    if argv and argv[0] in _VLLM_SUBCOMMANDS and argv[0] != "serve":
+        _run_vllm_cli(argv)
+        return
+
     modelopt_parser = FlexibleArgumentParser(add_help=False)
     _add_fakequant_args(modelopt_parser)
     add_mlflow_args(modelopt_parser)
     modelopt_args, rest_argv = modelopt_parser.parse_known_args(sys.argv[1:])
     rest_argv = _default_to_serve(rest_argv)
+    if rest_argv and rest_argv[0] != "serve":
+        _run_vllm_cli(argv)
+        return
 
     if (modelopt_args.modelopt_quant_cfg or modelopt_args.modelopt_kv_quant_cfg) and (
         modelopt_args.modelopt_recipe_path
@@ -325,10 +342,7 @@ def main():
             if not _has_flag(rest_argv, "--moe-backend", "--moe_backend"):
                 rest_argv = [*rest_argv, "--moe_backend", "triton"]
 
-    sys.argv = ["vllm", *rest_argv]
-    from vllm.entrypoints.cli.main import main as vllm_main
-
-    vllm_main()
+    _run_vllm_cli(rest_argv)
 
 
 if __name__ == "__main__":

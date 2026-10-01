@@ -219,7 +219,8 @@ def test_vllm_serve_parser_dependency_error_propagates(monkeypatch):
     assert raised.value is dependency_error
 
 
-def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch):
+@pytest.mark.parametrize("quant_cfg", [None, "FP8_DEFAULT_CFG"])
+def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
     for key in (
         "QUANT_CFG",
         "KV_QUANT_CFG",
@@ -228,6 +229,8 @@ def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch):
         "QUANT_FILE_PATH",
     ):
         monkeypatch.delenv(key, raising=False)
+    if quant_cfg:
+        monkeypatch.setenv("QUANT_CFG", quant_cfg)
     launcher = _load_fakequant_launcher(monkeypatch)
     monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
     vllm_main = Mock()
