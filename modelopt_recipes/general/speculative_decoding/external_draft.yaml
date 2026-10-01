@@ -26,7 +26,7 @@ data:
   data_path:
   offline_data_path:
   # Dumped top-k teacher deployment policy. Selects data.mode=sparse, which needs no
-  # base lm_head at train time and requires a TVD objective (tvd or tvd_deploy).
+  # base lm_head at train time and requires a TVD objective (tvd, tvd_deploy or tvd_ce).
   #
   # The first run over a dump builds a memmapped cache beside the shards, which takes
   # hours on a large corpus. Under torchrun only rank 0 builds it and the others wait,

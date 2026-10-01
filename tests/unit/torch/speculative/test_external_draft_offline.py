@@ -146,6 +146,33 @@ def test_dense_tvd_uses_full_vocabulary_and_the_filter_changes_it():
     assert not torch.allclose(a, b), "the serving filter must change the loss"
 
 
+def test_dense_tvd_ce_runs_and_its_weights_are_honoured():
+    """The dense `tvd_ce` branch is a separate code path from the sparse one.
+
+    Zeroing the CE weight must reproduce the dense `tvd` loss exactly, which pins the
+    mix rather than merely showing the two differ.
+    """
+    batch = _offline_batch()
+    # _external_draft builds freshly initialised models, so the three have to be seeded
+    # identically or the comparison measures the random init rather than the objective.
+    torch.manual_seed(0)
+    plain, _ = _external_draft(external_loss="tvd")
+    torch.manual_seed(0)
+    mixed, _ = _external_draft(external_loss="tvd_ce")
+    torch.manual_seed(0)
+    only_tvd, _ = _external_draft(
+        external_loss="tvd_ce", external_tvd_alpha=1.0, external_ce_alpha=0.0
+    )
+
+    a = plain(**batch).loss
+    b = mixed(**batch).loss
+    c = only_tvd(**batch).loss
+    assert torch.isfinite(b), "dense tvd_ce must produce a finite loss"
+    assert not torch.allclose(a, b), "the cross-entropy term must change the loss"
+    assert torch.allclose(a, c), f"ce_alpha=0 must reproduce plain tvd: {a} vs {c}"
+    b.backward()
+
+
 def test_prenorm_without_a_norm_raises_rather_than_corrupting():
     """A producer declaring a pre-norm hidden with no norm attached must fail loudly.
 

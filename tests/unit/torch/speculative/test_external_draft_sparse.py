@@ -365,6 +365,91 @@ def test_warns_when_stored_policy_is_a_truncated_nucleus(tmp_path):
         SparsePolicyDataset([str(p)], max_length=32)
 
 
+def test_tvd_ce_ignores_rows_the_dump_left_empty():
+    """An empty policy row has no argmax; CE must not read that as a target of id 0.
+
+    The ragged fallback zero-fills a short row while ``__getitem__`` still scores the
+    position, and TVD only degrades to its bounded out-of-support term there. CE's
+    penalty is unbounded, so an unguarded target would drag the draft toward token 0.
+    """
+    torch.manual_seed(0)
+    seq = 4
+    tok = torch.randint(1, VOCAB, (1, seq, TOPK))
+    prob = torch.rand(1, seq, TOPK).softmax(-1)
+    prob[0, 2] = 0.0  # the row the dump never filled
+    tok[0, 2] = 0
+    mask = torch.ones(1, seq)
+    m = _draft(external_loss="tvd_ce", external_report_acc=False)
+
+    # the loss must not depend on what the draft predicts at the empty row
+    logits = torch.randn(1, seq, VOCAB)
+    a = logits.clone()
+    a[0, 1] = torch.full((VOCAB,), -30.0).scatter(-1, torch.tensor([0]), 30.0)
+    b = logits.clone()
+    b[0, 1] = torch.full((VOCAB,), -30.0).scatter(-1, torch.tensor([0]), -30.0)
+    # shift: position 2 of the policy is scored against draft position 1
+    la, _ = m.compute_sparse_loss(a, tok, prob, mask)
+    lb, _ = m.compute_sparse_loss(b, tok, prob, mask)
+    assert torch.allclose(la, lb), f"empty row still steers the CE term: {la} vs {lb}"
+    assert torch.isfinite(la)
+
+
+def test_tvd_ce_adds_a_ranking_term_to_tvd():
+    """CE must change the loss and must reward the base's own top-1 token."""
+    torch.manual_seed(0)
+    seq = 3
+    logits = torch.randn(1, seq, VOCAB)
+    tok = torch.randint(0, VOCAB, (1, seq, TOPK))
+    prob = torch.rand(1, seq, TOPK).softmax(-1)
+    mask = torch.ones(1, seq)
+
+    plain, _ = _draft(external_loss="tvd", external_report_acc=False).compute_sparse_loss(
+        logits, tok, prob, mask
+    )
+    mixed, _ = _draft(external_loss="tvd_ce", external_report_acc=False).compute_sparse_loss(
+        logits, tok, prob, mask
+    )
+    assert not torch.allclose(plain, mixed)
+
+    # putting all mass on the base's top-1 must beat putting it elsewhere.
+    # compute_sparse_loss scores draft position t against teacher position t+1, so the
+    # spikes have to sit where the shift puts them -- aligning them at t leaves the
+    # comparison to be decided by unrelated randint pairs, which a reseed can flip.
+    m = _draft(external_loss="tvd_ce", external_report_acc=False)
+    best = tok.gather(-1, prob.argmax(-1, keepdim=True)).squeeze(-1)
+    best_t = torch.cat((best[:, 1:], best[:, -1:]), dim=1)
+    worst_t = torch.cat((tok[:, 1:, -1], tok[:, -1:, -1]), dim=1)
+    good = torch.full((1, seq, VOCAB), -30.0).scatter_(-1, best_t.unsqueeze(-1), 30.0)
+    bad = torch.full((1, seq, VOCAB), -30.0).scatter_(-1, worst_t.unsqueeze(-1), 30.0)
+    lg, _ = m.compute_sparse_loss(good, tok, prob, mask)
+    lb, _ = m.compute_sparse_loss(bad, tok, prob, mask)
+    assert lg < lb, f"agreeing with the base's top-1 must score better: {lg} vs {lb}"
+
+
+def test_tvd_ce_weights_are_honoured():
+    """Zeroing the CE weight must reproduce plain tvd exactly.
+
+    ``not allclose(plain, mixed)`` cannot catch a swapped-weight bug; this can.
+    """
+    torch.manual_seed(0)
+    seq = 3
+    logits = torch.randn(1, seq, VOCAB)
+    tok = torch.randint(0, VOCAB, (1, seq, TOPK))
+    prob = torch.rand(1, seq, TOPK).softmax(-1)
+    mask = torch.ones(1, seq)
+
+    plain, _ = _draft(external_loss="tvd", external_report_acc=False).compute_sparse_loss(
+        logits, tok, prob, mask
+    )
+    only_tvd, _ = _draft(
+        external_loss="tvd_ce",
+        external_tvd_alpha=1.0,
+        external_ce_alpha=0.0,
+        external_report_acc=False,
+    ).compute_sparse_loss(logits, tok, prob, mask)
+    assert torch.allclose(plain, only_tvd), f"{plain} vs {only_tvd}"
+
+
 def _write_sourced(path, sources):
     """One record per entry in ``sources``, tagged with that source."""
     torch.manual_seed(0)
