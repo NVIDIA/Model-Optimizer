@@ -36,19 +36,23 @@ for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
-Step 1: Configure fakequant with ModelOpt CLI flags. Each flag falls back to its
-corresponding environment variable when omitted:
+Step 1: Configure quantization with the ModelOpt CLI flags below. Each flag falls back to its corresponding environment variable when omitted:
 
-| CLI flag | Environment fallback | Description |
-| --- | --- | --- |
-| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config (planned deprecation) |
-| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config (planned deprecation) |
-| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Path to `quantizer_state.pth` in a Megatron (MCore) vLLM fakequant export; requires a quantization config or recipe |
-| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Path to `vllm_fq_modelopt_state.pth` in an HF vLLM fakequant export (full ModelOpt state) |
-| `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML or exported `quant_recipe.yaml` |
-| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
-| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
-| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
+| CLI flag | Environment fallback | Description | Default / auto-detection |
+| --- | --- | --- | --- |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation config (planned deprecation) | Unset |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache config (planned deprecation) | Unset |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Megatron export's `quantizer_state.pth`; requires a config or recipe | `<model_dir>/quantizer_state.pth` when present with a recipe |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | HF export's full ModelOpt state | `<model_dir>/vllm_fq_modelopt_state.pth` when present |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | PTQ recipe YAML or exported Megatron `quant_recipe.yaml` | `<model_dir>/quant_recipe.yaml` when present |
+| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset | `cnn_dailymail` |
+| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count | `512` |
+| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size | `1` |
+
+CLI values take precedence over their environment fallbacks. `--modelopt-quant-cfg` /
+`--modelopt-kv-quant-cfg` and `--modelopt-recipe-path` are mutually exclusive because a
+recipe already carries its quantization configuration. For a local model directory, HF full
+state auto-detection takes precedence over Megatron quantizer-state/recipe sidecars.
 
 `QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
 release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or
@@ -59,7 +63,7 @@ rejects mixing them.
 Run the launcher directly from the repository checkout; the example does not
 need a separate package installation.
 
-Step 2: Serve with any stock vLLM options plus the ModelOpt flags:
+Step 2: Serve with the launcher. It accepts every stock vLLM flag plus the ModelOpt flags above:
 
 ```bash
 python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
@@ -70,12 +74,18 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
 ```
 
 The launcher assumes the vLLM `serve` subcommand when given a model path; spelling out
-`serve` is optional.
+`serve` is optional. For an exported HF or Megatron fakequant directory containing the
+standard sidecars, no ModelOpt path flags are required:
 
-When fakequant is requested, the launcher selects `fakequant_worker.FakeQuantWorker`
-unless `--worker-cls` is supplied. Without ModelOpt quantization settings,
-it delegates to stock vLLM. ModelOpt flags belong to this launcher; stock
-`vllm serve` does not recognize them.
+```bash
+python3 examples/vllm_serve/vllm_serve_fakequant.py <export_dir> \
+  -tp 8 --host 0.0.0.0 --port 8000
+```
+
+When fakequant is requested explicitly or auto-detected, the launcher selects
+`fakequant_worker.FakeQuantWorker` unless `--worker-cls` is supplied. Without ModelOpt
+settings or recognized sidecars, it delegates to stock vLLM. ModelOpt flags belong to
+this launcher; stock `vllm serve` does not recognize them.
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
 0.30.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
@@ -415,6 +425,6 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 ## Known Problems
 
-1. **MCore reload does not use `MODELOPT_STATE_PATH`**; pass `quant_recipe.yaml` via `RECIPE_PATH` and `quantizer_state.pth` via `QUANT_FILE_PATH`.
+1. **MCore reload uses export sidecars rather than `MODELOPT_STATE_PATH`**. Current exports write both `quantizer_state.pth` and `quant_recipe.yaml`; serving the export directory through this launcher auto-detects both. For a legacy export without the YAML sidecar, pass `QUANT_FILE_PATH` and set `QUANT_CFG` to match the original MCore quantization recipe.
 2. KV cache quantization export and reload is not supported in MCore yet.
-3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the shim sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the launcher sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.

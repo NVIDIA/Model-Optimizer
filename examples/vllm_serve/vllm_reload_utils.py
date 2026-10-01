@@ -39,6 +39,7 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import _has_routed_experts_cls
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.utils import get_unwrapped_name
 
 # vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
 # submodule of the MoE layer, so merged expert keys need that extra hop. Follow the plugin's
@@ -121,6 +122,24 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         )
         return ("group", group_key, value)
 
+    # Fused HF expert containers keep one activation quantizer beside their packed 3-D
+    # expert weights instead of one quantizer below each ``experts.<index>`` module.
+    # Nemotron-H's non-gated experts use ``up_proj_*``; gated variants use
+    # ``gate_up_proj_*``. Both feed vLLM's routed-expert w13 projection.
+    fused_expert_first_match = re.search(
+        r"(.*\.experts)\.(?:gate_up_proj|up_proj)_([^.]+_quantizer)(\..+)?$", key
+    )
+    if fused_expert_first_match:
+        suffix = fused_expert_first_match.group(3) or ""
+        group_key = (
+            fused_expert_first_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w13_"
+            + fused_expert_first_match.group(2)
+            + suffix
+        )
+        return ("group", group_key, value)
+
     # Check if this is a non-expert gate/up projection that needs merging. Only *routed* experts
     # (``experts.<i>.``) merge into w13/w2 above; shared experts are a plain MLP whose gate/up
     # still merge into ``gate_up_proj``, so they must not be excluded by the "experts" substring.
@@ -139,6 +158,18 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
             + _EXPERTS_INFIX
             + ".w2_"
             + expert_down_match.group(2)
+            + suffix
+        )
+        return ("group", group_key, value)
+
+    fused_expert_down_match = re.search(r"(.*\.experts)\.down_proj_([^.]+_quantizer)(\..+)?$", key)
+    if fused_expert_down_match:
+        suffix = fused_expert_down_match.group(3) or ""
+        group_key = (
+            fused_expert_down_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w2_"
+            + fused_expert_down_match.group(2)
             + suffix
         )
         return ("group", group_key, value)
@@ -657,6 +688,21 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
             f"{n} quantizer key(s) missing from every rank's checkpoint (after all_gather):"
             f"{sample}{' ... (+{rest} more)' if rest > 0 else ''}"
         )
+
+    unconditional_wq_disabled = 0
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and is_weight_quantizer_state_key(
+            get_unwrapped_name(name, model)
+        ):
+            if module.is_enabled:
+                print(f"[load_state_dict_from_path] disabling weight quantizer: {name}")
+            module.disable()
+            unconditional_wq_disabled += 1
+    print(
+        f"[load_state_dict_from_path] {len(checkpoint_quant_keys)} checkpoint quantizer keys, "
+        f"{len(missing_wq_module_paths)} weight quantizers flagged missing via state_dict diff, "
+        f"{unconditional_wq_disabled} weight quantizer modules disabled unconditionally"
+    )
 
     for name, module in model.named_modules():
         if (

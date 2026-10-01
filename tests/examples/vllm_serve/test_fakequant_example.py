@@ -111,6 +111,48 @@ def test_fakequant_launcher_rejects_unusable_quant_file(
         launcher.main()
 
 
+def test_manual_quantizer_state_and_cfg_prevent_full_state_autodetection(
+    monkeypatch, clean_launcher_env, tmp_path
+):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    explicit_quantizer_state = "/explicit/quantizer_state.pth"
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg="FP8_DEFAULT_CFG",
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=explicit_quantizer_state,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert args.modelopt_quant_file_path == explicit_quantizer_state
+    assert args.modelopt_state_path is None
+
+
+def test_fakequant_launcher_autodetects_megatron_sidecars(
+    monkeypatch, clean_launcher_env, tmp_path
+):
+    (tmp_path / "quantizer_state.pth").touch()
+    (tmp_path / "quant_recipe.yaml").write_text("quantizer: {}")
+    launcher = _load_fakequant_launcher(monkeypatch)
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, ray_registration, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    monkeypatch.setattr(sys, "argv", ["vllm_serve_fakequant.py", str(tmp_path)])
+
+    launcher.main()
+
+    assert os.environ["QUANT_FILE_PATH"] == str(tmp_path / "quantizer_state.pth")
+    assert os.environ["RECIPE_PATH"] == str(tmp_path / "quant_recipe.yaml")
+    assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == "1"
+    assert "--worker-cls" in sys.argv
+    assert "fakequant_worker.FakeQuantWorker" in sys.argv
+    vllm_main.assert_called_once_with()
+    ray_registration.assert_called_once_with()
+
+
 def _calibration_worker(
     num_blocks: int,
     *,
@@ -378,6 +420,25 @@ def test_fakequant_launcher_mlflow_uses_effective_cli_settings(monkeypatch, clea
     assert os.environ["RECIPE_PATH"] == "/recipes/nvfp4.yaml"
     assert os.environ["MLFLOW_EXPERIMENT_NAME"].endswith("/qwen-nvfp4")
     vllm_main.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "error"),
+    [
+        ("", "non-empty YAML mapping"),
+        ("{}", "non-empty YAML mapping"),
+        ("[]", "non-empty YAML mapping"),
+        ("foo: 1", "Per-quantizer recipe entries"),
+        ("quantize: [", "Invalid quantization recipe YAML"),
+    ],
+)
+def test_get_quant_config_rejects_empty_or_invalid_recipe(tmp_path, yaml_text, error):
+    module = _load_example_module("vllm_ptq_utils")
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(yaml_text)
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+    with pytest.raises(ValueError, match=error):
+        module.get_quant_config(config, SimpleNamespace())
 
 
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):

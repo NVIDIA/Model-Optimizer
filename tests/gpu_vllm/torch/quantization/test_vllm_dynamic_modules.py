@@ -253,6 +253,36 @@ def test_disable_compilation_updates_all_markers_and_restores_after_error():
     assert "do_not_compile" not in vars(model.language_model)
 
 
+def test_disable_compilation_prefers_outer_marker():
+    """An outer compile wrapper takes precedence over an unmarked inner model."""
+    inner_model = SimpleNamespace()
+    model = SimpleNamespace(do_not_compile=False, model=inner_model)
+
+    with disable_compilation(model):
+        assert model.do_not_compile is True
+        assert not hasattr(inner_model, "do_not_compile")
+
+    assert model.do_not_compile is False
+
+
+def test_disable_compilation_restores_class_marker_after_error():
+    """Cleanup restores a class marker without masking an error from the context body."""
+
+    class CompileWrappedModel(torch.nn.Module):
+        do_not_compile = False
+
+    inner_model = CompileWrappedModel()
+    model = torch.nn.Module()
+    model.model = inner_model
+
+    with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
+        assert inner_model.do_not_compile is True
+        raise RuntimeError("quantization failed")
+
+    assert inner_model.do_not_compile is False
+    assert "do_not_compile" not in vars(inner_model)
+
+
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
     calibrated_amax = 7.25
     layer = SimpleNamespace(
@@ -918,6 +948,8 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
     for hf_key, expected_quantizer in (
         ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
         ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.0.mlp.experts.up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.down_proj_input_quantizer._amax", "w2_input_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)
