@@ -147,17 +147,17 @@ def main(args):
     launch_memory_monitor()
 
     # --pyt_ckpt_path stays as given. Later steps read the local copy of the whole checkpoint in
-    # hf_model_path, since exporters read the source's files from local disk only; hf_model_name is
-    # the Hub ID, or None for a local path.
-    args.hf_model_name, args.hf_model_path = ensure_local_checkpoint(args.pyt_ckpt_path)
-    print(f"Loading model: {args.hf_model_path}")
+    # local_checkpoint_path, since exporters read the source's files from local disk only;
+    # hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(args.pyt_ckpt_path)
+    print(f"Loading model: {args.local_checkpoint_path}")
 
     # No need to specify attn_implementation here — mtsa.sparsify() sets it
     # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
-        args.hf_model_path, attn_implementation="eager", dtype="auto", device_map="auto"
+        args.local_checkpoint_path, attn_implementation="eager", dtype="auto", device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.hf_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.local_checkpoint_path)
 
     # Set pad token if not set
     if tokenizer.pad_token is None:
