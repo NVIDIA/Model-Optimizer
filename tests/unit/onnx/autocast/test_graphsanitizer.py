@@ -451,14 +451,83 @@ def test_sanitize_large_external_initializer_metadata():
     assert [node.op_type for node in sanitizer.model.graph.node] == ["Identity"]
 
 
-def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("defer_nvfp4_trt_inference", [False, True])
+@pytest.mark.parametrize(
+    ("op_type", "output_dtype", "output_shape", "extra_custom_op", "requires_trt_inference"),
+    [
+        pytest.param(
+            "TRT_FP4DynamicQuantize",
+            TensorProto.FLOAT4E2M1,
+            [1],
+            False,
+            False,
+            id="dynamic-quantize-complete-metadata",
+        ),
+        pytest.param(
+            "TRT_FP4DynamicQuantize",
+            TensorProto.UNDEFINED,
+            [1],
+            False,
+            True,
+            id="dynamic-quantize-missing-type",
+        ),
+        pytest.param(
+            "TRT_FP4DynamicQuantize",
+            TensorProto.FLOAT,
+            [1],
+            False,
+            True,
+            id="dynamic-quantize-wrong-type",
+        ),
+        pytest.param(
+            "TRT_FP4DynamicQuantize",
+            TensorProto.FLOAT4E2M1,
+            None,
+            False,
+            False,
+            id="dynamic-quantize-missing-shape",
+        ),
+        pytest.param(
+            "CustomOp",
+            TensorProto.FLOAT4E2M1,
+            [1],
+            False,
+            True,
+            id="other-custom-op-complete-metadata",
+        ),
+        pytest.param(
+            "TRT_FP4DynamicQuantize",
+            TensorProto.FLOAT4E2M1,
+            [1],
+            True,
+            True,
+            id="dynamic-quantize-with-another-custom-op",
+        ),
+    ],
+)
+def test_find_custom_nodes_uses_source_model_path(
+    tmp_path,
+    monkeypatch,
+    op_type,
+    output_dtype,
+    output_shape,
+    extra_custom_op,
+    requires_trt_inference,
+    defer_nvfp4_trt_inference,
+):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
-    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
-    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name="custom")
-    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    y = helper.make_tensor_value_info("Y", output_dtype, output_shape)
+    scale = helper.make_tensor_value_info("scale", TensorProto.FLOAT8E4M3FN, [1])
+    custom_node = helper.make_node(op_type, [x.name], [y.name, scale.name], name="custom")
+    graph = helper.make_graph([custom_node], "custom_graph", [x], [y, scale])
+    if extra_custom_op:
+        graph.node.append(helper.make_node("CustomOp", [x.name], ["extra"], name="extra_custom"))
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
     model_path = tmp_path / "custom.onnx"
-    tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
+    tensor_info = {
+        "Y": {"dtype": TensorProto.FLOAT4E2M1, "shape": [1]},
+        "scale": {"dtype": TensorProto.FLOAT8E4M3FN, "shape": [1]},
+    }
     get_custom_layers = Mock(return_value=([custom_node.name], tensor_info))
     infer_types_shapes = Mock(return_value=model)
 
@@ -467,7 +536,14 @@ def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
     monkeypatch.setattr(graphsanitizer, "infer_types_shapes_tensorrt", infer_types_shapes)
 
     sanitizer = GraphSanitizer(model, min_opset=22, onnx_path=str(model_path))
-    sanitizer.find_custom_nodes()
+    if defer_nvfp4_trt_inference:
+        sanitizer.find_custom_nodes(defer_nvfp4_trt_inference=True)
+    else:
+        sanitizer.find_custom_nodes()
 
-    get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
-    infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+    if requires_trt_inference or not defer_nvfp4_trt_inference:
+        get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
+        infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+    else:
+        get_custom_layers.assert_not_called()
+        infer_types_shapes.assert_not_called()
