@@ -52,8 +52,9 @@ These instructions apply to AI-assisted work in this repository.
   Large PRs stall in review; exceed the budget only when the change genuinely
   cannot be split — a mechanical rename, generated files, or a self-contained
   drop such as a new example or a new model/backend that has no working
-  intermediate state. Deletions don't count; check the insertions from
-  `git diff --shortstat <base>...HEAD` before opening.
+  intermediate state. Deletions, tests, and docs don't count; check the
+  insertions from `git diff --shortstat <base>...HEAD -- . ':!tests' ':!docs'`
+  before opening.
 - **Propose the split before opening an oversized PR.** When the work in flight
   is already over budget, offer a series of smaller PRs and, once the user
   agrees, do the split — don't open the big one and ask afterwards.
