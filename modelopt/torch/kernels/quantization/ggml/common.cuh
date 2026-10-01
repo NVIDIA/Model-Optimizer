@@ -72,16 +72,34 @@ inline void check_scalar_pack_input(const char *format, const at::Tensor &input,
               " CUDA grid is too large");
 }
 
-// Validates the codebook contract every IQ format shares. Called from the pybind wrapper on the
-// caller's tensors and again from the CUDA entry point on the materialized contiguous tensors, so
-// the enforced rule and the message it reports are written once.
+// Validates the codebook contract every IQ format shares, once, at each format's CUDA entry point.
 inline void check_pack_inputs(const char *format, const at::Tensor &input, const at::Tensor &grid,
                               int64_t entries) {
+  TORCH_CHECK(input.is_cuda(), format, " packing requires a CUDA input");
+  TORCH_CHECK(grid.is_cuda(), format, " packing requires a CUDA grid");
   check_scalar_pack_input(format, input, kBlockSize);
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == entries &&
                   grid.size(1) == kVectorSize,
               "grid must be float32 [", entries, ", ", kVectorSize, "]");
   TORCH_CHECK(input.get_device() == grid.get_device(), "input and grid must share a device");
+}
+
+// Validates a format that takes one precomputed FP16 block scale per 256 values. The kernels copy
+// these bits straight into the block scale field: a non-finite entry produces a payload that
+// decodes to garbage, and a negative one inverts the sign of every decoded element while still
+// packing cleanly -- GGML's own encoders assert a non-negative block scale. One fused reduction, so
+// the synchronization is paid once per packed tensor, on an export path.
+inline void check_scaled_pack_inputs(const char *format, const at::Tensor &input,
+                                     const at::Tensor &grid, int64_t entries,
+                                     const at::Tensor &scales) {
+  TORCH_CHECK(scales.is_cuda(), format, " packing requires CUDA scales");
+  check_pack_inputs(format, input, grid, entries);
+  TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
+                  scales.numel() == input.numel() / kBlockSize,
+              "scales must be float16 [numel / 256]");
+  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
+              "scales must be finite and non-negative");
+  TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
 }
 
 #ifdef __CUDACC__
@@ -231,8 +249,8 @@ __device__ __forceinline__ bool store_block_scale(uint8_t *payload, uint16_t d_b
 
 // Decoders run one thread per 8-value vector and follow the PyTorch decoders operation for
 // operation. Every float operation is explicitly rounded so the compiler cannot fuse a multiply
-// into an add, which keeps them bit-identical to that reference. A format supplies a Decoder
-// with decode(block, vector, grid, values) and binds decode_blocks for its layout.
+// into an add, which keeps them bit-identical to that reference. A format's layout type supplies
+// kPayloadBytes, kEntries and decode(block, vector, grid, values), and binds decode_blocks.
 constexpr int kVectorsPerBlock = kBlockSize / kVectorSize;
 
 __device__ __forceinline__ uint32_t load_u16(const uint8_t *bytes) {
@@ -268,15 +286,15 @@ __device__ __forceinline__ void shifted_scaled(const float *q, float delta, floa
     values[j] = __fmul_rn(__fadd_rn(q[j], delta), scale);
 }
 
-template <typename Decoder, int kPayloadBytes, typename out_t>
+template <typename Format, typename out_t>
 __global__ void decode_vectors(const uint8_t *packed, int64_t num_vectors, const float *grid,
                                out_t *output) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= num_vectors)
     return;
   float values[kVectorSize];
-  Decoder::decode(packed + (index / kVectorsPerBlock) * kPayloadBytes,
-                  static_cast<int>(index % kVectorsPerBlock), grid, values);
+  Format::decode(packed + (index / kVectorsPerBlock) * Format::kPayloadBytes,
+                 static_cast<int>(index % kVectorsPerBlock), grid, values);
   out_t *out = output + index * kVectorSize;
 #pragma unroll
   for (int j = 0; j < kVectorSize; ++j)
@@ -284,9 +302,11 @@ __global__ void decode_vectors(const uint8_t *packed, int64_t num_vectors, const
 }
 
 // Decodes uint8 [blocks, kPayloadBytes] into [blocks, 256] of dtype on the payload's device.
-template <typename Decoder, int kPayloadBytes, int kEntries>
+template <typename Format>
 at::Tensor decode_blocks(const char *format, const at::Tensor &packed, const at::Tensor &grid,
                          at::ScalarType dtype) {
+  constexpr int kPayloadBytes = Format::kPayloadBytes;
+  constexpr int kEntries = Format::kEntries;
   TORCH_CHECK(packed.is_cuda() && grid.is_cuda(), format, " decoding requires CUDA tensors");
   TORCH_CHECK(packed.get_device() == grid.get_device(), "payload and grid must share a device");
   TORCH_CHECK(packed.scalar_type() == at::kByte && packed.dim() == 2 &&
@@ -307,7 +327,7 @@ at::Tensor decode_blocks(const char *format, const at::Tensor &packed, const at:
   const auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, dtype, "ggml_decode", [&] {
-        decode_vectors<Decoder, kPayloadBytes, scalar_t><<<launch_blocks, kThreads, 0, stream>>>(
+        decode_vectors<Format, scalar_t><<<launch_blocks, kThreads, 0, stream>>>(
             payload.data_ptr<uint8_t>(), num_vectors, table.data_ptr<float>(),
             output.data_ptr<scalar_t>());
         C10_CUDA_KERNEL_LAUNCH_CHECK();
