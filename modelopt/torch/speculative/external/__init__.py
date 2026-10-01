@@ -18,3 +18,4 @@
 
 from .conversion import *
 from .external_model import *
+from .sparse_data import *
