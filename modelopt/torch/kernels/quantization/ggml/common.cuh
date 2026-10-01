@@ -41,6 +41,7 @@ namespace modelopt::ggml {
 // https://github.com/ggml-org/llama.cpp/blob/9b05354ec6fb58b4e665e9a39ebc40285c015638/ggml/src/ggml-common.h
 constexpr int kBlockSize = 256;
 constexpr int kVectorSize = 8;
+constexpr int kVectorsPerBlock = kBlockSize / kVectorSize;
 constexpr int kScaleOffset = 0;
 constexpr int kScaleBytes = 2;
 
@@ -72,16 +73,34 @@ inline void check_scalar_pack_input(const char *format, const at::Tensor &input,
               " CUDA grid is too large");
 }
 
-// Validates the codebook contract every IQ format shares. Called from the pybind wrapper on the
-// caller's tensors and again from the CUDA entry point on the materialized contiguous tensors, so
-// the enforced rule and the message it reports are written once.
+// Validates the codebook contract every IQ format shares, once, at each format's CUDA entry point.
 inline void check_pack_inputs(const char *format, const at::Tensor &input, const at::Tensor &grid,
                               int64_t entries) {
+  TORCH_CHECK(input.is_cuda(), format, " packing requires a CUDA input");
+  TORCH_CHECK(grid.is_cuda(), format, " packing requires a CUDA grid");
   check_scalar_pack_input(format, input, kBlockSize);
   TORCH_CHECK(grid.scalar_type() == at::kFloat && grid.dim() == 2 && grid.size(0) == entries &&
                   grid.size(1) == kVectorSize,
               "grid must be float32 [", entries, ", ", kVectorSize, "]");
   TORCH_CHECK(input.get_device() == grid.get_device(), "input and grid must share a device");
+}
+
+// Validates a format that takes one precomputed FP16 block scale per 256 values. The kernels copy
+// these bits straight into the block scale field: a non-finite entry produces a payload that
+// decodes to garbage, and a negative one inverts the sign of every decoded element while still
+// packing cleanly -- GGML's own encoders assert a non-negative block scale. One fused reduction, so
+// the synchronization is paid once per packed tensor, on an export path.
+inline void check_scaled_pack_inputs(const char *format, const at::Tensor &input,
+                                     const at::Tensor &grid, int64_t entries,
+                                     const at::Tensor &scales) {
+  TORCH_CHECK(scales.is_cuda(), format, " packing requires CUDA scales");
+  check_pack_inputs(format, input, grid, entries);
+  TORCH_CHECK(scales.scalar_type() == at::kHalf && scales.dim() == 1 &&
+                  scales.numel() == input.numel() / kBlockSize,
+              "scales must be float16 [numel / 256]");
+  TORCH_CHECK((scales.isfinite() & (scales >= 0)).all().item<bool>(),
+              "scales must be finite and non-negative");
+  TORCH_CHECK(input.get_device() == scales.get_device(), "input and scales must share a device");
 }
 
 #ifdef __CUDACC__
