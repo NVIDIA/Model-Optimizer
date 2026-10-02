@@ -122,7 +122,7 @@ def clear_types_and_shapes_recursive(
     """Recursively clear type/shape information for a graph and all its subgraphs.
 
     Resets intermediate (``value_info``) and output tensor types to ``UNDEFINED`` and, when
-    ``clear_shapes`` is True, replaces concrete dims with a symbolic ``"unk"`` so a subsequent
+    ``clear_shapes`` is True, clears concrete dims so a subsequent
     :func:`modelopt.onnx.utils.infer_types` re-derives them from the operator graph. For subgraphs,
     input types/shapes are cleared too so they propagate from the parent graph. This does not change
     tensor *rank*, so it cannot repair a stale rank (see ``_reconcile_stale_output_shapes``).
@@ -137,8 +137,8 @@ def clear_types_and_shapes_recursive(
         value_info.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
         if clear_shape:
             for dim in value_info.type.tensor_type.shape.dim:
-                if dim.dim_value:
-                    dim.dim_param = "unk"
+                if dim.HasField("dim_value"):
+                    dim.ClearField("dim_value")
 
     def _clear_callback(g: onnx.GraphProto, parent: onnx.NodeProto, is_sub: bool) -> None:
         logger.debug(f"Clearing types/shapes in {'subgraph' if is_sub else 'main graph'}: {g.name}")
