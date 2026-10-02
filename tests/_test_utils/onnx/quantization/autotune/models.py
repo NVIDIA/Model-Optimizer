@@ -56,6 +56,78 @@ def _create_simple_conv_onnx_model():
     return helper.make_model(graph, producer_name="test")
 
 
+def _create_branch_merge_onnx_model():
+    """Build ONNX model with two distinct structural branches for multi-region tests.
+
+    Architecture (branch-merge, guaranteed distinct region patterns)::
+
+        Input -+- Conv(3x3, 8->16) -> Relu ---+- Add -> Output
+               +- Conv(1x1, 8->16) -> Sigmoid -+
+
+    The two branches have different kernel sizes and activations, producing
+    distinct region patterns.  The divergence (input feeds two convs) and
+    convergence (Add merges them) ensure the region search creates separate
+    regions for each branch.
+    """
+    n, c, h, w = 1, 8, 16, 16
+    out_c = 16
+
+    input_tensor = helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [n, c, h, w])
+    output_tensor = helper.make_tensor_value_info(
+        "output", onnx.TensorProto.FLOAT, [n, out_c, h, w]
+    )
+
+    # Branch A: Conv 3x3 -> Relu
+    conv_a = helper.make_node(
+        "Conv",
+        inputs=["input", "conv_a_weight"],
+        outputs=["conv_a_out"],
+        name="conv_a",
+        kernel_shape=[3, 3],
+        pads=[1, 1, 1, 1],
+    )
+    relu_a = helper.make_node("Relu", inputs=["conv_a_out"], outputs=["branch_a"], name="relu_a")
+
+    # Branch B: Conv 1x1 -> Sigmoid
+    conv_b = helper.make_node(
+        "Conv",
+        inputs=["input", "conv_b_weight"],
+        outputs=["conv_b_out"],
+        name="conv_b",
+        kernel_shape=[1, 1],
+    )
+    sigmoid_b = helper.make_node(
+        "Sigmoid", inputs=["conv_b_out"], outputs=["branch_b"], name="sigmoid_b"
+    )
+
+    # Merge: Add
+    add_node = helper.make_node(
+        "Add", inputs=["branch_a", "branch_b"], outputs=["output"], name="add"
+    )
+
+    graph = helper.make_graph(
+        [conv_a, relu_a, conv_b, sigmoid_b, add_node],
+        "branch_merge",
+        [input_tensor],
+        [output_tensor],
+        initializer=[
+            helper.make_tensor(
+                "conv_a_weight",
+                onnx.TensorProto.FLOAT,
+                [out_c, c, 3, 3],
+                [0.1] * (out_c * c * 3 * 3),
+            ),
+            helper.make_tensor(
+                "conv_b_weight",
+                onnx.TensorProto.FLOAT,
+                [out_c, c, 1, 1],
+                [0.1] * (out_c * c * 1 * 1),
+            ),
+        ],
+    )
+    return helper.make_model(graph, producer_name="test")
+
+
 def _create_simple_resnet18_model():
     """Build a ResNet-18 subgraph (stem + layer1) for MOQ + Autotuner integration tests.
 

@@ -746,7 +746,8 @@ class QDQAutotunerBase:
         logger.info(
             f"Saved state → {output_path} ({num_patterns} patterns, {total_schemes} schemes)"
         )
-        logger.debug(f"State: baseline={self.baseline_latency_ms:.3f} ms")
+        if self.baseline_latency_ms is not None:
+            logger.debug(f"State: baseline={self.baseline_latency_ms:.3f} ms")
 
         if self.pattern_cache is not None and self.pattern_cache.num_patterns > 0:
             base_path, ext = os.path.splitext(output_path)
