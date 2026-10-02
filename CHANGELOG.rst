@@ -40,6 +40,7 @@ Changelog
 *Misc*
 
 - A tracked ``examples/hf_ptq/hf_ptq.py`` run now writes ``.experiment.json`` into ``--export_path`` and uploads the same file with the run, so a checkpoint on disk names the experiment and MLflow run id that produced it. The pointer is written only once the export completes, and an export that is not tracked removes one it would otherwise inherit from a reused ``--export_path`` or from a quantized source checkpoint.
+- ``export_hf_checkpoint`` and the vLLM fake-quant export now copy the source checkpoint's non-model files (tokenizer, processor, remote code, chat templates, ...) into the export unchanged. They read the source from local disk only: get a local copy of a Hugging Face Hub model with ``modelopt.torch.export.ensure_local_checkpoint`` and load it from there.
 
 **Backward Breaking Changes**
 
@@ -91,6 +92,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix Hugging Face exports dropping off-index safetensors such as GLM-4.7's ``mtp.safetensors``.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.

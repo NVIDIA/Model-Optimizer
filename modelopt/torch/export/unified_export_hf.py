@@ -20,7 +20,6 @@ import copy
 import importlib
 import json
 import re
-import shutil
 import tempfile
 import warnings
 from builtins import ValueError
@@ -37,6 +36,8 @@ from safetensors.torch import save_file
 
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
+    copy_non_model_files,
+    copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
     sanitize_hf_config_for_deployment,
@@ -1517,13 +1518,34 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
+def _copy_non_model_files_from_source(model: nn.Module, export_dir: "str | Path") -> None:
+    """Copy the source checkpoint's non-model files into the export, from local disk only.
+
+    See ``copy_non_model_files``. Exporters never fetch from the Hub: a model loaded by Hub ID
+    gets a warning instead, since its cache holds only the files loading needed.
+    """
+    source = _source_checkpoint(model)
+    if source is None:
+        return
+    if not Path(source).is_dir():
+        warnings.warn(
+            f"The source checkpoint {source!r} is not a local directory, so its non-model files "
+            "(tokenizer, processor, remote code, chat templates, ...) were not copied into the "
+            "export. Get a local copy first with modelopt.torch.export.ensure_local_checkpoint "
+            "and load the model from that directory."
+        )
+        return
+    copy_non_model_files(source, export_dir)
+
+
 def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
-    """Write config.json, generation_config.json, and trust_remote_code modeling files.
+    """Write config.json and generation_config.json, then copy the source's non-model files.
 
     For exporters that stream weights out themselves and never hand a state dict to
     ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
     storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
-    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need.
+    The non-model files include the ``*.py`` modules ``trust_remote_code`` checkpoints (e.g.
+    NemotronH) need.
     """
     _sanitize_generation_config_for_save(model)
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.
@@ -1537,12 +1559,7 @@ def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
         with contextlib.suppress(Exception):
             model.generation_config.save_pretrained(str(export_dir))
 
-    src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
-    if src_dir.is_dir():
-        for py_file in src_dir.glob("*.py"):
-            dst = export_dir / py_file.name
-            if not dst.exists():
-                shutil.copy2(py_file, dst)
+    _copy_non_model_files_from_source(model, export_dir)
 
 
 def export_speculative_decoding(
@@ -1631,7 +1648,7 @@ def _source_checkpoint(model: nn.Module) -> str | None:
     Prefers ``_modelopt_source_checkpoint`` (recorded at load time by
     ``record_unplaced_source_keys``). A model that reached export without going through that path
     still knows its own provenance via ``config._name_or_path``, and the several places this is
-    asked must agree on the answer -- otherwise, for instance, a weight is carried but its sidecar
+    asked must agree on the answer -- otherwise, for instance, a weight is carried but its off-index
     tensors never reach ``exclude_modules`` because the two halves disagreed about where the
     checkpoint was.
     """
@@ -1666,15 +1683,17 @@ def carryable_unplaced_keys(model: nn.Module) -> list[str]:
 
 
 def off_index_tensor_names(model: nn.Module) -> list[str]:
-    """Tensor names in the checkpoint's off-index safetensors sidecars.
+    """Tensor names in the checkpoint's off-index weight files.
 
-    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim rather than
-    loaded, so they are never ``unexpected_keys`` and :func:`carryable_unplaced_keys` cannot see
-    them -- yet their tensors land in the export in original precision exactly like a carried
-    weight, and must reach ``exclude_modules`` the same way. Before this mechanism existed
+    Those files (GLM-4.7's ``mtp.safetensors``) are copied into the export verbatim by
+    :func:`~modelopt.torch.utils.plugins.hf_checkpoint_utils.copy_off_index_safetensors` rather
+    than loaded, so they are never ``unexpected_keys`` and
+    :func:`carryable_unplaced_keys` cannot see them -- yet their tensors land in the export in
+    original precision exactly like a carried weight, and must reach ``exclude_modules`` the same
+    way. Before this mechanism existed
     ``_add_mtp_exclusions`` covered them by globbing for ``mtp*``.
 
-    Reads safetensors headers only, never tensor data, and stays silent when the sidecars or the
+    Reads safetensors headers only, never tensor data, and stays silent when those files or the
     library cannot be read: an absent exclusion is a deployment problem, but so is an export that
     dies while computing one.
     """
@@ -1887,7 +1906,7 @@ def export_hf_checkpoint(
     if _writes_extra and _carried:
         extra_state_dict = {**_carried, **(extra_state_dict or {})}
     # Everything the export writes in original precision straight from the source, by either
-    # mechanism: tensors carried above, and the off-index sidecars copied verbatim alongside.
+    # mechanism: tensors carried above, and the off-index weight files copied verbatim alongside.
     # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
     # that, and because only this point knows what was actually written rather than what was
     # merely unplaced.
@@ -1899,6 +1918,10 @@ def export_hf_checkpoint(
     if exporter is not None:
         # Per-layer export wrote the shards during calibration; this writes the rest.
         exporter.finalize(extra_state_dict=extra_state_dict)
+        # Into the exporter's directory, which is where finalize() wrote: export_dir may differ
+        # when the recipe's layerwise.export_dir chose it.
+        if _writes_extra:
+            copy_off_index_safetensors(_source_checkpoint(model), exporter.export_dir)
         return
 
     export_dir = Path(export_dir)
@@ -2040,6 +2063,10 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
+            copy_off_index_safetensors(_source_checkpoint(model), export_dir)
+            if not (_offloaded or is_fsdp2_sharded):
+                # The streaming paths already did, from save_non_weight_artifacts.
+                _copy_non_model_files_from_source(model, export_dir)
 
     except Exception as e:
         warnings.warn(
