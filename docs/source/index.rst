@@ -17,6 +17,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
          <button class="announcement-tag" type="button" data-tag="nvfp4" aria-pressed="false">NVFP4</button>
          <button class="announcement-tag" type="button" data-tag="qad" aria-pressed="false">QAD</button>
          <button class="announcement-tag" type="button" data-tag="local-hessian" aria-pressed="false">Local-Hessian</button>
+         <button class="announcement-tag" type="button" data-tag="single-gpu" aria-pressed="false">Single GPU</button>
          <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
          <button class="announcement-tag" type="button" data-tag="dflash" aria-pressed="false">DFlash</button>
          <button class="announcement-tag" type="button" data-tag="dspark" aria-pressed="false">DSpark</button>
@@ -28,6 +29,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-09-28" data-title="Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU" data-summary="Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300." data-tags="quantization nvfp4 layerwise moe single-gpu modelopt">
+       <div class="announcement-card-meta">September 28, 2026 &middot; Model Optimizer Team</div>
+       <h2><a href="announcements/single-gpu-ptq.html">Quantizing a 4.9 TB Qwen3.8 Model on a Single GPU</a></h2>
+       <p>Layerwise calibration and per-layer shard export drop the memory floor for PTQ from one model to one layer: a 4.9 TB Qwen3.8 checkpoint quantized on a single GB300.</p>
+       <div class="announcement-card-tags"><span>quantization</span><span>nvfp4</span><span>layerwise</span><span>moe</span><span>single-gpu</span><span>modelopt</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation" data-summary="Weight-only NVFP4 is slower than BF16 on Blackwell; W4A4 unlocks the FP4 kernels, and QAD recovers the accuracy it costs." data-tags="quantization nvfp4 w4a4 qad distillation megatron-bridge">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
