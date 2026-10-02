@@ -34,9 +34,10 @@ import gc
 import importlib.util
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -86,23 +87,34 @@ def _load_fakequant_launcher(monkeypatch):
     return _load_example_module("vllm_serve_fakequant")
 
 
+@contextmanager
+def _isolated_launcher_env():
+    with patch.dict(os.environ):
+        for key in (
+            "QUANT_CFG",
+            "KV_QUANT_CFG",
+            "QUANT_FILE_PATH",
+            "MODELOPT_STATE_PATH",
+            "RECIPE_PATH",
+            "QUANT_DATASET",
+            "QUANT_CALIB_SIZE",
+            "CALIB_BATCH_SIZE",
+            "TRUST_REMOTE_CODE",
+            "MLFLOW_TRACKING_URI",
+            "MLFLOW_EXPERIMENT_NAME",
+            "MODELOPT_MLFLOW_REQUIRED",
+            "MODELOPT_MLFLOW_COMMAND",
+            "MODELOPT_MLFLOW_RUN_NAME",
+        ):
+            os.environ.pop(key, None)
+        yield
+
+
 @pytest.fixture
-def clean_launcher_env(monkeypatch):
+def clean_launcher_env():
     """Keep launch settings from affecting other CLI cases."""
-    for key in (
-        "QUANT_CFG",
-        "KV_QUANT_CFG",
-        "QUANT_FILE_PATH",
-        "MODELOPT_STATE_PATH",
-        "RECIPE_PATH",
-        "QUANT_DATASET",
-        "QUANT_CALIB_SIZE",
-        "CALIB_BATCH_SIZE",
-        "TRUST_REMOTE_CODE",
-        "MLFLOW_TRACKING_URI",
-        "MLFLOW_EXPERIMENT_NAME",
-    ):
-        monkeypatch.delenv(key, raising=False)
+    with _isolated_launcher_env():
+        yield
 
 
 def _stub_launcher_runtime(monkeypatch, launcher):
@@ -351,8 +363,7 @@ def test_fakequant_launcher_serving_paths(
     monkeypatch, clean_launcher_env, argv, initial_env, forwarded, expected_env
 ):
     """Serve through stock vLLM or publish settings and select the fakequant worker."""
-    for key, value in initial_env.items():
-        monkeypatch.setenv(key, value)
+    os.environ.update(initial_env)
     launcher = _load_fakequant_launcher(monkeypatch)
     monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
     vllm_main, ray_registration, moe_support = _stub_launcher_runtime(monkeypatch, launcher)
@@ -454,8 +465,7 @@ def test_fakequant_launcher_mlflow_uses_effective_cli_settings(
     monkeypatch, clean_launcher_env, settings, initial_env, expected_variant, env_key, env_value
 ):
     """Default experiment naming sees CLI overrides before MLflow resolves them."""
-    for key, value in initial_env.items():
-        monkeypatch.setenv(key, value)
+    os.environ.update(initial_env)
     launcher = _load_fakequant_launcher(monkeypatch)
     vllm_main, _, _ = _stub_launcher_runtime(monkeypatch, launcher)
     mlflow_utils = sys.modules["vllm_mlflow_utils"]
@@ -482,6 +492,45 @@ def test_fakequant_launcher_mlflow_uses_effective_cli_settings(
     assert os.environ[env_key] == env_value
     assert os.environ["MLFLOW_EXPERIMENT_NAME"].endswith(f"/qwen-{expected_variant}")
     vllm_main.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("setting", "published_key"),
+    [
+        (["--modelopt-quant-cfg", "FP8_DEFAULT_CFG"], "QUANT_CFG"),
+        (["--modelopt-recipe-path", "/recipes/nvfp4.yaml"], "RECIPE_PATH"),
+    ],
+)
+def test_fakequant_launcher_restores_environment_after_cli_settings(
+    monkeypatch, setting, published_key
+):
+    """Launcher and MLflow settings must not survive test environment teardown."""
+    monkeypatch.setenv(published_key, "original-setting")
+    monkeypatch.setenv("MODELOPT_MLFLOW_COMMAND", "original-command")
+    original_env = os.environ.copy()
+
+    with _isolated_launcher_env():
+        launcher = _load_fakequant_launcher(monkeypatch)
+        _stub_launcher_runtime(monkeypatch, launcher)
+        mlflow_utils = sys.modules["vllm_mlflow_utils"]
+        monkeypatch.setattr(
+            mlflow_utils,
+            "resolve_tracking_uri",
+            lambda _args, _parser: ("https://mlflow.example.com", True),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["vllm", "serve", "/models/qwen", "--mlflow", "https://mlflow.example.com", *setting],
+        )
+
+        launcher.main()
+
+        assert os.environ[published_key] == setting[1]
+        assert os.environ["MODELOPT_MLFLOW_REQUIRED"] == "1"
+        assert os.environ["MODELOPT_MLFLOW_COMMAND"] != "original-command"
+
+    assert os.environ == original_env
 
 
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
