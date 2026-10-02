@@ -147,6 +147,12 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
     _QUANT_RECIPE_MARKER_SUFFIX = "._quant_recipe_marker"
 
+    def __init__(self, *args, **kwargs):
+        """Initialize recipe capture before lazy export shards are built."""
+        super().__init__(*args, **kwargs)
+        self._quantizer_state_for_recipe: dict[str, dict] = {}
+        self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
         """Store one resolved recipe, requiring repeated routes to agree."""
         previous = self._quantizer_state_for_recipe.get(name)
@@ -210,8 +216,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         )
 
         # Temporary scalar markers carry each recipe through the same export mapping as amax.
-        self._quantizer_state_for_recipe: dict[str, dict] = {}
-        self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        self._quantizer_state_for_recipe = {}
+        # Cached shards still reference markers collected when they were built.
+        if not self._layer_state_dicts:
+            self._quantizer_recipe_markers = []
         layer_state_dicts = self.layer_state_dicts
         self._extract_quantizer_recipe_markers(layer_state_dicts)
 
