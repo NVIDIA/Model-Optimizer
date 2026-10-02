@@ -316,6 +316,9 @@ class GPTModelExporter:
         # medusa_heads and eagle_module only exist in the last stage.
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
+        is_layer_writer_rank = (
+            tp_rank == 0 and get_expert_model_parallel_rank() == 0 and get_data_parallel_rank() == 0
+        )
 
         quantization_format = self._get_quantization_format(self.model)
         if self._any_rank_uses_iq_quantization():
@@ -461,17 +464,16 @@ class GPTModelExporter:
                 json.dump(config_dict, f, indent=4)
         torch.distributed.barrier()
 
-        # save_safetensors(state_dict, save_directory)
+        # All ranks enter the helper's barrier; one TP/EP/DP rank per PP stage writes its shards.
         save_safetensors_by_layer_index(
-            layer_state_dicts=layer_state_dicts,
+            layer_state_dicts=layer_state_dicts if is_layer_writer_rank else {},
             total_layers=self.model.config.num_layers,
             save_directory=save_directory,
             name_template="model-{:05d}-of-{:05d}",
         )
 
-        # Every rank has written its shards; one rank now checks nothing was dropped. The result is
-        # shared so every rank raises together -- this is public API, and a lone raise would leave
-        # peers hanging in the next collective instead of surfacing the error.
+        # After the shard-save barrier, share the writer's coverage check result so
+        # no peer hangs in the next collective if export dropped a tensor.
         torch.distributed.barrier()
         failure = ""
         if is_writer_rank:

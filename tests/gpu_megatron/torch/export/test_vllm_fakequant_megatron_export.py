@@ -17,16 +17,19 @@ import json
 from collections import Counter
 from contextlib import nullcontext
 from functools import partial
+from unittest.mock import patch
 
 import pytest
 import torch
 import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron, run_mcore_inference
+from megatron.core.parallel_state import get_expert_model_parallel_rank
 from safetensors import safe_open
 
+import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
+from modelopt.torch.export import export_mcore_gpt_to_hf, export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     VllmFqGPTModelExporter,
     gather_mcore_vllm_fq_quantized_state_dict,
@@ -384,15 +387,17 @@ def test_mcore_vllm_grouped_export(dist_workers_size_1, tmp_path, quant_cfg, dev
     dist_workers_size_1.run(partial(_test_mcore_vllm_grouped_export, tmp_path, quant_cfg, device))
 
 
-def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
-    """Every EP rank contributes its local folded experts to one checkpoint."""
-    initialize_for_megatron(expert_model_parallel_size=size)
+def _test_mcore_vllm_grouped_ep_export(tmp_path, pp_size, rank, size):
+    """Every EP rank contributes its local experts; one rank per stage writes."""
+    assert size == 2 * pp_size
+    initialize_for_megatron(pipeline_model_parallel_size=pp_size, expert_model_parallel_size=2)
     model = (
         get_mcore_hybrid_model(
             initialize_megatron=False,
-            expert_model_parallel_size=size,
-            num_layers=1,
-            hybrid_layer_pattern="E",
+            pipeline_model_parallel_size=pp_size,
+            expert_model_parallel_size=2,
+            num_layers=pp_size,
+            hybrid_layer_pattern="E" * pp_size,
             hidden_size=64,
             num_attention_heads=8,
             num_query_groups=8,
@@ -415,7 +420,9 @@ def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
             run_mcore_inference(model, torch.arange(16, device="cuda").unsqueeze(0))
 
     mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
-    experts = model.decoder.layers[0].mlp.experts
+    layer = model.decoder.layers[0]
+    experts = layer.mlp.experts
+    ep_rank = get_expert_model_parallel_rank()
     expected_local = {}
     for module, projection in (
         (experts.linear_fc1, "up_proj"),
@@ -423,13 +430,13 @@ def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
     ):
         assert isinstance(module.weight_quantizer, GroupedQuantizer)
         for local_id in range(module.num_gemms):
-            global_id = rank * module.num_gemms + local_id
+            global_id = ep_rank * module.num_gemms + local_id
             weight = getattr(module, f"weight{local_id}")
             with torch.no_grad():
                 expected = module.weight_quantizer[local_id](weight.to(torch.bfloat16))
-            expected_local[f"backbone.layers.0.mixer.experts.{global_id}.{projection}.weight"] = (
-                expected.cpu()
-            )
+            expected_local[
+                f"backbone.layers.{layer.layer_number - 1}.mixer.experts.{global_id}.{projection}.weight"
+            ] = expected.cpu()
 
     all_expected = [None] * size
     torch.distributed.all_gather_object(all_expected, expected_local)
@@ -443,8 +450,8 @@ def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
                     "intermediate_size": 128,
                     "moe_intermediate_size": 64,
                     "moe_shared_expert_intermediate_size": 32,
-                    "hybrid_override_pattern": "E",
-                    "num_hidden_layers": 1,
+                    "hybrid_override_pattern": "E" * pp_size,
+                    "num_hidden_layers": pp_size,
                     "num_attention_heads": 8,
                     "num_key_value_heads": 8,
                     "head_dim": 8,
@@ -457,10 +464,25 @@ def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
             )
     torch.distributed.barrier()
 
+    shard_writes = []
+    save_shards = uem.save_safetensors_by_layer_index
+
+    def record_shard_write(**kwargs):
+        shard_writes.append(tuple(kwargs["layer_state_dicts"]))
+        return save_shards(**kwargs)
+
     export_dir = tmp_path / "grouped_ep_export"
-    export_mcore_gpt_to_hf_vllm_fq(
-        model, tmp_path, dtype=torch.bfloat16, export_dir=str(export_dir)
-    )
+    regular_export_dir = tmp_path / "grouped_ep_regular_export"
+    with patch.object(uem, "save_safetensors_by_layer_index", record_shard_write):
+        export_mcore_gpt_to_hf_vllm_fq(
+            model, tmp_path, dtype=torch.bfloat16, export_dir=str(export_dir)
+        )
+        export_mcore_gpt_to_hf(
+            model, tmp_path, dtype=torch.bfloat16, export_dir=str(regular_export_dir)
+        )
+
+    expected_shards = [(layer.layer_number,)] * 2 if ep_rank == 0 else [(), ()]
+    assert shard_writes == expected_shards
     torch.distributed.barrier()
     if rank == 0:
         with open(export_dir / "model.safetensors.index.json") as f:
@@ -469,7 +491,13 @@ def _test_mcore_vllm_grouped_ep_export(tmp_path, rank, size):
             for key, expected in per_rank.items():
                 with safe_open(export_dir / weight_map[key], framework="pt") as f:
                     torch.testing.assert_close(f.get_tensor(key), expected, rtol=0, atol=0)
+        with open(regular_export_dir / "model.safetensors.index.json") as f:
+            regular_weight_map = json.load(f)["weight_map"]
+        assert set(weight_map) <= regular_weight_map.keys()
 
 
-def test_mcore_vllm_grouped_ep_export(dist_workers_size_2, tmp_path):
-    dist_workers_size_2.run(partial(_test_mcore_vllm_grouped_ep_export, tmp_path))
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_mcore_vllm_grouped_ep_export(request, tmp_path, pp_size):
+    """Only EP0 writes each stage's layer files in regular and fakequant export."""
+    workers = request.getfixturevalue(f"dist_workers_size_{2 * pp_size}")
+    workers.run(partial(_test_mcore_vllm_grouped_ep_export, tmp_path, pp_size))
