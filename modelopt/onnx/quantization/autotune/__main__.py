@@ -102,14 +102,20 @@ def run_autotune() -> int:
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
     if trtexec_args and isinstance(trtexec_args, str):
         trtexec_args = trtexec_args.split()
-    benchmark_instance = init_benchmark_instance(
-        use_trtexec=args.use_trtexec,
-        plugin_libraries=args.plugin_libraries,
-        timing_cache_file=args.timing_cache,
-        warmup_runs=args.warmup_runs,
-        timing_runs=args.timing_runs,
-        trtexec_args=trtexec_args,
-    )
+    try:
+        benchmark_instance = init_benchmark_instance(
+            use_trtexec=args.use_trtexec,
+            plugin_libraries=args.plugin_libraries,
+            timing_cache_file=args.timing_cache,
+            warmup_runs=args.warmup_runs,
+            timing_runs=args.timing_runs,
+            trtexec_args=trtexec_args,
+            network_timeout_minutes=args.network_timeout_minutes,
+            remote_engine_path=args.remote_engine_path,
+        )
+    except (ValueError, ImportError) as e:
+        logger.error(str(e))
+        return 1
 
     if benchmark_instance is None:
         logger.error("Failed to initialize TensorRT benchmark")
@@ -313,6 +319,20 @@ Examples:
         default=None,
         help="Additional command-line arguments to pass to trtexec as a single quoted string. "
         "Example: --trtexec_benchmark_args '--fp16 --workspace=4096 --verbose'",
+    )
+    trt_group.add_argument(
+        "--network_timeout_minutes",
+        type=int,
+        default=10,
+        help="Timeout used for network commands when performing remote auto tuning, mainly relevant for scp",
+    )
+    trt_group.add_argument(
+        "--remote_engine_path",
+        type=str,
+        default=None,
+        help="Path used for storing temporary TensorRT engine files for remote profiling. "
+        "If unset, a unique per-run filename is generated automatically to avoid collisions "
+        "when multiple users share the same remote device.",
     )
 
     # Logging
