@@ -125,12 +125,13 @@ def _is_quant_moe_linear(module: nn.Module) -> bool:
     name gets uniquified — would bypass this handler and export without the input-amax
     fallback. The name check is kept as a fallback so stand-in modules match too.
 
-    The wrapper lives in the optional transformers plugin, hence the lazy import.
+    The wrapper lives in the Step PTQ modeling module, imported lazily like other export
+    modules do to avoid an import cycle with ``modelopt.torch.quantization``.
     """
     if not hasattr(module, "experts"):
         return False
     try:
-        from modelopt.torch.quantization.plugins.huggingface import _QuantMoELinear
+        from modelopt.torch.models.step3p5.modeling_ptq import _QuantMoELinear
 
         if isinstance(module, _QuantMoELinear):
             return True
