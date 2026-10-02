@@ -100,6 +100,7 @@ def _isolated_launcher_env():
             "QUANT_CALIB_SIZE",
             "CALIB_BATCH_SIZE",
             "TRUST_REMOTE_CODE",
+            "VLLM_DISABLE_COMPILE_CACHE",
             "MLFLOW_TRACKING_URI",
             "MLFLOW_EXPERIMENT_NAME",
             "MODELOPT_MLFLOW_REQUIRED",
@@ -324,7 +325,7 @@ def test_fakequant_launcher_passes_through_non_serve_commands(monkeypatch, quant
         ),
         pytest.param(
             ["vllm", "serve", "/models/qwen"],
-            {"QUANT_CFG": "NVFP4_DEFAULT_CFG"},
+            {"QUANT_CFG": "NVFP4_DEFAULT_CFG", "VLLM_DISABLE_COMPILE_CACHE": "0"},
             ["serve", "/models/qwen"],
             {"QUANT_CFG": "NVFP4_DEFAULT_CFG"},
             id="environment-fallback",
@@ -379,9 +380,13 @@ def test_fakequant_launcher_serving_paths(
         for key, value in expected_env.items():
             assert os.environ[key] == value
         assert os.environ["QUANT_DATASET"] == "cnn_dailymail"
+        assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == initial_env.get(
+            "VLLM_DISABLE_COMPILE_CACHE", "1"
+        )
     else:
         assert "QUANT_CFG" not in os.environ
         assert "MODELOPT_STATE_PATH" not in os.environ
+        assert "VLLM_DISABLE_COMPILE_CACHE" not in os.environ
     assert sys.argv == expected_argv
     _, unknown = launcher._make_vllm_serve_parser().parse_known_args(sys.argv[2:])
     assert not unknown

@@ -33,7 +33,7 @@ Changelog
 - Add the ``configs/ptq/units/kv_nvfp4_mla`` recipe unit for fake quantization of the MLA KV cache (DeepSeek-V3, GLM-5.3-Flash, ...) in vLLM fake-quant serving: NVFP4 for the latent and FP8 for the RoPE key. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve>`_ for an example recipe.
 - vLLM fake-quant serving now runs on pre-quantized checkpoints such as FP8 when the recipe leaves those layers unquantized (for example a KV-cache-only recipe), and on MLA models with an FP8 KV cache; both previously failed during quantization.
 - ``KV_QUANT_CFG`` presets in vLLM fake-quant serving now quantize the MLA KV cache; on vLLM 0.16 and later they silently quantized nothing for MLA models.
-- vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
+- vLLM fake-quant serving of NVFP4 and cast-mode KV-cache configs no longer needs ``--enforce-eager``. ``examples/vllm_serve/vllm_serve_fakequant.py`` now sets ``VLLM_DISABLE_COMPILE_CACHE=1`` for fake-quant serves by default, because a cached torch.compile graph of the same model without the fake quant would otherwise be reused.
 
 *Speculative Decoding*
 

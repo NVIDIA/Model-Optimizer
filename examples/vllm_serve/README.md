@@ -395,4 +395,4 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
 2. KV cache quantization export and reload is not supported in MCore yet.
-3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which this launcher sets by default). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the shim sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
