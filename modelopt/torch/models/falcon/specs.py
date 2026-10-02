@@ -20,5 +20,5 @@ from ..specs import ModelSpec, register
 __all__: list[str] = []
 
 # Dense, and nothing model-specific for export. Older remote-code Falcon checkpoints
-# (RWForCausalLM) report other model types and are handled by the HF quantization plugin alone.
+# (RWForCausalLM) report other model types and are handled by modeling_ptq.py alone.
 register(ModelSpec(model_type="falcon", min_transformers_version="4.57"))
