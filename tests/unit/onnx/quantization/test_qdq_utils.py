@@ -1178,6 +1178,237 @@ class TestQdqToDqValidation:
         with pytest.raises(ValueError, match="QuantizeLinear node bad_q has no inputs"):
             qdq_to_dq(model)
 
+    def _create_shared_qdq_model(self, num_dq=2, dq_scale_names=None, dq_zp_names=None, add_op_type="MatMul"):
+        """Helper to create a model with shared Q feeding multiple DQs.
+
+        Args:
+            num_dq: Number of DQ consumers
+            dq_scale_names: List of scale names for each DQ (default: all use "scale")
+            dq_zp_names: List of zero-point names for each DQ (default: all use "zp")
+            add_op_type: Operation type after DQ ("MatMul", "Gemm", "MixedMatMulGemmTransB1")
+        """
+        if dq_scale_names is None:
+            dq_scale_names = ["scale"] * num_dq
+        if dq_zp_names is None:
+            dq_zp_names = ["zp"] * num_dq
+
+        weight = numpy_helper.from_array(np.random.randn(32, 16).astype(np.float32), "weight")
+        scale = numpy_helper.from_array(np.array([0.1]*16, dtype=np.float32), "scale")
+        zp = numpy_helper.from_array(np.array([0]*16, dtype=np.int32), "zp")
+
+        # Additional scales for mismatch tests
+        additional_initializers = [weight, scale, zp]
+        for i, (sname, zname) in enumerate(zip(dq_scale_names, dq_zp_names)):
+            if sname != "scale":
+                additional_initializers.append(numpy_helper.from_array(np.array([0.2]*16, dtype=np.float32), sname))
+            if zname != "zp":
+                additional_initializers.append(numpy_helper.from_array(np.array([1]*16, dtype=np.int32), zname))
+
+        input_tensors = []
+        nodes = []
+        outputs = []
+
+        q_node = helper.make_node("QuantizeLinear", ["weight", "scale", "zp"], ["q_out"], "q_w")
+        nodes.append(q_node)
+
+        for i in range(num_dq):
+            sname = dq_scale_names[i]
+            zname = dq_zp_names[i]
+            dq_name = f"dq{i}"
+            dq_out = f"dq{i}_out"
+            dq_node = helper.make_node("DequantizeLinear", ["q_out", sname, zname], [dq_out], dq_name)
+            nodes.append(dq_node)
+
+            input_name = f"input{i}"
+            input_tensors.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT, [4, 32]))
+
+            out_name = f"out{i}"
+            if add_op_type == "MatMul":
+                op_node = helper.make_node("MatMul", [input_name, dq_out], [out_name], f"matmul{i}")
+            elif add_op_type == "Gemm":
+                op_node = helper.make_node("Gemm", [input_name, dq_out], [out_name], f"gemm{i}", transB=0)
+            elif add_op_type == "MixedMatMulGemmTransB1":
+                # First branch: MatMul (axis=1), Second branch: Gemm(transB=1) (axis=0)
+                if i == 0:
+                    op_node = helper.make_node("MatMul", [input_name, dq_out], [out_name], f"matmul{i}")
+                else:
+                    op_node = helper.make_node("Gemm", [input_name, dq_out], [out_name], f"gemm{i}", transB=1)
+            else:
+                raise ValueError(f"Unknown add_op_type: {add_op_type}")
+            nodes.append(op_node)
+
+            outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, [4, 16]))
+
+        graph = helper.make_graph(
+            nodes=nodes,
+            name="test_graph",
+            inputs=input_tensors,
+            outputs=outputs,
+            initializer=additional_initializers,
+        )
+        return helper.make_model(graph)
+
+    def test_shared_qdq_two_matmul(self):
+        """Test shared QDQ with two MatMul consumers (basic MHA pattern)."""
+        model = self._create_shared_qdq_model(num_dq=2, add_op_type="MatMul")
+
+        # Should not raise assertion error
+        converted = qdq_to_dq(model)
+
+        # Verify structure
+        onnx.checker.check_model(converted)
+        q_nodes = [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        assert len(q_nodes) == 0, "All Q nodes should be removed"
+
+        dq_nodes = [n for n in converted.graph.node if n.op_type == "DequantizeLinear"]
+        assert len(dq_nodes) == 2, "Both DQ nodes should remain"
+
+        # Both DQs should reference the same converted weight
+        weight_inits = [init for init in converted.graph.initializer if init.name == "weight"]
+        assert len(weight_inits) == 1
+        assert all(n.input[0] == "weight" for n in dq_nodes)
+
+    def test_shared_qdq_matmul_gemm_transb0(self):
+        """Test shared QDQ with MatMul and Gemm(transB=0) - compatible axes."""
+        model = self._create_shared_qdq_model(num_dq=2, add_op_type="Gemm")
+
+        converted = qdq_to_dq(model)
+
+        onnx.checker.check_model(converted)
+        dq_nodes = [n for n in converted.graph.node if n.op_type == "DequantizeLinear"]
+        assert len(dq_nodes) == 2
+
+    def test_shared_qdq_matmul_gemm_transb1(self):
+        """Test shared QDQ with MatMul and Gemm(transB=1) - incompatible axes."""
+        model = self._create_shared_qdq_model(num_dq=2, add_op_type="MixedMatMulGemmTransB1")
+
+        with pytest.raises(RuntimeError, match=r"incompatible axes"):
+            qdq_to_dq(model)
+
+    def test_shared_qdq_scale_mismatch(self):
+        """Test shared QDQ where DQs have different scales."""
+        model = self._create_shared_qdq_model(num_dq=2, dq_scale_names=["scale", "scale2"])
+
+        with pytest.raises(RuntimeError, match=r"scale input.*differs"):
+            qdq_to_dq(model)
+
+    def test_shared_qdq_zp_mismatch(self):
+        """Test shared QDQ where DQs have different zero points."""
+        model = self._create_shared_qdq_model(num_dq=2, dq_zp_names=["zp", "zp2"])
+
+        with pytest.raises(RuntimeError, match=r"zero-point input.*differs"):
+            qdq_to_dq(model)
+
+    def test_shared_qdq_missing_zp(self):
+        """Test shared QDQ where Q and all DQs have no zero point."""
+        # Create model with 2-input QuantizeLinear (no zero point)
+        weight = numpy_helper.from_array(np.random.randn(32, 16).astype(np.float32), "weight")
+        scale = numpy_helper.from_array(np.array([0.1]*16, dtype=np.float32), "scale")
+
+        input_tensors = [
+            helper.make_tensor_value_info("input0", TensorProto.FLOAT, [4, 32]),
+            helper.make_tensor_value_info("input1", TensorProto.FLOAT, [4, 32]),
+        ]
+
+        q_node = helper.make_node("QuantizeLinear", ["weight", "scale"], ["q_out"], "q_w")
+        dq1 = helper.make_node("DequantizeLinear", ["q_out", "scale"], ["dq1_out"], "dq1")
+        dq2 = helper.make_node("DequantizeLinear", ["q_out", "scale"], ["dq2_out"], "dq2")
+        matmul1 = helper.make_node("MatMul", ["input0", "dq1_out"], ["out0"], "matmul0")
+        matmul2 = helper.make_node("MatMul", ["input1", "dq2_out"], ["out1"], "matmul1")
+
+        graph = helper.make_graph(
+            nodes=[q_node, dq1, dq2, matmul1, matmul2],
+            name="test_graph",
+            inputs=input_tensors,
+            outputs=[
+                helper.make_tensor_value_info("out0", TensorProto.FLOAT, [4, 16]),
+                helper.make_tensor_value_info("out1", TensorProto.FLOAT, [4, 16]),
+            ],
+            initializer=[weight, scale],
+        )
+        model = helper.make_model(graph)
+
+        converted = qdq_to_dq(model)
+        onnx.checker.check_model(converted)
+
+        dq_nodes = [n for n in converted.graph.node if n.op_type == "DequantizeLinear"]
+        assert len(dq_nodes) == 2
+
+    def test_shared_qdq_zp_presence_mismatch(self):
+        """Test shared QDQ where Q has no ZP but DQ has ZP (or vice versa)."""
+        # Q has ZP, DQ1 has ZP, DQ2 doesn't
+        weight = numpy_helper.from_array(np.random.randn(32, 16).astype(np.float32), "weight")
+        scale = numpy_helper.from_array(np.array([0.1]*16, dtype=np.float32), "scale")
+        zp = numpy_helper.from_array(np.array([0]*16, dtype=np.int32), "zp")
+
+        input_tensors = [
+            helper.make_tensor_value_info("input0", TensorProto.FLOAT, [4, 32]),
+            helper.make_tensor_value_info("input1", TensorProto.FLOAT, [4, 32]),
+        ]
+
+        q_node = helper.make_node("QuantizeLinear", ["weight", "scale", "zp"], ["q_out"], "q_w")
+        dq1 = helper.make_node("DequantizeLinear", ["q_out", "scale", "zp"], ["dq1_out"], "dq1")
+        # DQ2 has only 2 inputs (no zero point)
+        dq2 = helper.make_node("DequantizeLinear", ["q_out", "scale"], ["dq2_out"], "dq2")
+        matmul1 = helper.make_node("MatMul", ["input0", "dq1_out"], ["out0"], "matmul0")
+        matmul2 = helper.make_node("MatMul", ["input1", "dq2_out"], ["out1"], "matmul1")
+
+        graph = helper.make_graph(
+            nodes=[q_node, dq1, dq2, matmul1, matmul2],
+            name="test_graph",
+            inputs=input_tensors,
+            outputs=[
+                helper.make_tensor_value_info("out0", TensorProto.FLOAT, [4, 16]),
+                helper.make_tensor_value_info("out1", TensorProto.FLOAT, [4, 16]),
+            ],
+            initializer=[weight, scale, zp],
+        )
+        model = helper.make_model(graph)
+
+        with pytest.raises(RuntimeError, match="zero-point"):
+            qdq_to_dq(model)
+
+    def test_shared_qdq_mixed_consumers(self):
+        """Test shared QDQ with non-DQ consumer (should reject)."""
+        weight = numpy_helper.from_array(np.random.randn(32, 16).astype(np.float32), "weight")
+        scale = numpy_helper.from_array(np.array([0.1]*16, dtype=np.float32), "scale")
+        zp = numpy_helper.from_array(np.array([0]*16, dtype=np.int32), "zp")
+
+        input_tensors = [
+            helper.make_tensor_value_info("input0", TensorProto.FLOAT, [4, 32]),
+        ]
+
+        q_node = helper.make_node("QuantizeLinear", ["weight", "scale", "zp"], ["q_out"], "q_w")
+        dq1 = helper.make_node("DequantizeLinear", ["q_out", "scale", "zp"], ["dq1_out"], "dq1")
+        add_node = helper.make_node("Add", ["q_out", "input0"], ["add_out"], "add_node")
+        matmul1 = helper.make_node("MatMul", ["input0", "dq1_out"], ["out0"], "matmul0")
+
+        graph = helper.make_graph(
+            nodes=[q_node, dq1, add_node, matmul1],
+            name="test_graph",
+            inputs=input_tensors,
+            outputs=[helper.make_tensor_value_info("out0", TensorProto.FLOAT, [4, 16])],
+            initializer=[weight, scale, zp],
+        )
+        model = helper.make_model(graph)
+
+        with pytest.raises(RuntimeError, match="non-DequantizeLinear consumers"):
+            qdq_to_dq(model)
+
+    def test_single_consumer_regression(self):
+        """Test single consumer case still works (regression test)."""
+        model = self._create_shared_qdq_model(num_dq=1, add_op_type="MatMul")
+
+        converted = qdq_to_dq(model)
+
+        onnx.checker.check_model(converted)
+        q_nodes = [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
+        assert len(q_nodes) == 0
+
+        dq_nodes = [n for n in converted.graph.node if n.op_type == "DequantizeLinear"]
+        assert len(dq_nodes) == 1
+        assert dq_nodes[0].input[0] == "weight"
+
 
 class TestLegacyEdgeLLMShims:
     """Smoke tests for the deprecated top-level shims kept for TensorRT-Edge-LLM 0.6.1.
