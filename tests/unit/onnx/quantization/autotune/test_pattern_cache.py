@@ -133,6 +133,33 @@ class TestPatternCache:
             if os.path.exists(yaml_path):
                 os.unlink(yaml_path)
 
+    def test_yaml_load_ignores_locale_encoding(self, tmp_path, monkeypatch):
+        """A UTF-8 cache file loads even where the locale codepage is cp1252 (e.g. Windows).
+
+        CI runs under a UTF-8 locale, so make every ``open()`` in the module that does not pin
+        ``encoding=`` decode as cp1252 instead -- the failure a Windows user would see.
+        """
+        import builtins
+
+        from modelopt.onnx.quantization.autotune import common
+
+        def cp1252_open(file, mode="r", *args, encoding=None, **kwargs):
+            if "b" not in mode and encoding is None:
+                encoding = "cp1252"
+            return builtins.open(file, mode, *args, encoding=encoding, **kwargs)
+
+        monkeypatch.setattr(common, "open", cp1252_open, raising=False)
+
+        cache = PatternCache()
+        cache.add_pattern_schemes(PatternSchemes(pattern=self._create_test_pattern("Conv->Relu")))
+        yaml_path = tmp_path / "cache.yaml"
+        cache.save(str(yaml_path))
+        # A hand-edited comment: U+0101 encodes as C4 81, and 0x81 is undefined in cp1252.
+        yaml_path.write_text("# tuned by Dāvis\n" + yaml_path.read_text(encoding="utf-8"), "utf-8")
+
+        restored = PatternCache.load(str(yaml_path))
+        assert restored.pattern_schemes[0].pattern_signature == "Conv->Relu"
+
     def test_update_cache(self):
         """Test updating existing pattern in cache (merges schemes)."""
         cache = PatternCache(minimum_distance=0)

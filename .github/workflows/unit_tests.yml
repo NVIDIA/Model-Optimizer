@@ -224,10 +224,9 @@ jobs:
     steps:
       - name: Required unit tests did not succeed
         # windows is deliberately absent from this condition. It still runs and is still visible,
-        # but it does not gate the merge: the job is flaky for reasons unrelated to the change
-        # under review -- an MSVC extension build racing the per-test timeout, and an
-        # 0xc000001d illegal instruction that depends on which CPU the runner draws. What we
-        # actually care about on that platform is the ONNX surface, so blocking every PR on
+        # but it does not gate the merge: its torch CPU tests are flaky for host-dependent
+        # reasons unrelated to the change under review. What we actually care about on that
+        # platform is the ONNX surface (QA also covers Windows), so blocking every PR on
         # unrelated torch flakiness costs more than it catches.
         if: >-
           ${{ needs.linux.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
