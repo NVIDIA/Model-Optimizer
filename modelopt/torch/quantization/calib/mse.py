@@ -119,13 +119,15 @@ class MseCalibrator(_Calibrator):
                 self._losses_sum[step] += loss
 
     def reset(self):
-        """Reset the stored losses and amax value."""
+        """Reset the per-cycle search state, keeping the calibrator reusable.
+
+        ``_initial_amax`` is only ever set in ``__init__``, so dropping it here would
+        leave the instance permanently unusable rather than reset. It is a clone of the
+        quantizer amax -- scalar or ``[out_features]`` -- so keeping it is cheap.
+        """
         self._losses_sum = None
         self._candidates = None
         self._amax = None
-        if self._initial_amax is not None:
-            del self._initial_amax
-            self._initial_amax = None
 
     @torch.no_grad()
     def compute_amax(self, verbose: bool = False):
@@ -298,13 +300,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         return self._best_amax
 
     def reset(self):
-        """Reset per-cycle state. Keep ``_initial_amax`` so the calibrator stays reusable.
-
-        ``MseCalibrator.reset()`` intentionally drops ``_initial_amax`` to free memory in
-        the multi-step search, but the NVFP4 per-block amax is shape ``[num_blocks]`` —
-        small enough to keep so a follow-up ``collect()`` can run again on the same
-        calibrator instance.
-        """
+        """Reset the per-cycle search state, keeping the calibrator reusable."""
         self._best_amax = None
         self._losses_sum = None
         self._candidates = None

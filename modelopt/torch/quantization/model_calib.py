@@ -821,12 +821,18 @@ def _mse_calibrate_weights(
                 )
                 if cal is None:
                     continue
-                weight_quantizer._calibrator = cal
-                _run_and_load_max_stats(
-                    weight_quantizer, partial(_collect_weight_stats, weight=weight)
-                )
-                if hasattr(cal, "reset"):
-                    cal.reset()
+                # A search calibrator installed for this amax search only; a later stage
+                # that collects stats must not inherit it.
+                previous_calibrator = weight_quantizer._calibrator
+                try:
+                    weight_quantizer._calibrator = cal
+                    _run_and_load_max_stats(
+                        weight_quantizer, partial(_collect_weight_stats, weight=weight)
+                    )
+                    if hasattr(cal, "reset"):
+                        cal.reset()
+                finally:
+                    weight_quantizer._calibrator = previous_calibrator
 
                 pbar.update(1)
     pbar.close()
@@ -2130,6 +2136,11 @@ def layerwise_calibrate(
         calib_mutates_weights=calib_mutates_weights,
         save_layer_state=exporter is None,
     )
+    if ckpt is not None:
+        # `from_folder` may adopt the checkpoint's more conservative value on resume, so take
+        # the resolved one back: the write-back decision below and what gets saved per layer
+        # are two halves of the same choice and must not drift apart.
+        calib_mutates_weights = ckpt.calib_mutates_weights
     start_layer = ckpt.start_layer if ckpt else 0
 
     if exporter is not None and _reconcile_export_with_resume(
