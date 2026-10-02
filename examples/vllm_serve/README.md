@@ -101,11 +101,13 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 ## Fake-quantize the MLA KV cache
 
 MLA models such as DeepSeek-V3 and GLM-5.3-Flash cache one latent vector per token instead of
-separate keys and values. Its fake quantizer is `kv_c_bmm_quantizer` on vLLM's `MLAAttention`.
-`KV_QUANT_CFG` presets (e.g. `NVFP4_KV_CFG`) are extended to it automatically, but the KV-cache
-units in a recipe (`*[kv]_bmm_quantizer`) do not match it, so a recipe imports the
-`configs/ptq/units/kv_nvfp4_mla` unit instead. For example, `kv_nvfp4_mla_only.yaml` quantizes the
-latent KV cache alone (weights and activations stay unquantized):
+separate keys and values; RoPE models such as DeepSeek-V3 also cache a small RoPE key. Their fake
+quantizers are `kv_c_bmm_quantizer` and `k_pe_bmm_quantizer` on vLLM's `MLAAttention`.
+`KV_QUANT_CFG` presets (e.g. `NVFP4_KV_CFG`) are extended to both automatically, with the same
+format for both. The KV-cache units in a recipe (`*[kv]_bmm_quantizer`) do not match them, so a
+recipe imports the `configs/ptq/units/kv_nvfp4_mla` unit instead, which uses NVFP4 for the latent
+and FP8 for the RoPE key. For example, `kv_nvfp4_mla_only.yaml` quantizes the MLA KV cache alone
+(weights and activations stay unquantized):
 
 ```yaml
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
@@ -114,7 +116,7 @@ imports:
   kv_nvfp4_mla: configs/ptq/units/kv_nvfp4_mla
 
 metadata:
-  description: NVFP4 fake quantization of the MLA latent KV cache only.
+  description: Fake quantization of the MLA KV cache only (NVFP4 latent, FP8 RoPE key).
 quantize:
   algorithm: max
   quant_cfg:
@@ -132,8 +134,8 @@ This recipe also runs on the FP8 GLM-5.3-Flash release, since it leaves the FP8 
 
 Notes:
 
-- The latent is fake-quantized before vLLM writes it to the cache, so attention over the tokens
-  of the current step sees the quantized values too.
+- The latent and RoPE key are fake-quantized before vLLM writes them to the cache, so attention
+  over the tokens of the current step sees the quantized values too.
 - Serve with a BF16 KV cache: an FP8 cache would quantize the fake-quantized latent a second time.
   `--kv-cache-dtype auto` is BF16 unless the checkpoint declares a quantized KV cache (e.g. a
   ModelOpt export with an FP8 KV cache); then pass `--kv-cache-dtype bfloat16`.
