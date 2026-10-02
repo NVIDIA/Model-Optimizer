@@ -49,12 +49,7 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.utils import clear_cuda_cache
 
-from ..quantization.nn import (
-    GroupedQuantizer,
-    NVFP4StaticQuantizer,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_utils import TiedWeightMap, get_language_model_from_vl
 from .quant_format import (
     GGML_FORMATS,
@@ -457,17 +452,7 @@ def uses_iq_quantization(module) -> bool:
 
     This reads ``num_bits`` directly rather than resolving each layer's full format, so an
     unrelated unsupported quantizer elsewhere in the model cannot turn the check into an error.
-
-    A TEGroupedLinear stores its per-expert quantizers in one ``GroupedQuantizer`` rather than
-    beside its ``weight0..N`` parameters, so inspect that container directly.
     """
-    grouped_quantizer = getattr(module, "weight_quantizer", None)
-    if isinstance(grouped_quantizer, GroupedQuantizer) and any(
-        quantizer.is_enabled and getattr(quantizer, "num_bits", None) in GGML_FORMATS
-        for quantizer in grouped_quantizer
-    ):
-        return True
-
     for weight_name in weight_attr_names(module):
         weight_quantizer = representative_weight_quantizer(module, weight_name)
         # getattr: a SequentialQuantizer has is_enabled but no num_bits, and is never GGML --
@@ -1915,10 +1900,16 @@ def get_quant_config(
     )
     if needs_layerwise_kv_metadata:
         if weight_quant_algo not in (None, "MIXED_PRECISION"):
-            raise NotImplementedError(
-                "Mixed-precision KV-cache export with a uniform quantized-weight format is "
-                "not supported yet. Use BF16 weights or a mixed-weight AutoQuantize recipe."
+            warn(
+                "The exported checkpoint combines uniform quantized weights with a mixed-precision "
+                "KV-cache layer map. Released runtimes do not yet consume "
+                "kv_cache_quantized_layers for uniform-weight ModelOpt checkpoints. Export succeeds "
+                "for artifact inspection only; do not deploy this checkpoint until the runtime "
+                "adds that metadata path. The exported metadata records "
+                "kv_cache_deployment_supported=false.",
+                stacklevel=2,
             )
+            quant_config["quantization"]["kv_cache_deployment_supported"] = False
         # KV metadata is orthogonal to weight metadata. In particular, a KV-only search
         # must preserve BF16 weights instead of synthesizing a weight quantization algorithm.
         quant_config["quantization"]["kv_cache_quant_algo"] = (

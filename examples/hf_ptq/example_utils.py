@@ -33,6 +33,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
     AutoConfig,
@@ -44,7 +45,9 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
@@ -892,15 +895,24 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_enc_dec(model_type) -> bool:
-    """Return whether the model_type uses encoder-decoder-style preview decode.
+def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
+    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
 
-    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
-    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
-    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
-    decode applies).
+    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
+    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
     """
-    return model_type in ["t5", "bart", "whisper"]
+    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
+
+
+def generate_excludes_prompt(model) -> bool:
+    """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
+
+    True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
+    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
+    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    """
+    config = model.config
+    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
 
 
 def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
@@ -1072,6 +1084,94 @@ def save_processor_config(args, export_path) -> None:
     except Exception as e:
         print(f"Warning: Could not save processor config: {e}")
         print("This is normal for some VLM architectures that don't use AutoProcessor")
+
+
+def _prepare_quant_cfg(
+    args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
+) -> dict[str, Any]:
+    """Apply shared checkpoint-local adjustments to a PTQ configuration."""
+    # Resolve the real export directory before resolve_checkpoint_dir hashes the config; otherwise
+    # distinct --export_path values containing the placeholder would share one checkpoint path.
+    if args.layerwise_export:
+        assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
+        quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
+        print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+        # Shards are resumable only while the manifest naming their resume point remains beside
+        # them; default the calibration checkpoint directory accordingly.
+        quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
+        if moved:
+            print(
+                "Layerwise checkpoint_dir co-located with the export path so a resumed run "
+                "finds its manifest next to the shards it must not overwrite."
+            )
+
+    if needs_checkpoint_path_update(quant_cfg):
+        quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+        print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
+
+    if args.cast_mxfp4_to_nvfp4:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        force_weight_quantizers_static(quant_cfg["quant_cfg"])
+    return quant_cfg
+
+
+def assert_layerwise_export_compatible(
+    args: argparse.Namespace,
+    full_model: torch.nn.Module,
+    algorithm: str | dict | list | None,
+) -> None:
+    """Refuse layerwise export before calibration starts, not after the run is paid for.
+
+    Layerwise export writes each layer's shard during calibration and finishes the checkpoint
+    in finalize() afterwards, so anything that would rewrite or contradict that checkpoint has
+    to be caught here -- once calibration begins, the user has already paid for the whole run.
+    """
+    block = layerwise_export_block(algorithm)
+    if block is not None:
+        entries = algorithm if isinstance(algorithm, list) else [algorithm]
+        owner = next(e for e in entries if isinstance(e, dict) and e.get("layerwise") is block)
+        if not owner.get("method"):
+            raise NotImplementedError(
+                "layerwise.export_dir needs a calibration method: without one there is no "
+                "per-layer pass to write the shards, so the export would find nothing. Set "
+                "algorithm.method, or export without layerwise.export_dir."
+            )
+
+    if has_spec_opt(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support speculative-decoding models: "
+            "export_speculative_decoding() would write a second checkpoint over the same "
+            "--export_path."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        raise NotImplementedError(
+            "layerwise.export_dir is not compatible with --cast_mxfp4_to_nvfp4: the cast "
+            "rewrites weights after calibration, by which point every shard is written."
+        )
+
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
+    for flag, value, exporter in (
+        ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
+        ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+        (
+            "an encoder-decoder model_type",
+            is_trtllm_enc_dec_export(hf_model_type(full_model)),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+    ):
+        if value:
+            raise NotImplementedError(
+                f"layerwise.export_dir is not compatible with {flag}: {exporter} would write a "
+                "second checkpoint over the same --export_path that layerwise calibration "
+                "already populated."
+            )
 
 
 def _layerwise_blocks(algorithm) -> list[dict]:

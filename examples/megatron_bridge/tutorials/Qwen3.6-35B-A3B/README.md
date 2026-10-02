@@ -187,7 +187,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 Non-default arguments:
 
 - `--student_megatron_path` — the quantized checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture.
-- `--tp_size 1 --pp_size 1 --cp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint.
+- `--tp_size 1 --pp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint. You may increase `--cp_size` to enable context parallelism for longer sequence lengths (`nemo:26.10` container onwards).
 - `--seq_length 32768 --gbs 512` — 16.8M tokens/iteration, 1.7B per 100 iterations.
 - `--lr 1e-5 --min_lr 1e-6` — an order of magnitude below typical distillation LRs: the job is to adapt weights to quantization, not to learn the task.
 - `--logit_kl_topk 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.
@@ -244,8 +244,10 @@ Sampling follows the [nvidia/Qwen3.6-35B-A3B-NVFP4](https://huggingface.co/nvidi
 > it cannot share a config with the others (`deployment.command` is global). `qwen3_coder` is what
 > the model card specifies; the template's `<tool_call>` markers resemble `hermes`, which would
 > mis-parse tool calls and silently invalidate the benchmark. Its `top_k` / `presence_penalty` go
-> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept —
-> that is why the other five configs omit them.
+> through tau2's `agent_args` passthrough, which NEL's top-level `params` block does not accept.
+> On an `ns_*` task they go through the adapter's `params_to_add` instead — the other five configs
+> still omit them, deliberately, so they reproduce the table above; see **Output length** below
+> for when `presence_penalty` helps and when it is pure cost.
 
 > [!IMPORTANT]
 > Every task sets `num_repeats: 1`; the repeat counts above come from **launching a config that many times**. N launches give N independent `pass@1` values, which is what `mean ± sem` and the paired tests need — `num_repeats: N` instead yields a single `pass@1[avg-of-N]` with no spread. GPQA is the deliberate exception.
@@ -308,12 +310,12 @@ Accuracy is only half the serving cost — a model that scores the same while em
 | MMMU-Pro | 9,382 | +3.0% | +6.2% | −3.8% | 8 |
 | GPQA Diamond | 13,561 | +17.1% | +6.6% | −8.5% | 1 |
 
-**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this.
+**4-bit weights lengthen SciCode outputs by ~23-25% on their own** — the published W4A16 checkpoint does it too, so it is not something QAD or W4A4 introduced. **QAD then pushes SciCode to +90.9%**, for an unchanged score (40.2 vs 39.9), while pulling GPQA and MMMU-Pro back toward BF16. The throughput table is measured at fixed output length, so it does not capture this. The SciCode figure is a termination failure with a **decode-time mitigation** — see below.
 
 <details>
-<summary><b>What the SciCode number actually is — worth reading before running QAD on another model</b></summary>
+<summary><b>What the SciCode number actually is, and how to fix it — worth reading before running QAD on another model</b></summary>
 
-It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps**:
+It is not verbosity. It is a **failure to terminate on a small fraction of sub-steps** — SciCode splits its 80 problems into 338 sub-steps, and `Subtask` scores the fraction of those whose code passes:
 
 - Sub-steps that hit the 131,072-token cap inside `<think>` go from **0.7% (20/2704, BF16) to 3.6% (96/2704, QAD 500)**. Almost all return **zero answer tokens** (93 of those 96) — the model writes a complete solution, says *"I think I've been going in circles"*, and writes it again. In the case we inspected, a 20-word window repeats **352 times** and 97.7% of the trace's 20-word windows are duplicates.
 - Those 3.6% of sub-steps burn **45.7% of all completion tokens**, so they dominate the mean: excluding them it is **+30.4%** rather than +90.9%.
@@ -322,7 +324,37 @@ It is not verbosity. It is a **failure to terminate on a small fraction of sub-s
 
 The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
 
+**It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token; almost all such sub-steps return nothing and score zero. Counts are pooled over all 8 runs, so the denominator is 338 × 8 = 2,704 sub-steps:
+
+| Model | Capped sub-steps | SciCode (Subtask) | Mean tokens | Median tokens |
+| --- | --- | --- | --- | --- |
+| **BF16** (teacher) | 20 → **0** | 39.9 → 39.9 | 5,348 → 3,590 | 1,817 → 1,927 |
+| W4A16 NVFP4 PTQ | 37 → **0** | 38.5 → 39.4 | 6,572 → 3,838 | 1,917 → 1,978 |
+| **W4A4 NVFP4 PTQ** | 32 → **1** | 39.1 → 39.1 | 6,713 → 4,052 | 2,116 → 2,184 |
+| **↳ + QAD 500 iters** | 96 → **2** | 40.2 → 39.6 | 10,209 → 4,641 | 3,482 → 3,302 |
+
+Accuracy is neutral — the deltas span −0.59 to +0.89, run-to-run noise in both directions. Note what that implies: the QAD row recovers 94 capped sub-steps, up to +3.5 pp of mechanical headroom, and the score does not move. Whether those sub-steps simply fail their tests anyway or the penalty costs a little elsewhere is not separable at this noise level — either way the win is cost, not accuracy: SciCode wall-clock generation drops 12-44%, which the token columns explain — see the rate-cost table below.
+
+Means are `avg_completion_tokens`, so the left-hand column matches the table above; medians come from the per-response `output.jsonl`, which is the only place they exist.
+
+**Read the two token columns together: the penalty removes the tail, it does not make the model concise.** The median is flat or slightly *up* on three of four builds, so a typical response is unchanged; the mean falls 33-55% purely because the runaway generations are gone. And the underlying shift survives — QAD's median is still **+71%** over BF16 with the penalty on, against +91.6% without. This suppresses the pathology, not the verbosity QAD introduced.
+
+The shipped `eval_configs/scicode.yaml` carries the line already, commented out, so it reproduces the results table above — uncomment `presence_penalty: 1.5` in its `params_to_add` block to get the right-hand column.
+
+**Scope it to this failure mode, though.** On GPQA Diamond, which never caps, the same setting leaves accuracy unchanged and costs **4.8× throughput**. Use it where runaway generation actually occurs; do not make it a global default.
+
+The two wall-clock results look contradictory and are not — the penalty has a *rate* cost that scales with concurrency, and SciCode pays it back in tokens it no longer emits:
+
+| Benchmark | `parallelism` | tok/s without → with | rate cost | tokens removed | net |
+| --- | --- | --- | --- | --- | --- |
+| SciCode | 8 | 1,475 → 1,192 | 1.24× | −55% | **faster** |
+| GPQA Diamond | 32 | 5,109 → 1,067 | 4.8× | −7% | **slower** |
+
+Measured on single-Slurm-segment runs on both sides, so neither figure includes requeue overhead. The likely cause is that the penalty is applied per sequence across the 248,320-token vocabulary on every decode step, so its cost grows with the number of concurrent sequences — at `parallelism: 8` it is a 24% tax, at 32 it dominates. We measured the correlation with `parallelism`, not the implementation, so treat the attribution as inference. The practical rule is the same either way: **the penalty pays for itself only where it removes enough tokens to cover its rate cost**, and that means workloads that actually cap.
+
 **For the next QAD run**, three things follow: track the **length-capped rate** as a first-class metric alongside accuracy (a benchmark score can stay flat while 3.6% of responses return nothing); consider **top-p instead of top-k** for the KD loss so coverage adapts to the teacher's entropy rather than a fixed rank; and if memory allows, **full-vocab KL** — at 32K on this 248,320-token vocabulary the dense fp32 logits are 30.31 GiB per tensor, which is why top-k was used here, but more GPU memory or a smaller model or shorter sequence may afford it.
+
+[Lotfi et al., *Quantized Reasoning Models Think They Need to Think Longer, but They Do Not*](https://arxiv.org/abs/2606.00206) reports a related effect — PTQ amplifies "overthinking", where the model reaches a correct answer and then talks itself out of it — and proposes a logit penalty on hesitation markers ("Wait", "But", "Alternatively"). We tested their penalty here: it helps, but less than `presence_penalty` and at a small accuracy cost, and their marker-density signature does not reproduce on our W4A4 PTQ. Their failure opens *new* reasoning branches; ours repeats a finished solution.
 
 </details>
 

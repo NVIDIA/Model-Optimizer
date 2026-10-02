@@ -28,7 +28,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 30 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 32 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -59,8 +59,10 @@ supported combinations.
 | `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
 | `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 | `iq1_s` | IQ1_S W1A16, eligible linears | none | none (no calibration) |
+| `iq1_m` | IQ1_M W1A16 (1.75 bpw), eligible linears | none | none (no calibration) |
 | `iq2_xxs` | IQ2_XXS W2A16 (2.06 bpw), eligible linears | none | none (no calibration) |
 | `iq2_xs` | IQ2_XS W2A16 (2.31 bpw), eligible linears | none | none (no calibration) |
+| `iq2_s` | IQ2_S W2A16 (2.56 bpw), eligible linears | none | none (no calibration) |
 | `q8_0` | Q8_0 W8A16 (8.5 bpw), eligible linears | none | none (no calibration) |
 
 </details>
@@ -140,10 +142,10 @@ activations and tensor-core math are what deliver the throughput.
 - **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
   activations. Needs no calibration forward pass; the QAT starting point for the
   GPT-OSS family (see `examples/gpt-oss`).
-- **`iq1_s` / `iq2_xxs` / `iq2_xs` / `q8_0`** — GGML-compatible weight-only
+- **`iq1_s` / `iq1_m` / `iq2_xxs` / `iq2_xs` / `iq2_s` / `q8_0`** — GGML-compatible weight-only
   quantization on the eligible linear layers, with BF16 activations; `lm_head`, MoE routers,
   `conv1d` and the vision branch stay in BF16 like every other preset. The IQ formats
-  trade size against accuracy at 1.56, 2.06 and 2.31 bits per weight; Q8_0 uses 8.5 bits per
+  trade size against accuracy at 1.56, 1.75, 2.06, 2.31 and 2.56 bits per weight; Q8_0 uses 8.5 bits per
   weight. No calibration data is required. IQ weights must have a final dimension divisible by
   256; Q8_0 requires divisibility by 32.
   Unified HF export writes the packed GGML blocks; Megatron export additionally
@@ -553,6 +555,29 @@ entry is a thin **alias** that imports that recipe wholesale and overrides only
   `model_type/qwen3_5_moe/ptq/nvfp4_experts_mse-fp8_rest-kv_fp8` — NVFP4 (MSE static weights)
   on the routed experts, ModelOpt-default FP8 elsewhere, and an FP8 KV cache — as published in
   `nvidia/Qwen3.5-397B-A17B-NVFP4-V2`.
+- **`models/zai-org/GLM-5.1/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast`** and
+  **`models/zai-org/GLM-5.2/ptq/...`** alias
+  `general/ptq/nvfp4_experts_only_input_scale1-kv_fp8_cast` — expert-only NVFP4 with the
+  expert `input_scale` pinned to 1.0 and an FP8 KV cache in cast mode — as published in
+  `nvidia/GLM-5.1-NVFP4` and `nvidia/GLM-5.2-NVFP4`.
+- **`models/MiniMaxAI/MiniMax-M2.5/ptq/nvfp4_experts_only-kv_fp8_cast`** aliases
+  `general/ptq/nvfp4_experts_only-kv_fp8_cast` — expert-only NVFP4 with an FP8 KV cache in
+  cast mode — as published in `nvidia/MiniMax-M2.5-NVFP4`.
+- **`models/deepseek-ai/DeepSeek-V3.1/ptq/nvfp4_omlp_only-kv_fp8_cast`**,
+  **`models/deepseek-ai/DeepSeek-V3.2/ptq/...`**,
+  **`models/Qwen/Qwen3-235B-A22B-Instruct-2507/ptq/...`** and
+  **`models/Qwen/Qwen3-235B-A22B-Thinking-2507/ptq/...`** all alias
+  `general/ptq/nvfp4_omlp_only-kv_fp8_cast` — NVFP4 on the attention `o_proj` and the
+  MLP/MoE layers, FP8 KV cache in cast mode — as published in the matching
+  `nvidia/<model>-NVFP4` releases.
+- **`models/Qwen/Qwen3.6-27B/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast`** aliases the
+  `qwen3_5` architecture recipe — W4A16 NVFP4 with MSE weight scales, FP8 attention and an
+  FP8 KV cache in cast mode — as published in `nvidia/Qwen3.6-27B-NVFP4`. The release also
+  carries `input_scale` parameters on its W4A16 layers from a separate calibration pass;
+  the recipe reproduces the evaluated W4A16 scheme, not those extra scales.
+- **`models/MiniMaxAI/MiniMax-M3/ptq/mxfp8_nvfp4_experts`** aliases the `minimax_m3_vl`
+  architecture recipe — MXFP8 language-model linears with MSE-calibrated NVFP4 routed
+  experts at `input_scale` 1.0 — as published in `nvidia/MiniMax-M3-NVFP4`.
 
 ---
 

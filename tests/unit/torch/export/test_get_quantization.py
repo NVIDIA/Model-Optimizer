@@ -147,6 +147,34 @@ def test_uses_iq_quantization_false_without_iq_layers():
     assert not uses_iq_quantization(model)
 
 
+class _FakeGroupedLinear(torch.nn.Module):
+    """TEGroupedLinear layout: ``weight0..N`` behind one GroupedQuantizer and no ``weight``."""
+
+    def __init__(self, weight_cfg):
+        super().__init__()
+        self.weight0 = torch.nn.Parameter(torch.randn(4, 4))
+        self.weight1 = torch.nn.Parameter(torch.randn(4, 4))
+        quantizers = [TensorQuantizer(), TensorQuantizer()]
+        for q in quantizers:
+            q.set_from_attribute_config(weight_cfg)
+        self.weight_quantizer = GroupedQuantizer(*quantizers)
+        self.input_quantizer = TensorQuantizer()
+        self.input_quantizer.set_from_attribute_config({"num_bits": (4, 3)})
+
+
+def test_grouped_experts_only_model_reports_its_format():
+    """An experts-only recipe leaves grouped experts as the only quantized modules."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), _FakeGroupedLinear({"num_bits": (4, 3)}))
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+
+
+def test_uses_iq_quantization_sees_grouped_experts():
+    model = torch.nn.Sequential(_FakeGroupedLinear(_IQ_WEIGHT_CFG))
+
+    assert uses_iq_quantization(model)
+
+
 def test_uses_iq_quantization_tolerates_sequential_quantizer():
     """A SequentialQuantizer has is_enabled but no num_bits, and is never IQ.
 
@@ -405,6 +433,46 @@ def test_uniform_vlm_export_ignores_disabled_vision_attention():
     assert quantization["quant_algo"] == "FP8"
     assert quantization["kv_cache_quant_algo"] == "FP8"
     assert "kv_cache_quantized_layers" not in quantization
+
+
+def test_uniform_weight_quantization_exports_mixed_kv_cache_map():
+    model = ToyModel()
+    mtq.quantize(model, partial_fp8_config, lambda x: x(torch.randn(1, 4, 10)))
+    model.attn0 = _FakeAttention()
+    model.attn1 = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model.attn0,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+    )
+    mtq.set_quantizer_by_cfg(
+        model.attn1,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "constant_amax": 1.0,
+                },
+            }
+        ],
+    )
+
+    with pytest.warns(UserWarning, match="uniform quantized weights.*mixed-precision KV-cache"):
+        quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_deployment_supported"] is False
+    assert quantization["kv_cache_quantized_layers"] == {
+        "attn0": {"quant_algo": "FP8"},
+        "attn1": {"quant_algo": "NVFP4"},
+    }
 
 
 def test_quant_config_tolerates_ambiguous_language_model_roots():

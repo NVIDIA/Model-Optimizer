@@ -222,6 +222,11 @@ def dequantize_iq2_xs(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_XS_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_xs_grid(blocks.device)
+            return extension.iq2_xs_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     grid = iq2_xs_grid(blocks.device)
     decoded = torch.empty((blocks.shape[0], IQ2_XS_BLOCK_SIZE), dtype=dtype, device=blocks.device)
@@ -267,5 +272,5 @@ IQ2_XS_FORMAT = IQFormat(
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xs and
 # dequantize_iq2_xs when it was built, so patching those module functions changes neither backend
-# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
 iq2_xs_fake_quant = IQ2_XS_FORMAT.fake_quant

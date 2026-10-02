@@ -106,14 +106,14 @@ more fine-grained control on installed dependencies or for alternative docker im
 
 <div align="center">
 
-| **Technique** | **Description** | **Examples** | **Docs** |
+| **Technique** | **Description** | **Getting started** | **Examples** |
 | :------------: | :------------: | :------------: | :------------: |
-| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[HF LLMs / VLMs](./examples/hf_ptq/)\] \[[Megatron-Bridge LLMs / VLMs](./examples/megatron_bridge/)\] \[[Diffusers](./examples/diffusers/)\] \[[ONNX](./examples/onnx_ptq/)\] \[[Windows](./examples/windows/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Quantization Aware Training / Distillation | Refine accuracy of quantized models even further with a few training steps! | \[[Hugging Face](./examples/llm_qat/)\] \[[Megatron-Bridge](./examples/megatron_bridge)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Pruning | Reduce your model parameters or memory footprint and accelerate inference by removing unnecessary weights! | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/)\] | |
-| Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Hugging Face](./examples/llm_distill/)\] \[[Megatron-Bridge](./examples/megatron_bridge/)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
-| Speculative Decoding | Train draft modules to predict extra tokens during inference! | \[[Hugging Face](./examples/speculative_decoding/)\] \[[Megatron-LM](./examples/speculative_decoding#mlm-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)\] |
-| Sparsity | Efficiently compress your model by storing only its non-zero parameter values and their locations | \[[Hugging Face](./examples/llm_sparsity/)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html)\] |
+| Post Training Quantization | Compress model size by 2x-4x, speeding up inference while preserving model quality! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] | \[[HF LLMs / VLMs](./examples/hf_ptq/)\] \[[Megatron-Bridge LLMs / VLMs](./examples/megatron_bridge/README.md#post-training-quantization)\] \[[Diffusers](./examples/diffusers/)\] \[[ONNX](./examples/onnx_ptq/)\] \[[Windows](./examples/windows/)\] |
+| Quantization Aware Training / Distillation | Refine accuracy of quantized models even further with a few training steps! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/quantization_aware_training_and_distillation.html)\] | \[[Hugging Face](./examples/llm_qat/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#quantization-aware-distillation-qad)\] |
+| Pruning | Reduce your model parameters or memory footprint and accelerate inference by removing unnecessary weights! | \[[Start&nbsp;here](./examples/pruning/README.md)\] | \[[General](./examples/pruning/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#pruning)\] |
+| Distillation | Reduce deployment model size by teaching small models to behave like larger models! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] | \[[Hugging Face](./examples/llm_distill/)\] \[[Megatron-Bridge](./examples/megatron_bridge/README.md#distillation)\] \[[Megatron-LM](./examples/llm_distill/README.md#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] |
+| Speculative Decoding | Train draft modules to predict extra tokens during inference! | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)\] | \[[Hugging Face](./examples/speculative_decoding/)\] \[[Megatron-LM](./examples/speculative_decoding#mlm-example)\] |
+| Sparsity | Efficiently compress your model by storing only its non-zero parameter values and their locations | \[[Start&nbsp;here](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html)\] | \[[Hugging Face](./examples/llm_sparsity/)\] |
 
 </div>
 

@@ -81,8 +81,10 @@ def test_ptq_whisper(command):
         # satisfy both. These recipes set algorithm: null, so the format-specific cost is
         # packing each weight once and decoding it on each forward.
         PTQCommand(recipe="general/ptq/iq1_s", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq1_m", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xxs", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/iq2_xs", kv_cache_quant="none"),
+        PTQCommand(recipe="general/ptq/iq2_s", kv_cache_quant="none"),
         PTQCommand(recipe="general/ptq/q8_0", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
         PTQCommand(quant="nvfp4_awq_lite"),

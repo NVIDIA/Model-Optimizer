@@ -739,7 +739,7 @@ class PatternCache:
         """
         state = self.to_dict()
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         logger.info(
@@ -768,7 +768,7 @@ class PatternCache:
         Raises:
             FileNotFoundError: If the input_path doesn't exist
         """
-        with open(input_path) as f:
+        with open(input_path, encoding="utf-8") as f:
             state = yaml.safe_load(f)
 
         cache = cls.from_dict(state)

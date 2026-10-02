@@ -375,6 +375,52 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_lk_loss_type: Literal["ce", "tv", "lambda"] = ModeloptField(
+        default="ce",
+        description=(
+            "DFlash2 only: which divergence the block objective minimizes against the "
+            "hard target. 'ce' is -log q(gold), today's behavior. 'tv' is 1 - q(gold), the "
+            "total variation to the one-hot target, which is also the per-position expected "
+            "acceptance loss. 'lambda' anneals between them: the CE share is "
+            "dflash_lk_ce_scale * exp(-dflash_lk_ce_decay * a), where a is the mean q(gold) "
+            "over supervised positions, so the objective moves from fitting the "
+            "distribution to maximizing acceptance as acceptance improves. "
+            "'lambda' and 'tv' require dflash_self_logit_distillation=false: both read "
+            "q(gold) from the per-position cross-entropy, which the KD path does not "
+            "produce. Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
+    dflash_lk_ce_scale: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: scale of the CE share in the dflash_lk_loss_type='lambda' "
+            "blend. 1.0 starts the run as pure CE. Ignored for other loss types."
+        ),
+    )
+
+    dflash_lk_ce_decay: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: how fast the CE share decays as acceptance rises in the "
+            "dflash_lk_loss_type='lambda' blend. 0 pins the blend at dflash_lk_ce_scale. "
+            "Ignored for other loss types."
+        ),
+    )
+
+    dflash_selector_loss_alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: weight of the candidate-selector cross-entropy term, added to "
+            "the backbone loss. The selector re-ranks the backbone's top-k candidates per "
+            "block position; 0 trains the backbone and convolutions only. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha

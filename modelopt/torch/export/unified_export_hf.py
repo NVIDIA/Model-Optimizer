@@ -25,7 +25,7 @@ import tempfile
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -458,11 +458,61 @@ def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=Non
     return fsdp2_aware_weight_update(model, modules, names=names)
 
 
+def _llm_dummy_forward(model: torch.nn.Module) -> None:
+    """Run a dummy forward that reaches every fusable linear of an LLM or VLM language model."""
+    model_hf_type = hf_model_type(model)
+    fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
+    decoder_fake_input = fake_input
+
+    # Check if this is a VL model that needs special input handling
+    is_vl_model = is_multimodal_model(model)
+
+    if model_hf_type == "whisper":
+        # For Whisper models, we need to pass a fake input with the specific sequence length
+        from transformers import AutoFeatureExtractor
+
+        feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
+        fake_input = torch.ones(
+            [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
+        ).to(model.device)
+
+    # Nemotron VL checkpoints are remote-code models: match on config.architectures, the
+    # field the loader dispatches on, as is_multimodal_model does, and on the class name for a
+    # model built from a config without architectures.
+    architectures = getattr(getattr(model, "config", None), "architectures", None) or []
+    is_nemotron = any("nemotron" in name.lower() for name in [*architectures, type(model).__name__])
+    if is_vl_model and is_nemotron:
+        # For Nemotron VL models, run optimization on just the language model/decoder.
+        # This avoids needing pixel_values for the vision encoder.
+        language_model_lineage = get_language_model_from_vl(model)
+
+        if language_model_lineage is not None:
+            language_model = language_model_lineage[-1]
+            print(
+                f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+            )
+            # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+            language_model(fake_input, use_cache=False)
+        else:
+            raise ValueError(
+                f"Cannot extract language_model from Nemotron VL model ({type(model).__name__}). "
+                "This is required for requantization/resmoothing optimization. "
+                "Please ensure the model architecture is supported or file an issue."
+            )
+    elif getattr(model.config, "is_encoder_decoder", False):
+        # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
+        model(fake_input, decoder_input_ids=decoder_fake_input)
+    elif hasattr(model, "get_dummy_inputs"):
+        # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
+        model(**model.get_dummy_inputs())
+    else:
+        model(fake_input)
+
+
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
-    model_type = type(model).__name__.lower()
     model_hf_type = hf_model_type(model)
     module_names = set()
     # Built once: every fusion below resolves module names through it.
@@ -491,52 +541,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
-    # Define the dummy forward function for LLM
-    def llm_dummy_forward():
-        fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
-        decoder_fake_input = fake_input
-
-        # Check if this is a VL model that needs special input handling
-        is_vl_model = is_multimodal_model(model)
-
-        if model_type.startswith("whisper"):
-            # For Whisper models, we need to pass a fake input with the specific sequence length
-            from transformers import AutoFeatureExtractor
-
-            feature_extractor = AutoFeatureExtractor.from_pretrained(model.name_or_path)
-            fake_input = torch.ones(
-                [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
-            ).to(model.device)
-
-        if is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, run optimization on just the language model/decoder.
-            # This avoids needing pixel_values for the vision encoder.
-            language_model_lineage = get_language_model_from_vl(model)
-
-            if language_model_lineage is not None:
-                language_model = language_model_lineage[-1]
-                print(
-                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                )
-                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
-                language_model(fake_input, use_cache=False)
-            else:
-                raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                    "This is required for requantization/resmoothing optimization. "
-                    "Please ensure the model architecture is supported or file an issue."
-                )
-        elif getattr(model.config, "is_encoder_decoder", False):
-            # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif hasattr(model, "get_dummy_inputs"):
-            # For speculative decoding models (EAGLE, etc.), use model-provided dummy inputs
-            model(**model.get_dummy_inputs())
-        else:
-            model(fake_input)
-
     input_to_linear, output_to_layernorm = collect_shared_input_modules(
-        model, llm_dummy_forward, collect_layernorms=True
+        model, lambda: _llm_dummy_forward(model), collect_layernorms=True
     )
 
     fused_linears = _fuse_shared_input_modules(
@@ -635,8 +641,9 @@ def _export_quantized_weight(
                 "GGML unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
-        quantize_ggml = GGML_FORMAT_REGISTRY[quantization_format].quantize
-        packed_weight, _ = quantize_ggml(weight.to(dtype))
+        packed_weight = GGML_FORMAT_REGISTRY[quantization_format].pack(
+            weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+        )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
         maybe_clear_cuda_cache()
         return
@@ -1581,10 +1588,17 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+def _revert_hf_quant_config_names(
+    hf_quant_config: dict,
+    name_mapper: Callable[[str], str],
+    *,
+    module_names: Iterable[str] = (),
+) -> dict:
     """Return a name-reverted copy, leaving the input untouched if mapping fails."""
     mapped_quant_config = copy.deepcopy(hf_quant_config)
-    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    revert_quant_config_names(
+        mapped_quant_config.get("quantization", {}), name_mapper, module_names=module_names
+    )
     return mapped_quant_config
 
 
@@ -1598,7 +1612,11 @@ def _revert_quant_config_names_best_effort(
     try:
         name_mapper = build_reverse_name_mapper(model)
         if name_mapper is not None and hf_quant_config:
-            return _revert_hf_quant_config_names(hf_quant_config, name_mapper)
+            return _revert_hf_quant_config_names(
+                hf_quant_config,
+                name_mapper,
+                module_names=(name for name, _ in model.named_modules()),
+            )
     except Exception as exc:
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
@@ -1985,14 +2003,22 @@ def export_hf_checkpoint(
                 mapped_quant_config = hf_quant_config
                 if name_mapper is not None and hf_quant_config:
                     mapped_quant_config = _revert_hf_quant_config_names(
-                        hf_quant_config, name_mapper
+                        hf_quant_config,
+                        name_mapper,
+                        module_names=(
+                            key.removesuffix(".weight")
+                            for key in export_state_dict
+                            if key.endswith(".weight")
+                        ),
                     )
                 export_state_dict = mapped_state_dict
                 hf_quant_config = mapped_quant_config
             except Exception as exc:
                 warnings.warn(
-                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                    "names may not match the original HF hub checkpoint."
+                    f"Quant-aware reverse weight conversion skipped ({exc}); all exported "
+                    "tensors and quantization config retain their in-memory names, including "
+                    "unrelated submodels. Deployment loaders expecting the original HF hub "
+                    "layout may fail to load or skip these weights."
                 )
 
             _sanitize_generation_config_for_save(model)
