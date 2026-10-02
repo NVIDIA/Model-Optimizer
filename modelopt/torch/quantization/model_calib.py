@@ -2257,7 +2257,7 @@ def gptq(
     forward_loop: ForwardLoop,
     perc_damp: float = 0.01,
     block_size: int = 128,
-    fused: bool = False,
+    fused: bool = True,
 ):
     """GPTQ quantization.
 

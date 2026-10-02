@@ -42,9 +42,12 @@ import math
 
 import torch
 
+import modelopt.torch.kernels.quantization.gemm as triton_kernel
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
+
+from .numeric_utils import E4M3_MAX, fp8_max_for_normalization
 
 
 def update_hessian(input, hessian, n_samples):
@@ -201,9 +204,8 @@ class GPTQHelper:
     def _blockwise_update(self, block_size):
         """Column-wise GPTQ update.
 
-        When ``self.fused`` is True and the weight quantizer is an
-        ``NVFP4StaticQuantizer``, uses :func:`gptq_blockwise_update_fused_scalar`
-        (a fused Triton kernel).  Otherwise falls back to
+        When ``self.fused`` is True and :meth:`_fused_supported` holds, uses
+        :func:`gptq_blockwise_update_fused_scalar` (a fused Triton kernel).  Otherwise falls back to
         :func:`gptq_blockwise_update` (unfused column-by-column loop).
         """
         assert self.weight is not None and self.h_inv is not None, (
@@ -211,7 +213,7 @@ class GPTQHelper:
         )
         quantizer = self.module.weight_quantizer
 
-        if self.fused and getattr(quantizer, "_is_nvfp4_static_quantizer", False):
+        if self.fused and self._fused_supported(quantizer):
             block_sizes = quantizer.block_sizes
             quant_block_size = block_sizes.get(-1) or block_sizes.get(1)
             if quant_block_size is not None and block_size % quant_block_size != 0:
@@ -228,6 +230,16 @@ class GPTQHelper:
             )
         else:
             gptq_blockwise_update(self.weight, self.h_inv, block_size, quantizer)
+
+    def _fused_supported(self, quantizer):
+        # The fused kernel needs FP8 Triton casts (SM89+) and the default FP8 scale range (no 4/6).
+        return (
+            getattr(quantizer, "_is_nvfp4_static_quantizer", False)
+            and fp8_max_for_normalization(quantizer) == E4M3_MAX
+            and triton_kernel.IS_AVAILABLE
+            and self.module.weight.is_cuda
+            and torch.cuda.get_device_capability(self.module.weight.device) >= (8, 9)
+        )
 
     def _print_mse_error(self, hessian):
         """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""

@@ -25,7 +25,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import promote_nvfp4_static_quantizers
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
@@ -315,3 +317,30 @@ def bench_fused_nvfp4():
 
 if __name__ == "__main__":
     bench_fused_nvfp4()
+
+
+@requires_triton
+@pytest.mark.parametrize(("four_over_six", "expected"), [(False, True), (True, False)])
+def test_fused_supported_skips_four_over_six(four_over_six, expected):
+    model = torch.nn.Linear(64, 32, bias=False, device="cuda")
+    cfg = {
+        "num_bits": (2, 1),
+        "block_sizes": {
+            -1: 16,
+            "type": "static",
+            "scale_bits": (4, 3),
+            "four_over_six": four_over_six,
+        },
+    }
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "cfg": cfg},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(torch.randn(2, 64, device="cuda")))
+    promote_nvfp4_static_quantizers(model)
+    helper = GPTQHelper(model, "linear", fused=True)
+    expected = expected and torch.cuda.get_device_capability() >= (8, 9)
+    assert helper._fused_supported(model.weight_quantizer) == expected
