@@ -220,6 +220,7 @@ class TestDFlashOfflineForwardGPU:
 
     def test_offline_forward_returns_loss(self, offline_model):
         """Offline forward consumes precomputed base_model_outputs and returns a finite loss."""
+        assert offline_model.dflash_self_logit_distillation  # KD: teacher projected from hidden
         bsz = 2
         input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
         attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
@@ -231,26 +232,6 @@ class TestDFlashOfflineForwardGPU:
             base_model_outputs=base_model_outputs,
         )
         assert hasattr(output, "loss")
-        assert output.loss.requires_grad
-        assert torch.isfinite(output.loss).item()
-
-    def test_offline_forward_self_logit_distillation_reads_hidden_states(self, offline_model):
-        """Without base_model_logits, self-distillation projects the captured hidden states.
-
-        Only the rows the loss reads are projected, so no full-sequence logits come back.
-        """
-        assert offline_model.dflash_self_logit_distillation
-        bsz = 2
-        input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
-        attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
-        base_model_outputs = self._make_base_model_outputs(offline_model, bsz)
-
-        output = offline_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            base_model_outputs=base_model_outputs,
-        )
-        assert output.logits is None
         assert output.loss.requires_grad
         assert torch.isfinite(output.loss).item()
 

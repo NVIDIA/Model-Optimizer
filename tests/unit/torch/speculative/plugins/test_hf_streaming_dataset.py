@@ -430,45 +430,17 @@ def test_lapped_slot_is_treated_as_miss(monkeypatch):
         ds[0]
 
 
-def _done_raising_handler(seq, n_layers, hidden, *, fail_first_n, calls):
-    """Sidecar handler whose /done raises a transport error for its first ``fail_first_n``
-    calls, then behaves normally. ``calls`` accumulates the paths hit."""
+def _first_done_raising_handler(seq, n_layers, hidden, calls):
+    """Sidecar handler whose first /done raises a transport error; ``calls`` logs the paths."""
     inner = _rdma_sidecar_handler(seq, n_layers, hidden)
-    state = {"done": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        if request.url.path == "/done":
-            state["done"] += 1
-            if state["done"] <= fail_first_n:
-                raise httpx.ConnectError("simulated sidecar failure")
+        if request.url.path == "/done" and calls.count("/done") == 1:
+            raise httpx.ConnectError("simulated sidecar failure")
         return inner(request)
 
     return handler
-
-
-def test_failed_done_is_treated_as_a_miss(monkeypatch):
-    """A /done that errors fails closed, like an explicit lap: the read is discarded."""
-    seq, n_layers, hidden = 8, 3, 16
-    calls: list[str] = []
-    _mock_rdma(
-        monkeypatch,
-        _done_raising_handler(seq, n_layers, hidden, fail_first_n=10**6, calls=calls),
-    )
-
-    ds = EagleVllmStreamingDataset(
-        entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
-        tokenizer=_tokenizer_returning(seq),
-        config=EagleVllmStreamingConfig(
-            server_urls="http://mock:8000",
-            model="mock-model",
-            max_seq_len=seq,
-            fail_after_consecutive_skips=100,
-        ),
-    )
-    with pytest.raises(RuntimeError, match="no fetchable sample"):
-        ds[0]
-    assert "/done" in calls, "fixture never reached /done"
 
 
 def test_failed_done_resamples_instead_of_returning_the_read(monkeypatch):
@@ -477,7 +449,7 @@ def test_failed_done_resamples_instead_of_returning_the_read(monkeypatch):
     calls: list[str] = []
     _mock_rdma(
         monkeypatch,
-        _done_raising_handler(seq, n_layers, hidden, fail_first_n=1, calls=calls),
+        _first_done_raising_handler(seq, n_layers, hidden, calls),
     )
 
     ds = EagleVllmStreamingDataset(

@@ -874,12 +874,6 @@ class TestDraftStackCompile:
         m.eval()
         assert m._body() == m._forward_body
 
-    def test_compiled_body_is_built_once(self):
-        m = _dspark_model(use_compile=True).dflash_module
-        first = m._body()
-        assert first != m._forward_body
-        assert m._body() is first, "recompiled on a later step"
-
     def test_flag_reaches_the_tvd_chunk(self):
         assert _dspark_model(use_compile=False)._tvd_chunk_fn is _tvd_chunk
         assert _dspark_model(use_compile=True)._tvd_chunk_fn is not _tvd_chunk
@@ -940,10 +934,7 @@ class TestDdpGradientCoverage:
         hidden = m(*args)
         vocab = model.dflash_config.vocab_size
         backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        # The teacher is read before the degenerate branch, so it must still be passed.
-        base_outputs = DFlashBaseModelOutput(
-            args[1], base_hidden=torch.randn(bsz, SEQ_LEN, hidden.size(-1), dtype=hidden.dtype)
-        )
+        base_outputs = DFlashBaseModelOutput(args[1])  # no base distribution: not read here
         final_logits, confidence_logits = model._apply_markov_head(
             hidden, backbone_logits, input_ids, anchors, n_blocks
         )

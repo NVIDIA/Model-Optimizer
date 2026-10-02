@@ -83,44 +83,9 @@ def is_block_mask(mask) -> bool:
     return isinstance(mask, BlockMask)
 
 
-def build_draft_block_mask(
-    seq_len,
-    anchor_positions,
-    block_keep_mask,
-    n_blocks,
-    block_size,
-    window,
-    device,
-    head_dim,
-    causal=False,
-):
-    """BlockMask equivalent of ``HFDFlashModel._build_draft_attention_mask``.
-
-    Every term of the dense predicate must appear here too, or the two paths silently train
-    different models.
-    """
+def build_draft_block_mask(mask_mod, bsz, q_len, kv_len, device, head_dim):
+    """Block-sparse ``BlockMask`` of the draft attention's ``mask_mod``."""
     _, create_block_mask = _flex_ops()
-    bsz = anchor_positions.shape[0]
-    q_len = n_blocks * block_size
-    kv_len = seq_len + q_len
-    # Indexed inside mask_mod, which runs under vmap -- keep them on-device and integral.
-    anchors = anchor_positions.to(device=device, dtype=torch.int32)
-    keep = block_keep_mask.to(device=device, dtype=torch.bool)
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        q_block = q_idx // block_size
-        anchor = anchors[b, q_block]
-        is_ctx = kv_idx < seq_len
-        ctx_ok = is_ctx & (kv_idx < anchor)
-        if window is not None:
-            # Window from the query's real position (anchor + position in block).
-            ctx_ok = ctx_ok & (kv_idx > anchor + (q_idx % block_size) - window)
-        draft_ok = (~is_ctx) & (q_block == (kv_idx - seq_len) // block_size)
-        if causal:
-            # Block-causal: block position i sees draft positions <= i.
-            draft_ok = draft_ok & (((kv_idx - seq_len) % block_size) <= (q_idx % block_size))
-        return (ctx_ok | draft_ok) & keep[b, q_block]
-
     return create_block_mask(
         mask_mod,
         bsz,

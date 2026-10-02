@@ -116,8 +116,10 @@ def _get_sink_attention_fn():
 class DFlashBaseModelOutput:
     """What a DFlash-family draft takes from the base model in a training step.
 
-    The base distribution is never materialized here: a loss that needs it projects just
-    the rows it reads (``HFDFlashModel._teacher_logits``).
+    ``logits`` holds the full base logits when the producer already has them (DFlash's
+    online CausalLM forward, or an offline batch carrying ``base_model_logits``);
+    otherwise ``base_hidden`` stays unprojected, and ``HFDFlashModel._teacher_logits``
+    projects only the rows a loss reads.
     """
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]

@@ -266,27 +266,35 @@ class TestDPaceLossIntegration:
 
     def test_compute_loss_dpace_branch(self):
         """Default dpace objective produces a finite loss and valid accuracy."""
-        model = self._converted_model("dpace")
+        model = self._converted_model("dpace", dflash_self_logit_distillation=False)
         loss, acc = model._compute_loss(*self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_decay_branch(self):
         """The static-decay objective path also produces a finite loss."""
-        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        model = self._converted_model(
+            "decay", dflash_loss_decay_factor=4.0, dflash_self_logit_distillation=False
+        )
         loss, acc = model._compute_loss(*self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
     def test_compute_loss_dpace_kd_branch(self):
-        """dpace + KD (teacher given): confidences use a dedicated no_grad CE pass."""
+        """dpace + KD: confidences use a dedicated no_grad CE pass."""
         vocab = 32
         model = self._converted_model("dpace")
         inputs = self._make_inputs(vocab=vocab)
         teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
-        loss, acc = model._compute_loss(*inputs, teacher=teacher)
+        loss, acc = model._compute_loss(*inputs, base_outputs=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
+
+    def test_kd_without_base_outputs_raises(self):
+        """KD is decided by the config, so a missing teacher cannot fall back to CE."""
+        model = self._converted_model("dpace")
+        with pytest.raises(ValueError, match="base_outputs"):
+            model._compute_loss(*self._make_inputs())
 
 
 class TestDFlashSaveRestore:
@@ -414,6 +422,67 @@ class TestDFlashSlidingWindow:
         )
         attn = DFlashAttention(config, layer_idx=0)
         assert attn.sliding_window is None
+
+
+class TestDraftMaskRule:
+    """The dense mask and the FlexAttention BlockMask evaluate one rule, ``_draft_mask_mod``."""
+
+    SEQ_LEN, BLOCK_SIZE = 16, 4
+
+    def _model(self, attention="bidirectional"):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=self.BLOCK_SIZE)
+        config["dflash_draft_attention"] = attention
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def _visible(self, model, anchors, keep, window=None):
+        mask = model._build_draft_attention_mask(
+            self.SEQ_LEN, anchors, keep, anchors.shape[1], torch.float32, "cpu", window=window
+        )
+        return mask > torch.finfo(torch.float32).min / 2
+
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    def test_matches_a_hand_written_mask(self, attention):
+        """Context strictly before each anchor, then the query's own block, nothing else."""
+        anchors = (6, 9)
+        visible = self._visible(
+            self._model(attention), torch.tensor([anchors]), torch.tensor([[True, True]])
+        )
+        n_q = len(anchors) * self.BLOCK_SIZE
+        expected = torch.zeros(n_q, self.SEQ_LEN + n_q, dtype=torch.bool)
+        for block, anchor in enumerate(anchors):
+            for i in range(self.BLOCK_SIZE):
+                row = block * self.BLOCK_SIZE + i
+                expected[row, :anchor] = True
+                start = self.SEQ_LEN + block * self.BLOCK_SIZE
+                expected[
+                    row, start : start + (i + 1 if attention == "causal" else self.BLOCK_SIZE)
+                ] = True
+        assert torch.equal(visible[0, 0], expected)
+
+    def test_dropped_block_sees_nothing(self):
+        visible = self._visible(
+            self._model(), torch.tensor([[6, 9]]), torch.tensor([[True, False]])
+        )
+        assert visible[0, 0, : self.BLOCK_SIZE].any(dim=-1).all()
+        assert not visible[0, 0, self.BLOCK_SIZE :].any()
+
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    @pytest.mark.parametrize("window", [None, 6])
+    def test_dense_mask_matches_the_vmapped_rule(self, attention, window):
+        """Broadcast evaluation (dense) and vmap evaluation (flex) of the rule agree."""
+        from torch.nn.attention.flex_attention import create_mask
+
+        anchors = torch.tensor([[2, 7, 11], [5, 0, 9]])
+        keep = torch.tensor([[True, True, False], [True, False, True]])
+        mask_mod = hf_dflash._draft_mask_mod(
+            self.SEQ_LEN, anchors, keep, self.BLOCK_SIZE, window, causal=attention == "causal"
+        )
+        q_len = anchors.shape[1] * self.BLOCK_SIZE
+        vmapped = create_mask(mask_mod, 2, 1, q_len, self.SEQ_LEN + q_len, device="cpu")
+        dense = self._visible(self._model(attention), anchors, keep, window)
+        assert torch.equal(dense, vmapped)
 
 
 class TestDFlashSwaMask:
@@ -1186,6 +1255,7 @@ class TestAnchorSamplingStaticShape:
         model = get_tiny_llama(num_hidden_layers=4)
         config = get_dflash_config(block_size=BLOCK_SIZE)
         config["dflash_num_anchors"] = num_anchors
+        config["dflash_self_logit_distillation"] = False  # the padding test calls the CE loss
         mtsp.convert(model, [("dflash", config)])
         return model
 
@@ -1382,9 +1452,9 @@ class TestTeacherLogits:
         hidden = self._hidden(model, bsz=1)
         inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
         full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
-        loss_full, _ = model._compute_loss(*inputs, teacher=full)
+        loss_full, _ = model._compute_loss(*inputs, base_outputs=full)
         loss, _ = model._compute_loss(
-            *inputs, teacher=DFlashBaseModelOutput(None, base_hidden=hidden)
+            *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
         )
         torch.testing.assert_close(loss, loss_full)
 

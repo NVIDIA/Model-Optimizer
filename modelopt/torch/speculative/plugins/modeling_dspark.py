@@ -150,51 +150,44 @@ class DSparkModule(DFlashModule):
         """Look up the Markov embedding ``W1[x_{k-1}]`` of the teacher-forced prev tokens."""
         return self.markov_w1(prev_ids.long())
 
-    def compute_markov_latent(self, prev_ids: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        """Rank-``r`` latent that ``markov_w2`` projects into the transition bias.
+    def compute_markov_bias(self, prev_ids: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        """Compute the transition bias ``B_k`` added to the backbone base logits.
 
         Args:
             prev_ids: Teacher-forced previous-token ids per block position [B, N, block_size].
             hidden: Backbone hidden states [B, N, block_size, H] (used by gated/rnn heads).
 
         Returns:
-            Latent [B, N, block_size, r].
+            Logit bias [B, N, block_size, vocab].
         """
         prev_emb = self.prev_token_embeddings(prev_ids)  # [B, N, bs, r]
 
         if self.markov_head_type == "vanilla":
-            return prev_emb
+            return self.markov_w2(prev_emb)
 
         if self.markov_head_type == "gated":
             gate = torch.sigmoid(self.gate_proj(torch.cat([hidden, prev_emb], dim=-1)))
-            return gate.to(prev_emb.dtype) * prev_emb
+            return self.markov_w2(gate.to(prev_emb.dtype) * prev_emb)
 
         # rnn: unroll the gated recurrence over the block dimension.
         block_size = prev_ids.shape[-1]
         leading = prev_emb.shape[:-2]  # [B, N]
         state = torch.zeros(*leading, self.markov_rank, device=prev_emb.device, dtype=hidden.dtype)
-        latents = []
+        biases = []
         for k in range(block_size):
-            state, latent = self._rnn_step(state, prev_emb[..., k, :], hidden[..., k, :])
-            latents.append(latent)
-        return torch.stack(latents, dim=-2)
-
-    def compute_markov_bias(self, prev_ids: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        """Compute the transition bias ``B_k`` added to the backbone base logits.
-
-        Returns:
-            Logit bias [B, N, block_size, vocab].
-        """
-        return self.markov_w2(self.compute_markov_latent(prev_ids, hidden))
+            state, bias = self._rnn_step(state, prev_emb[..., k, :], hidden[..., k, :])
+            biases.append(bias)
+        return torch.stack(biases, dim=-2)
 
     def _rnn_step(self, state, prev_emb, hidden):
-        """One GRU-like recurrent step. Returns (new_state [.., r], latent [.., r])."""
+        """One GRU-like recurrent step. Returns (new_state [.., r], bias [.., vocab])."""
         z = torch.cat([state, prev_emb, hidden], dim=-1)
         gate_raw, candidate_raw, output_raw = self.joint_proj(z).chunk(3, dim=-1)
         gate = torch.sigmoid(gate_raw)
         candidate = torch.tanh(candidate_raw)
         new_state = gate * state + (1.0 - gate) * candidate
-        return new_state, torch.tanh(output_raw)
+        bias = self.markov_w2(torch.tanh(output_raw))
+        return new_state, bias
 
     def markov_step(self, prev_token: torch.Tensor, hidden: torch.Tensor, state=None):
         """One autoregressive Markov step (inference): bias for a single position.
@@ -219,8 +212,7 @@ class DSparkModule(DFlashModule):
             state = torch.zeros(
                 prev_emb.shape[0], self.markov_rank, device=prev_emb.device, dtype=hidden.dtype
             )
-        state, latent = self._rnn_step(state, prev_emb, hidden)
-        bias = self.markov_w2(latent)
+        state, bias = self._rnn_step(state, prev_emb, hidden)
         return bias, state
 
     def compute_confidence_logits(
