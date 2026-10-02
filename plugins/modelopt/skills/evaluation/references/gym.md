@@ -2,13 +2,27 @@
 
 Gym tasks run on the **0.2.6 `nel` launcher** (not nel-next), so SKILL Steps 1–9
 apply — but they are mechanically unlike the `aa/` nemo-skills tasks: NeMo Gym is
-pulled and run **inline in the eval container** (`install_on_the_fly`) via
-`ng_prepare_benchmark` + `ng_e2e_collect_rollouts`, and each gym task is
-**standalone** (one gym eval per config, never merged into a multi-task `tasks`
-list). This file is the shared machinery; the per-task recipes live at
-`recipes/tasks/gym/*.md` with self-contained examples at
-`recipes/examples/gym/example_<task>.yaml`. A fix here applies to every gym
-example.
+pulled and run **inline in the eval container** (`install_on_the_fly`), and each gym
+task is **standalone** (one gym eval per config, never merged into a multi-task
+`tasks` list). Two config schemas are in use:
+
+| Schema | Tasks | Gym entry points | Image needs |
+|---|---|---|---|
+| **explicit** (`data_prep_params` / `collect_rollout_params`) | MRCR | `ng_prepare_benchmark` + `ng_e2e_collect_rollouts` in `/opt/Gym` | a **git-backed** `/opt/Gym` |
+| **condensed** (`benchmark` / `prepare_args` / `run_args`) | Tau3-Banking | `gym eval prepare` + `gym eval run`, Gym cloned into a temp dir | python + `uv` + `git` + `ray`; **no** `/opt/Gym` |
+
+The condensed `command:` bootstrap must be carried in the config (the template does): the
+image does not ship it, and without it nemo-evaluator falls back to `framework.yml`
+(`cd /opt/Gym`). It verifies the pin and reaps its own process group; the pin,
+prepare/reap and `pre_cmd` sections below describe the explicit schema.
+
+**Serving the policy model:** if it has an upstream fragment (`configs/models/<model>/` in
+nvidia-eval-factory-benchmarking), carry its serving layout (TP/DP/expert parallel,
+`extra_args`) and `deployment.env_vars` over **as a unit** — env vars there can be
+prerequisites of the layout, not tuning. To deviate, change both together.
+
+Per-task recipes: `recipes/tasks/gym/*.md`; self-contained examples:
+`recipes/examples/gym/example_<task>.yaml`. A fix here applies to every gym example.
 
 Always invoke a gym task through the pinned wrapper, even if `nel` is already on
 PATH:
@@ -111,18 +125,16 @@ Two editing rules for these blocks:
 | `DUMMY_API_KEY` | lit:dummy | self-deployed vLLM policy key |
 | `NEL_INVOCATION_ID` | runtime | stable run id assigned by the validated launcher; do not use `SLURM_JOB_ID` |
 
-Two launcher-level trust flags gate every gym submission, both set in `.env`:
+Two launcher-level trust flags gate gym submissions, both set in `.env`:
 
-- `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — the gym configs carry a `pre_cmd`; prepare fails
-  without it.
+- `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — for configs that carry a `pre_cmd` (MRCR); prepare
+  fails without it.
 - `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
   submission is refused without it.
 
-No currently supported gym task is judge-scored, so `INFERENCE_API_KEY` /
-`INFERENCE_JUDGE_URL` are not part of this path. If you add one that is, follow the
-skill-wide convention: substitute the URL as a **literal `<INFERENCE_JUDGE_URL>`
-placeholder**, not `${oc.env:...}`, and keep judge `model_id`s hardcoded in the
-config. The same rule covers mount KEYS, which are not interpolated either.
+No gym task here is judge-scored; Tau3-Banking's user simulator adds `INFERENCE_API_KEY`
+and `TAU3_USER_*` (its recipe). Endpoint URLs and mount KEYS are substituted as literals,
+not `${oc.env:...}`.
 
 ## Preflight — what NEL validates, and what it does NOT
 
@@ -157,10 +169,14 @@ auto-uploading them; drop the suffix only if you actually want them uploaded.
 
 ## num_repeats
 
-**Use 1** unless a task recipe says otherwise, set with a top-level `++num_repeats=1`
-in `common_params`. For `type: benchmark` datasets the value each gym config
-*declares* upstream is a placeholder and the runner decides, so pin it explicitly and
-report `pass@1`. **Do not change repeat counts when aligning to a golden.**
+- **Explicit schema (MRCR):** `ng_e2e_collect_rollouts` treats a `type: benchmark`
+  dataset's declared `num_repeats` as a placeholder, so pin `++num_repeats=1` in
+  `common_params` and report `pass@1`.
+- **Condensed schema (Tau3-Banking):** `gym eval run` applies the benchmark's declared
+  repeats, so set no override and check the count — Tau3's 5 give
+  `num_samples_total == 485` (every reviewed upstream run shows 485).
+
+**Do not change repeat counts when aligning to a golden.**
 
 ## Failure modes to check at canary
 

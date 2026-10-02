@@ -87,6 +87,17 @@ for an "AA" request. If the user asks for MRCR:
 
 ---
 
+### Tau3-Banking (NeMo Gym `tau2` agent) path — AA's agentic tool-use task
+
+A **standalone** 0.2.6 `nemo_gym` config that **is** in the AA suite: it replaces
+Tau2-Bench Telecom, so an "AA" request gets the `aa/` multi-task config **plus** a
+Tau3-Banking config. Read `references/gym.md` + `recipes/tasks/gym/tau3_banking.md`,
+start from `recipes/examples/gym/example_tau3_banking.yaml`, and launch through
+`"$SKILL_DIR/scripts/nel-gym.sh"`. NVIDIA-internal user simulator and images:
+`modelopttools:eval-config` Step 3e.
+
+---
+
 Detailed launcher instructions live in [launcher-workflow.md](references/launcher-workflow.md).
 Read only the sections needed for the current stage; retain the dry-run → canary →
 full-run gates. Existing configs can start at Step 8. Paths in that reference are

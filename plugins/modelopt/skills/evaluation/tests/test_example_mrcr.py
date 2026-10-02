@@ -15,27 +15,16 @@
 
 import re
 import shlex
-from pathlib import Path
+from functools import partial
 
 import pytest
+from _gym_template import EXAMPLES, block
 
-TEMPLATE = Path(__file__).parents[1] / "recipes" / "examples" / "gym" / "example_mrcr.yaml"
+TEMPLATE = EXAMPLES / "example_mrcr.yaml"
+_block = partial(block, TEMPLATE)
 GATE = re.compile(
     r"\{% if config\.params\.limit_samples is not none %\}(.*?)\{% endif %\}", re.DOTALL
 )
-
-
-def _block(key):
-    """Return the lines nested under the first ``key:`` in the template (stdlib-only)."""
-    lines = TEMPLATE.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip().startswith(f"{key}:"))
-    indent = len(lines[start]) - len(lines[start].lstrip())
-    block = []
-    for line in lines[start + 1 :]:
-        if line.strip() and len(line) - len(line.lstrip()) <= indent:
-            break
-        block.append(line)
-    return lines[start], "\n".join(block)
 
 
 def _render_gate(text, limit_samples):
