@@ -512,8 +512,8 @@ checkpoint's** quant config verbatim:
   source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
   dequantizes it to BF16 before quantizers are inserted, so the scales are
   calibrated against BF16 weights, not the shipped FP8.
-- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
-  the NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+- **`models/zai-org/GLM-5.3-Flash-BF16/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`** is
+  the NVFP4 config for `zai-org/GLM-5.3-Flash-BF16`, a `glm5_next` VLM MoE with
   **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
   sparse-MLA layers. Routed experts **and** the dense MLP → NVFP4 W4A4; KV cache
   → FP8 cast; everything else stays BF16 (shared experts, router gate, both
