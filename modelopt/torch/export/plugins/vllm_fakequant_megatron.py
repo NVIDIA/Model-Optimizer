@@ -145,7 +145,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 class VllmFqGPTModelExporter(GPTModelExporter):
     """VLLM fakequant GPTModel exporter."""
 
-    _RECIPE_MARKER_SUFFIX = "._vllm_fq_recipe_marker"
+    _QUANT_RECIPE_MARKER_SUFFIX = "._quant_recipe_marker"
 
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
         """Store one resolved recipe, requiring repeated routes to agree."""
@@ -161,7 +161,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         routed_marker_ids: set[int] = set()
         for state_dict in layer_state_dicts.values():
             for key in list(state_dict):
-                if not key.endswith(self._RECIPE_MARKER_SUFFIX):
+                if not key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX):
                     continue
 
                 marker = state_dict.pop(key)
@@ -170,7 +170,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
                 if any(recipe != recipes[0] for recipe in recipes[1:]):
                     raise ValueError(f"Conflicting packed quantizer recipes routed to {key}")
 
-                recipe_name = key[: -len(self._RECIPE_MARKER_SUFFIX)]
+                recipe_name = key[: -len(self._QUANT_RECIPE_MARKER_SUFFIX)]
                 self._store_quantizer_recipe(recipe_name, recipes[0])
                 routed_marker_ids.update(marker_ids)
 
@@ -252,7 +252,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         for qname, qstate in _quantizer_configs(module).items():
             marker_id = len(self._quantizer_recipe_markers)
             self._quantizer_recipe_markers.append((source_prefix + qname, qstate))
-            name_to_value[qname + self._RECIPE_MARKER_SUFFIX] = torch.tensor(
+            name_to_value[qname + self._QUANT_RECIPE_MARKER_SUFFIX] = torch.tensor(
                 marker_id, dtype=torch.int64
             )
 
