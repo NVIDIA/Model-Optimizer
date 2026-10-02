@@ -354,3 +354,35 @@ class Testfp4:
             f"Mean abs diff: {(output_static - output_dynamic).abs().mean()}\n"
             f"Max relative diff: {((output_static - output_dynamic).abs() / (output_dynamic.abs() + 1e-8)).max()}"
         )
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_fp4_kernel_scales_with_small_inputs(self, dtype):
+        """Scaling the input and global amax by a power of two scales the output by the same factor.
+
+        Blocks with small magnitudes must not be flushed to zero by an absolute scale floor.
+        """
+        torch.manual_seed(0)
+        x = (torch.randn(8, 64, device="cuda") * 10).to(dtype)
+        reference = triton_kernel.fp4_fake_quant_block(x, x.float().abs().amax())
+        assert reference.abs().amax() > 0
+        for factor in (2.0**-10, 2.0**-20):
+            scaled = triton_kernel.fp4_fake_quant_block(x * factor, x.float().abs().amax() * factor)
+            assert torch.equal(scaled, reference * factor)
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize("global_amax", [0.0, float("inf"), float("nan")])
+    def test_fp4_kernel_invalid_global_amax_uses_unit_scale(self, global_amax):
+        """A zero, inf or NaN global amax uses a unit block scale, like the CUDA extension."""
+        torch.manual_seed(0)
+        e2m1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
+        x = e2m1[torch.randint(0, 8, (8, 64), device="cuda")]
+        x = x * (torch.randint(0, 2, x.shape, device="cuda") * 2 - 1)
+        output = triton_kernel.fp4_fake_quant_block(x, torch.tensor(global_amax, device="cuda"))
+        assert torch.equal(output, x)

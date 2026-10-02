@@ -14,7 +14,6 @@ imports:
   w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
 metadata:
-  recipe_type: auto_quantize
   description: >-
     Qwen3.6 MoE module-specific search based on the Qwen3.5-MoE W4A16/FP8 PTQ
     recipe: shared experts, attention, and lm_head searched over W4A16 NVFP4

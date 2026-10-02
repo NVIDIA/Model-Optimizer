@@ -37,6 +37,7 @@ from modelopt.torch.kernels.common.attention import (
     validate_triton_attention_envelope,
 )
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
@@ -247,8 +248,17 @@ class _QuantAttention(QuantModule):
                 return self._eager_p_qdq_attention(
                     original_attention_interface, query_states, key_states, value_states, **kwargs
                 )
-            return self._triton_qdq_attention(
-                p_qdq, query_states, key_states, value_states, **kwargs
+            if self.p_bmm_quantizer._if_quant:
+                return self._triton_qdq_attention(
+                    p_qdq, query_states, key_states, value_states, **kwargs
+                )
+
+        # Fused P-QDQ paths bypass TensorQuantizer.forward().
+        if not self.p_bmm_quantizer.is_enabled or not self.p_bmm_quantizer._if_quant:
+            if args:
+                kwargs.pop("attention_mask", None)
+            return original_attention_interface(
+                self, query_states, key_states, value_states, *args, **kwargs
             )
 
         if kitchen is not None and self.kitchen_attn_fn is None:
@@ -2052,7 +2062,7 @@ def _is_step_family_model(model: nn.Module) -> bool:
     Step revisions apart without a class-name allowlist, rather than distinguishing Step
     from arbitrary third-party MoE code.
     """
-    model_type = str(getattr(getattr(model, "config", None), "model_type", "") or "")
+    model_type = hf_model_type(model) or ""
     return bool(_STEP_FAMILY_RE.match(model_type) or _STEP_FAMILY_RE.match(type(model).__name__))
 
 

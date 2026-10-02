@@ -26,6 +26,7 @@
 #   lm_head              →  FP8 W8A16    (weight-only; overrides its Q8_0 GGUF type)
 #   everything else (F32: conv1d, norms, A_log/D/dt_bias)  →  bf16
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
@@ -34,7 +35,6 @@ imports:
   nvfp4: configs/numerics/nvfp4
 
 metadata:
-  recipe_type: ptq
   description: >-
     GGUF Q4_K_M-mirrored Nemotron-H recipe: NVFP4 W4A4 for Q4_K/Q5_0 linears
     (attn q/k/v/o kept uniform for export fusion), FP8 W8A8 for Q6_K MLP

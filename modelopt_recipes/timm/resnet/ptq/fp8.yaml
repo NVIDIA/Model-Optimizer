@@ -21,7 +21,6 @@ imports:
   w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
 
 metadata:
-  recipe_type: ptq
   description: FP8 ResNet PTQ with quantized residual connections.
 
 quantize:

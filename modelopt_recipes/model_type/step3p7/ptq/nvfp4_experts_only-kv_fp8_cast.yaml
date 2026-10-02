@@ -20,6 +20,7 @@
 # `moe.{gate,up,down}_proj`, the router is `moe.gate`, and each MoE layer also has a dense
 # `share_expert` that stays in BF16.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -27,7 +28,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Applies dynamic NVFP4 to Step-3.7 routed-expert weight and input quantizers, plus FP8
     KV-cache cast mode using constant amax; the router, the shared expert and the dense MLPs

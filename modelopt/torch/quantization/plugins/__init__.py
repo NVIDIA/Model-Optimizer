@@ -52,6 +52,7 @@ with import_plugin("huggingface"):
 
 with import_plugin("megatron"):
     from .megatron import *
+    from .megatron_indexer import *
 
 with import_plugin("peft"):
     from .peft import *
@@ -70,6 +71,7 @@ with import_plugin("transformers"):
 
 with import_plugin("vllm"):
     from .vllm import *
+    from .vllm_indexer import *
 
 with import_plugin("trl"):
     from .trl import *

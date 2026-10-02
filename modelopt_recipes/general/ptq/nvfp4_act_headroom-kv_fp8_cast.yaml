@@ -16,6 +16,7 @@
 # using nvfp4_act_headroom calibration: NVFP4 weights on plain max, NVFP4 activation global
 # scales anchored with headroom. Module coverage matches nvfp4_default-kv_fp8_cast.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
   default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
@@ -23,7 +24,6 @@ imports:
   kv_fp8_cast: configs/ptq/units/kv_fp8_cast
 
 metadata:
-  recipe_type: ptq
   description: >-
     Composes dynamic NVFP4 W4A4 model quantization with FP8 KV-cache cast mode using constant
     amax; uses nvfp4_act_headroom calibration. Weight quantizers use plain max, while the NVFP4

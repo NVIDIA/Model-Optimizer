@@ -18,7 +18,6 @@ imports:
   base: models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_max
 
 metadata:
-  recipe_type: ptq
   description: >-
     Qwen3.8-27B local-Hessian PTQ using the NVFP4 W4A4 and FP8 W8A8 assignment exported by
     the 5.5-bit NVFP4-max AutoQuantize sweep.

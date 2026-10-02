@@ -19,14 +19,9 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
-from modelopt.torch.quantization.ggml import (
-    IQ1_S_BLOCK_BYTES,
-    IQ1_S_BLOCK_SIZE,
-    IQ1_S_EFFECTIVE_BITS,
-    IQ2_XS_BLOCK_BYTES,
-    IQ2_XS_BLOCK_SIZE,
-    IQ2_XS_EFFECTIVE_BITS,
-)
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+
+from .quant_format import IQ_FORMATS
 
 
 def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
@@ -127,15 +122,10 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
-    elif quant_algo in ("IQ1_S", "IQ2_XS"):
-        if quant_algo == "IQ1_S":
-            block_size = IQ1_S_BLOCK_SIZE
-            payload_bytes = IQ1_S_BLOCK_BYTES
-            effective_bits = IQ1_S_EFFECTIVE_BITS
-        else:
-            block_size = IQ2_XS_BLOCK_SIZE
-            payload_bytes = IQ2_XS_BLOCK_BYTES
-            effective_bits = IQ2_XS_EFFECTIVE_BITS
+    elif quant_algo.lower() in IQ_FORMATS:
+        iq_format = IQ_FORMAT_REGISTRY[quant_algo.lower()]
+        block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
+        effective_bits = iq_format.effective_bits
         if group_size not in (None, block_size):
             raise ValueError(f"{quant_algo} requires group size {block_size}, got {group_size}")
         # IQ payloads are self-contained blocks, not compressed-tensors integer groups.
@@ -239,7 +229,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "targets": ["Linear"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
-    elif quant_algo_value in ("IQ1_S", "IQ2_XS"):
+    elif str(quant_algo_value).lower() in IQ_FORMATS:
         # Forward the caller's group size so a mismatched one is rejected rather than rewritten
         # to the format's block size.
         iq_metadata = _quant_algo_to_group_config(
@@ -318,6 +308,10 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             new_config["kv_cache_schema_version"] = original_quantization_details.get(
                 "kv_cache_schema_version", 1
             )
+            if "kv_cache_deployment_supported" in original_quantization_details:
+                new_config["kv_cache_deployment_supported"] = original_quantization_details[
+                    "kv_cache_deployment_supported"
+                ]
 
     producer_info = input_config.get("producer")
     if producer_info:

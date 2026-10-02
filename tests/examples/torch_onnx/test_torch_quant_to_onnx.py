@@ -87,6 +87,7 @@ def test_torch_onnx(tmp_path, model_key, qformat):
         onnx_save_path=str(onnx_save_path),
         calibration_data_size="1",
         num_score_steps="1",
+        trt_builder_optimization_level=0,
     )
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
