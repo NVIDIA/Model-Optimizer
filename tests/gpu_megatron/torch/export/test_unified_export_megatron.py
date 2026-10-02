@@ -295,7 +295,7 @@ def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
     exporter = _make_iq_exporter()
 
-    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+    with pytest.raises(NotImplementedError, match="Fused-MoE GGML export requires"):
         exporter._pack_name_remapping(
             experts,
             "model.layers.0.mlp.experts.down_proj",
@@ -309,7 +309,7 @@ def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader(qfo
     experts = _make_iq_experts(qformat, "linear_fc1", bias=True)
     exporter = _make_iq_exporter()
 
-    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+    with pytest.raises(NotImplementedError, match="Fused-MoE GGML export requires"):
         exporter._pack_name_remapping_gpt_oss(
             experts,
             "model.layers.0.mlp.experts.gate_up_proj",
