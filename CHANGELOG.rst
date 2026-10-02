@@ -13,6 +13,7 @@ Changelog
 
 *Quantization*
 
+- Add model-specific AutoQuantize recipes that search NVFP4, FP8, and BF16 while keeping MTP routed and shared experts at NVFP4 W4A4.
 - Add Hugging Face PTQ calibration and export support for quantized MTP modules, including preservation of MTP expert input scales.
 - Add IQ1_S and IQ2_XS weight-only quantization with GGML-compatible 256-value block encoders, built-in ``iq1_s`` / ``iq2_xs`` PTQ recipes, and unified HF and Megatron export of the packed blocks. Quantized weights must have a final dimension divisible by 256, and Megatron export requires tensor and pipeline parallel sizes of 1.
 - Add ``iq2_xxs`` weight-only quantization with a CUDA encoder and a ``general/ptq`` recipe, at 2.0625 bits per weight between ``iq1_s`` and ``iq2_xs``. The same 256-value block constraint applies.

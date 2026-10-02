@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Nemotron-H language-path search over weight-MSE NVFP4, FP8, and implicit BF16.
+
+# modelopt-schema: modelopt.recipe.config.AutoQuantizeConfig
+imports:
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+  fp8: configs/numerics/fp8
+  kv_fp8: configs/ptq/presets/kv/fp8
+
+constraints:
+  effective_bits: 5.0
+module_search_spaces:
+  - module_name_patterns:
+      - "*language_model.layers*"
+      - "*language_model.model.layers*"
+      - "*language_model.backbone.layers*"
+    candidate_formats: &search_candidates
+      - algorithm:
+          method: mse
+          fp8_scale_sweep: true
+        quant_cfg:
+          - quantizer_name: "*"
+            enable: false
+          - quantizer_name: "*weight_quantizer"
+            enable: true
+            cfg: {$import: nvfp4_static}
+          - quantizer_name: "*input_quantizer"
+            enable: true
+            cfg: {$import: nvfp4}
+      - algorithm: max
+        quant_cfg:
+          - quantizer_name: "*"
+            enable: false
+          - quantizer_name: "*weight_quantizer"
+            enable: true
+            cfg: {$import: fp8}
+          - quantizer_name: "*input_quantizer"
+            enable: true
+            cfg: {$import: fp8}
+    allow_no_quant: true
+  - module_name_patterns:
+      - "*lm_head*"
+      - "*output_layer*"
+    candidate_formats: *search_candidates
+    allow_no_quant: true
+auto_quantize_method: gradient
+score_size: 128
+kv_cache: {$import: kv_fp8}
+disabled_layers:
+  - "*block_sparse_moe.gate*"
+  - "*linear_attn.conv1d*"
+  - "*linear_attn.in_proj_a*"
+  - "*linear_attn.in_proj_b*"
+  - "*mixer.conv1d*"
+  - "*mlp.gate.*"
+  - "*mlp.shared_expert_gate.*"
+  - "*shared_expert_gate*"
+  - "*proj_out.*"
+  - "*router*"
+  - "*vision*"
+  - "*visual*"
+  - "*image*"
+  - "*radio*"
+  - "*encoder*"
+  - "*model_encoder*"
+  - "*video*"
+  - "*audio*"
+  - "*speech*"
+  - "*multimodal_projector*"
+  - "*multi_modal_projector*"
+  - "*vision_projector*"
+  - "*audio_projector*"
+cost_excluded_layers:
+  - $import: base_cost_excluded_layers
+  - "*vision*"
+  - "*visual*"
+  - "*image*"
+  - "*radio*"
+  - "*encoder*"
+  - "*model_encoder*"
+  - "*video*"
+  - "*audio*"
+  - "*speech*"
+  - "*multimodal_projector*"
+  - "*multi_modal_projector*"
+  - "*vision_projector*"
+  - "*audio_projector*"
+  - "*mtp*"

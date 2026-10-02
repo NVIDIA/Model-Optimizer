@@ -2509,6 +2509,38 @@ def test_load_recipe_autoquantize_builtin_active_moe():
     assert all(c.effective_bits is None for c in aq.candidate_formats)
 
 
+def test_nvfp4_static_autoquant_cost_includes_scale_storage():
+    """Static NVFP4 uses the packed-value and FP8-scale storage cost."""
+    config = load_config("configs/numerics/nvfp4_static")
+    assert config.effective_bits == 4.5
+
+
+@pytest.mark.parametrize("target", ["4p8", "4p9", "5p0"])
+def test_load_nemotron_h_mse_autoquant_recipe(target):
+    recipe = load_recipe(
+        f"model_type/nemotron_h/auto_quantize/nvfp4_mse_fp8_mtp_fixed_at_{target}bits"
+    )
+
+    assert recipe.auto_quantize.constraints["effective_bits"] == float(target.replace("p", "."))
+    assert recipe.auto_quantize.auto_quantize_method == "gradient"
+    assert len(recipe.auto_quantize.module_search_spaces) == 2
+    assert recipe.quantize.algorithm == "max"
+    fixed_mtp_entries = [
+        entry.model_dump()
+        for entry in recipe.quantize.quant_cfg
+        if entry.enable and "mtp.layers.1" in entry.quantizer_name
+    ]
+    assert len(fixed_mtp_entries) == 4
+    assert all(entry["cfg"]["num_bits"] == (2, 1) for entry in fixed_mtp_entries)
+    assert all(entry["cfg"]["block_sizes"][-1] == 16 for entry in fixed_mtp_entries)
+    assert "*mtp*" in recipe.auto_quantize.cost_excluded_layers
+    assert all(
+        "mtp" not in pattern
+        for search_space in recipe.auto_quantize.module_search_spaces
+        for pattern in search_space.module_name_patterns
+    )
+
+
 def test_load_recipe_autoquantize_module_search_spaces():
     """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
     recipe = load_recipe(

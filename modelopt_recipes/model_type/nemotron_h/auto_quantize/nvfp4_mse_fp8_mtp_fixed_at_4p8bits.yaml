@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  mtp: model_type/nemotron_h/auto_quantize/mtp_w4a4_nvfp4-kv_fp8
+  search: model_type/nemotron_h/auto_quantize/nvfp4_mse_fp8_search
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Nemotron-H AutoQuantize at 4.8 effective bits over weight-MSE NVFP4, FP8, and BF16,
+    with a fixed MTP quantization policy and vision/audio paths kept in BF16.
+
+quantize: {$import: mtp}
+auto_quantize:
+  $import: search
+  constraints:
+    effective_bits: 4.8
