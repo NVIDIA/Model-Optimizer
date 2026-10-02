@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), standalone serving (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -8,11 +8,11 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for evaluation canaries and full runs; do not use independently launched or PTQ smoke-test servers as evaluation targets. External model-under-test endpoints require explicit user authorization; record their lifetime/availability as an external dependency. This restriction does not apply to judge/user-simulator endpoints or temporary serving diagnostics. Keeping a PTQ smoke server running does not authorize evaluating it.
 
 ### Workspace integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
+If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (PTQ → checkpoint smoke test → NEL evaluation; carry compatibility requirements into NEL's deployment config).
 
 ### Workflow
 
@@ -89,7 +89,7 @@ for an "AA" request. If the user asks for MRCR:
 
 Detailed launcher instructions live in [launcher-workflow.md](references/launcher-workflow.md).
 Read only the sections needed for the current stage; retain the dry-run → canary →
-full-run gates. Existing configs can start at Step 8. Paths in that reference are
+full-run gates. Existing configs must pass Step 3's serving-handoff check before Step 8. Paths in that reference are
 relative to this skill directory.
 
 ### Step 1 — Prerequisites

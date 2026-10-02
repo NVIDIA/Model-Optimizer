@@ -115,7 +115,7 @@ rsync -a --quiet \
 
 ## Cross-Skill Workspace Flow
 
-Workspaces carry over across the PTQ → Deploy → Eval pipeline. Each stage adds to the same directory:
+Workspaces carry over across PTQ → checkpoint smoke test → NEL evaluation. Hand off the checkpoint and validated serving configuration, not a smoke-test endpoint. Each stage adds to the same directory:
 
 ```text
 workspaces/<session_id>/model-name-format/
