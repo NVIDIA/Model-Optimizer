@@ -51,7 +51,7 @@ try:
 
     if _Version(_transformers_version) < _Version("4.57") or _Version(
         _transformers_version
-    ) >= _Version("5.15"):
+    ) >= _Version("5.19"):
         _warnings.warn(
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",

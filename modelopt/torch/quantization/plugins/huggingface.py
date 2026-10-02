@@ -75,6 +75,11 @@ if TYPE_CHECKING:
 __all__ = ["register_hf_attentions_on_the_fly"]
 
 TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
+# transformers 5.0-5.14 multiply DBRX expert weights transposed (``x @ w1[i]``); 4.x and 5.15+ use
+# the standard ``x @ w1[i].T``.
+_DBRX_TRANSPOSED_EXPERTS = TRANSFORMERS_VERSION_GE_5_0 and version.parse(
+    transformers.__version__
+) < version.parse("5.15")
 
 
 class _QuantAttention(QuantModule):
@@ -832,49 +837,32 @@ class _QuantDbrxExpertGLU(QuantModule):
                 with torch.no_grad():
                     module.weight.copy_(weights[expert_idx].detach())
 
-        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
-        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
-        # computes x @ W.T), we store weights transposed: W = w1[i].T.
-        self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
+        # F.linear(x, W) computes x @ W.T, so the standard orientation (gate = x @ w1[i].T,
+        # down = inter @ w2[i]) uses W = w1[i] and W = w2[i].T; transformers 5.0-5.14 swap both.
+        experts = (self.moe_num_experts, self.ffn_hidden_size, self.hidden_size)
+        in_proj = [w.view(experts) for w in (self.w1, self.v1)]
+        out_proj = self.w2.view(experts)
+        if _DBRX_TRANSPOSED_EXPERTS:
+            in_proj = [w.transpose(1, 2) for w in in_proj]
+        else:
+            out_proj = out_proj.transpose(1, 2)
+
+        def _make_linears(weights):
+            out_features, in_features = weights.shape[1:]
+            modules = nn.ModuleList(
+                [
+                    nn.Linear(in_features, out_features, bias=False)
+                    for _ in range(self.moe_num_experts)
+                ]
+            )
+            _copy_weights(modules, weights)
+            return modules
+
+        self.w1_linear = _make_linears(in_proj[0])
+        self.v1_linear = _make_linears(in_proj[1])
+        self.w2_linear = _make_linears(out_proj)
         delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
         delattr(self, "v1")
-
-        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
-        # so W = w2[i] directly (no extra transpose needed).
-        self.w2_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
         delattr(self, "w2")
 
     def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
