@@ -376,8 +376,7 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
         ckpt_path, trust_remote_code=trust_remote_code, **kwargs
     )
 
-    # can't set attribute 'pad_token' for "<unk>"; leave other valid pad tokens unchanged
-    if tokenizer.pad_token is None or tokenizer.pad_token == "<unk>":
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     assert tokenizer.pad_token is not None, f"Pad token for {ckpt_path} cannot be set!"
