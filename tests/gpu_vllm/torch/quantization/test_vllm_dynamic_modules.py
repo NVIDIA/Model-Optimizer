@@ -361,8 +361,8 @@ def test_fakequant_launcher_serving_paths(
 @pytest.mark.parametrize(
     "overrides",
     [
-        ["--worker-cls=custom.Worker", "--moe-backend=triton_unfused"],
-        ["--worker-cls", "custom.Worker", "--moe-backend", "triton_unfused"],
+        ["--worker-cls=custom.Worker", "--moe-backend=auto"],
+        ["--worker-cls", "custom.Worker", "--moe-backend", "auto"],
     ],
     ids=("equals", "separate-values"),
 )
