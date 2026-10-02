@@ -679,12 +679,19 @@ def test_get_device_dtype_ignores_kv_cache_dtype():
             setattr(module, name, value)
         return module
 
+    def linear_like(weight_dtype):
+        # vLLM linears keep the model dtype in ``params_dtype``, also with pre-quantized weights.
+        linear = torch.nn.Linear(4, 4).to(weight_dtype)
+        linear.params_dtype = torch.bfloat16
+        return linear
+
     attention = attention_like(dtype=torch.bfloat16)  # vLLM Attention: dtype but no device attr
-    mla = attention_like(kv_b_proj=torch.nn.Linear(4, 4, dtype=torch.bfloat16))  # MLA: neither
+    mla = attention_like(kv_b_proj=linear_like(torch.bfloat16))  # MLAAttention: neither
+    mla_fp8 = attention_like(kv_b_proj=linear_like(torch.float8_e4m3fn))  # FP8 checkpoint
     for cache_dtype in ("auto", "bfloat16", "float16", "fp8", "fp8_e4m3", "fp8_ds_mla"):
-        attention.kv_cache_dtype = mla.kv_cache_dtype = cache_dtype
-        assert vllm_plugin._get_device_dtype(attention) == (torch.device("cpu"), torch.bfloat16)
-        assert vllm_plugin._get_device_dtype(mla) == (torch.device("cpu"), torch.bfloat16)
+        for module in (attention, mla, mla_fp8):
+            module.kv_cache_dtype = cache_dtype
+            assert vllm_plugin._get_device_dtype(module) == (torch.device("cpu"), torch.bfloat16)
 
 
 class _PrequantizedMethod:

@@ -26,6 +26,7 @@ from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, Schedul
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
+from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -281,8 +282,6 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     separate `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the format of the first
     `*[kv]_bmm_quantizer` entry to them; `k_pe` is skipped for NoPE models (no RoPE key).
     """
-    from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
-
     mla_layers = [
         m
         for m in model.modules()
