@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-fakequant-serve"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[project.scripts]
+# Installing this shadows the real vLLM console script: `which vllm` should
+# resolve here after `pip install -e examples/vllm_serve`. `vllm_fakequant` is
+# kept as an unambiguous alias for the same entry point.
+vllm = "vllm_serve_fakequant:main"
+vllm_fakequant = "vllm_serve_fakequant:main"
+
+[tool.setuptools]
+# Every module imported by bare name at runtime must be listed here, or it is simply not
+# installed and the import fails (ModuleNotFoundError) outside a plain `python <script>.py` run.
+py-modules = [
+    "vllm_serve_fakequant",
+    "fakequant_worker",
+    "vllm_mlflow_utils",
+    "vllm_ptq_utils",
+    "vllm_reload_utils",
+    "sparse_attn_worker",
+    "vllm_serve_sparse_attn",
+]
