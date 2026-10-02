@@ -167,13 +167,8 @@ class HFDSparkModel(HFDFlashModel):
 
         return DSparkExporter(self)
 
-    def _apply_markov_head(
-        self, hidden, backbone_logits, input_ids, anchor_positions, n_blocks, inplace=False
-    ):
+    def _apply_markov_head(self, hidden, backbone_logits, input_ids, anchor_positions, n_blocks):
         """Add the Markov transition bias to the backbone base logits.
-
-        ``inplace`` adds the bias into ``backbone_logits`` instead of a new vocab-wide tensor,
-        so the caller must not need the uncorrected logits afterwards.
 
         Returns ``(final_logits [B, N, bs, V], confidence_logits [B, N, bs] | None)``.
         """
@@ -191,7 +186,7 @@ class HFDSparkModel(HFDFlashModel):
         prev_ids = torch.gather(input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, prev_idx)
 
         bias = self.dflash_module.compute_markov_bias(prev_ids, hidden4d)
-        final4d = base4d.add_(bias) if inplace else base4d + bias
+        final4d = base4d + bias
 
         confidence_logits = None
         if self.dflash_module.use_confidence_head:
@@ -214,7 +209,7 @@ class HFDSparkModel(HFDFlashModel):
         Uses next-token (shift_label) alignment: block position k predicts the token
         at anchor+k+1; the aligned target distribution is the base model's own
         next-token distribution at position anchor+k (= label index - 1), read from
-        ``base_outputs``. ``backbone_logits=None`` skips the ``base_accuracy`` metric.
+        ``base_outputs``.
         """
         bsz, seq_len = input_ids.shape
         bs = self.dflash_block_size
@@ -249,7 +244,7 @@ class HFDSparkModel(HFDFlashModel):
             weight_mask = weight_mask * decay
 
         flat_final = final_logits.reshape(-1, vocab)
-        flat_base = None if backbone_logits is None else backbone_logits.reshape(-1, vocab)
+        flat_base = backbone_logits.reshape(-1, vocab)
         flat_targets = target_ids.reshape(-1)
         flat_weights = weight_mask.reshape(-1)
         valid_count = flat_weights.sum() + 1e-6
@@ -301,10 +296,8 @@ class HFDSparkModel(HFDFlashModel):
             keep = binary_eval_mask > 0.5
             acc = ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
             base_acc = (
-                acc.new_zeros(())
-                if flat_base is None
-                else ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            )
+                (flat_base.argmax(dim=-1) == flat_targets) & keep
+            ).sum().float() / eval_count
             # One device sync for all five scalars instead of one per .item().
             acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
                 [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
@@ -428,19 +421,12 @@ class HFDSparkModel(HFDFlashModel):
         )
 
         # 6. Backbone logits → Markov correction → three-term loss.
-        # Without dflash_report_acc the uncorrected logits are unused, so the bias folds in place.
-        report_base_acc = getattr(self, "dflash_report_acc", True)
         backbone_logits = self._base_model_lm_head(hidden).reshape(bsz, n_blocks, block_size, -1)
         final_logits, confidence_logits = self._apply_markov_head(
-            hidden,
-            backbone_logits,
-            input_ids,
-            anchor_positions,
-            n_blocks,
-            inplace=not report_base_acc,
+            hidden, backbone_logits, input_ids, anchor_positions, n_blocks
         )
         loss, accuracy, metrics = self._compute_dspark_loss(
-            backbone_logits if report_base_acc else None,
+            backbone_logits,
             final_logits,
             confidence_logits,
             input_ids,
