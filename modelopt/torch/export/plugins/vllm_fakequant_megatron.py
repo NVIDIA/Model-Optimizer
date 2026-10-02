@@ -59,12 +59,12 @@ def gather_mcore_vllm_fq_quantizer_state(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
 ) -> None:
-    """Sync each rank's captured quantizer configs and save as ``vllm_fq_quantizer_state.yaml``.
+    """Sync each rank's captured quantizer configs and save as ``quant_recipe.yaml``.
 
     Args:
         quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
             ``VllmFqGPTModelExporter._get_quantized_state``.
-        save_directory: Directory for ``vllm_fq_quantizer_state.yaml``.
+        save_directory: Directory for ``quant_recipe.yaml``.
     """
 
     def _merge_quantizer_states(objs: list) -> dict:
@@ -87,7 +87,7 @@ def gather_mcore_vllm_fq_quantizer_state(
         _merge_quantizer_states,
     )
     if is_master():
-        with open(Path(save_directory) / "vllm_fq_quantizer_state.yaml", "w") as f:
+        with open(Path(save_directory) / "quant_recipe.yaml", "w") as f:
             yaml.safe_dump(merged, f, sort_keys=False)
 
 
@@ -191,7 +191,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` before delegating to base export.
+        """Save ``quantizer_state.pth`` and ``quant_recipe.yaml`` before delegating to base export.
 
         Args:
             save_directory: The directory to save the exported model.
@@ -320,7 +320,7 @@ def export_mcore_gpt_to_hf_vllm_fq(
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
-    Also saves ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` sidecars,
+    Also saves ``quantizer_state.pth`` and ``quant_recipe.yaml`` sidecars,
     for later fakequant reload.
 
     Args:
