@@ -53,7 +53,7 @@
 """Thin ``vllm`` CLI shim: translates ``--modelopt-*`` flags to env vars, then delegates
 to vLLM's real CLI (``vllm.entrypoints.cli.main.main``) unmodified.
 
-Without fakequant settings, the wrapper delegates to
+Without fakequant settings or recognized local sidecars, the wrapper delegates to
 stock vLLM without installing the fakequant worker. Install this as the ``vllm``
 console script (see pyproject.toml) so ``vllm serve <model> ...`` works directly.
 Add ``--modelopt-*`` flags (or set the env vars) to opt into fakequant.
@@ -165,7 +165,8 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-quant-file-path",
         default=os.environ.get("QUANT_FILE_PATH"),
         help=(
-            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export "
+            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export. "
+            "Auto-detected from a local model directory with its recipe YAML if omitted "
             "[env: QUANT_FILE_PATH]"
         ),
     )
@@ -173,14 +174,18 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-state-path",
         default=os.environ.get("MODELOPT_STATE_PATH"),
         help=(
-            "Path to vllm_fq_modelopt_state.pth in an HF vLLM fakequant export "
-            "[env: MODELOPT_STATE_PATH]"
+            "Path to full ModelOpt state (vllm_fq_modelopt_state.pth) in an HF "
+            "vLLM fakequant export. Auto-detected from a local model directory "
+            "if omitted [env: MODELOPT_STATE_PATH]"
         ),
     )
     g.add_argument(
         "--modelopt-recipe-path",
         default=os.environ.get("RECIPE_PATH"),
-        help="Path to a ModelOpt PTQ recipe YAML [env: RECIPE_PATH]",
+        help="Path to a quantization recipe file, or a Megatron export's "
+        "per-quantizer resolved config YAML (auto-translated to vLLM naming). "
+        "Auto-detected as <model_dir>/vllm_fq_quantizer_state.yaml for a local "
+        "model directory if omitted [env: RECIPE_PATH]",
     )
     g.add_argument(
         "--modelopt-quant-dataset",
@@ -209,6 +214,32 @@ def _fakequant_requested(modelopt_args) -> bool:
         or modelopt_args.modelopt_state_path
         or modelopt_args.modelopt_recipe_path
     )
+
+
+def _autodetect_fakequant_paths(args) -> None:
+    """Fill in --modelopt-state-path / --modelopt-recipe-path / --modelopt-quant-file-path
+    from the model dir's standard export sidecar files, when unset. state-path wins over
+    recipe-path if both are present; quant-file-path (amax override) only applies when no
+    state path is in play.
+    """
+    model = args.model
+    manual_ptq_requested = bool(
+        args.modelopt_quant_cfg
+        or args.modelopt_kv_quant_cfg
+        or args.modelopt_quant_file_path
+        or args.modelopt_recipe_path
+    )
+    if manual_ptq_requested:
+        return
+    if not args.modelopt_state_path and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth"):
+        args.modelopt_state_path = str(Path(model) / "vllm_fq_modelopt_state.pth")
+
+    if not args.modelopt_quant_file_path and not args.modelopt_state_path:
+        if os.path.exists(f"{model}/quantizer_state.pth") and os.path.exists(
+            f"{model}/vllm_fq_quantizer_state.yaml"
+        ):
+            args.modelopt_quant_file_path = str(Path(model) / "quantizer_state.pth")
+            args.modelopt_recipe_path = str(Path(model) / "vllm_fq_quantizer_state.yaml")
 
 
 def _apply_fakequant_env(args, rest_argv: list) -> None:
@@ -315,6 +346,7 @@ def main():
     # in a worker that has already loaded the weights.
     modelopt_args.model = _find_serve_model(rest_argv) or "unknown-model"
     resolve_mlflow_args(modelopt_args, modelopt_parser)
+    _autodetect_fakequant_paths(modelopt_args)
     if _fakequant_requested(modelopt_args):
         _apply_fakequant_env(modelopt_args, rest_argv)
 

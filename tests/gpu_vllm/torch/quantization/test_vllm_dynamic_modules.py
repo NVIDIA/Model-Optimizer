@@ -125,6 +125,25 @@ def test_fakequant_launcher_rejects_unusable_quant_file(monkeypatch, extra_args,
         launcher.main()
 
 
+def test_manual_quantizer_state_and_cfg_prevent_full_state_autodetection(monkeypatch, tmp_path):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    explicit_quantizer_state = "/explicit/quantizer_state.pth"
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg="FP8_DEFAULT_CFG",
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=explicit_quantizer_state,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert args.modelopt_quant_file_path == explicit_quantizer_state
+    assert args.modelopt_state_path is None
+
+
 def _calibration_worker(
     num_blocks: int,
     *,
@@ -232,6 +251,25 @@ def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
 
     assert sys.argv == ["vllm", "launch", "render", "--help"]
     vllm_main.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "error"),
+    [
+        ("", "non-empty YAML mapping"),
+        ("{}", "non-empty YAML mapping"),
+        ("[]", "non-empty YAML mapping"),
+        ("foo: 1", "Per-quantizer recipe entries"),
+        ("quantize: [", "Invalid quantization recipe YAML"),
+    ],
+)
+def test_get_quant_config_rejects_empty_or_invalid_recipe(tmp_path, yaml_text, error):
+    module = _load_example_module("vllm_ptq_utils")
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(yaml_text)
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+    with pytest.raises(ValueError, match=error):
+        module.get_quant_config(config, SimpleNamespace())
 
 
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
@@ -650,6 +688,36 @@ def test_disable_compilation_updates_all_markers_and_restores_after_error():
     assert "do_not_compile" not in vars(model.language_model)
 
 
+def test_disable_compilation_prefers_outer_marker():
+    """An outer compile wrapper takes precedence over an unmarked inner model."""
+    inner_model = SimpleNamespace()
+    model = SimpleNamespace(do_not_compile=False, model=inner_model)
+
+    with disable_compilation(model):
+        assert model.do_not_compile is True
+        assert not hasattr(inner_model, "do_not_compile")
+
+    assert model.do_not_compile is False
+
+
+def test_disable_compilation_restores_class_marker_after_error():
+    """Cleanup restores a class marker without masking an error from the context body."""
+
+    class CompileWrappedModel(torch.nn.Module):
+        do_not_compile = False
+
+    inner_model = CompileWrappedModel()
+    model = torch.nn.Module()
+    model.model = inner_model
+
+    with pytest.raises(RuntimeError, match="quantization failed"), disable_compilation(model):
+        assert inner_model.do_not_compile is True
+        raise RuntimeError("quantization failed")
+
+    assert inner_model.do_not_compile is False
+    assert "do_not_compile" not in vars(inner_model)
+
+
 def test_attention_kv_defaults_set_only_uncalibrated_dynamic_block16_quantizers():
     calibrated_amax = 7.25
     layer = SimpleNamespace(
@@ -910,6 +978,8 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
     for hf_key, expected_quantizer in (
         ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
         ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+        ("model.layers.0.mlp.experts.up_proj_input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.down_proj_input_quantizer._amax", "w2_input_quantizer"),
     ):
         action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
         assert action == "group", (hf_key, action)

@@ -314,12 +314,45 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
     """Resolve and merge model and KV-cache quantization configuration."""
     import copy
 
-    if quant_config["recipe_path"]:
-        recipe = load_recipe(quant_config["recipe_path"])
-        assert isinstance(recipe, ModelOptPTQRecipe), (
-            f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
+    import yaml
+
+    if quant_config["recipe_path"] and (quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]):
+        raise ValueError(
+            "recipe_path and quant_cfg/kv_quant_cfg are mutually exclusive -- the recipe file "
+            "already carries the quant_cfg. Set only one."
         )
-        quant_cfg = recipe.quantize
+
+    if quant_config["recipe_path"]:
+        # Two shapes share this path: a standard ModelOptPTQRecipe YAML (metadata + quantize
+        # sections), or a Megatron export's per-quantizer resolved config (a flat
+        # quantizer_name -> state dict, saved by vllm_fakequant_megatron.py), which needs the
+        # HF->vLLM name translation load_quantizer_state_as_quant_cfg applies.
+        try:
+            with open(quant_config["recipe_path"]) as f:
+                raw_recipe = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                f"Invalid quantization recipe YAML: {quant_config['recipe_path']}"
+            ) from exc
+        if not isinstance(raw_recipe, dict) or not raw_recipe:
+            raise ValueError(
+                f"Quantization recipe must be a non-empty YAML mapping: {quant_config['recipe_path']}"
+            )
+        if "quantize" in raw_recipe:
+            recipe = load_recipe(quant_config["recipe_path"])
+            assert isinstance(recipe, ModelOptPTQRecipe), (
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
+            )
+            quant_cfg = recipe.quantize
+        else:
+            if any(not isinstance(state, dict) for state in raw_recipe.values()):
+                raise ValueError(
+                    f"Per-quantizer recipe entries must be YAML mappings: "
+                    f"{quant_config['recipe_path']}"
+                )
+            from vllm_reload_utils import load_quantizer_state_as_quant_cfg
+
+            quant_cfg = load_quantizer_state_as_quant_cfg(raw_recipe, model)
     else:
         quant_cfg = (
             copy.deepcopy(getattr(mtq, quant_config["quant_cfg"]))
