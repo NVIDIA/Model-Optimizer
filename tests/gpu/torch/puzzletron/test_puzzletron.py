@@ -15,7 +15,9 @@
 import json
 from datetime import timedelta
 from functools import partial
+from itertools import count
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
@@ -23,6 +25,7 @@ from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.puzzletron as mtpz
+import modelopt.torch.puzzletron.tools.validate_puzzle_with_multi_replacements as puzzle_validation
 import modelopt.torch.utils.distributed as dist
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
@@ -107,9 +110,13 @@ def _test_puzzletron_multiprocess_job(
     dist.barrier()
 
     # Compress the model using a one-click approach
-    hydra_cfg = mtpz.entrypoint.puzzletron(
-        str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path)
-    )
+    with (
+        patch.object(puzzle_validation, "monotonic", side_effect=count(0, 2)),
+        patch.object(puzzle_validation, "mprint", wraps=puzzle_validation.mprint) as progress_log,
+    ):
+        hydra_cfg = mtpz.entrypoint.puzzletron(
+            str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path)
+        )
 
     #
     # Check assertions (collect all failures, report at the end)
@@ -121,6 +128,27 @@ def _test_puzzletron_multiprocess_job(
             errors.append(message)
 
     if rank == 0:
+        total_solutions = len(hydra_cfg.scoring.solutions_to_validate)
+        messages = [call.args[0] for call in progress_log.call_args_list]
+        check(
+            f"Puzzletron Progress: validating {total_solutions} solutions" in messages,
+            "Missing solution-count progress message",
+        )
+        completion_messages = [
+            message
+            for message in messages
+            if message.startswith("Puzzletron Progress: validated ")
+        ]
+        expected_messages = [
+            f"Puzzletron Progress: validated {completed}/{total_solutions} solutions; "
+            f"elapsed {timedelta(seconds=2 * completed)}; "
+            f"estimated remaining {timedelta(seconds=2 * (total_solutions - completed))}"
+            for completed in range(1, total_solutions + 1)
+        ]
+        check(
+            completion_messages[:total_solutions] == expected_messages,
+            "Scoring progress counts or estimated remaining times are incorrect",
+        )
         if has_moe_layers:
             # assertions for the score_pruning_activations step 1 (MoE models only)
             rank_filepath = (
