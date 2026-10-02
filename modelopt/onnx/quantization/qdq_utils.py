@@ -577,6 +577,10 @@ def _get_scale_and_zp(
     return scale, zp
 
 
+# Consumers whose quantized weights qdq_to_dq knows how to convert.
+_REAL_QUANT_WEIGHT_CONSUMERS = {"Conv", "ConvTranspose", "Gemm", "MatMul"}
+
+
 def _quantization_axis(node: onnx.NodeProto) -> int:
     """Returns a Q/DQ node's quantization axis; ONNX defaults the attribute to 1."""
     return next((attr.i for attr in node.attribute if attr.name == "axis"), 1)
@@ -645,7 +649,6 @@ def _convert_weight(
         - INT8 weights are clipped to [-128, 127]
         - FP8 weights use float8e4m3fn format
     """
-    # Per-op quantization axis mapping (must match ORT config)
     weight_shape = weight_array.shape
     op_type = quantized_node.op_type
 
@@ -653,44 +656,26 @@ def _convert_weight(
     scale_array = onnx.numpy_helper.to_array(scale)
     zp_array = onnx.numpy_helper.to_array(zp)
 
-    # Dynamically determine transB for Gemm
-    trans_b = 0
-    if op_type == "Gemm":
-        for attr in quantized_node.attribute:
-            if attr.name == "transB":
-                trans_b = attr.i
-                break
-
-    axis_map = {
-        "Conv": 0,
-        "ConvTranspose": 1,
-        "Gemm": 0 if trans_b else 1,
-        "MatMul": 1,
-    }
-
-    if op_type not in axis_map:
+    if op_type not in _REAL_QUANT_WEIGHT_CONSUMERS:
         raise ValueError(f"Unsupported op_type for real weight quantization: {op_type}")
 
+    # A single scale covers the whole weight, so it broadcasts and no axis applies to it.
+    reshape_dims = [1] * len(weight_shape)
     if scale_array.size > 1:
-        # The DequantizeLinear left in the graph dequantizes along the axis it declares,
-        # and that axis indexes the stored weight whatever the consumer's layout is.
+        # Per-axis: the DequantizeLinear left in the graph dequantizes along the axis it
+        # declares, and that axis indexes the stored weight whatever the consumer's layout is.
         axis = 1 if dq_axis is None else dq_axis
         if not -len(weight_shape) <= axis < len(weight_shape):
             raise ValueError(
                 f"Quantization axis {axis} is out of range for weight shape {weight_shape}"
             )
         axis %= len(weight_shape)
-    else:
-        # A single scale is broadcast over the whole weight, so only the check below cares.
-        axis = axis_map[op_type]
+        if scale_array.shape[0] != weight_shape[axis]:
+            raise ValueError(
+                f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} along axis {axis}"
+            )
+        reshape_dims[axis] = scale_array.shape[0]
 
-    if scale_array.shape and scale_array.shape[0] != weight_shape[axis]:
-        raise ValueError(
-            f"Scale shape {scale_array.shape} does not match weight shape {weight_shape} along axis {axis}"
-        )
-
-    reshape_dims = [1] * len(weight_shape)
-    reshape_dims[axis] = scale_array.shape[0]
     scale_array = scale_array.reshape(*reshape_dims)
     zp_array = zp_array.reshape(*reshape_dims)
 

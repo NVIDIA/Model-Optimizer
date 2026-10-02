@@ -1170,6 +1170,7 @@ def create_test_model_with_dq_transpose_matmul(
     q_axis: int = 0,
     transpose: bool = True,
     declare_axis: bool = True,
+    single_scale: bool = False,
 ):
     """Create weight[out, in] -> Q -> DQ -> Transpose -> MatMul, per-channel on the out axis.
 
@@ -1179,9 +1180,14 @@ def create_test_model_with_dq_transpose_matmul(
     """
     rng = np.random.RandomState(7)
     weight = rng.randn(out_features, in_features).astype(np.float32)
-    reduced = tuple(axis for axis in range(2) if axis != q_axis)
-    scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
-    zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
+    if single_scale:
+        # One element: covers the whole weight and broadcasts, whatever the axis says.
+        scale = np.array([np.abs(weight).max() / 127.0], dtype=np.float32)
+        zero_point = np.zeros(1, dtype=np.int8)
+    else:
+        reduced = tuple(axis for axis in range(2) if axis != q_axis)
+        scale = (np.abs(weight).max(axis=reduced) / 127.0).astype(np.float32)
+        zero_point = np.zeros(weight.shape[q_axis], dtype=np.int8)
 
     # ONNX defaults an omitted `axis` to 1, so a caller omitting it must pass q_axis=1.
     axis_attr = {"axis": q_axis} if declare_axis else {}
@@ -1322,6 +1328,25 @@ class TestQdqToDqTranspose:
 
         expected = run(model)
         converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+        assert np.array_equal(run(converted), expected)
+
+    @pytest.mark.parametrize(("out_features", "in_features"), [(1, 32), (32, 1)])
+    def test_one_element_scale_broadcasts_through_transpose(self, out_features, in_features):
+        """A single scale covers the whole weight, so no axis of it has to be length 1."""
+        model = create_test_model_with_dq_transpose_matmul(
+            out_features, in_features, single_scale=True
+        )
+        inputs = {"input": np.random.RandomState(11).randn(3, in_features).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        assert not [n for n in converted.graph.node if n.op_type == "QuantizeLinear"]
         assert np.array_equal(run(converted), expected)
 
     def test_disagreeing_qdq_axes_raise(self):
