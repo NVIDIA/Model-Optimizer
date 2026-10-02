@@ -19,9 +19,11 @@ Tests for PatternCache in the autotuner.
 Covers pattern cache creation, serialization, YAML round-trip, and scheme management.
 """
 
+import builtins
 import os
 import tempfile
 
+from modelopt.onnx.quantization.autotune import common
 from modelopt.onnx.quantization.autotune.common import (
     InsertionScheme,
     NodeInputInsertionPoint,
@@ -139,9 +141,6 @@ class TestPatternCache:
         CI runs under a UTF-8 locale, so make every ``open()`` in the module that does not pin
         ``encoding=`` decode as cp1252 instead -- the failure a Windows user would see.
         """
-        import builtins
-
-        from modelopt.onnx.quantization.autotune import common
 
         def cp1252_open(file, mode="r", *args, encoding=None, **kwargs):
             if "b" not in mode and encoding is None:
