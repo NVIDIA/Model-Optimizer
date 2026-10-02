@@ -28,13 +28,14 @@ from safetensors import safe_open
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
+    VllmFqGPTModelExporter,
     gather_mcore_vllm_fq_quantized_state_dict,
     gather_mcore_vllm_fq_quantizer_recipe,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
+def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -116,12 +117,18 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
 
     handles = [quantizer.register_forward_hook(count_qdq) for quantizer in quantizers]
     try:
-        export_mcore_gpt_to_hf_vllm_fq(
-            model,
-            pretrained_model_name_or_path=tmp_path,
-            dtype=torch.bfloat16,
-            export_dir=str(export_dir),
-        )
+        if prebuild:
+            exporter = VllmFqGPTModelExporter(model, tmp_path, dtype=torch.bfloat16)
+            assert exporter.state_dict
+            assert exporter.layer_state_dicts
+            exporter.save_pretrained(str(export_dir), tmp_path)
+        else:
+            export_mcore_gpt_to_hf_vllm_fq(
+                model,
+                pretrained_model_name_or_path=tmp_path,
+                dtype=torch.bfloat16,
+                export_dir=str(export_dir),
+            )
     finally:
         for handle in handles:
             handle.remove()
@@ -187,6 +194,13 @@ def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size):
     """Export each PP stage once and retain weights and sidecars from every stage."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg))
+
+
+def test_mcore_vllm_export_after_state_dict_access(dist_workers_size_1, tmp_path):
+    """Cached shards retain recipe markers when export begins after state inspection."""
+    dist_workers_size_1.run(
+        partial(_test_mcore_vllm_export, tmp_path, mtq.FP8_DEFAULT_CFG, prebuild=True)
+    )
 
 
 def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
