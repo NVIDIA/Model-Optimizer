@@ -150,7 +150,7 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
     with open(quantizer_recipe_file) as f:
         quantizer_recipe = yaml.safe_load(f)
 
-    marker_suffix = "._vllm_fq_recipe_marker"
+    marker_suffix = "._quant_recipe_marker"
     assert not any(key.endswith(marker_suffix) for key in quantizer_state)
     assert not any(key.endswith(marker_suffix) for key in quantizer_recipe)
 
