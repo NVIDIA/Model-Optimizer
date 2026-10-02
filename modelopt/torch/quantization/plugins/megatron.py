@@ -1117,6 +1117,14 @@ if HAS_GDN:
         paths (``ssm_prefill`` / ``ssm_decode``) are left untouched.
         """
 
+        # Class-level overrides so torch routes the quantizer state through ``_extra_state``
+        # (GatedDeltaNet has none); see _QuantDSAttention.
+        def get_extra_state(self):
+            return quant_module_get_extra_state(self)
+
+        def set_extra_state(self, state):
+            quant_module_set_extra_state(self, state)
+
         def _setup(self):
             super()._setup()
             try:
