@@ -91,6 +91,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix an illegal memory access in static NVFP4 fake quantization for tensors with more than 2^31 elements, such as stacked MoE expert weights. The kernel is also about 14x faster.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.
