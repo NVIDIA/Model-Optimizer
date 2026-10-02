@@ -250,7 +250,14 @@ def test_vllm_serve_parser_dependency_error_propagates(monkeypatch):
 
 
 @pytest.mark.parametrize("quant_cfg", [None, "FP8_DEFAULT_CFG"])
-def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["vllm", "launch", "render", "--help"], id="launch"),
+        pytest.param(["vllm", "--help"], id="top-level-help"),
+    ],
+)
+def test_fakequant_launcher_passes_through_non_serve_commands(monkeypatch, quant_cfg, argv):
     for key in (
         "QUANT_CFG",
         "KV_QUANT_CFG",
@@ -265,11 +272,11 @@ def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
     monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
     vllm_main = Mock()
     monkeypatch.setattr(launcher, "vllm_main", vllm_main)
-    monkeypatch.setattr(sys, "argv", ["vllm", "launch", "render", "--help"])
+    monkeypatch.setattr(sys, "argv", argv)
 
     launcher.main()
 
-    assert sys.argv == ["vllm", "launch", "render", "--help"]
+    assert sys.argv == argv
     vllm_main.assert_called_once_with()
 
 
@@ -323,6 +330,20 @@ def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
             ["serve", "/models/qwen"],
             {"QUANT_CFG": "FP8_DEFAULT_CFG"},
             id="legacy-direct-script",
+        ),
+        pytest.param(
+            [
+                "vllm_serve_fakequant.py",
+                "--port",
+                "8000",
+                "/models/qwen",
+                "--modelopt-quant-cfg",
+                "FP8_DEFAULT_CFG",
+            ],
+            {},
+            ["serve", "--port", "8000", "/models/qwen"],
+            {"QUANT_CFG": "FP8_DEFAULT_CFG"},
+            id="legacy-option-leading-direct-script",
         ),
     ],
 )

@@ -246,9 +246,11 @@ _VLLM_SUBCOMMANDS = {"serve", "chat", "complete", "bench", "run-batch", "collect
 def _default_to_serve(rest_argv: list) -> list:
     """Prepend ``serve`` when no vLLM subcommand was given, so ``vllm_serve_fakequant.py
     <model> ...`` keeps working the way the old single-purpose launcher did."""
-    if rest_argv and rest_argv[0] not in _VLLM_SUBCOMMANDS and not rest_argv[0].startswith("-"):
-        return ["serve", *rest_argv]
-    return rest_argv
+    if not rest_argv or rest_argv[0] in _VLLM_SUBCOMMANDS:
+        return rest_argv
+    if len(rest_argv) == 1 and rest_argv[0] in {"-h", "--help", "--version"}:
+        return rest_argv
+    return ["serve", *rest_argv]
 
 
 def _find_serve_model(rest_argv: list) -> str | None:
