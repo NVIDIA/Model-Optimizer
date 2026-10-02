@@ -105,6 +105,13 @@ with import_plugin("megatron"):
     from megatron.core.transformer.torch_norm import L2Norm
     from megatron.core.transformer.transformer_layer import TransformerLayer
 
+    try:
+        from megatron.core.models.hybrid.layers.hybrid_hyper_connection import (
+            HyperConnectionHybridLayer,
+        )
+    except ImportError:  # older Megatron-Core without mHC
+        HyperConnectionHybridLayer = None
+
     has_mcore = True
 
 __all__ = [
@@ -205,11 +212,9 @@ class GPTModelExporter:
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
         self.all_mcore_mappings = all_mcore_hf_export_mapping[self.arch]
-        if self.rules.get("mtp_in_decoder_layers", False) and language_model.config.mtp_num_layers:
-            # Only the copy from the source checkpoint is supported (the bridge builds no MTP).
-            raise NotImplementedError(
-                f"Exporting a Megatron-built MTP for {self.arch} is not supported yet."
-            )
+        if self.rules.get("fold_attn_mlp_layer_pairs", False):
+            # Each HF decoder layer is an attention and an MLP physical layer in Megatron.
+            self._hf_text_config.num_hidden_layers = language_model.config.num_layers // 2
         # The vision tower is copied through unquantized, so deployments must not treat it as such.
         self.exclude_modules = [
             prefix.removesuffix(".") + "*" for prefix in self.vision_passthrough_prefixes or ()
@@ -631,12 +636,9 @@ class GPTModelExporter:
         # Decoder layers
         for layer in model.decoder.layers:
             layer_id = layer.layer_number - 1
-            if isinstance(layer, MambaLayer):
-                self._get_mamba_layer_state_dict(layer, layer_id)
-            elif isinstance(layer, TransformerLayer):
-                self._get_transformer_layer_state_dict(layer, layer_id)
-            else:
-                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+            if self.rules.get("fold_attn_mlp_layer_pairs", False):
+                layer_id //= 2
+            self._get_decoder_layer_state_dict(layer, layer_id)
 
             self._layer_state_dicts[layer.layer_number] = self._state_dict
             if layer.layer_number != self.model.config.num_layers:
@@ -669,6 +671,32 @@ class GPTModelExporter:
         if weight is None:
             return None, None
         return fused_key, weight
+
+    def _get_decoder_layer_state_dict(
+        self, layer, layer_id, is_mtp=False, export_hyper_connection=True
+    ):
+        """Export one decoder layer, unwrapping an mHC ``HyperConnectionHybridLayer`` first."""
+        if HyperConnectionHybridLayer is not None and isinstance(layer, HyperConnectionHybridLayer):
+            if export_hyper_connection:
+                self._get_hyper_connection_state_dict(layer, layer_id)
+            layer = layer.inner_layer
+        if isinstance(layer, MambaLayer):
+            self._get_mamba_layer_state_dict(layer, layer_id, is_mtp=is_mtp)
+        elif isinstance(layer, TransformerLayer):
+            self._get_transformer_layer_state_dict(layer, layer_id, is_mtp=is_mtp)
+        else:
+            raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+
+    def _get_hyper_connection_state_dict(self, layer, layer_id):
+        """Export an mHC wrapper as HF's ``hc_{attn,ffn}_{fn,base,scale}`` of its HF layer."""
+        attention = getattr(layer.inner_layer, "self_attention", None)
+        kind = "ffn" if attention is None or isinstance(attention, IdentityOp) else "attn"
+        hc = layer.hyper_connection
+        self.rules["hc_fn"](hc.mapping_proj.weight.detach().to(self.dtype), layer_id, kind)
+        # The HF checkpoint keeps the mHC bias and alpha scales in FP32.
+        self.rules["hc_base"](hc.bias.detach().float(), layer_id, kind)
+        alphas = torch.cat([hc.alpha_pre, hc.alpha_post, hc.alpha_res]).detach().float()
+        self.rules["hc_scale"](alphas, layer_id, kind)
 
     def _get_transformer_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.input_layernorm, IdentityOp):
@@ -718,6 +746,8 @@ class GPTModelExporter:
                 indexer = getattr(core_attention, "indexer", None)
                 if indexer is not None:
                     self._get_dsa_indexer_state_dict(indexer, layer_id, is_mtp)
+            elif "kda" in self.rules and hasattr(layer.self_attention, "in_proj"):
+                self._get_kda_state_dict(layer, layer_id, is_mtp=is_mtp)
             elif "linear_attn" in self.rules and hasattr(layer.self_attention, "in_proj"):
                 # GatedDeltaNet (Qwen3.5 linear attention): no q/k layernorm, no core_attention.
                 self._get_gated_delta_net_state_dict(layer, layer_id, is_mtp=is_mtp)
@@ -833,12 +863,20 @@ class GPTModelExporter:
         saved_state_dict = self._state_dict
         self._state_dict = OrderedDict()
         try:
-            for mtp_layer in mtp.layers:
+            for mtp_idx, mtp_layer in enumerate(mtp.layers):
                 # Some architectures (Qwen3.5) put a single TransformerLayer here, not a container.
                 inner = mtp_layer.mtp_model_layer
                 inner_layers = getattr(inner, "layers", None) or [inner]
-                first_id = inner_layers[0].layer_number - 1
-                last_id = inner_layers[-1].layer_number - 1
+                if self.rules.get("mtp_in_decoder_layers", False):
+                    # HF stores the MTP layer after the decoder layers, under the decoder's names.
+                    first_id = last_id = self._hf_text_config.num_hidden_layers + mtp_idx
+                    inner_ids = [first_id] * len(inner_layers)
+                    inner_is_mtp = False
+                else:
+                    first_id = inner_layers[0].layer_number - 1
+                    last_id = inner_layers[-1].layer_number - 1
+                    inner_ids = [layer.layer_number - 1 for layer in inner_layers]
+                    inner_is_mtp = True
 
                 # Outer predictor projections attach to the first inner HF index.
                 if "mtp.enorm" in self.rules:
@@ -846,19 +884,18 @@ class GPTModelExporter:
                 if "mtp.hnorm" in self.rules:
                     self.rules["mtp.hnorm"](mtp_layer.hnorm, first_id)
                 if "mtp.eh_proj" in self.rules:
-                    self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
+                    if getattr(mtp_layer, "eh_proj", None) is not None:
+                        self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
+                    else:  # split projections (GLM-5.3-Flash): HF eh_proj is [e_proj | h_proj]
+                        eh_proj = torch.cat([mtp_layer.e_proj.weight, mtp_layer.h_proj.weight], 1)
+                        self.rules["mtp.eh_proj"](eh_proj.detach().to(self.dtype), first_id)
 
-                # Inner layers reuse the base decoder walker (is_mtp=True).
-                for inner in inner_layers:
-                    hf_layer_id = inner.layer_number - 1
-                    if isinstance(inner, MambaLayer):
-                        self._get_mamba_layer_state_dict(inner, hf_layer_id, is_mtp=True)
-                    elif isinstance(inner, TransformerLayer):
-                        self._get_transformer_layer_state_dict(inner, hf_layer_id, is_mtp=True)
-                    else:
-                        raise ValueError(
-                            "Only TransformerLayer or MambaLayer are supported in the MTP block."
-                        )
+                # Inner layers reuse the base decoder walker. The MTP mHC weights have no HF
+                # counterpart (Megatron-Bridge initializes them on import), so they are dropped.
+                for inner, hf_layer_id in zip(inner_layers, inner_ids):
+                    self._get_decoder_layer_state_dict(
+                        inner, hf_layer_id, is_mtp=inner_is_mtp, export_hyper_connection=False
+                    )
 
                 # The MTP block's own final layernorm attaches to the last inner HF index.
                 final_layernorm = getattr(mtp_layer, "final_layernorm", None)
@@ -996,12 +1033,31 @@ class GPTModelExporter:
         self.rules["linear_attn.out_norm"](gdn.out_norm, layer_id, is_mtp=is_mtp)
         self.rules["linear_attn.out_proj"](gdn.out_proj, layer_id, is_mtp=is_mtp)
 
+    def _get_kda_state_dict(self, layer, layer_id, is_mtp=False):
+        """Export a KDA (Kimi Delta Attention) layer's ``self_attention``."""
+        kda = layer.self_attention
+        self.rules["kda"](kda, layer_id, is_mtp=is_mtp)
+        for name in ("beta_proj", "f_a_proj", "f_b_proj", "g_a_proj", "g_b_proj"):
+            self.rules[f"kda.{name}"](getattr(kda, name), layer_id, is_mtp=is_mtp)
+        self.rules["kda.out_norm"](kda.out_norm, layer_id, is_mtp=is_mtp)
+        self.rules["kda.out_proj"](kda.out_proj, layer_id, is_mtp=is_mtp)
+        # The HF checkpoint keeps the kernel parameters in FP32.
+        self.rules["kda.A_log"](kda.A_log.detach().float(), layer_id, is_mtp=is_mtp)
+        self.rules["kda.dt_bias"](kda.dt_bias.detach().float(), layer_id, is_mtp=is_mtp)
+
     def _get_dsa_indexer_state_dict(self, indexer, layer_id, is_mtp=False):
-        """Export the DSA indexer of a sparse MLA layer."""
+        """Export the DSA kpool indexer of a sparse MLA layer."""
         if "indexer.linear_wq_b" not in self.rules:
             raise NotImplementedError(f"No export rule for the DSA indexer of {self.arch}.")
         for name in ("linear_wq_b", "linear_wk", "k_norm", "linear_weights_proj"):
             self.rules[f"indexer.{name}"](getattr(indexer, name), layer_id, is_mtp=is_mtp)
+        # KPool (GLM-5.3-Flash) only; plain DSA indexers (GLM-5.2) have no compression params.
+        for name in ("index_kpool_compress_ape", "index_kpool_compress_gate"):
+            param = getattr(indexer, name, None)
+            if param is not None:
+                self.rules[f"indexer.{name}"](
+                    param.detach().to(self.dtype), layer_id, is_mtp=is_mtp
+                )
 
     def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):
@@ -1139,6 +1195,7 @@ class GPTModelExporter:
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
                 "gated_delta_net_slicing": self._gated_delta_net_slicing,
+                "kda_slicing": self._kda_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
@@ -1890,11 +1947,6 @@ class GPTModelExporter:
         """
         if is_mtp:
             prefix = self._mtp_prefix(prefix)
-        in_proj = module.in_proj
-        name_to_value, qformat, block_size = self._get_quantized_state(
-            in_proj, self.dtype, prefix=prefix
-        )
-
         assert tuple(module.in_proj_split_names) == (
             "query",
             "key",
@@ -1914,12 +1966,39 @@ class GPTModelExporter:
             sections["alpha"],
         ]
         proj_names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
-        proj_prefixes = [prefix + name + "." for name in proj_names]
         # The recipes keep the alpha / beta gates in BF16, but Megatron fuses all six sections
         # behind one quantizer, so they can only be dropped here rather than by a quantizer_name.
-        keep_bf16 = {
-            p for p, n in zip(proj_prefixes, proj_names) if n in ("in_proj_a", "in_proj_b")
-        }
+        self._split_fused_projection(
+            module.in_proj,
+            prefix,
+            proj_names,
+            split_sizes,
+            keep_bf16_names=("in_proj_a", "in_proj_b"),
+        )
+
+    def _kda_slicing(self, module, prefix, is_mtp=False):
+        """Split KDA's fused q|k|v ``in_proj`` and depthwise ``conv1d`` into HF's q/k/v tensors."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        assert tuple(module.in_proj_split_names) == ("query", "key", "value"), (
+            f"Unexpected KDA in_proj layout {tuple(module.in_proj_split_names)}; only the "
+            "two-stage-gate layout [query, key, value] is supported"
+        )
+        split_sizes = list(module.in_proj_split_sections)
+        self._split_fused_projection(
+            module.in_proj, prefix, ("q_proj", "k_proj", "v_proj"), split_sizes
+        )
+        conv_weights = torch.split(module.conv1d.weight.detach().to(self.dtype), split_sizes)
+        for name, weight in zip(("q_conv1d", "k_conv1d", "v_conv1d"), conv_weights):
+            self._state_dict[prefix + name + ".weight"] = weight
+
+    def _split_fused_projection(self, fused, prefix, proj_names, split_sizes, keep_bf16_names=()):
+        """Export a row-fused projection as the HF projections ``prefix + proj_names[i]``."""
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            fused, self.dtype, prefix=prefix
+        )
+        proj_prefixes = [prefix + name + "." for name in proj_names]
+        keep_bf16 = {p for p, n in zip(proj_prefixes, proj_names) if n in keep_bf16_names}
 
         for proj_prefix in proj_prefixes:
             if proj_prefix in keep_bf16:

@@ -22,7 +22,7 @@ explicit per-module map, so a few non-obvious matches decide correctness:
   *not* matched and the shared experts stay BF16.
 * The vision tower reuses the language MLP's leaf names (``mlp.gate_proj`` /
   ``up_proj`` / ``down_proj``), so the dense-MLP patterns match ``model.visual.*``
-  too -- only the trailing ``*visual*`` disable (which must stay last) keeps the
+  too -- only the ``*visual*`` disable (which must follow them) keeps the
   vision tower in BF16.
 * ``*mlp.gate_proj*`` must not catch the router ``mlp.gate``.
 
@@ -144,7 +144,7 @@ def test_glm_5_3_recipe_quantizer_precedence():
 
     # Vision tower stays BF16 -- the load-bearing case: the vision MLP reuses
     # gate_proj/up_proj/down_proj, so the dense-MLP patterns match it and only the
-    # trailing `*visual*` disable keeps it off.
+    # later `*visual*` disable keeps it off.
     vblock = model.model.visual.blocks[0]
     for proj in (vblock.mlp.gate_proj, vblock.mlp.up_proj, vblock.mlp.down_proj):
         assert proj.weight_quantizer.is_enabled is False
@@ -170,3 +170,68 @@ def test_glm_5_3_recipe_quantizer_precedence():
 
     # lm_head stays BF16.
     assert model.lm_head.weight_quantizer.is_enabled is False
+
+
+class _McoreMLP(nn.Module):
+    """Megatron-Bridge MLP leaf names (dense MLP, each local expert, and the shared experts)."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear_fc1 = nn.Linear(_H, 2 * _H, bias=False)
+        self.linear_fc2 = nn.Linear(_H, _H, bias=False)
+
+
+class _McoreMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.Module()
+        self.experts.local_experts = nn.ModuleList([_McoreMLP(), _McoreMLP()])
+        self.shared_experts = _McoreMLP()
+
+
+class _McoreLayer(nn.Module):
+    def __init__(self, mlp):
+        super().__init__()
+        self.inner_layer = nn.Module()  # mHC wraps each block as `<layer>.inner_layer`
+        self.inner_layer.mlp = mlp
+
+
+class _McoreGLM53Flash(nn.Module):
+    """Megatron-Bridge naming: a dense and an MoE decoder layer, the MTP layer, and vision."""
+
+    def __init__(self):
+        super().__init__()
+        self.language_model = nn.Module()
+        self.language_model.decoder = nn.Module()
+        self.language_model.decoder.layers = nn.ModuleList(
+            [_McoreLayer(_McoreMLP()), _McoreLayer(_McoreMoE())]
+        )
+        self.language_model.mtp = nn.Module()
+        self.language_model.mtp.layers = nn.ModuleList([_McoreLayer(_McoreMoE())])
+        self.visual = nn.Module()
+        self.visual.blocks = nn.ModuleList([_VisionBlock()])
+
+
+def test_glm_5_3_recipe_megatron_names():
+    model = _McoreGLM53Flash()
+    config = load_recipe(_RECIPE).quantize.model_dump()
+    config["algorithm"] = None
+    mtq.quantize(model, config)
+
+    dense, sparse = (layer.inner_layer.mlp for layer in model.language_model.decoder.layers)
+    mtp = model.language_model.mtp.layers[0].inner_layer.mlp
+
+    # Dense MLP and routed experts -> NVFP4 W4A4.
+    for mlp in (dense, *sparse.experts.local_experts):
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert _nvfp4(proj.weight_quantizer)
+            assert _nvfp4(proj.input_quantizer)
+
+    # Shared experts, the whole MTP layer, and the vision tower stay BF16.
+    for mlp in (sparse.shared_experts, mtp.shared_experts, *mtp.experts.local_experts):
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert proj.weight_quantizer.is_enabled is False
+            assert proj.input_quantizer.is_enabled is False
+    vmlp = model.visual.blocks[0].mlp
+    for proj in (vmlp.gate_proj, vmlp.up_proj, vmlp.down_proj):
+        assert proj.weight_quantizer.is_enabled is False

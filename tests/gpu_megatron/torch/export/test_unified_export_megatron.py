@@ -289,6 +289,59 @@ def test_megatron_gated_delta_net_slicing_exports_iq_payloads(qformat):
     )
 
 
+def test_megatron_kda_slicing_splits_fused_qkv_and_conv1d():
+    weight = torch.randn(7, 4).bfloat16()
+    conv = torch.randn(7, 1, 4).bfloat16()
+    module = SimpleNamespace(
+        in_proj=object(),
+        in_proj_split_names=("query", "key", "value"),
+        in_proj_split_sections=(2, 2, 3),
+        conv1d=SimpleNamespace(weight=conv),
+    )
+    exporter = _make_iq_exporter()
+    exporter._get_quantized_state = lambda *a, **k: ({"weight": weight}, None, None)
+
+    exporter._kda_slicing(module, "model.layers.0.self_attn.")
+
+    for name, rows in (("q", slice(0, 2)), ("k", slice(2, 4)), ("v", slice(4, 7))):
+        torch.testing.assert_close(
+            exporter._state_dict[f"model.layers.0.self_attn.{name}_proj.weight"], weight[rows]
+        )
+        torch.testing.assert_close(
+            exporter._state_dict[f"model.layers.0.self_attn.{name}_conv1d.weight"], conv[rows]
+        )
+    assert exporter.exclude_modules == [
+        f"model.layers.0.self_attn.{name}_proj" for name in ("q", "k", "v")
+    ]
+
+
+@pytest.mark.parametrize(("self_attention", "kind"), [(object(), "attn"), (None, "ffn")])
+def test_megatron_hyper_connection_exports_hf_hc_tensors(self_attention, kind):
+    hc = SimpleNamespace(
+        mapping_proj=SimpleNamespace(weight=torch.randn(24, 64)),
+        bias=torch.randn(24),
+        alpha_pre=torch.tensor([0.1]),
+        alpha_post=torch.tensor([0.2]),
+        alpha_res=torch.tensor([0.3]),
+    )
+    layer = SimpleNamespace(
+        hyper_connection=hc, inner_layer=SimpleNamespace(self_attention=self_attention)
+    )
+    exporter = _make_iq_exporter()
+    exporter.rules = exporter._populate_rule_book()["Glm5NextForConditionalGeneration"]
+
+    exporter._get_hyper_connection_state_dict(layer, 2)
+
+    prefix = f"model.language_model.layers.2.hc_{kind}_"
+    assert sorted(exporter._state_dict) == [prefix + n for n in ("base", "fn", "scale")]
+    assert exporter._state_dict[prefix + "fn"].dtype == torch.bfloat16
+    # The released checkpoint keeps the mHC bias and alpha scales in FP32.
+    assert exporter._state_dict[prefix + "base"].dtype == torch.float32
+    torch.testing.assert_close(
+        exporter._state_dict[prefix + "scale"], torch.tensor([0.1, 0.2, 0.3])
+    )
+
+
 @pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
 def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
@@ -1054,30 +1107,6 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp*" in exporter.exclude_modules
 
 
-def _test_live_decoder_mtp_export_rejected(model_dir, rank, size):
-    model = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        pipeline_model_parallel_size=1,
-        initialize_megatron=True,
-        num_layers=2,
-        hidden_size=64,
-        num_attention_heads=4,
-        vocab_size=128,
-        max_sequence_length=32,
-        mtp_num_layers=1,
-    ).cuda()
-    with pytest.raises(NotImplementedError, match="Megatron-built MTP"):
-        GPTModelExporter(model, str(model_dir))
-
-
-def test_live_decoder_mtp_export_rejected(dist_workers_size_1, tmp_path):
-    """GLM-5 MTP is only copied from the source; a Megatron-built one must not export misnamed."""
-    transformers.GlmMoeDsaConfig(
-        num_hidden_layers=2, architectures=["GlmMoeDsaForCausalLM"]
-    ).save_pretrained(tmp_path)
-    dist_workers_size_1.run(partial(_test_live_decoder_mtp_export_rejected, tmp_path))
-
-
 def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
     """GLM-5 keeps MTP as an extra decoder layer; copy it dequantized when Megatron did not build it."""
     model_dir = tmp_path / "fake_glm5"
@@ -1099,6 +1128,8 @@ def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
     exporter._src_num_hidden_layers = 2
     exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
 
+    # Non-writer ranks skip the copy.
+    assert exporter._get_mtp_state_dict(copy_from_pretrained=False) == {}
     mtp_state_dict = exporter._get_mtp_state_dict()
 
     assert sorted(mtp_state_dict) == [
