@@ -16,7 +16,8 @@
 """Custom mappings from Megatron Core models to GLM-5.x Hugging Face models.
 
 GLM-5 / GLM-5.2 (``glm_moe_dsa``) is DeepSeek-V3-style MLA with a DSA indexer. It keeps the MTP
-layer at HF index ``num_hidden_layers`` under the decoder's names.
+layer at HF index ``num_hidden_layers`` under the decoder's names; Megatron-Bridge does not build
+it, so the exporter copies it from the source checkpoint.
 """
 
 from .mcore_custom import (
@@ -37,8 +38,4 @@ glm_moe_dsa_causal_lm_export: dict = {
     "indexer.linear_weights_proj": NameRemapping("model.layers.{}.self_attn.indexer.weights_proj."),
     "experts.linear_fc1": GroupedGatedMLPSlicing("model.layers.{}.mlp.experts.{{}}"),
     "experts.linear_fc2": GroupedMLPSlicing("model.layers.{}.mlp.experts.{{}}.down_proj"),
-    "mtp.enorm": NameRemapping("model.layers.{}.enorm."),
-    "mtp.hnorm": NameRemapping("model.layers.{}.hnorm."),
-    "mtp.eh_proj": NameRemapping("model.layers.{}.eh_proj."),
-    "mtp.final_layernorm": NameRemapping("model.layers.{}.shared_head.norm."),
 }

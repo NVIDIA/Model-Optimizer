@@ -1054,6 +1054,30 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp*" in exporter.exclude_modules
 
 
+def _test_live_decoder_mtp_export_rejected(model_dir, rank, size):
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        pipeline_model_parallel_size=1,
+        initialize_megatron=True,
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        vocab_size=128,
+        max_sequence_length=32,
+        mtp_num_layers=1,
+    ).cuda()
+    with pytest.raises(NotImplementedError, match="Megatron-built MTP"):
+        GPTModelExporter(model, str(model_dir))
+
+
+def test_live_decoder_mtp_export_rejected(dist_workers_size_1, tmp_path):
+    """GLM-5 MTP is only copied from the source; a Megatron-built one must not export misnamed."""
+    transformers.GlmMoeDsaConfig(
+        num_hidden_layers=2, architectures=["GlmMoeDsaForCausalLM"]
+    ).save_pretrained(tmp_path)
+    dist_workers_size_1.run(partial(_test_live_decoder_mtp_export_rejected, tmp_path))
+
+
 def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
     """GLM-5 keeps MTP as an extra decoder layer; copy it dequantized when Megatron did not build it."""
     model_dir = tmp_path / "fake_glm5"

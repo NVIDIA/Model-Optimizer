@@ -205,6 +205,11 @@ class GPTModelExporter:
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
         self.all_mcore_mappings = all_mcore_hf_export_mapping[self.arch]
+        if self.rules.get("mtp_in_decoder_layers", False) and language_model.config.mtp_num_layers:
+            # Only the copy from the source checkpoint is supported (the bridge builds no MTP).
+            raise NotImplementedError(
+                f"Exporting a Megatron-built MTP for {self.arch} is not supported yet."
+            )
         # The vision tower is copied through unquantized, so deployments must not treat it as such.
         self.exclude_modules = [
             prefix.removesuffix(".") + "*" for prefix in self.vision_passthrough_prefixes or ()
@@ -990,18 +995,11 @@ class GPTModelExporter:
         self.rules["linear_attn.out_proj"](gdn.out_proj, layer_id, is_mtp=is_mtp)
 
     def _get_dsa_indexer_state_dict(self, indexer, layer_id, is_mtp=False):
-        """Export the DSA kpool indexer of a sparse MLA layer."""
+        """Export the DSA indexer of a sparse MLA layer."""
         if "indexer.linear_wq_b" not in self.rules:
             raise NotImplementedError(f"No export rule for the DSA indexer of {self.arch}.")
         for name in ("linear_wq_b", "linear_wk", "k_norm", "linear_weights_proj"):
             self.rules[f"indexer.{name}"](getattr(indexer, name), layer_id, is_mtp=is_mtp)
-        # KPool (GLM-5.3-Flash) only; plain DSA indexers (GLM-5.2) have no compression params.
-        for name in ("index_kpool_compress_ape", "index_kpool_compress_gate"):
-            param = getattr(indexer, name, None)
-            if param is not None:
-                self.rules[f"indexer.{name}"](
-                    param.detach().to(self.dtype), layer_id, is_mtp=is_mtp
-                )
 
     def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):

@@ -2176,6 +2176,11 @@ def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
         if ".indexer." in name:
             param.requires_grad_(False)
     sharded_state_dict_test_helper(tmp_path, model, model_test, forward)
+    # The helper compares every restored tensor (incl. K/V amax), but V is unused in the forward
+    # pass, so also check both quantizers came back enabled.
+    restored = [m for m in model_test.modules() if isinstance(m, DSAttention)]
+    assert len(restored) == len(dsa_modules)
+    assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
 
 
 def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
