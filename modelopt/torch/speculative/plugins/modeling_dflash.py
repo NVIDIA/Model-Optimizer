@@ -408,6 +408,7 @@ class DFlashModule(nn.Module):
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
+        self._compiled_body = None  # set by compile_body()
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
@@ -439,17 +440,19 @@ class DFlashModule(nn.Module):
         self._maybe_init_rotary_emb(device=noise_embedding.device)
         return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
 
-    def _body(self):
-        """Return the draft stack, Inductor-compiled on first use when asked for.
+    def compile_body(self):
+        """Inductor-compile the draft stack; ``_body`` runs it in training only.
 
-        Training only: ``dynamic=False`` relies on the pinned block count, while generation
-        runs at varying lengths and would recompile for each.
+        ``dynamic=False`` relies on the pinned block count, while generation runs at varying
+        lengths and would recompile for each.
         """
-        if not self.training or not getattr(self, "_dflash_compile_stack", False):
-            return self._forward_body
-        if getattr(self, "_compiled_body", None) is None:
-            self._compiled_body = torch.compile(self._forward_body, dynamic=False)
-        return self._compiled_body
+        self._compiled_body = torch.compile(self._forward_body, dynamic=False)
+
+    def _body(self):
+        """The compiled draft stack while training, if ``compile_body`` ran; eager otherwise."""
+        if self.training and self._compiled_body is not None:
+            return self._compiled_body
+        return self._forward_body
 
     def _forward_body(self, noise_embedding, target_hidden, position_ids, attention_mask):
         """Feature fusion, rotary selection, the decoder stack, and the final norm."""

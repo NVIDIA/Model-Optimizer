@@ -37,7 +37,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_per_token
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_chunk, _tvd_per_token
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
@@ -879,6 +879,10 @@ class TestDraftStackCompile:
         first = m._body()
         assert first != m._forward_body
         assert m._body() is first, "recompiled on a later step"
+
+    def test_flag_reaches_the_tvd_chunk(self):
+        assert _dspark_model(use_compile=False)._tvd_chunk_fn is _tvd_chunk
+        assert _dspark_model(use_compile=True)._tvd_chunk_fn is not _tvd_chunk
 
     def test_compiled_matches_eager(self):
         """Same weights, same inputs, both bodies -- same hidden states."""

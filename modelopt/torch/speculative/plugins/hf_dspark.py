@@ -83,26 +83,6 @@ def _tvd_chunk(a, b):
     return (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
 
 
-# Compiled _tvd_chunk, built once per process: fuses its six vocab-wide elementwise passes.
-_compiled_tvd_chunk = None
-_tvd_compile_failed = False
-
-
-def _get_tvd_chunk(use_compile: bool):
-    """Return the TVD chunk fn, compiled when asked for and when compilation succeeds."""
-    global _compiled_tvd_chunk, _tvd_compile_failed
-    if not use_compile or _tvd_compile_failed:
-        return _tvd_chunk
-    if _compiled_tvd_chunk is None:
-        try:
-            _compiled_tvd_chunk = torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
-        except Exception as exc:
-            _tvd_compile_failed = True
-            logger.warning("torch.compile of the DSpark TVD chunk failed (%s); using eager.", exc)
-            return _tvd_chunk
-    return _compiled_tvd_chunk
-
-
 def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None):
     """Total-variation distance ||softmax(a)-softmax(b)||_1 / ... per token, memory-lean.
 
@@ -160,6 +140,12 @@ class HFDSparkModel(HFDFlashModel):
                 "dflash_confidence_head_alpha > 0 but the confidence head was not built; "
                 "set dflash_architecture_config.use_confidence_head=true."
             )
+        # Compiling fuses the chunk's six vocab-wide elementwise passes.
+        self._tvd_chunk_fn = (
+            torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
+            if self.dflash_use_torch_compile
+            else _tvd_chunk
+        )
 
     def get_exporter(self):
         """Get the exporter for the DSpark draft model."""
@@ -272,7 +258,7 @@ class HFDSparkModel(HFDFlashModel):
         l1_per_token = _tvd_per_token(
             flat_final,
             flat_teacher,
-            chunk_fn=_get_tvd_chunk(getattr(self, "dflash_use_torch_compile", False)),
+            chunk_fn=self._tvd_chunk_fn,
         )
         l1_loss = (l1_per_token * flat_weights).sum() / valid_count
 

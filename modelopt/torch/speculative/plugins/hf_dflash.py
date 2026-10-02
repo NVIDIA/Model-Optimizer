@@ -437,9 +437,8 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
-        self.dflash_module._dflash_compile_stack = bool(
-            getattr(self, "dflash_use_torch_compile", False)
-        )
+        if self.dflash_use_torch_compile:
+            self.dflash_module.compile_body()
 
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
