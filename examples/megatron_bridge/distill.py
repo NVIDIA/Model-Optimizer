@@ -48,6 +48,15 @@ from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+
+try:
+    from megatron.bridge.data.builders import DirectHFSFTDatasetConfig
+    from megatron.bridge.data.sft_processing import ChatSFTPreprocessingConfig
+    from megatron.bridge.data.sources import HFDatasetSourceConfig
+
+    HAS_DIRECT_HF_SFT = True
+except ImportError:
+    HAS_DIRECT_HF_SFT = False
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -191,6 +200,45 @@ def get_args():
         help="Directory holding training.jsonl (and validation.jsonl when --eval_iters > 0) of "
         '{"input": <prompt>, "output": <response>} records (used with --sft). See the README for '
         "how the fields are tokenized and truncated.",
+    )
+    parser.add_argument(
+        "--sft_hf_dataset",
+        type=str,
+        default=None,
+        help="Chat dataset to distill on (used with --sft): a Hub dataset id, or 'json' together "
+        "with --sft_hf_data_files for a local chat jsonl. Each conversation is rendered by the "
+        "model's own chat template. Alternative to --sft_dataset_root, which expects "
+        '{"input", "output"} records already preprocessed into a dataset root.',
+    )
+    parser.add_argument(
+        "--sft_hf_split", type=str, default="train", help="Split for --sft_hf_dataset"
+    )
+    parser.add_argument(
+        "--sft_hf_data_files",
+        type=str,
+        default=None,
+        help="Local chat jsonl for --sft_hf_dataset json (HuggingFace load_kwargs.data_files)",
+    )
+    parser.add_argument(
+        "--sft_hf_validation_split",
+        type=str,
+        default=None,
+        help="Validation split for --sft_hf_dataset (required when --eval_iters > 0)",
+    )
+    parser.add_argument(
+        "--sft_hf_validation_data_files",
+        type=str,
+        default=None,
+        help="Local chat jsonl for the validation split of --sft_hf_dataset json",
+    )
+    parser.add_argument(
+        "--sft_loss_mode",
+        type=str,
+        default="assistant",
+        choices=["assistant", "last_turn", "full"],
+        help="Which tokens --sft_hf_dataset trains on: every assistant turn, only the final one, "
+        "or the whole conversation. Multi-turn records train all of their responses under "
+        "'assistant'.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -339,11 +387,25 @@ def get_args():
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
 
-    if args.sft and not args.sft_dataset_root:
+    if args.sft and not (args.sft_dataset_root or args.sft_hf_dataset):
         raise ValueError(
             "--sft requires --sft_dataset_root (a directory with training.jsonl, plus "
-            "validation.jsonl when --eval_iters > 0)."
+            "validation.jsonl when --eval_iters > 0) or --sft_hf_dataset."
         )
+    if args.sft_dataset_root and args.sft_hf_dataset:
+        raise ValueError("--sft_dataset_root and --sft_hf_dataset are mutually exclusive.")
+    if args.sft_hf_dataset:
+        if not args.sft:
+            raise ValueError("--sft_hf_dataset requires --sft.")
+        if not HAS_DIRECT_HF_SFT:
+            raise ValueError(
+                "--sft_hf_dataset needs a Megatron-Bridge providing DirectHFSFTDatasetConfig "
+                "(added 2026-07-09). Use a newer Bridge or --sft_dataset_root."
+            )
+        if args.eval_iters > 0 and not args.sft_hf_validation_split:
+            raise ValueError(
+                "--sft_hf_dataset with --eval_iters > 0 needs --sft_hf_validation_split."
+            )
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
@@ -351,7 +413,7 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
-    if args.sft:
+    if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
         required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
         absent = [f for f in required if not os.path.isfile(os.path.join(args.sft_dataset_root, f))]
@@ -541,7 +603,31 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         "dataloader_type": "single",
         "skip_getting_attention_mask_from_dataset": True,
     }
-    if args.sft:
+    if args.sft and args.sft_hf_dataset:
+        # Chat rows rendered by the model's own chat template, with the loss covering every
+        # assistant turn, so multi-round records train all of their responses rather than the last.
+        def _hf_source(split, data_files=None):
+            return HFDatasetSourceConfig(
+                path_or_dataset=args.sft_hf_dataset,
+                split=split,
+                load_kwargs={"data_files": data_files} if data_files else None,
+            )
+
+        dataset_config = DirectHFSFTDatasetConfig(
+            seq_length=args.seq_length,
+            source=_hf_source(args.sft_hf_split, args.sft_hf_data_files),
+            validation_source=(
+                _hf_source(args.sft_hf_validation_split, args.sft_hf_validation_data_files)
+                if args.sft_hf_validation_split
+                else None
+            ),
+            preprocessing=ChatSFTPreprocessingConfig(loss_mode=args.sft_loss_mode),
+            seed=args.seed,
+            dataloader_type="batch",
+            do_validation=args.eval_iters > 0,
+            do_test=False,
+        )
+    elif args.sft:
         # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset,
         # reading {"input", "output"} jsonl. Fields are tokenized as written except that each is
         # ``.strip(" ")``-ed; see --sft_dataset_root help.
