@@ -59,6 +59,7 @@ from ...tensor_quant import (
     fake_tensor_quant,
     fp4_cast_ste,
     int_cast_ste,
+    lsq_fp4_fake_quant,
     scaled_e4m3,
     static_blockwise_fp4_fake_quant,
 )
@@ -1743,6 +1744,10 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             scale_pre = self._block_scale_from_amax(
                 _to_local(self.amax_pre), self._quantize_scales and self._quantize_pre_scale
             )
+            if isinstance(self._num_bits, tuple) and inputs.is_cuda:
+                pre, post = scale_pre.float().reshape(-1), scale_post.float().reshape(-1)
+                out = lsq_fp4_fake_quant(inputs.reshape(pre.numel(), -1), pre, post)
+                return out.view_as(inputs)
             quant_input = inputs.float() / scale_pre.float().view(-1, 1)
             w_cast = self._cast_ste(quant_input)
             return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
