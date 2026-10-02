@@ -15,12 +15,8 @@ Use the Dockerfile to build an environment with vLLM 0.30.0:
 docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 ```
 
-To build the same environment with another tested vLLM release, override `VLLM_VERSION`:
-
-```bash
-docker build --build-arg VLLM_VERSION=0.29.0 \
-  -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.29.0 .
-```
+The Dockerfile defaults to vLLM 0.30.0. Override `VLLM_VERSION` only when
+building for a different tested release.
 
 For a direct installation from the ModelOpt repository root, install the tested vLLM
 release and the ModelOpt extras used by this example:
