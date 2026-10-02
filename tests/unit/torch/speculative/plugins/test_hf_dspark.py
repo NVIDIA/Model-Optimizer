@@ -880,7 +880,9 @@ class TestDraftStackCompile:
 
     def test_compiled_matches_eager(self):
         """Same weights, same inputs, both bodies -- same hidden states."""
-        model = _dspark_model(use_compile=True)
+        # fp32: in bf16, Inductor and eager round at different points, too far apart to
+        # compare tightly.
+        model = _dspark_model(use_compile=True).float()
         m = model.dflash_module
         _, _, _, args = _draft_args(model)
         m._maybe_init_rotary_emb(device=args[0].device)  # normally done by forward()
@@ -889,8 +891,8 @@ class TestDraftStackCompile:
             ref = m._forward_body(*args)
             got = m._body()(*args)
         assert m._body() != m._forward_body, "fixture did not actually compile"
-        # Inductor may reassociate, so compare to the dtype's precision, not bitwise.
-        torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+        # Inductor may reassociate, so not bitwise.
+        torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-4)
 
 
 class TestDdpGradientCoverage:
