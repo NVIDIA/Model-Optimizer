@@ -530,6 +530,29 @@ class TestDFlashLazyRotaryEmb:
         assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
+    def test_restore_draft_precision_keeps_fp32_rope_after_convert(self):
+        """On a fresh convert the draft is already placed; re-casting would round RoPE to bf16."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        inv_freq = model.dflash_module.rotary_emb.inv_freq.clone()
+        assert inv_freq.dtype == torch.float32
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert torch.equal(model.dflash_module.rotary_emb.inv_freq, inv_freq)
+
+    def test_restore_draft_precision_places_draft_converted_on_meta(self):
+        """After a meta-device convert (the from_pretrained path) it still places the draft."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        model.to_empty(device="cpu")  # stands in for from_pretrained loading the weights
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert all(p.dtype == torch.bfloat16 for p in model.dflash_module.parameters())
+
 
 class TestBuildTargetLayerIds:
     """Test target layer selection."""

@@ -555,7 +555,8 @@ class HFDFlashModel(DFlashModel):
         # lists. After the cast, because `Module.to` casts float buffers and building first
         # would round the RoPE frequencies.
         base_device = self._base_device()
-        if base_device.type != "meta":
+        self._draft_placed = base_device.type != "meta"
+        if self._draft_placed:
             self.dflash_module.to(device=base_device, dtype=self._base_model.dtype)
             self.dflash_module._maybe_init_rotary_emb(device=base_device)
 
@@ -583,10 +584,12 @@ class HFDFlashModel(DFlashModel):
         placement entirely. A no-op on a freshly converted model.
         """
         base_device = self._base_device()
-        if base_device.type == "meta":
+        # Placing an already-placed draft again would round its fp32 rotary buffer to bf16.
+        if self._draft_placed or base_device.type == "meta":
             return
         self.dflash_module.to(device=base_device, dtype=self._base_model.dtype)
         self.dflash_module._maybe_init_rotary_emb(device=base_device)
+        self._draft_placed = True
 
     # Draft-module entries that legitimately come from the base model rather than the
     # exported draft checkpoint, so their absence (or presence) is not an error.
