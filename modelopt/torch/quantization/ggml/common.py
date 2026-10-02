@@ -27,12 +27,34 @@ GGML_BLOCK_SIZE = 256
 
 @dataclass
 class _PackedWeightCache:
-    input_ref: weakref.ReferenceType
+    """One weight's packed payload, reused across forwards.
+
+    ``base_ref`` points at the parameter, not at the tensor the backend was handed.
+    TensorQuantizer passes a fresh view of the weight on every forward, so a weakref to that
+    view dies as soon as the forward returns and an identity check against it never matches
+    again -- which is what kept this cache from ever hitting.
+
+    Keeping it a weakref matters: a strong reference would pin full-precision storage alive and
+    defeat offloaded or meta-device flows. Tying the entry to the parameter's lifetime means the
+    payload stops being reused exactly when the weight it came from is released.
+    """
+
+    base_ref: weakref.ReferenceType
     input_key: tuple[object, ...]
     format_name: str
     block_chunk_size: int
     packed_weights: torch.Tensor
     weight_shape: torch.Tensor
+
+
+def _cache_base(inputs: torch.Tensor) -> torch.Tensor:
+    """The tensor whose lifetime the cached payload should follow.
+
+    ``inputs`` is a per-forward view; ``inputs._base`` is the parameter behind it, which lives
+    as long as the module does.
+    """
+    base = inputs._base
+    return inputs if base is None else base
 
 
 def _input_cache_key(inputs: torch.Tensor) -> tuple[object, ...] | None:
@@ -57,16 +79,18 @@ def fake_quantize_with_cache(
     *,
     format_name: str,
     block_chunk_size: int,
+    decode_chunk_size: int,
     quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     dequantize: Callable[..., torch.Tensor],
 ) -> torch.Tensor:
     """Fake-quantize a weight while caching its compact packed representation."""
     input_key = _input_cache_key(inputs)
+    cache_base = _cache_base(inputs)
     cache = getattr(quantizer, "_quantizer_cache", None)
     if (
         isinstance(cache, _PackedWeightCache)
         and input_key is not None
-        and cache.input_ref() is inputs
+        and cache.base_ref() is cache_base
         and cache.input_key == input_key
         and cache.format_name == format_name
         and cache.block_chunk_size == block_chunk_size
@@ -76,7 +100,7 @@ def fake_quantize_with_cache(
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
         if input_key is not None:
             quantizer._quantizer_cache = _PackedWeightCache(
-                input_ref=weakref.ref(inputs),
+                base_ref=weakref.ref(cache_base),
                 input_key=input_key,
                 format_name=format_name,
                 block_chunk_size=block_chunk_size,
@@ -86,13 +110,68 @@ def fake_quantize_with_cache(
         else:
             quantizer._quantizer_cache = None
 
+    # Sized separately from the encode chunk: packing happens once per weight and is bounded
+    # by its search temporaries, while this runs on every forward and is bounded by launches.
     reconstructed = dequantize(
         packed_weights,
         weight_shape,
         dtype=inputs.dtype,
-        block_chunk_size=block_chunk_size,
+        block_chunk_size=decode_chunk_size,
     )
     return inputs + (reconstructed - inputs).detach()
+
+
+@dataclass(frozen=True)
+class IQFormat:
+    """Everything backend dispatch and export need to know about one IQ format.
+
+    Each format module declares one of these beside its encoder and decoder, and
+    :data:`~modelopt.torch.quantization.ggml.registry.IQ_FORMAT_REGISTRY` lists them. The
+    per-format pieces -- codebook, search, payload layout -- stay in the format's module; what
+    lives here is the part every format does the same way.
+    """
+
+    name: str
+    block_size: int
+    block_bytes: int
+    quantize: Callable[..., tuple[torch.Tensor, torch.Tensor]]
+    dequantize: Callable[..., torch.Tensor]
+    # Encode and decode are chunked separately: packing runs once per weight and is bounded by
+    # its search temporaries, decoding runs every forward and is bounded by kernel launches.
+    block_chunk_size: int
+    decode_chunk_size: int
+
+    @property
+    def effective_bits(self) -> float:
+        """Packed storage cost per weight."""
+        return self.block_bytes * 8 / self.block_size
+
+    def fake_quant(
+        self,
+        inputs: torch.Tensor,
+        quantizer,
+        *,
+        block_chunk_size: int | None = None,
+        decode_chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        """TensorQuantizer backend for this format, with pass-through backward."""
+        if getattr(quantizer, "num_bits", None) != self.name:
+            raise ValueError(
+                f"The ggml {self.name.upper()} backend requires num_bits={self.name!r}"
+            )
+        return fake_quantize_with_cache(
+            inputs,
+            quantizer,
+            format_name=self.name,
+            block_chunk_size=(
+                self.block_chunk_size if block_chunk_size is None else block_chunk_size
+            ),
+            decode_chunk_size=(
+                self.decode_chunk_size if decode_chunk_size is None else decode_chunk_size
+            ),
+            quantize=self.quantize,
+            dequantize=self.dequantize,
+        )
 
 
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:

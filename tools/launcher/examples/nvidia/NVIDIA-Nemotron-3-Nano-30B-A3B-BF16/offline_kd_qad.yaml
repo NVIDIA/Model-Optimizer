@@ -34,7 +34,7 @@
 #
 # Usage:
 #   source .env-slurm && cd tools/launcher
-#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4/offline_kd_qad.yaml --yes
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/offline_kd_qad.yaml --yes
 
 job_name: NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-QAD-OfflineKD
 pipeline:

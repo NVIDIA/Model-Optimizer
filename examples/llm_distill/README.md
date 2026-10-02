@@ -52,61 +52,67 @@ student_model = AutoModelForCausalLM.from_pretrained("student-model-id-or-path")
 teacher_model = AutoModelForCausalLM.from_pretrained("teacher-model-id-or-path")
 ```
 
-### Set up the meta model
+### Set up the KDTrainer
 
-As Knowledge Distillation involves (at least) two models, ModelOpt simplifies the integration process by wrapping both student and teacher into one meta model.
-
-Please see an example Distillation setup below. This example assumes the outputs of `teacher_model` and `student_model` are logits.
+For HuggingFace models, ModelOpt provides `KDTrainer`, a drop-in replacement for HuggingFace's `Trainer` that
+handles the teacher forward pass and KD loss computation internally. Unlike the general-purpose Distillation API,
+`KDTrainer` does **not** call `mtd.convert()` and does not wrap the student in a `DistillationModel` — the student
+stays a plain HuggingFace model, and the teacher is kept on the trainer and forwarded explicitly during loss
+computation.
 
 ```python
-import modelopt.torch.distill as mtd
+from modelopt.torch.distill.plugins.huggingface import KDTrainer
 
-distillation_config = {
-    "teacher_model": teacher_model,
-    "criterion": mtd.LogitsDistillationLoss(),  # callable receiving student and teacher outputs, in order
-    "loss_balancer": mtd.StaticLossBalancer(),  # combines multiple losses; omit if only one distillation loss used
-}
-
-distillation_model = mtd.convert(student_model, mode=[("kd_loss", distillation_config)])
+trainer = KDTrainer(
+    student_model,
+    training_args,
+    distill_args={"teacher_model": teacher_model},  # criterion defaults to "logits_loss"
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+)
 ```
 
-The `teacher_model` can be either a `nn.Module`, a callable which returns an `nn.Module`, or a tuple of `(model_cls, args, kwargs)`. The `criterion` is the distillation loss used between student and teacher tensors. The `loss_balancer` determines how the original and distillation losses are combined (if needed).
-
-See [Distillation](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html) for more info.
-
-### Distill during training
-
-To Distill from teacher to student, simply use the meta model in the usual training loop, while also using the meta model’s `.compute_kd_loss()` method to compute the distillation loss, in addition to the original user loss.
-
-An example of Distillation training is given below:
+`KDTrainer` can be mixed in with other HuggingFace trainers (e.g. `SFTTrainer`) via normal Python multiple
+inheritance, as done in [`main.py`](main.py):
 
 ```python
-# Setup the data loaders. As example:
-train_loader = get_train_loader()
-
-# Define user loss function. As example:
-loss_fn = get_user_loss_fn()
-
-for input, labels in train_dataloader:
-    distillation_model.zero_grad()
-    # Forward through the wrapped models
-    out = distillation_model(input)
-    # Same loss as originally present
-    loss = loss_fn(out, labels)
-    # Combine distillation and user losses
-    loss_total = distillation_model.compute_kd_loss(student_loss=loss)
-    loss_total.backward()
+class KDSFTTrainer(KDTrainer, SFTTrainer):
+    pass
 ```
 
 > [!NOTE]
-> DataParallel may break ModelOpt’s Distillation feature. Note that HuggingFace Trainer uses DataParallel by default.
+> `KDTrainer` currently only supports logit-level (output) distillation. Hidden-state / intermediate-layer
+> distillation is not yet supported by `KDTrainer`. Until that support lands, use `mtd.convert()` and
+> `DistillationModel` directly (see [Distillation](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html))
+> for hidden-state KD.
+
+### Distill during training
+
+Since `KDTrainer` overrides `compute_loss()` to run the teacher forward pass and compute the KD loss, training is
+just the normal HuggingFace `Trainer` loop — no manual loss computation is required:
+
+```python
+trainer.train()
+```
+
+> [!NOTE]
+> `compute_loss()` returns the KD loss on its own; it does not combine it with the original student
+> cross-entropy loss. Weighted combination of CE and KD losses is not yet supported by `KDTrainer`, though it
+> is a planned feature. During evaluation, the CE loss is still computed and reported separately as the
+> `eval_ce_loss` metric.
+
+> [!NOTE]
+> `KDTrainer` requires FSDP2 when FSDP is enabled; FSDP1 is not supported. Note that HuggingFace Trainer uses
+> DataParallel by default, which may break distributed teacher/student forwarding — use FSDP2, DeepSpeed, or DDP
+> instead (see [`accelerate_config/fsdp2.yaml`](accelerate_config/fsdp2.yaml)).
 
 ### Export trained model
 
-The model can easily be reverted to its original class for further use (i.e deployment) without any ModelOpt modifications attached.
+Because the student is never wrapped in a `DistillationModel`, no `mtd.export()` step is needed — `trainer.save_model()`
+saves the student directly in its original HuggingFace format.
 
 ```python
-model = mtd.export(distillation_model)
+trainer.save_model(training_args.output_dir)
 ```
 
 ## Support Matrix

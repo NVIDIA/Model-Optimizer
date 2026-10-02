@@ -43,7 +43,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as _dist
 
-from .model_utils import get_export_units
+from .model_utils import _release_exported_tensors, get_export_units
 from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_mapper
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
@@ -52,7 +52,6 @@ from .quant_utils import (
 )
 from .registry import ExportContext
 from .unified_export_hf import (
-    _add_mtp_exclusions,
     _dispatch_export_handler,
     _prepare_model_for_export,
     _prepare_moe_inputs,
@@ -214,22 +213,22 @@ def _parse_shard_size(size: int | str) -> int:
 
 
 def _assert_no_split_rules(model: nn.Module) -> None:
-    """Refuse to stream a model whose conversion mapping needs tensor-level splits.
+    """Refuse to stream a model whose conversion mapping regroups tensors.
 
-    A split rule regroups tensors across the whole state dict, which per-tensor name reversal
-    cannot do.
+    Split and merge rules regroup tensors across the whole state dict, which per-tensor name
+    reversal cannot do.
     """
     try:
-        split_rules, _, _ = _build_reverse_rules(model)
+        split_rules, merge_rules, _, _ = _build_reverse_rules(model)
     except Exception:
         return  # build_reverse_name_mapper reports the failure with a warning
-    if split_rules:
+    if split_rules or merge_rules:
         raise NotImplementedError(
-            "Streaming export cannot reverse tensor-level split rules in this model's "
+            "Streaming export cannot reverse tensor-level split or merge rules in this model's "
             "transformers conversion mapping: it reverses names one tensor at a time, while a "
-            "split rule regroups tensors across the whole state dict. Export the model resident "
-            "instead -- without disk/CPU offload and without FSDP2 -- so the full state dict is "
-            "built in memory."
+            "tensor transform regroups tensors across the whole state dict. Export the model "
+            "resident instead -- without disk/CPU offload and without FSDP2 -- so the full state "
+            "dict is built in memory."
         )
 
 
@@ -240,7 +239,7 @@ def _build_reverse_name_mapper_or_none(model):
     """
     _assert_no_split_rules(model)
     try:
-        return build_reverse_name_mapper(model)
+        return build_reverse_name_mapper(model, tensor_keys=True)
     except Exception as exc:
         warnings.warn(
             f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
@@ -333,8 +332,8 @@ def _export_transformers_checkpoint_streaming(
 
     - Tied weights are dropped by *name* from ``_tied_weights_keys`` (data_ptr is meaningless
       once weights move host<->device); see the TODO below on adopting ``all_tied_weights_keys``.
-    - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
-      time, so they are rejected up front rather than exported incorrectly.
+    - Conversion mappings that need tensor-level splits or merges cannot be reversed one
+      tensor at a time, so they are rejected up front rather than exported incorrectly.
 
     Args:
         model: the full torch model to export, carrying accelerate offload hooks.
@@ -352,7 +351,7 @@ def _export_transformers_checkpoint_streaming(
         ``quantization_config`` into ``config.json``.
 
     Raises:
-        NotImplementedError: if the model's conversion mapping contains split rules.
+        NotImplementedError: if the model's conversion mapping regroups tensors.
         RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
     # Deferred: the huggingface plugin imports transformers at module scope, and transformers
@@ -371,8 +370,6 @@ def _export_transformers_checkpoint_streaming(
     requantize_resmooth_fused_llm_layers(model)
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
-
-    _add_mtp_exclusions(model, quant_config)
 
     _warn_on_unsynced_moe_gate_up(model)
 
@@ -398,8 +395,8 @@ def _export_transformers_checkpoint_streaming(
     # --- Name mapper for per-tensor key reversal ---
     # Tensor names are applied inline; quant config names are handled by the caller.
     # Renames are all a per-tensor pass can reverse. The batch path additionally runs
-    # revert_weight_conversion_quant_aware() for split rules, which need the whole state
-    # dict to regroup tensors, so refuse rather than emit fused tensors under unfused
+    # revert_weight_conversion_quant_aware() for splits and merges, which need the whole
+    # state dict to regroup tensors, so refuse rather than emit tensors under mismatched
     # hub keys.
     name_mapper = _build_reverse_name_mapper_or_none(model)
 
@@ -456,7 +453,10 @@ def _export_transformers_checkpoint_streaming(
     for layer_name, layer_module in model.named_modules():
         if id(layer_module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(layer_module, model, names, writeback=False):
+        with (
+            enable_weight_access_and_writeback(layer_module, model, names, writeback=False),
+            _release_exported_tensors(layer_module),
+        ):
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -468,34 +468,6 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
-            # Release GPU tensors added by export handlers before hook.post_forward
-            # runs, to prevent cross-layer accumulation on disk-offloaded models.
-            #
-            # Two categories accumulate without explicit cleanup:
-            #
-            # 1. CUDA *buffers* on any sub-module (weight_scale, weight_scale_2,
-            #    input_scale): AlignDevicesHook.post_forward uses offload_buffers=False
-            #    by default, so it never offloads buffers.  Pre-existing buffers in
-            #    disk-offloaded layers live on CPU, so any CUDA buffer encountered here
-            #    was registered by the export handlers and is safe to drop.
-            #
-            # 2. CUDA *parameters* on modules WITHOUT _hf_hook: _export_fused_experts
-            #    creates fresh nn.Module objects (one per expert x projection) and adds
-            #    them to the layer via add_module() *after* weight_access_and_writeback
-            #    captured its materialized list.  hook.post_forward never visits these
-            #    new modules, so their packed NVFP4 weight parameters (~5 GB per MoE
-            #    layer) stay live on GPU.  Modules WITH _hf_hook are original model
-            #    modules whose parameters hook.post_forward will meta-ify; leave those
-            #    alone.
-            for sub_mod in layer_module.modules():
-                for buf_name in list(sub_mod._buffers):
-                    buf = sub_mod._buffers[buf_name]
-                    if buf is not None and buf.device.type == "cuda":
-                        sub_mod._buffers[buf_name] = None
-                if not hasattr(sub_mod, "_hf_hook"):
-                    for param_name, param in list(sub_mod._parameters.items()):
-                        if param is not None and param.device.type == "cuda":
-                            sub_mod._parameters[param_name] = None
         torch.cuda.empty_cache()
 
     # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,
@@ -663,8 +635,8 @@ def _export_fsdp2_checkpoint_streaming(
     # view to compare storage against. tied_map covers dict-style and MoE ties.
     tied_alias_keys = set(tied_map.alias_to_canonical) | _undeclared_tied_aliases(model)
 
-    # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
-    # so refuse rather than write fused tensors under unfused hub names.
+    # Tensor transforms regroup state across keys, which a per-unit pass cannot do, so refuse
+    # rather than write tensors under mismatched hub names.
     name_mapper = _build_reverse_name_mapper_or_none(model)
     if name_mapper is not None:
         tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}

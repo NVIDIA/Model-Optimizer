@@ -63,13 +63,18 @@ the validated runs are comparable:
 6. Judge-backed or simulator-backed tasks use the same judge/user model,
    endpoint class, prompt, and scoring config.
 7. The same accuracy metric and score field is used for both runs.
-8. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
+8. Timeout policies, effective limits, and failure scoring/exclusions match.
+   Apply **Timeout and Output-Limit Accounting** in the evaluation skill's
+   `references/run-validation.md` to both runs; matching limits alone cannot
+   rule out serving-speed effects on scores.
+9. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
    full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
    INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant
    comparison against the released precision (e.g. INT4 vs NVFP4, as for
-   Kimi-K2.6) is still a valid result; just compare like-for-like, **state which
-   precision the baseline is**, and apply the gate relative to that baseline
-   rather than to an assumed BF16.
+   Kimi-K2.6) is still a valid result. **State which precision the baseline is**
+   and apply only an acceptance criterion explicitly defined for that precision.
+   If the requested gate is relative to BF16 and no BF16 baseline is available,
+   report that gate as inconclusive; do not reinterpret it as an FP8/INT4 gate.
 
 For SciCode, keep `num_repeats: 1` and require **at least 8 runs per side**, comparing
 the two means — see the evaluation skill's `recipes/tasks/aa/scicode.md`. Fewer
@@ -95,6 +100,10 @@ Include:
   `externally unverified`).
 - Comparability status for prompt/template, generation settings, sample counts,
   reasoning handling, judge/simulator setup, and score field.
+- Per-task timeout and output-limit counts/rates for both runs, explicit
+  denominators, telemetry coverage, effective limits, and unresolved effects on
+  the score. Unknown accounting or unresolved infrastructure effects prevent an
+  `acceptable` quantization-feasibility verdict.
 - Comparability verdict: comparable, not comparable, or inconclusive.
 - Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
   Never report `acceptable` when external baseline sanity failed. An externally

@@ -38,7 +38,7 @@ from ..extensions import get_cuda_ext_ggml
 from .codebooks import iq1_s_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
-    fake_quantize_with_cache,
+    IQFormat,
     narrow_to_float32,
     validate_block_chunk_size,
     validate_packed_weights,
@@ -61,8 +61,14 @@ IQ1_S_EFFECTIVE_BITS = IQ1_S_BLOCK_BYTES * 8 / IQ1_S_BLOCK_SIZE
 _IQ1_S_DELTA = 0.125
 _IQ1_S_NATIVE_MAX = 16.875
 _IQ1_S_SCALE_ANCHOR = 0.61
-# At 1024 blocks, each largest IQ1_S search temporary is about 16 MiB in FP32.
+# Bounds the torch encode fallback, whose codebook search holds the large temporaries: at
+# 1024 blocks each is about 16 MiB in FP32. The CUDA encoder ignores this entirely.
 _DEFAULT_BLOCK_CHUNK_SIZE = 1024
+# The decode's temporaries are far smaller, so it is launch-bound rather than memory-bound
+# and wants a bigger chunk -- and unlike packing it is not cached, so it runs on every
+# forward. Measured decoding a 2048x5632 weight: 66.5 ms at 256 blocks, 4.2 ms at 4096,
+# where the transient peak is +42 MiB.
+_DEFAULT_DECODE_CHUNK_SIZE = 4096
 
 
 _GRID_CACHE: dict[torch.device, torch.Tensor] = {}
@@ -81,22 +87,34 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
     return _GRID_CACHE[resolved_device]
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """Predict one FP16 super-block scale for each flattened block.
+
+    The fixed-scale search favors a compressed super-block scale, so this empirical anchor
+    puts d below the full-range value. The CUDA encoder computes the same quantity in its
+    own scale kernel; this is the reference the torch path uses.
+    """
     x = narrow_to_float32(blocks)
-    block_count = x.shape[0]
-    vectors = x.reshape(block_count, 32, 8)
+    amax = x.abs().amax(dim=1)
+    return ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+
+
+def _search_shifted_grid(
+    vectors: torch.Tensor, d: torch.Tensor, grid: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Score every grid entry against each 8-value vector at every shift and local scale.
+
+    Returns the lowest error and the entry reaching it, both ``[blocks, 32, 16]`` and indexed
+    by choice ``shift * 8 + local``. IQ1_M runs the same search over the same grid and delta;
+    the two formats differ only in how they select among the choices afterwards.
+    """
+    block_count = vectors.shape[0]
     xnorm = vectors.square().sum(dim=-1)
     xsum = vectors.sum(dim=-1)
-
-    amax = x.abs().amax(dim=1)
-    # The fixed-scale search favors a compressed super-block scale. This
-    # empirical anchor initializes d below the full-range value.
-    d = ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
-    d_float = d.float()
-
-    best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
-    best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=x.device)
+    best_error = torch.full(
+        (block_count, 32, 16), torch.inf, dtype=torch.float32, device=vectors.device
+    )
+    best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=vectors.device)
     grid_norm = grid.square().sum(dim=-1)
     grid_sum = grid.sum(dim=-1)
 
@@ -114,7 +132,7 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
             shifted_norm = tile_norm + 2 * delta * tile_sum + 8 * delta * delta
             for local in range(8):
                 choice = shift * 8 + local
-                scale = d_float.reshape(-1, 1, 1) * (2 * local + 1)
+                scale = d.reshape(-1, 1, 1) * (2 * local + 1)
                 error = (
                     xnorm.unsqueeze(-1) - 2 * scale * shifted_dot + scale.square() * shifted_norm
                 ).clamp_min_(0)
@@ -126,6 +144,16 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
                 best_entry[:, :, choice] = torch.where(
                     replace, tile_index + entry_start, best_entry[:, :, choice]
                 )
+    return best_error, best_entry
+
+
+def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    """Encode a moderate-size batch of flattened 256-value blocks."""
+    x = narrow_to_float32(blocks)
+    block_count = x.shape[0]
+    d = _predict_iq1_s_scales(x)
+    d_float = d.float()
+    best_error, best_entry = _search_shifted_grid(x.reshape(block_count, 32, 8), d_float, grid)
 
     group_error = best_error.reshape(block_count, 8, 4, 16).sum(dim=2)
     selected_choice = group_error.argmin(dim=-1)
@@ -198,7 +226,7 @@ def dequantize_iq1_s(
     weight_shape: torch.Tensor,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
+    block_chunk_size: int = _DEFAULT_DECODE_CHUNK_SIZE,
 ) -> torch.Tensor:
     """Decode GGML-compatible IQ1_S payload bytes."""
     shape = validate_packed_weights(
@@ -229,20 +257,17 @@ def dequantize_iq1_s(
     return decoded.reshape(shape)
 
 
-def iq1_s_fake_quant(
-    inputs: torch.Tensor,
-    quantizer,
-    *,
-    block_chunk_size: int = _DEFAULT_BLOCK_CHUNK_SIZE,
-) -> torch.Tensor:
-    """IQ1_S weight backend for TensorQuantizer, with pass-through backward."""
-    if getattr(quantizer, "num_bits", None) != "iq1_s":
-        raise ValueError("The ggml IQ1_S backend requires num_bits='iq1_s'")
-    return fake_quantize_with_cache(
-        inputs,
-        quantizer,
-        format_name="iq1_s",
-        block_chunk_size=block_chunk_size,
-        quantize=quantize_iq1_s,
-        dequantize=dequantize_iq1_s,
-    )
+IQ1_S_FORMAT = IQFormat(
+    name="iq1_s",
+    block_size=IQ1_S_BLOCK_SIZE,
+    block_bytes=IQ1_S_BLOCK_BYTES,
+    quantize=quantize_iq1_s,
+    dequantize=dequantize_iq1_s,
+    block_chunk_size=_DEFAULT_BLOCK_CHUNK_SIZE,
+    decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
+)
+
+# Kept for callers of the per-format entry point. The record captured quantize_iq1_s and
+# dequantize_iq1_s when it was built, so patching those module functions changes neither backend
+# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+iq1_s_fake_quant = IQ1_S_FORMAT.fake_quant

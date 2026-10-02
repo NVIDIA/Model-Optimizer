@@ -17,7 +17,7 @@ import os
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "nel-gdpval.sh"
+SCRIPT = Path(__file__).parents[1] / "scripts" / "nel-gym.sh"
 
 
 def test_launcher_uses_validated_pin_despite_environment_override(tmp_path):
@@ -29,14 +29,14 @@ def test_launcher_uses_validated_pin_despite_environment_override(tmp_path):
     env = os.environ.copy()
     env.update(
         {
-            "NEL_GDPVAL_SPEC": "nemo-evaluator-launcher[all]==0.0.0",
-            "NEL_GDPVAL_VERSION": "0.0.0",
+            "NEL_GYM_SPEC": "nemo-evaluator-launcher[all]==0.0.0",
+            "NEL_GYM_VERSION": "0.0.0",
             "PATH": f"{tmp_path}:{env['PATH']}",
             "UVX_ARGS_FILE": str(args_file),
         }
     )
 
-    subprocess.run([SCRIPT, "run", "--config", "gdpval.yaml"], env=env, check=True)
+    subprocess.run([SCRIPT, "run", "--config", "mrcr.yaml"], env=env, check=True)
 
     assert args_file.read_text().splitlines() == [
         "--python",
@@ -46,5 +46,5 @@ def test_launcher_uses_validated_pin_despite_environment_override(tmp_path):
         "nel",
         "run",
         "--config",
-        "gdpval.yaml",
+        "mrcr.yaml",
     ]

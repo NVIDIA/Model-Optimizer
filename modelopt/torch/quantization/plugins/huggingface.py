@@ -247,8 +247,17 @@ class _QuantAttention(QuantModule):
                 return self._eager_p_qdq_attention(
                     original_attention_interface, query_states, key_states, value_states, **kwargs
                 )
-            return self._triton_qdq_attention(
-                p_qdq, query_states, key_states, value_states, **kwargs
+            if self.p_bmm_quantizer._if_quant:
+                return self._triton_qdq_attention(
+                    p_qdq, query_states, key_states, value_states, **kwargs
+                )
+
+        # Fused P-QDQ paths bypass TensorQuantizer.forward().
+        if not self.p_bmm_quantizer.is_enabled or not self.p_bmm_quantizer._if_quant:
+            if args:
+                kwargs.pop("attention_mask", None)
+            return original_attention_interface(
+                self, query_states, key_states, value_states, *args, **kwargs
             )
 
         if kitchen is not None and self.kitchen_attn_fn is None:

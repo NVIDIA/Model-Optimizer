@@ -52,6 +52,9 @@ prints the resolved spec, so check there if a run behaves unexpectedly.
   (SWE-bench), and `${MLFLOW_TRACKING_URI}` from `.env`. Run **`modelopttools:eval-config`**
   (Step 3b) to write them — it holds the canonical values, arch/region rules, and
   points to the per-benchmark `bench.yaml` source of truth.
+- **`HARBOR_ECS_REGION`** sets `sandbox.region` + `AWS_DEFAULT_REGION` (upstream default
+  `us-east-1` TB2.1, `us-east-2` SWE-bench). TB2.1's ECR repo name tracks it
+  (`…ecr.<region>…/harbor-<region>`); SWE-bench's stays `us-west-2/harbor-swebench`.
 - `set -a && source .env && set +a` before running so `${VAR}` resolves.
 
 ## Architecture — where each piece runs
@@ -136,6 +139,11 @@ is a mandatory model-card lookup** (Step 3 / `references/model-card-research.md`
 never generic defaults): `generation.temperature`/`top_p` (+`max_tokens` if the card
 caps output) and `proxy.extra_body` for any card extras (`skip_special_tokens`, thinking toggles).
 
+Put per-model reasoning config in `extra_body.chat_template_kwargs` (e.g. `enable_thinking`
+for Qwen/Nemotron), not as loose top-level keys. Only add extras the card or
+`generation_config.json` dictates — skip no-op defaults (`min_p: 0.0`, `presence_penalty: 0.0`,
+`repetition_penalty: 1.0`); `top_k` is not a no-op (vLLM default `-1`).
+
 ## One benchmark per config
 
 Keep `benchmarks:` to a **single** entry — one benchmark per file. Don't combine
@@ -156,10 +164,12 @@ with its own `run_id`, copying the shared `services:` block.
   `ValidationError` mentioning an unknown/missing config field as skew, not a config bug.
 - **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
   against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
-  pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
+  pin and does move; tag runs with its `nemo_evaluator_next_version` (MLflow tag
+  `nemo-evaluator-next-version`). Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
   Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
-- **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600). A
-  smaller proxy timeout silently truncates long agent turns.
+- **Always set `proxy.request_timeout` explicitly** (`3600`, >= `agent_kwargs.llm_kwargs.timeout`).
+  Omitted, it inherits the model fragment's serving value (3600–36000 upstream); smaller than
+  the agent timeout silently truncates long turns.
 - **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
   `max_input_tokens_per_task`, `no_rebuild`. The last two are sent by the 0.5.x eval image;
   vLLM 400s on them if they aren't stripped.
@@ -178,7 +188,17 @@ with its own `run_id`, copying the shared `services:` block.
   for the life of the run, full request + response bodies, and the whole list is re-serialized
   on each write. A long agentic run that is 400ing or rate-limiting (the failure this dumps
   diagnose) grows the proxy without bound — exactly the run you can least afford to lose.
-  Chain position is per benchmark (last for TB2.1, first for SWE-bench).
+  Put it **last** in the chain (TB2.1 and SWE-bench) so it records the request as sent to
+  vLLM; upstream placement varies and does not affect the score.
+- **Interceptor order**: `drop_params` → `consolidate_system` → `reasoning` →
+  `reasoning_replay` → `http_pairs_dump` (SWE-bench prepends `system_message` +
+  `turn_counter`). Lists **replace** on merge — restate the whole chain when adding one.
+- **`proxy.model_traffic.capture_request_body: true`** goes on the service
+  (`services.<alias>.proxy.model_traffic`), never a shared block (alias-only entry has no `type`).
+- **Consult `configs/models/<model>/` upstream when it exists** — reviewed serving flags,
+  thinking toggle, `reasoning_replay.mode`. Still override its `request_timeout`.
+- **`VLLM_*` MoE env vars are build-dependent** — check the server log for
+  `Unknown vLLM environment variable` once per new image.
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.
@@ -188,7 +208,8 @@ with its own `run_id`, copying the shared `services:` block.
 - **MLflow export — config + a post-run push.** Add `output.export: [mlflow]` +
   `export_config.mlflow` (hardcode `experiment_name: <user>/<model>` — `${USER}=root`
   in-container; tags `framework`/`model`/`temperature`/`top_p` + `checkpoint_path`/`benchmark`
-  for dashboard attribution). `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
+  for dashboard attribution, + canonical `task_name`/`nemo-evaluator-next-version`).
+  `tracking_uri: ${MLFLOW_TRACKING_URI}` (from `eval-config`
   Step 3b — canonical `mlflow.frontier-evals.nvidia.com`; **not** the `mlflow-nemo-evaluator`
   alias, whose 308 strips `/api/...` → 405). **SLURM does NOT auto-export** — push after
   the run with `nel-next.sh mlflow-push` (Run flow), which resolves the var and falls back

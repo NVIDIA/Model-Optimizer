@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,23 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
+# QuantizeConfig preset for IQ2_S weight-only quantization.
 
-# Exact known-good pin; follow references/gym-gdpval.md before bumping it.
-readonly NEL_GDPVAL_VERSION="0.2.6"
-readonly NEL_GDPVAL_SPEC="nemo-evaluator-launcher[all]==${NEL_GDPVAL_VERSION}"
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  iq2_s: configs/numerics/iq2_s
 
-case "${1:-}" in
-  -h|--help)
-    echo "usage: nel-gdpval.sh <nel arguments>"
-    echo "       nel-gdpval.sh --version"
-    exit 0
-    ;;
-esac
-
-command -v uvx >/dev/null 2>&1 || {
-  echo "ERROR: 'uvx' is required to run the pinned GDPVal launcher" >&2
-  exit 1
-}
-
-exec uvx --python 3.10 --from "$NEL_GDPVAL_SPEC" nel "$@"
+algorithm:
+quant_cfg:
+  - $import: base_disable_all
+  - quantizer_name: '*weight_quantizer'
+    cfg:
+      $import: iq2_s
+  - quantizer_name: '*input_quantizer'
+    enable: false
+  - $import: default_disabled_quantizers

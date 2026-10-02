@@ -82,6 +82,7 @@ hf = [
     "datasets>=3.0.0",
     "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.32.2",
+    "httpx>=0.23.0,<1",
     "huggingface_hub>=0.24.0",
     "nltk",
     "peft>=0.17.0",
