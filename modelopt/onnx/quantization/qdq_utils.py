@@ -60,6 +60,13 @@ onnx_dtype_map = {
 onnx_bit_dtype_signed_map = {4: "INT4", 8: "INT8"}
 onnx_bit_dtype_unsigned_map = {4: "UINT4", 8: "UINT8"}
 
+# Integer weight types qdq_to_dq can emit, keyed by the zero point's ONNX type. The
+# DequantizeLinear left in the graph keeps its zero point, so the weight must match it.
+qdq_weight_np_dtype_map = {
+    onnx.TensorProto.INT8: np.int8,
+    onnx.TensorProto.UINT8: np.uint8,
+}
+
 np_dtype_map = {
     "Float": np.float32,
     "Half": np.float16,
@@ -631,7 +638,7 @@ def _convert_weight(
         ValueError: If scale shape doesn't match weight shape for the operation
 
     Note:
-        - INT8 weights are clipped to [-128, 127]
+        - Integer weights are clipped to the range of the zero point's type
         - FP8 weights use float8e4m3fn format
     """
     # Per-op quantization axis mapping (must match ORT config)
@@ -672,14 +679,27 @@ def _convert_weight(
     scale_array = scale_array.reshape(*reshape_dims)
     zp_array = zp_array.reshape(*reshape_dims)
 
-    # Convert to INT8/FP8
+    # Convert to integer/FP8
     if zp.data_type == onnx_dtype_map["Float8"]:
         scaled = np.asarray(weight_array / scale_array) + zp_array
     else:
+        weight_dtype = _qdq_weight_dtype(zp)
+        bounds = np.iinfo(weight_dtype)
         scaled = np.asarray((weight_array / scale_array).round())
-        np.clip(scaled + zp_array, -128, 127, out=scaled)
+        np.clip(scaled + zp_array, bounds.min, bounds.max, out=scaled)
 
     return scaled
+
+
+def _qdq_weight_dtype(zp: onnx.TensorProto) -> type[np.signedinteger | np.unsignedinteger]:
+    """Returns the numpy type a converted weight must use for this zero point."""
+    weight_dtype = qdq_weight_np_dtype_map.get(zp.data_type)
+    if weight_dtype is None:
+        raise ValueError(
+            f"Unsupported zero point type for real weight quantization: "
+            f"{onnx.TensorProto.DataType.Name(zp.data_type)}"
+        )
+    return weight_dtype
 
 
 def _cast_fp8(array: np.ndarray) -> np.ndarray:
@@ -764,8 +784,9 @@ def qdq_to_dq(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 new_weight = _create_fp8_tensor(scaled, weight_name)
                 logger.debug(f"Converted {weight_name} to FP8")
             else:
-                new_weight = onnx.numpy_helper.from_array(scaled.astype("int8"), weight_name)
-                logger.debug(f"Converted {weight_name} to INT8")
+                weight_dtype = _qdq_weight_dtype(zp)
+                new_weight = onnx.numpy_helper.from_array(scaled.astype(weight_dtype), weight_name)
+                logger.debug(f"Converted {weight_name} to {weight_dtype.__name__.upper()}")
             weight.CopyFrom(new_weight)
 
             # Track QuantizeLinear node indices for cleanup
