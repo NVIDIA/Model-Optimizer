@@ -161,7 +161,6 @@ from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
 
-from .algo_cfg import WEIGHT, capabilities_for
 
 
 class QuantizerCfgEntry(ModeloptBaseConfig):
@@ -847,8 +846,15 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         Capabilities are resolved with this config's own kwargs, and an unrecognized method is
         rejected rather than waved through, so this agrees with ``mode._writes_weights``
         instead of accepting a config that then fails at conversion time.
+
+        The import is function-local because ``algo_cfg`` imports ``AlgoCfgEntry`` from this
+        module at module scope, so a top-level import here closes the cycle. Only an explicit
+        ``False`` -- never the derived default -- reaches it, so it cannot fire while
+        ``algo_cfg`` is still loading.
         """
         if self.layerwise.calib_mutates_weights is False:
+            from .algo_cfg import WEIGHT, capabilities_for
+
             caps = capabilities_for(self.method, self.model_dump())
             if caps is None or WEIGHT in caps.may_write:
                 raise ValueError(
@@ -1564,6 +1570,70 @@ def normalize_quant_cfg_list(
     return result
 
 
+class AlgoCfgEntry(ModeloptBaseConfig):
+    """A single entry in an ``algo_cfg`` list — one scope, one ordered algorithm pipeline.
+
+    Deliberately shaped like :class:`QuantizerCfgEntry`: a selector plus a ``cfg``.  Where
+    ``quant_cfg`` entries carry quantizer *attributes*, ``algo_cfg`` entries carry the ordered
+    list of calibration *algorithms* to run on the matched targets.
+
+    Exactly one selector must be given:
+
+    - ``module_name`` — glob over quantized-linear module names.  Use for weight/module-level
+      algorithms (``gptq``, ``awq_lite``, ``smoothquant``), where the role is implied by the
+      algorithm itself.
+    - ``quantizer_name`` — glob over quantizer module names.  Use when the role must be picked
+      explicitly, e.g. ``max`` on ``*input_quantizer`` only.
+    """
+
+    module_name: str | None = ModeloptField(
+        default=None,
+        title="Module name pattern.",
+        description="Glob matched against quantized-linear module names.",
+    )
+    quantizer_name: str | None = ModeloptField(
+        default=None,
+        title="Quantizer name pattern.",
+        description="Glob matched against quantizer module names.",
+    )
+    cfg: list[_QuantizeAlgoCfgType] = ModeloptField(
+        default=...,
+        title="Ordered calibration pipeline for the matched targets.",
+        description="A list of algorithms run in order, each consuming the previous one's "
+        'mutated weights/scales. An element is an algorithm name (``"max"``), a dict keyed on '
+        '``method`` (``{"method": "gptq", "block_size": 64}``), or a '
+        ":class:`QuantizeAlgorithmConfig`.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_entry(cls, values):
+        """Accept a bare (non-list) ``cfg`` and enforce the exactly-one-selector rule."""
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        if "cfg" in values and not isinstance(values["cfg"], list):
+            values["cfg"] = [values["cfg"]]
+        selectors = [k for k in ("module_name", "quantizer_name") if values.get(k) is not None]
+        if len(selectors) != 1:
+            raise ValueError(
+                "AlgoCfgEntry needs exactly one of 'module_name' / 'quantizer_name'; got "
+                f"{selectors or 'neither'}. Entry: {values!r}"
+            )
+        if not values.get("cfg"):
+            raise ValueError(
+                f"AlgoCfgEntry 'cfg' must list at least one algorithm. Got: {values!r}"
+            )
+        return values
+
+    @property
+    def selector(self) -> tuple[str, str]:
+        """``(selector_kind, glob)`` for this entry."""
+        if self.module_name is not None:
+            return "module_name", self.module_name
+        return "quantizer_name", self.quantizer_name  # type: ignore[return-value]
+
+
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
 
@@ -1578,6 +1648,15 @@ class QuantizeConfig(ModeloptBaseConfig):
         title="Calibration algorithm, see :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>` "
         "for more details.",
         validate_default=True,
+    )
+
+    algo_cfg: list[AlgoCfgEntry] | None = ModeloptField(
+        default=None,
+        title="Scoped calibration pipelines.",
+        description="An ordered list of :class:`AlgoCfgEntry` dicts assigning a calibration "
+        "pipeline to a scope, e.g. ``[{'module_name': '*mlp*', 'cfg': ['awq_lite', 'mse']}]``. "
+        "Targets not matched by any entry fall back to the model-wide ``algorithm``. When "
+        "omitted, ``algorithm`` alone is used and behaviour is unchanged.",
     )
 
     effective_bits: float | None = ModeloptField(
@@ -1820,6 +1899,9 @@ choices: set[str] = {
 
 def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     """Check if calibration is needed for the given config."""
+    if config.get("algo_cfg"):
+        # Any scoped pipeline is an explicit request to calibrate.
+        return True
     if config["algorithm"] is not None and config["algorithm"] != "max":
         return True
 
