@@ -30,3 +30,15 @@ def fp4_compatible():
     if not torch.cuda.is_available():
         return False
     return torch.cuda.get_device_capability(0) >= (10, 0)
+
+
+def check_attributes(obj: object, key: str, value: object) -> bool:
+    """Check the attributes of objects such as quantizers."""
+    _key = f"_{key}"
+
+    if hasattr(obj, key):
+        return getattr(obj, key) == value
+    elif hasattr(obj, _key):
+        return getattr(obj, _key) == value
+
+    return False
