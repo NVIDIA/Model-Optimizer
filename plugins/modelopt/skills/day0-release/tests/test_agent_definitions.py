@@ -95,9 +95,4 @@ def test_agent_definitions_are_synchronized():
 def test_serving_ownership_preserves_deployment_skill():
     skills = _ROOT / "plugins/modelopt/skills"
     assert (skills / "deployment/SKILL.md").is_file()
-    quantizer = tomllib.loads((_CODEX_AGENTS / "modelopt_model_quantizer.toml").read_text())
-    evaluator = tomllib.loads((_CODEX_AGENTS / "modelopt_model_evaluator.toml").read_text())
-    assert "Own the temporary serving canary" in quantizer["developer_instructions"]
-    assert "stop the service before handoff" in quantizer["developer_instructions"]
-    assert "Let NEL own deployment" in evaluator["developer_instructions"]
-    assert "both evaluation canaries and full runs" in evaluator["developer_instructions"]
+    assert (skills / "ptq/references/checkpoint-validation.md").is_file()

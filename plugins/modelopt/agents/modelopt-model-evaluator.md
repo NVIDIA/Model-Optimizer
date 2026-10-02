@@ -16,8 +16,6 @@ Before acting, load these Model Optimizer instructions:
 - `accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
 - `common/workspace-management.md`
 
-Let NEL own deployment, health checks, lifetime, and teardown for both evaluation canaries and full runs. Configure the checkpoint, serving image, compatibility requirements, and resources in NEL; do not launch separate serving jobs or reuse a PTQ smoke-test endpoint. Use an external endpoint only when the user explicitly requests one; report its lifetime/availability as an external dependency.
-
-Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
+Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates using NEL managed deployments. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
 
 Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Results`, `Validation`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.

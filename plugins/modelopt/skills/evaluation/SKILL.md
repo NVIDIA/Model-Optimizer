@@ -8,7 +8,7 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL owns deployment for both evaluation canaries and full runs; do not start separate serving jobs or reuse PTQ smoke-test endpoints. External endpoints require an explicit user request.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for evaluation canaries and full runs; do not use independently launched or PTQ smoke-test servers as evaluation targets. External model-under-test endpoints require explicit user authorization; record their lifetime/availability as an external dependency. This restriction does not apply to judge/user-simulator endpoints or temporary serving diagnostics. Keeping a PTQ smoke server running does not authorize evaluating it.
 
 ### Completed-run analysis
 
@@ -93,7 +93,7 @@ for an "AA" request. If the user asks for MRCR:
 
 Detailed launcher instructions live in [launcher-workflow.md](references/launcher-workflow.md).
 Read only the sections needed for the current stage; retain the dry-run → canary →
-full-run gates. Existing configs can start at Step 8. Paths in that reference are
+full-run gates. Existing configs must pass Step 3's serving-handoff check before Step 8. Paths in that reference are
 relative to this skill directory.
 
 ### Step 1 — Prerequisites
