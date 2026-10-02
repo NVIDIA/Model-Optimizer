@@ -21,7 +21,7 @@ pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 | `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-1}` |
 | `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by `modelopttools:eval-config`; repo name tracks the region (`harbor-<region>`) |
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
-| `max_concurrent` / `sandbox.concurrency` | `50` (canonical, nano-class); **`15` for larger models** (upstream non-nano leaves). Keep both equal and fixed across baseline/candidate (see Sharding) |
+| `max_concurrent` / `sandbox.concurrency` | `8` per shard (conservative starting point); keep both equal and fixed across comparisons |
 | timeout_strategy | `max` + `run_timeout: 14400` (ModelOpt default); use `task` for leaderboard-comparable |
 | `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) *(shared — see `references/nel-next.md`)* |
 | `proxy.request_timeout` | `3600` — set explicitly (TB2.1 has no benchmark key for it); must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
@@ -32,7 +32,7 @@ pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 | `output.export_config.mlflow.tags` | `task_name: terminal-bench-2.1` |
 | scope | 89 tasks × `repeats: 8` |
 
-Except for the ModelOpt timeout/lifetime overrides below, these values follow
+Except for concurrency and the ModelOpt timeout/lifetime overrides below, these values follow
 the canonical TB2.1 config — re-check it before a scored run:
 `configs/benchmarks/terminal-bench-2.1/bench.yaml` (+ `manifest.yaml`) in
 nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the image pin in
@@ -44,7 +44,7 @@ nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the
 benchmarks:
   - playbook: terminal_bench_2_1
     repeats: 8
-    max_concurrent: 50            # nano-class; LARGE models use 15. Keep == sandbox.concurrency
+    max_concurrent: 8             # conservative per shard; keep == sandbox.concurrency
     solver:
       service: <svc-name>
       timeout_strategy: max       # canonical bench.yaml; use "task" for leaderboard-comparable
@@ -56,7 +56,7 @@ benchmarks:
       max_task_lifetime_sec: 21600 # 6h: allow agent execution plus setup/verification
       region: ${HARBOR_ECS_REGION:-us-east-1}  # repo name below tracks it
       ecr_repository: ${HARBOR_ECR_REPOSITORY} # from eval-config (internal harbor account/region)
-      concurrency: 50
+      concurrency: 8
       log_stream_prefix: terminalbench-21-<model>-<framework>
 ```
 
@@ -80,6 +80,13 @@ sandboxes (`N × concurrency`). Trials are partitioned and merged, preserving th
 intended trial set. Sharding or concurrency changes can still affect scores when
 serving speed or queueing changes timeout rates. `shards: 4` suits 89 × r8 = 712 trials. Check
 `N × concurrency` against the Fargate quota and `N × gpus_per_node` against your allocation.
+
+Use `8` as a conservative starting point, not a benchmark-mandated value. Model
+endpoints are shared by trials within each shard. Reduce concurrency for capacity
+only with latency/queueing evidence; match concurrency and effective settings
+across comparisons. Keep benchmark-prescribed limits, temperature, top_p, and
+output settings fixed; never raise timeouts merely to improve scores. This default
+change has not been benchmarked and does not establish an improvement.
 
 ## Score Extraction
 
