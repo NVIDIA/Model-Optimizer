@@ -86,6 +86,35 @@ def _load_fakequant_launcher(monkeypatch):
     return _load_example_module("vllm_serve_fakequant")
 
 
+@pytest.fixture
+def clean_launcher_env(monkeypatch):
+    """Keep launch settings from affecting other CLI cases."""
+    for key in (
+        "QUANT_CFG",
+        "KV_QUANT_CFG",
+        "QUANT_FILE_PATH",
+        "MODELOPT_STATE_PATH",
+        "RECIPE_PATH",
+        "QUANT_DATASET",
+        "QUANT_CALIB_SIZE",
+        "CALIB_BATCH_SIZE",
+        "TRUST_REMOTE_CODE",
+        "MLFLOW_TRACKING_URI",
+        "MLFLOW_EXPERIMENT_NAME",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def _stub_launcher_runtime(monkeypatch, launcher):
+    vllm_main = Mock()
+    ray_registration = Mock()
+    moe_support = Mock(return_value=launcher._vllm_supports_moe_backend())
+    monkeypatch.setattr(launcher, "vllm_main", vllm_main)
+    monkeypatch.setattr(launcher, "_register_ray_env_vars", ray_registration)
+    monkeypatch.setattr(launcher, "_vllm_supports_moe_backend", moe_support)
+    return vllm_main, ray_registration, moe_support
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -179,6 +208,7 @@ def _launcher_import_modules():
         ),
         "vllm.entrypoints.openai.cli_args": SimpleNamespace(make_arg_parser=legacy_parser),
         "vllm.entrypoints.cli.serve": SimpleNamespace(make_arg_parser=current_parser),
+        "vllm.entrypoints.cli.main": SimpleNamespace(main=Mock()),
         "vllm.utils.argparse_utils": SimpleNamespace(FlexibleArgumentParser=Mock()),
     }
     return modules, legacy_parser, current_parser
@@ -234,12 +264,202 @@ def test_fakequant_launcher_passes_through_vllm_launch(monkeypatch, quant_cfg):
     launcher = _load_fakequant_launcher(monkeypatch)
     monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
     vllm_main = Mock()
-    monkeypatch.setitem(sys.modules, "vllm.entrypoints.cli.main", SimpleNamespace(main=vllm_main))
+    monkeypatch.setattr(launcher, "vllm_main", vllm_main)
     monkeypatch.setattr(sys, "argv", ["vllm", "launch", "render", "--help"])
 
     launcher.main()
 
     assert sys.argv == ["vllm", "launch", "render", "--help"]
+    vllm_main.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("argv", "initial_env", "forwarded", "expected_env"),
+    [
+        pytest.param(
+            ["vllm", "serve", "/models/qwen", "--port", "8000"],
+            {},
+            ["serve", "/models/qwen", "--port", "8000"],
+            {},
+            id="stock-serve",
+        ),
+        pytest.param(
+            [
+                "vllm",
+                "serve",
+                "/models/qwen",
+                "--modelopt-quant-cfg",
+                "FP8_DEFAULT_CFG",
+                "--modelopt-quant-calib-size",
+                "8",
+                "--trust-remote-code",
+            ],
+            {},
+            ["serve", "/models/qwen", "--trust-remote-code"],
+            {
+                "QUANT_CFG": "FP8_DEFAULT_CFG",
+                "QUANT_CALIB_SIZE": "8",
+                "TRUST_REMOTE_CODE": "true",
+            },
+            id="cli-settings",
+        ),
+        pytest.param(
+            ["vllm", "serve", "/models/qwen"],
+            {"QUANT_CFG": "NVFP4_DEFAULT_CFG"},
+            ["serve", "/models/qwen"],
+            {"QUANT_CFG": "NVFP4_DEFAULT_CFG"},
+            id="environment-fallback",
+        ),
+        pytest.param(
+            ["vllm", "serve", "/models/qwen"],
+            {"MODELOPT_STATE_PATH": "/tmp/modelopt_state.pth"},
+            ["serve", "/models/qwen"],
+            {"MODELOPT_STATE_PATH": "/tmp/modelopt_state.pth"},
+            id="state-restore",
+        ),
+        pytest.param(
+            ["vllm_serve_fakequant.py", "/models/qwen", "--modelopt-quant-cfg", "FP8_DEFAULT_CFG"],
+            {},
+            ["serve", "/models/qwen"],
+            {"QUANT_CFG": "FP8_DEFAULT_CFG"},
+            id="legacy-direct-script",
+        ),
+    ],
+)
+def test_fakequant_launcher_serving_paths(
+    monkeypatch, clean_launcher_env, argv, initial_env, forwarded, expected_env
+):
+    """Serve through stock vLLM or publish settings and select the fakequant worker."""
+    for key, value in initial_env.items():
+        monkeypatch.setenv(key, value)
+    launcher = _load_fakequant_launcher(monkeypatch)
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, ray_registration, moe_support = _stub_launcher_runtime(monkeypatch, launcher)
+    monkeypatch.setattr(sys, "argv", argv)
+
+    launcher.main()
+
+    expected_argv = ["vllm", *forwarded]
+    if expected_env:
+        expected_argv.extend(["--worker-cls", "fakequant_worker.FakeQuantWorker"])
+        if moe_support.return_value:
+            expected_argv.extend(["--moe-backend", "triton"])
+        for key, value in expected_env.items():
+            assert os.environ[key] == value
+        assert os.environ["QUANT_DATASET"] == "cnn_dailymail"
+    else:
+        assert "QUANT_CFG" not in os.environ
+        assert "MODELOPT_STATE_PATH" not in os.environ
+    assert sys.argv == expected_argv
+    _, unknown = launcher._make_vllm_serve_parser().parse_known_args(sys.argv[2:])
+    assert not unknown
+    vllm_main.assert_called_once_with()
+    assert ray_registration.call_count == bool(expected_env)
+    assert moe_support.call_count == bool(expected_env)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["--worker-cls=custom.Worker", "--moe-backend=triton_unfused"],
+        ["--worker-cls", "custom.Worker", "--moe-backend", "triton_unfused"],
+    ],
+    ids=("equals", "separate-values"),
+)
+def test_fakequant_launcher_preserves_explicit_worker_and_moe_overrides(
+    monkeypatch, clean_launcher_env, overrides
+):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    if not launcher._vllm_supports_moe_backend():
+        pytest.skip("vLLM does not expose --moe-backend")
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, ray_registration, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["vllm", "serve", "/models/qwen", "--modelopt-quant-cfg", "FP8_DEFAULT_CFG", *overrides],
+    )
+
+    launcher.main()
+
+    assert sys.argv == ["vllm", "serve", "/models/qwen", *overrides]
+    _, unknown = launcher._make_vllm_serve_parser().parse_known_args(sys.argv[2:])
+    assert not unknown
+    assert os.environ["QUANT_CFG"] == "FP8_DEFAULT_CFG"
+    vllm_main.assert_called_once_with()
+    ray_registration.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("settings", "initial_env", "expected_variant", "env_key", "env_value"),
+    [
+        (
+            ["--modelopt-quant-cfg", "FP8_DEFAULT_CFG"],
+            {},
+            "FP8_DEFAULT_CFG",
+            "QUANT_CFG",
+            "FP8_DEFAULT_CFG",
+        ),
+        (
+            ["--modelopt-recipe-path", "/recipes/nvfp4.yaml"],
+            {},
+            "nvfp4",
+            "RECIPE_PATH",
+            "/recipes/nvfp4.yaml",
+        ),
+        (
+            ["--modelopt-quant-cfg", "FP8_DEFAULT_CFG"],
+            {"QUANT_CFG": "INT8_DEFAULT_CFG"},
+            "FP8_DEFAULT_CFG",
+            "QUANT_CFG",
+            "FP8_DEFAULT_CFG",
+        ),
+        (
+            ["--modelopt-recipe-path", "/recipes/nvfp4.yaml"],
+            {"RECIPE_PATH": "/recipes/old.yaml"},
+            "nvfp4",
+            "RECIPE_PATH",
+            "/recipes/nvfp4.yaml",
+        ),
+    ],
+    ids=(
+        "cli-preset-only",
+        "cli-recipe-only",
+        "cli-preset-overrides-env",
+        "cli-recipe-overrides-env",
+    ),
+)
+def test_fakequant_launcher_mlflow_uses_effective_cli_settings(
+    monkeypatch, clean_launcher_env, settings, initial_env, expected_variant, env_key, env_value
+):
+    """Default experiment naming sees CLI overrides before MLflow resolves them."""
+    for key, value in initial_env.items():
+        monkeypatch.setenv(key, value)
+    launcher = _load_fakequant_launcher(monkeypatch)
+    vllm_main, _, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    mlflow_utils = sys.modules["vllm_mlflow_utils"]
+    monkeypatch.setattr(
+        mlflow_utils,
+        "resolve_tracking_uri",
+        lambda _args, _parser: ("https://mlflow.example.com", True),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vllm",
+            "serve",
+            "/models/qwen",
+            "--mlflow",
+            "https://mlflow.example.com",
+            *settings,
+        ],
+    )
+
+    launcher.main()
+
+    assert os.environ[env_key] == env_value
+    assert os.environ["MLFLOW_EXPERIMENT_NAME"].endswith(f"/qwen-{expected_variant}")
     vllm_main.assert_called_once_with()
 
 

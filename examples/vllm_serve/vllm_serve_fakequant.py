@@ -57,8 +57,8 @@ Without fakequant settings, the wrapper delegates to
 stock vLLM without installing the fakequant worker. Install this as the ``vllm``
 console script (see pyproject.toml) so ``vllm serve <model> ...`` works directly.
 Add ``--modelopt-*`` flags (or set the env vars) to opt into fakequant.
-The wrapper then defaults to ``--worker_cls fakequant_worker.FakeQuantWorker``;
-an explicit ``--worker_cls`` still overrides it.
+The wrapper then defaults to ``--worker-cls fakequant_worker.FakeQuantWorker``;
+an explicit ``--worker-cls`` still overrides it.
 """
 
 import os
@@ -67,6 +67,7 @@ from pathlib import Path
 
 import vllm
 from packaging import version
+from vllm.entrypoints.cli.main import main as vllm_main
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 
@@ -266,8 +267,6 @@ def _find_serve_model(rest_argv: list) -> str | None:
 def _run_vllm_cli(argv: list[str]) -> None:
     """Delegate arguments to the stock vLLM CLI."""
     sys.argv = ["vllm", *argv]
-    from vllm.entrypoints.cli.main import main as vllm_main
-
     vllm_main()
 
 
@@ -314,17 +313,19 @@ def main():
     # Settled before the engine starts, so an unusable tracking URI fails here rather than
     # in a worker that has already loaded the weights.
     modelopt_args.model = _find_serve_model(rest_argv) or "unknown-model"
-    resolve_mlflow_args(modelopt_args, modelopt_parser)
-    if _fakequant_requested(modelopt_args):
+    use_fakequant = _fakequant_requested(modelopt_args)
+    if use_fakequant:
         # vLLM's compile cache is not keyed on serve-time fake quantization.
         os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
+        # MLflow names the default experiment from these effective settings.
         _apply_fakequant_env(modelopt_args, rest_argv)
-
+    resolve_mlflow_args(modelopt_args, modelopt_parser)
+    if use_fakequant:
         # Fakequant only actually runs inside FakeQuantWorker; default to it here so
         # requesting fakequant (quant_cfg/state_path/recipe_path) is enough on its own,
-        # without also requiring this flag every time. An explicit --worker_cls still wins.
-        if not _has_flag(rest_argv, "--worker-cls", "--worker_cls"):
-            rest_argv = [*rest_argv, "--worker_cls", "fakequant_worker.FakeQuantWorker"]
+        # without also requiring this flag every time. An explicit --worker-cls still wins.
+        if not _has_flag(rest_argv, "--worker-cls"):
+            rest_argv = [*rest_argv, "--worker-cls", "fakequant_worker.FakeQuantWorker"]
 
         # Workers (Ray spawn / multi-proc) must be able to import fakequant_worker.
         repo_root = str(Path(__file__).resolve().parent)
@@ -339,8 +340,8 @@ def main():
         # Match the fakequant launcher default: use the decomposed Triton MoE backend when
         # this vLLM version exposes the option. An explicit user selection still wins.
         if _vllm_supports_moe_backend():
-            if not _has_flag(rest_argv, "--moe-backend", "--moe_backend"):
-                rest_argv = [*rest_argv, "--moe_backend", "triton"]
+            if not _has_flag(rest_argv, "--moe-backend"):
+                rest_argv = [*rest_argv, "--moe-backend", "triton"]
 
     _run_vllm_cli(rest_argv)
 
