@@ -55,7 +55,7 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
     }
 
 
-def gather_mcore_vllm_fq_quantizer_state(
+def gather_mcore_vllm_fq_quantizer_recipe(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
 ) -> None:
@@ -216,7 +216,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._extract_quantizer_recipe_markers(layer_state_dicts)
 
         gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_dir)
-        gather_mcore_vllm_fq_quantizer_state(self._quantizer_state_for_recipe, save_dir)
+        gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_dir)
 
         # Avoid rebuilding nonfinal PP stages whose trailing state is empty.
         for _layer_sd in layer_state_dicts.values():
