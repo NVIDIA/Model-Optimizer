@@ -145,7 +145,7 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
     for amax in input_amaxes:
         assert amax.dtype == torch.float32
         torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
-    quantizer_recipe_file = export_dir / "vllm_fq_quantizer_state.yaml"
+    quantizer_recipe_file = export_dir / "quant_recipe.yaml"
     assert quantizer_recipe_file.exists()
     with open(quantizer_recipe_file) as f:
         quantizer_recipe = yaml.safe_load(f)
@@ -201,7 +201,7 @@ def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
         gather_mcore_vllm_fq_quantizer_state({name: recipe}, tmp_path)
     if not conflicting:
         torch.distributed.barrier()
-        with open(tmp_path / "vllm_fq_quantizer_state.yaml") as f:
+        with open(tmp_path / "quant_recipe.yaml") as f:
             assert yaml.safe_load(f) == {name: recipe}
 
 
