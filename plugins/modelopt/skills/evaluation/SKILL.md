@@ -137,16 +137,10 @@ Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-r
 
 ### Step 9 — Verify completed run
 
-Read [run-validation.md](references/run-validation.md) before reporting scores.
-Parents and evaluators must apply its **Bounded Evaluation-Failure Policy**:
-verify complete coverage, protocol-valid failed scoring, and separate deduplicated
-response/trial rates. Both applicable gates must be ≤2.0% before rounding; warn
-for nonzero rates. Missing/unscored trials and independent integrity failures
-remain blockers. Above tolerance, return findings for parent review without
-automatic retry or tuning. Preserve raw evidence privately and report timeout,
-limit, and concurrency settings. Keep score, validation, and MLflow delivery
-separate. For comparisons, apply its **External Baseline Sanity Check**, then
-use `compare-results`.
+Apply [run-validation.md](references/run-validation.md)'s **Bounded Evaluation-Failure
+Policy** and **Timeout and Output-Limit Accounting** before reporting scores. For
+comparisons, also apply its **External Baseline Sanity Check**, then use
+`compare-results`.
 
 ---
 

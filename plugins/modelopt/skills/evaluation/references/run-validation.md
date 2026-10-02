@@ -41,9 +41,9 @@ automatically resubmit a completed run.
 
 ### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
-Accept complete runs with **≤2% failures in each applicable gate**, measured
+Accept complete runs with **<2% failures in each applicable gate**, measured
 before rounding. Warn for nonzero rates; do not abort, invalidate, or retry solely
-for bounded failures. Above 2%, return findings to the parent/user without
+for bounded failures. At or above 2%, return findings to the parent/user without
 automatic retry or a success verdict.
 
 | Gate | Failures | Denominator |
