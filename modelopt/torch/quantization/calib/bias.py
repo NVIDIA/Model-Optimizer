@@ -23,16 +23,17 @@ __all__ = ["BiasCalibrator"]
 
 
 def compute_maxmin(
-    inputs: torch.Tensor, axis: int | tuple[int, ...] | None
+    inputs: torch.Tensor, axis: tuple[int, ...] | list[int] | None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the max and min values of input tensor.
 
     Args:
         inputs: Input tensor
-        axis: Axis or tuple of axes to keep. Other dims are reduced.
+        axis: Tuple of axes to reduce over. The listed dims are reduced to size 1 (kept, so the
+            result broadcasts against ``inputs``); every other dim is preserved.
             None: reduce all dimensions (per-tensor)
-            (-1,): reduce all except last dim (per-channel)
-            (-1,-3): reduce all except last and third-to-last dims (per-head per-channel)
+            (-1,): reduce the last dim
+            (-1,-3): reduce the last and third-to-last dims
 
     Returns:
         Tuple of (max_values, min_values)
@@ -52,13 +53,17 @@ def compute_maxmin(
     return max_, min_
 
 
-def compute_maxmin_bias(inputs: torch.Tensor, axis: int | tuple[int, ...] | None) -> torch.Tensor:
+def compute_maxmin_bias(
+    inputs: torch.Tensor, axis: tuple[int, ...] | list[int] | None
+) -> torch.Tensor:
     """Compute the max_min mean bias of input tensor."""
     max_, min_ = compute_maxmin(inputs, axis)
     return (max_ + min_) / 2
 
 
-def compute_mean_bias(inputs: torch.Tensor, axis: int | tuple[int, ...] | None) -> torch.Tensor:
+def compute_mean_bias(
+    inputs: torch.Tensor, axis: tuple[int, ...] | list[int] | None
+) -> torch.Tensor:
     """Compute the mean bias of input tensor."""
     if axis is None:
         reduce_axis = None
@@ -75,13 +80,14 @@ def compute_mean_bias(inputs: torch.Tensor, axis: int | tuple[int, ...] | None) 
 
 
 def compute_bias(
-    inputs: torch.Tensor, axis: int | tuple[int, ...] | None, method: str = "mean"
+    inputs: torch.Tensor, axis: tuple[int, ...] | list[int] | None, method: str = "mean"
 ) -> torch.Tensor:
     """Compute the bias of input tensor. Supports mean and max_min methods."""
     if method == "mean":
         return compute_mean_bias(inputs, axis)
-    else:
+    if method == "max_min":
         return compute_maxmin_bias(inputs, axis)
+    raise ValueError(f"Unsupported bias method: {method!r}, expected 'mean' or 'max_min'")
 
 
 def subtract_bias(inputs: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
@@ -100,7 +106,7 @@ def add_bias(inputs: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
 class BiasCalibrator(_Calibrator):
     """Bias calibrator, tracks the bias of all tensors collected."""
 
-    def __init__(self, method: str = "mean", axis: int | tuple[int, ...] | None = None):
+    def __init__(self, method: str = "mean", axis: tuple[int, ...] | list[int] | None = None):
         """Initialize."""
         super().__init__(axis=axis)
         self._calib_bias = None
@@ -111,17 +117,20 @@ class BiasCalibrator(_Calibrator):
 
     def collect(self, x: torch.Tensor):
         """Compute bias of input tensor along axis."""
+        # self._axis lists the dims to REDUCE; they come back as size 1 so the bias broadcasts
+        # against the input. Every dim not listed is preserved, i.e. gets its own bias.
+        #
         # For a 4D tensor with shape [batch, heads, seq_len, hidden_dim]:
-        #   - None: reduce all dimensions (per-tensor bias)
-        #   - (-1,) or (3,): keep last dimension only (per-channel bias)
-        #   - (-1, -3) or (1, 3): keep last and third-to-last dimensions (per-head per-channel bias)
-        #   This computes separate bias per attention head and channel, which is recommended
+        #   - None: reduce all dimensions (a single per-tensor bias)
+        #   - (-1,) or (3,): reduce hidden_dim, giving a separate bias per token
+        #   - (-1, -3) or (1, 3): reduce hidden_dim and heads, giving a bias per token shared
+        #     across heads, which is recommended
         #
         # Examples:
         #   tensor.shape = (8, 12, 512, 64)  # [batch, heads, seq_len, hidden]
         #   axis=None      -> single bias value for entire tensor
-        #   axis=(-1,)     -> bias shape: (1, 1, 1, 64)
-        #   axis=(-1, -3)  -> bias shape: (1, 12, 1, 64)
+        #   axis=(-1,)     -> bias shape: (8, 12, 512, 1)
+        #   axis=(-1, -3)  -> bias shape: (8, 1, 512, 1)
 
         if self._method == "mean":
             bias_ = compute_bias(x, self._axis, self._method)
@@ -162,10 +171,10 @@ class BiasCalibrator(_Calibrator):
     def compute_dynamic_bias(self, inputs):
         """Compute dynamic bias based on current inputs."""
         if self._method == "mean":
-            # mean = (max + min) / 2
+            # bias = average(all tokens)
             return compute_bias(inputs, self._axis, method="mean")
         elif self._method == "max_min":
-            # mean = average(all tokens)
+            # bias = (max + min) / 2
             return compute_bias(inputs, self._axis, method="max_min")
         else:
             raise ValueError(f"Unknown bias method: {self._method}")

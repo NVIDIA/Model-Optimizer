@@ -524,16 +524,24 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         ModeloptField(
             default=None,
             title="Bias configuration.",
-            description="""Configuration for bias handling in affine quantization. The keys are:
-            - "enable": Boolean to enable/disable bias handling, default is False
+            description="""Configuration for bias handling in affine quantization.
+
+            Bias handling is enabled by setting this field; there is no separate ``"enable"`` key.
+
+            The **int keys are the axes** to reduce over when computing the bias, and map to
+            ``None``. At least one is required. Each listed dim is reduced to size 1, so a
+            separate bias is computed for every combination of the dims *not* listed. For a
+            ``[batch, heads, seq_len, hidden]`` tensor, ``{-1: None}`` gives a bias per token and
+            ``{-1: None, -3: None}`` gives a bias per token shared across heads.
+
+            Two optional string keys are also accepted:
             - "type": Specify the type of bias ["static", "dynamic"], default is "static"
             - "method": Specify the method of bias calibration ["mean", "max_min"], default is "mean"
-            - "axis": Tuple of integers specifying axes for bias computation, default is None
 
             Examples:
-            bias = {"enable": True}
-            bias = {"enable": True, "type": "static", "axis": -1}
-            bias = {"enable": True, "type": "dynamic", "axis": (-1, -3)}
+            bias = {-1: None}
+            bias = {-1: None, "type": "static"}
+            bias = {-1: None, -3: None, "type": "dynamic", "method": "max_min"}
         """,
         )
     )
@@ -583,7 +591,10 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         assert len(axis) > 0, "The axis for bias computation is not specified."
         for x in axis:
             if not isinstance(x, int):
-                raise ValueError(f"Invalid axis type {type(axis)}, expected int")
+                raise ValueError(
+                    f"Unsupported bias key {x!r}. The keys are the int axes to reduce over,"
+                    ' plus the optional "type" and "method" keys.'
+                )
 
         return v
 
