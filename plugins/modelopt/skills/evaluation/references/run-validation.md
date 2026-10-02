@@ -41,88 +41,43 @@ automatically resubmit a completed run.
 
 ### Bounded Evaluation-Failure Policy (Parent and Evaluator)
 
-For each benchmark/run, report category counts, their deduplicated union, the
-verified denominators, and `rate = 100 × union / denominator` for each applicable
-gate below. Calculate with unrounded counts; round only the displayed percentage.
+Accept complete runs with **≤2% failures in each applicable gate**, measured
+before rounding. Warn for nonzero rates; do not abort, invalidate, or retry solely
+for bounded failures. Above 2%, return findings to the parent/user without
+automatic retry or a success verdict.
 
-**Response gate (model-output faults).** Preserve unique-response accounting:
+| Gate | Failures | Denominator |
+|---|---|---|
+| Response | Truncated, empty-final, or malformed/unusable model outputs | Verified unique successful raw model responses selected for evaluation |
+| Trial | Terminal request/server/transport, judge, sandbox/verifier, terminal action, solver, or harness errors/timeouts | Expected trials including repeats |
 
-The denominator is the deduplicated set of unique, successful raw evaluated-model
-responses selected for evaluation. Count a cached response reused by multiple
-trajectories once; exclude duplicate log/cache records, failed request attempts,
-judge calls, and unrelated runs. Verify the denominator from response identity
-and provenance rather than dataset size, especially for repeated or multi-turn
-tasks. An unknown or zero denominator leaves the rate unverified, not 0%.
+Failures qualify only when preserved and recorded as incorrect/zero under the
+existing benchmark protocol. Verify this from artifacts and logs, not exception
+strings or summary zeros alone. Failed requests without raw responses belong only
+in the trial gate; ordinary wrong answers are not runtime failures.
 
-The numerator is the set union of denominator responses unusable because of
-model output behavior:
+Report category counts, deduplicated unions, denominators, and rates per
+benchmark/run. Deduplicate overlaps, caches, and resumes by response/trial identity;
+exclude judge responses and failed attempts from the response denominator. Never
+add the two rates or pool benchmarks. Unknown/zero applicable denominators leave
+validation incomplete; identify inapplicable gates explicitly.
 
-- length or token-budget truncation, including reasoning that consumes the budget;
-- an empty final answer, including a nonempty reasoning trace with no final answer;
-- a malformed or otherwise unusable final output.
+Retain all trials, zero scores, original score denominators, and private raw
+evidence. Continue after a harness crash only if it records a protocol-valid
+scored failure. Missing/unscored trials, fabricated or undocumented fallback
+scores, secret leaks, wrong identity/configuration, contamination, provenance
+failures, input/context clipping, systemic serving/scoring failures, and violated
+benchmark rules remain blockers. Never select passing repeats or silently regrade.
 
-Count a response in every applicable category for reporting, but once in the
-union. To qualify, the successful raw response must exist, remain preserved in
-the artifacts, and be deterministically retained and scored incorrect. A parser
-exception, parser fallback/default score, or missing parsed record is not
-automatically a model-output fault. A malformed answer qualifies only if the
-preserved raw response is explicitly retained and scored incorrect under the
-benchmark protocol. Runtime scorer/harness failures require trial-gate assessment
-and protocol-valid scoring instead.
+Keep protocol limits fixed, verify prompt/history plus output fits deployed
+context, and report mismatches or unknown reference settings; proposed changes
+need parent/user approval. Tolerance does not prove negligible score impact or
+leaderboard comparability.
 
-**Trial gate (runtime failures).** Use the expected benchmark trial/repeat count,
-not successful trials, HTTP attempts, or the number of records found. Its numerator
-is the deduplicated union of attributable terminal request/transport/server,
-judge, executor/sandbox/verifier, terminal action, solver, and harness failures,
-including timeouts, that the benchmark explicitly records and scores incorrect
-or zero under its existing protocol. A failed request without a raw response may
-qualify here only through such a scored trial; it cannot enter the response gate.
-Ordinary wrong answers are not runtime failures.
-
-Preserve diagnostics and original raw evidence privately, including failed
-submissions. Verify failure type and scoring from structured artifacts and logs;
-an exception string or a summary zero alone is insufficient. Deduplicate overlaps
-and resumes by invocation, benchmark, task, trial, and repeat identity. Count
-overlapping categories once within each gate; never add response and trial rates
-or pool benchmarks. Both applicable gates must pass. A shared fault may affect
-both gates, but is counted once within each. Mark an inapplicable gate explicitly;
-an unknown applicable denominator is not an exemption.
-
-Continue other trials after a harness crash only when the harness can record the
-affected trial as a protocol-valid scored failure. If it cannot, report a blocker.
-Do not fabricate zeros, modify scoring semantics, treat missing/unscored trials
-as completed, select passing repetitions, or silently regrade old runs. Keep the
-original trial and score denominators; omitted zero-scored failures leave coverage
-incomplete. Never average incomplete data.
-
-- **rate = 0%:** no failure warning for that gate; independent checks still apply.
-- **0 < rate ≤ 2.0% (inclusive, before rounding):** valid with a visible warning
-  only when coverage is complete and all independent gates pass. Retain failures
-  and their protocol-defined scores; do not invalidate, abort the invocation, or
-  retry solely for bounded failures. A low rate does **not** imply negligible
-  score impact or leaderboard comparability.
-- **rate > 2.0%:** return category counts, union, rate, findings, and a
-  recommendation to the parent (or user); do not automatically retry or declare
-  success.
-- The tolerance never waives secret leaks (scanning remains fail-closed), wrong
-  model/task/version/configuration, falsified or provenance-less output,
-  cross-invocation contamination, input/context clipping, systemic serving or
-  broken scoring, incomplete coverage, or benchmark-specific validity rules.
-  These are independent integrity failures, not ordinary per-trial failures.
-  Undocumented parser/judge fallback scores remain invalid. A score above a
-  reference does not establish validity.
-- Check configured and effective output limits against the reference evaluation
-  protocol and deployed context capacity, including prompt/history plus output
-  space. Report mismatches or unavailable reference settings. Do not remove or
-  tune token limits merely to pass; propose protocol-justified changes for
-  parent/user approval instead.
-
-Keep score, run validation, and MLflow delivery separate: a valid score does not
-prove export succeeded, and export cannot validate scoring. In a day0 run summary,
-keep policy-validated failure diagnostics in `warnings`; `errors` contains
-unresolved blockers and still fails `gate_run.py`. That summary gate does not
-compute these rates or verify raw evidence; perform this policy check first.
-The parent must retain both gates' counts, rates, and warnings in handoffs.
+Keep score, validation, and MLflow delivery separate. Carry counts, rates, and
+warnings into handoffs. In day0 summaries, accepted diagnostics go in `warnings`;
+unresolved blockers stay in `errors`. Apply this policy before `gate_run.py`,
+which does not verify rates or raw evidence.
 
 ## Timeout and Output-Limit Accounting
 
