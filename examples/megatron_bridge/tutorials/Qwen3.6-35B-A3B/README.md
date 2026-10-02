@@ -187,7 +187,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 Non-default arguments:
 
 - `--student_megatron_path` — the quantized checkpoint from Section 2; `--student_hf_path` still points at the BF16 model, which supplies the architecture.
-- `--tp_size 1 --pp_size 1 --cp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint.
+- `--tp_size 1 --pp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint. You may increase `--cp_size` to enable context parallelism for longer sequence lengths (`nemo:26.10` container onwards).
 - `--seq_length 32768 --gbs 512` — 16.8M tokens/iteration, 1.7B per 100 iterations.
 - `--lr 1e-5 --min_lr 1e-6` — an order of magnitude below typical distillation LRs: the job is to adapt weights to quantization, not to learn the task.
 - `--logit_kl_topk 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.

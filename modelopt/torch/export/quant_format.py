@@ -39,8 +39,10 @@ QUANTIZATION_FP8_PB_REAL = "fp8_pb_real"
 QUANTIZATION_FP8_PB_WO = "fp8_pb_wo"
 QUANTIZATION_FP8_PC_PT = "fp8_pc_pt"
 QUANTIZATION_IQ1_S = "iq1_s"
+QUANTIZATION_IQ1_M = "iq1_m"
 QUANTIZATION_IQ2_XXS = "iq2_xxs"
 QUANTIZATION_IQ2_XS = "iq2_xs"
+QUANTIZATION_IQ2_S = "iq2_s"
 
 # Every GGML IQ format, derived from the registry the quantization backend dispatches through, so
 # export and dispatch cannot disagree about which formats exist. They share the weight-only,
