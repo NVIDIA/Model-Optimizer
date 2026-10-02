@@ -22,14 +22,15 @@ explicit per-module map, so a few non-obvious matches decide correctness:
   *not* matched and the shared experts stay BF16.
 * The vision tower reuses the language MLP's leaf names (``mlp.gate_proj`` /
   ``up_proj`` / ``down_proj``), so the dense-MLP patterns match ``model.visual.*``
-  too -- only the trailing ``*visual*`` disable (which must stay last) keeps the
+  too -- only the ``*visual*`` disable (which must follow them) keeps the
   vision tower in BF16.
-* ``*mlp.gate_proj*`` must not catch the router ``mlp.gate``.
 
 This pins that behaviour so it can't silently drift.
 """
 
+import pytest
 import torch.nn as nn
+from _test_utils.torch import transformers_models
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -39,7 +40,7 @@ _H = 32
 
 
 class _MLP(nn.Module):
-    """Plain MLP leaf names, shared by the dense MLP, each routed/shared expert, and vision."""
+    """Plain MLP leaf names, shared by the dense MLP, the shared experts, and vision."""
 
     def __init__(self):
         super().__init__()
@@ -48,78 +49,31 @@ class _MLP(nn.Module):
         self.down_proj = nn.Linear(_H, _H, bias=False)
 
 
-class _MoE(nn.Module):
+class _VisionAttention(nn.Module):
     def __init__(self):
         super().__init__()
-        self.experts = nn.ModuleList([_MLP(), _MLP()])
-        self.shared_experts = _MLP()
-        self.gate = nn.Linear(_H, 2, bias=False)  # router
-
-
-class _KDA(nn.Module):
-    """KDA linear attention (projections plus a depthwise causal conv1d)."""
-
-    def __init__(self):
-        super().__init__()
-        self.in_proj_qkvz = nn.Linear(_H, _H, bias=False)
-        self.conv1d = nn.Conv1d(_H, _H, kernel_size=3, groups=_H, bias=False)
-        self.out_proj = nn.Linear(_H, _H, bias=False)
-
-
-class _MLA(nn.Module):
-    """NoPE sparse-MLA attention (and the vision attention, which reuses the leaf names)."""
-
-    def __init__(self):
-        super().__init__()
-        self.q_proj = nn.Linear(_H, _H, bias=False)
-        self.kv_proj = nn.Linear(_H, _H, bias=False)
-        self.o_proj = nn.Linear(_H, _H, bias=False)
-
-
-class _DenseLayer(nn.Module):
-    """Layers 0-2: KDA attention + a plain (dense) MLP."""
-
-    def __init__(self):
-        super().__init__()
-        self.linear_attn = _KDA()
-        self.mlp = _MLP()
-
-
-class _SparseLayer(nn.Module):
-    """Layers 3-44: MLA attention + an MoE block."""
-
-    def __init__(self):
-        super().__init__()
-        self.self_attn = _MLA()
-        self.mlp = _MoE()
+        self.qkv = nn.Linear(_H, 3 * _H)
+        self.proj = nn.Linear(_H, _H)
 
 
 class _VisionBlock(nn.Module):
     def __init__(self):
         super().__init__()
         self.mlp = _MLP()  # same gate_proj / up_proj / down_proj leaf names as the language MLP
-        self.attn = _MLA()
-
-
-class _GLM53Flash(nn.Module):
-    """Tiny stand-in for the ``glm5_next`` VLM MoE (one dense + one sparse layer + vision)."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Module()
-        self.model.language_model = nn.Module()
-        self.model.language_model.layers = nn.ModuleList([_DenseLayer(), _SparseLayer()])
-        self.model.visual = nn.Module()
-        self.model.visual.blocks = nn.ModuleList([_VisionBlock()])
-        self.lm_head = nn.Linear(_H, _H, bias=False)
+        self.attn = _VisionAttention()
 
 
 def _nvfp4(quantizer):
     return quantizer.is_enabled and quantizer.num_bits == (2, 1)
 
 
+def _fp8(quantizer):
+    return quantizer.is_enabled and quantizer.num_bits == (4, 3)
+
+
 def test_glm_5_3_recipe_quantizer_precedence():
-    model = _GLM53Flash()
+    pytest.importorskip("transformers.models.glm5_next", reason="needs transformers>=5.16.1")
+    model = transformers_models.get_tiny_glm5_next()
 
     config = load_recipe(_RECIPE).quantize.model_dump()
     # The recipe uses plain max calibration; here we only assert quantizer placement,
@@ -128,45 +82,111 @@ def test_glm_5_3_recipe_quantizer_precedence():
     config["algorithm"] = None
     mtq.quantize(model, config)
 
-    dense = model.model.language_model.layers[0]
-    sparse = model.model.language_model.layers[1]
+    dense, sparse = model.model.language_model.layers
 
-    # Routed experts -> NVFP4 W4A4.
-    for expert in sparse.mlp.experts:
-        for proj in (expert.gate_proj, expert.up_proj, expert.down_proj):
-            assert _nvfp4(proj.weight_quantizer)
-            assert _nvfp4(proj.input_quantizer)
+    # Routed experts (fused into 3D params, one weight quantizer per expert) -> NVFP4 W4A4.
+    experts = sparse.mlp.experts
+    for name in ("gate_up_proj", "down_proj"):
+        assert _nvfp4(getattr(experts, f"{name}_input_quantizer"))
+        assert all(_nvfp4(q) for q in getattr(experts, f"{name}_weight_quantizers"))
 
     # Dense MLP (layers 0-2) -> NVFP4.
     for proj in (dense.mlp.gate_proj, dense.mlp.up_proj, dense.mlp.down_proj):
         assert _nvfp4(proj.weight_quantizer)
         assert _nvfp4(proj.input_quantizer)
 
-    # Vision tower stays BF16 -- the load-bearing case: the vision MLP reuses
-    # gate_proj/up_proj/down_proj, so the dense-MLP patterns match it and only the
-    # trailing `*visual*` disable keeps it off.
-    vblock = model.model.visual.blocks[0]
-    for proj in (vblock.mlp.gate_proj, vblock.mlp.up_proj, vblock.mlp.down_proj):
-        assert proj.weight_quantizer.is_enabled is False
-        assert proj.input_quantizer.is_enabled is False
+    # Sparse-MLA KV cache -> FP8.
+    assert _fp8(sparse.self_attn.k_bmm_quantizer)
+    assert _fp8(sparse.self_attn.v_bmm_quantizer)
 
-    # Shared experts and the router gate stay BF16: `*.experts.*` needs a literal
-    # `.experts.` (so `shared_experts` is skipped), and `*mlp.gate_proj*` doesn't match
-    # the router `mlp.gate`.
+    # The whole vision tower stays BF16 -- the load-bearing case: its blocks and merger reuse
+    # gate_proj/up_proj/down_proj, so the dense-MLP patterns match them and only the later
+    # `*visual*` disable keeps them off.
+    for name, module in model.model.visual.named_modules():
+        if name.endswith("quantizer"):
+            assert module.is_enabled is False, name
+
+    # Shared experts stay BF16: `*.experts.*` needs a literal `.experts.`, so `shared_experts`
+    # is skipped. (The router `mlp.gate` is not an nn.Linear, so it gets no quantizer at all.)
     for proj in (
         sparse.mlp.shared_experts.gate_proj,
         sparse.mlp.shared_experts.up_proj,
         sparse.mlp.shared_experts.down_proj,
     ):
         assert proj.weight_quantizer.is_enabled is False
-    assert sparse.mlp.gate.weight_quantizer.is_enabled is False
+        assert proj.input_quantizer.is_enabled is False
 
-    # Both attention families stay BF16, including the KDA conv1d.
-    assert dense.linear_attn.conv1d.weight_quantizer.is_enabled is False
-    assert dense.linear_attn.in_proj_qkvz.weight_quantizer.is_enabled is False
-    assert dense.linear_attn.out_proj.weight_quantizer.is_enabled is False
-    for proj in (sparse.self_attn.q_proj, sparse.self_attn.kv_proj, sparse.self_attn.o_proj):
-        assert proj.weight_quantizer.is_enabled is False
+    # Both attention families' projections stay BF16, including the KDA conv1d and the indexer.
+    for attn in (dense.self_attn, sparse.self_attn):
+        for name, module in attn.named_modules():
+            if name.endswith(("weight_quantizer", "input_quantizer")):
+                assert module.is_enabled is False, name
 
-    # lm_head stays BF16.
+    # Embeddings and lm_head stay BF16.
+    assert model.model.language_model.embed_tokens.weight_quantizer.is_enabled is False
     assert model.lm_head.weight_quantizer.is_enabled is False
+
+
+class _McoreMLP(nn.Module):
+    """Megatron-Bridge MLP leaf names (dense MLP, each local expert, and the shared experts)."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear_fc1 = nn.Linear(_H, 2 * _H, bias=False)
+        self.linear_fc2 = nn.Linear(_H, _H, bias=False)
+
+
+class _McoreMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.Module()
+        self.experts.local_experts = nn.ModuleList([_McoreMLP(), _McoreMLP()])
+        self.shared_experts = _McoreMLP()
+
+
+class _McoreLayer(nn.Module):
+    def __init__(self, mlp):
+        super().__init__()
+        self.inner_layer = nn.Module()  # mHC wraps each block as `<layer>.inner_layer`
+        self.inner_layer.mlp = mlp
+
+
+class _McoreGLM53Flash(nn.Module):
+    """Megatron-Bridge naming: a dense and an MoE decoder layer, the MTP layer, and vision."""
+
+    def __init__(self):
+        super().__init__()
+        self.language_model = nn.Module()
+        self.language_model.decoder = nn.Module()
+        self.language_model.decoder.layers = nn.ModuleList(
+            [_McoreLayer(_McoreMLP()), _McoreLayer(_McoreMoE())]
+        )
+        self.language_model.mtp = nn.Module()
+        self.language_model.mtp.layers = nn.ModuleList([_McoreLayer(_McoreMoE())])
+        self.visual = nn.Module()
+        self.visual.blocks = nn.ModuleList([_VisionBlock()])
+
+
+def test_glm_5_3_recipe_megatron_names():
+    model = _McoreGLM53Flash()
+    config = load_recipe(_RECIPE).quantize.model_dump()
+    config["algorithm"] = None
+    mtq.quantize(model, config)
+
+    dense, sparse = (layer.inner_layer.mlp for layer in model.language_model.decoder.layers)
+    mtp = model.language_model.mtp.layers[0].inner_layer.mlp
+
+    # Dense MLP and routed experts -> NVFP4 W4A4.
+    for mlp in (dense, *sparse.experts.local_experts):
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert _nvfp4(proj.weight_quantizer)
+            assert _nvfp4(proj.input_quantizer)
+
+    # Shared experts, the whole MTP layer, and the vision tower stay BF16.
+    for mlp in (sparse.shared_experts, mtp.shared_experts, *mtp.experts.local_experts):
+        for proj in (mlp.linear_fc1, mlp.linear_fc2):
+            assert proj.weight_quantizer.is_enabled is False
+            assert proj.input_quantizer.is_enabled is False
+    vmlp = model.visual.blocks[0].mlp
+    for proj in (vmlp.gate_proj, vmlp.up_proj, vmlp.down_proj):
+        assert proj.weight_quantizer.is_enabled is False
