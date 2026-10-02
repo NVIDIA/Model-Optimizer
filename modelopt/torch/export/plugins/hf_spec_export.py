@@ -109,6 +109,30 @@ def has_quant_opt(model: nn.Module):
     return any(mode[0] == "quantize" for mode in opt_modes)
 
 
+SPECULATION_PROFILE_SCHEMA_VERSION = "1.0"
+
+
+def read_speculation_profile(speculation_profile: Path | str) -> dict:
+    """Read and validate a ``speculation_profile.json``. Needs no model or exporter.
+
+    Attaching a *measured* profile is pure file I/O -- the only reason the exporter
+    owns a copy of this is the unmeasured-stub branch, which needs the model to name
+    its speculation method. Kept module-level so a profile can be attached to an
+    existing export without reloading multi-GB weights just to write one JSON file.
+    """
+    source = Path(speculation_profile)
+    if not source.is_file():
+        raise FileNotFoundError(f"speculation_profile not found: {source}")
+    with open(source) as f:
+        profile = json.load(f)
+    if not isinstance(profile, dict) or "schema_version" not in profile:
+        raise ValueError(
+            f"{source} is not a speculation profile: expected a JSON object with a "
+            "'schema_version' field. Generate one with examples/specdec_bench."
+        )
+    return profile
+
+
 class SpeculativeDecodingExporter(ABC):
     """Export a modelopt speculative decoding checkpoint to deployment format."""
 
@@ -124,6 +148,74 @@ class SpeculativeDecodingExporter(ABC):
     ):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
+
+    def write_speculation_profile(self, export_dir: Path | str, profile: dict):
+        """Write ``speculation_profile.json`` beside the exported weights.
+
+        This side transports a profile, it does not build one: the producer
+        (``examples/specdec_bench``) commonly runs in an engine container without
+        modelopt installed, so it cannot import from here. The version is therefore
+        recorded rather than checked -- producers own the schema, and pinning an
+        expected version here would create a second source of truth that drifts.
+        """
+        export_dir = Path(export_dir)
+        target = export_dir / "speculation_profile.json"
+        with open(target, "w") as f:
+            json.dump(profile, f, indent=2)
+
+    def load_speculation_profile(self, speculation_profile: Path | str | None = None):
+        """Read and validate a profile, or build the unmeasured stub. Touches no weights.
+
+        Split out so callers can validate *before* an export writes anything: a bad
+        ``speculation_profile`` should fail while the destination is still empty, not
+        leave a partial checkpoint with a stale profile beside it. With none supplied,
+        the stub lets a consumer tell "not measured" from a checkpoint that predates
+        the schema, where the file is simply absent.
+        """
+        if speculation_profile is not None:
+            profile = read_speculation_profile(speculation_profile)
+        else:
+            # Same key set as a measured profile, so a consumer reads both with one
+            # code path and branches on `measured` rather than on which keys exist.
+            profile = {
+                "schema_version": SPECULATION_PROFILE_SCHEMA_VERSION,
+                "measured": False,
+                "method": self._profile_method(),
+                "draft_checkpoint": None,
+                "target_model": None,
+                "num_speculative_tokens": None,
+                "block_size": None,
+                "max_supported_k": None,
+                "verification_method": None,
+                "conditional_accept_rates": None,
+                "marginal_accept_rates": None,
+                "vectors_unavailable_reason": (
+                    "no acceptance measurement was supplied at export time"
+                ),
+                "mean_accept_length": None,
+                "mean_accept_length_per_request": None,
+                "accept_length_model": None,
+                "accept_length_by_k": {},
+                "acceptance_length_histogram": None,
+                "per_category": None,
+                "measurement_conditions": None,
+                "validation": None,
+                "note": (
+                    "No acceptance measurement was supplied at export time. Produce one with "
+                    "examples/specdec_bench and attach it with "
+                    "examples/speculative_decoding/scripts/attach_speculation_profile.py."
+                ),
+            }
+        return profile
+
+    def _profile_method(self):
+        """Best-effort speculation method name for the stub profile."""
+        for attr in ("eagle_config", "dflash_config", "config"):
+            cfg = getattr(self.model, attr, None)
+            method = getattr(cfg, "speculative_decoding_method", None) if cfg else None
+            if method:
+                return str(method)
+        return type(self).__name__.replace("Exporter", "").lower() or None
 
 
 class EagleExporter(SpeculativeDecodingExporter):
