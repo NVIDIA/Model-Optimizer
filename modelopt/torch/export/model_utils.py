@@ -21,64 +21,22 @@ import torch.nn as nn
 
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
-MODEL_NAME_TO_TYPE = {
-    "GPT2": "gpt",
-    "Mllama": "mllama",
-    "Llama4": "llama4",
-    "Llama": "llama",
-    "Mistral": "llama",
-    "GPTJ": "gptj",
-    "FalconForCausalLM": "falcon",
-    "RWForCausalLM": "falcon",
-    "baichuan": "baichuan",
-    "MPT": "mpt",
-    "Bloom": "bloom",
-    "ChatGLM": "chatglm",
-    "Qwen3Moe": "qwen3moe",
-    "Qwen3Next": "qwen3next",
-    "QWen": "qwen",
-    "RecurrentGemma": "recurrentgemma",
-    # DiffusionGemma must come before "Gemma" — get_model_type substring-matches
-    # in order, and "gemma" is a substring of "diffusiongemma".
-    "DiffusionGemma": "diffusion_gemma",
-    "Gemma3": "gemma3",
-    "Gemma2": "gemma2",
-    "Gemma": "gemma",
-    "phi3small": "phi3small",
-    "phi3": "phi3",
-    "PhiMoEForCausalLM": "phi3",
-    "phi": "phi",
-    "TLGv4ForCausalLM": "phi",
-    "MixtralForCausalLM": "llama",
-    "ArcticForCausalLM": "llama",
-    "StarCoder": "gpt",
-    "Dbrx": "dbrx",
-    "T5": "t5",
-    "Bart": "bart",
-    "GLM": "glm",
-    "InternLM2ForCausalLM": "internlm",
-    "ExaoneForCausalLM": "exaone",
-    "NemotronH": "nemotron_h",
-    "Nemotron": "gpt",
-    "Deepseek": "deepseek",
-    "Whisper": "whisper",
-    "gptoss": "gptoss",
-    "MiniMax": "minimax",
-}
-
-__doc__ = f"""Utility functions for model type detection and classification.
-
-    .. code-block:: python
-
-        {MODEL_NAME_TO_TYPE=}
-"""
-
 __all__ = [
     "TiedWeightMap",
     "get_language_model_from_vl",
     "get_model_type",
     "is_multimodal_model",
 ]
+
+# Deprecated in 0.48.0, scheduled for removal in 0.49.0 together with the TensorRT-LLM checkpoint
+# export, the only consumer of these TensorRT-LLM model names. The shims below import from
+# .trtllm lazily: importing it here is circular, since trtllm/__init__ loads model_config_export,
+# which imports ..quant_utils, which imports TiedWeightMap from this module before it is defined.
+_MODEL_TYPE_DEPRECATION_MSG = (
+    "{name} returns TensorRT-LLM model names and is deprecated as of 0.48.0; it will be removed "
+    "in 0.49.0. Use the Hugging Face model type, model.config.model_type, instead. "
+    "export_tensorrt_llm_checkpoint now detects its decoder_type when it is omitted."
+)
 
 
 @contextmanager
@@ -103,12 +61,34 @@ def _release_exported_tensors(root: nn.Module):
             module._buffers[buf_name] = None
 
 
-def get_model_type(model):
-    """Try get the model type from the model name. If not found, return None."""
-    for k, v in MODEL_NAME_TO_TYPE.items():
-        if k.lower() in type(model).__name__.lower():
-            return v
-    return None
+def __getattr__(name: str):
+    if name == "MODEL_NAME_TO_TYPE":
+        from .trtllm.decoder_type import MODEL_NAME_TO_DECODER_TYPE
+
+        warnings.warn(
+            _MODEL_TYPE_DEPRECATION_MSG.format(name="MODEL_NAME_TO_TYPE"),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return MODEL_NAME_TO_DECODER_TYPE
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_model_type(model: nn.Module):
+    """Try get the TensorRT-LLM model type from the model name. If not found, return None.
+
+    .. deprecated:: 0.48.0
+        Returns TensorRT-LLM model names and will be removed in 0.49.0. Use the Hugging Face
+        model type, ``model.config.model_type``, instead.
+    """
+    from .trtllm.decoder_type import get_decoder_type
+
+    warnings.warn(
+        _MODEL_TYPE_DEPRECATION_MSG.format(name="get_model_type"),
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_decoder_type(model)
 
 
 def is_multimodal_model(model):
