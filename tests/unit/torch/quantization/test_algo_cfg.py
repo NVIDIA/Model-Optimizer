@@ -323,11 +323,35 @@ def test_declared_produces_is_an_upper_bound_on_what_the_algorithm_writes(algo):
     assert written <= declared, f"{algo} writes {sorted(written - declared)}, undeclared"
 
 
+@pytest.mark.parametrize(
+    ("algo", "key"),
+    [("lsq", "scale_algorithm"), ("nvfp4_act_headroom", "weight_scale_algorithm")],
+)
+def test_a_delegating_algorithm_inherits_its_sub_algorithms_capabilities(algo, key):
+    from modelopt.torch.quantization.algo_cfg import ACTS, capabilities_for
+
+    # An `fp8_scale_sweep` sub-algorithm searches stored per-block scales, so the grid has to
+    # be static -- otherwise `prepare` never upgrades it and the search has nothing to read.
+    assert capabilities_for(algo, {}).requires_weight_scales is None
+    swept = capabilities_for(algo, {key: {"method": "mse", "fp8_scale_sweep": True}})
+    assert swept.requires_weight_scales == "static"
+
+    # `local_hessian` reads activations; the delegating algorithm must say so on its behalf.
+    assert ACTS in capabilities_for(algo, {key: {"method": "local_hessian"}}).requires
+
+
 def test_a_delegating_algorithm_falls_back_to_the_conservative_upper_bound():
     from modelopt.torch.quantization.algo_cfg import WRITABLE_TOKENS, capabilities_for
 
     caps = capabilities_for("lsq", {"scale_algorithm": {"method": "not_an_algorithm"}})
     assert caps.may_write >= WRITABLE_TOKENS
+
+
+def test_algorithms_that_run_awq_lite_internally_require_a_dynamic_grid():
+    from modelopt.torch.quantization.algo_cfg import capabilities_for
+
+    for algo in ("awq_lite", "awq_full", "awq_clip", "svdquant"):
+        assert capabilities_for(algo).requires_weight_scales == "dynamic", algo
 
 
 def test_a_custom_algorithm_inherits_conservative_capabilities():
@@ -397,6 +421,19 @@ def test_mse_after_a_stage_that_produced_amax_skips_its_own_max_init(quantized):
     assert derive_handoff(quantized, plan, 1) == {"skip_max_init": True}
 
 
+def test_handoff_is_dropped_for_algorithms_without_the_matching_knob():
+    model = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": ["max", "awq_clip"]}],
+        },
+        _forward_loop,
+    )
+    assert _weight_amax(model)
+
+
 def test_range_search_then_gptq_is_recognized_as_a_handoff(quantized):
     plan = _compile(quantized, {"module_name": "*mlp*", "cfg": ["mse", {"method": "gptq"}]})
     assert [stage.algo for stage in plan] == ["mse", "gptq"]
@@ -407,6 +444,52 @@ def test_range_search_then_gptq_is_recognized_as_a_handoff(quantized):
 def test_leading_gptq_still_initializes_its_own_amax(quantized):
     plan = _compile(quantized, {"module_name": "*mlp*", "cfg": ["gptq"]})
     assert derive_handoff(quantized, plan, 0) == {}
+
+
+def test_gptq_preserves_a_preceding_range_search():
+    gptq = {"method": "gptq", "block_size": 32}
+    only_mse = _run_chain(["mse"])
+    only_gptq = _run_chain([gptq])
+    chained = _run_chain(["mse", gptq])
+
+    probe = "layers.0.mlp.gate_proj.weight_quantizer"
+    # GPTQ kept MSE's amax instead of re-deriving it from max ...
+    assert torch.equal(chained[probe], only_mse[probe])
+    # ... and the resulting model is not the one plain GPTQ may_write.
+    assert not torch.equal(chained[probe], only_gptq[probe])
+
+
+def test_awq_full_is_exactly_its_two_stage_pipeline():
+    bundled = mtq.quantize(
+        _model(), {"quant_cfg": QUANT_CFG, "algorithm": "awq_full"}, _forward_loop
+    )
+    pipeline = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"quantizer_name": "*", "cfg": ["awq_lite", "awq_clip"]}],
+        },
+        _forward_loop,
+    )
+    lite_only = mtq.quantize(
+        _model(), {"quant_cfg": QUANT_CFG, "algorithm": "awq_lite"}, _forward_loop
+    )
+    bundled_amax, pipeline_amax = _weight_amax(bundled), _weight_amax(pipeline)
+
+    assert set(bundled_amax) == set(pipeline_amax)
+    assert all(torch.equal(bundled_amax[k], pipeline_amax[k]) for k in bundled_amax)
+    # Guard against the assertion passing because awq_clip did nothing.
+    lite_amax = _weight_amax(lite_only)
+    assert any(not torch.equal(bundled_amax[k], lite_amax[k]) for k in bundled_amax)
+
+
+def test_awq_then_mse_refines_the_smoothed_weights():
+    only_awq = _run_chain(["awq_lite"])
+    chained = _run_chain(["awq_lite", "mse"])
+
+    assert set(only_awq) == set(chained)
+    assert any(not torch.equal(only_awq[k], chained[k]) for k in only_awq)
 
 
 def test_handoff_needs_coverage_not_just_overlap(quantized):
@@ -423,6 +506,21 @@ def test_handoff_needs_coverage_not_just_overlap(quantized):
 def test_handoff_fires_when_the_producer_covers_the_consumer(quantized):
     plan = _compile(quantized, {"module_name": "*mlp*", "cfg": ["mse", "gptq"]})
     assert derive_handoff(quantized, plan, 1) == {"skip_max_init": True}
+
+
+def test_the_handoff_is_not_user_facing_config():
+    import inspect
+
+    from modelopt.torch.quantization.config import GPTQCalibConfig, MseCalibConfig
+    from modelopt.torch.quantization.model_calib import gptq, local_hessian_calibrate, mse_calibrate
+
+    # The handoff describes the plan, not the algorithm the user asked for, so it reaches the
+    # calibration function as an argument (like `should_process`) and is not a settable field.
+    for cfg in (MseCalibConfig, GPTQCalibConfig):
+        assert "skip_max_init" not in cfg.model_fields
+    for func in (mse_calibrate, gptq, local_hessian_calibrate):
+        assert "skip_max_init" in inspect.signature(func).parameters
+        assert "should_process" in inspect.signature(func).parameters
 
 
 def test_unknown_algorithm_is_fatal_even_when_not_strict(quantized):
@@ -469,6 +567,21 @@ def test_stage_predicate_matches_on_identity_not_name(quantized):
     assert not should_process(subtree_names["self_attn.q_proj"])
 
 
+def test_scoped_stage_writes_only_its_targets():
+    model = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": ["max"]}],
+        },
+        _forward_loop,
+    )
+    calibrated = _weight_amax(model)
+    assert calibrated
+    assert all("mlp" in name for name in calibrated)
+
+
 def test_module_scope_reaches_sequential_quantizer_levels():
     model = mtq.quantize(_model(), {"quant_cfg": SEQUENTIAL_QUANT_CFG, "algorithm": None}, None)
     _, quantizers = resolve_targets(model, "*", "module_name")
@@ -479,6 +592,23 @@ def test_module_scope_reaches_sequential_quantizer_levels():
     ]
     assert levels, "fixture should produce sequential sub-quantizers"
     assert all(level in quantizers for level in levels)
+
+
+def test_sequential_quantizers_are_calibrated_under_a_module_scope():
+    scoped = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": SEQUENTIAL_QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*", "cfg": ["max"]}],
+        },
+        _forward_loop,
+    )
+    legacy = mtq.quantize(
+        _model(), {"quant_cfg": SEQUENTIAL_QUANT_CFG, "algorithm": "max"}, _forward_loop
+    )
+    assert _uncalibrated_weight_quantizers(scoped) == []
+    assert _uncalibrated_weight_quantizers(legacy) == []
 
 
 def test_quantizer_scoped_entry_leaves_the_fallback_able_to_calibrate_weights():
@@ -549,6 +679,22 @@ def test_scoping_never_toggles_enable_state():
     assert before == after
 
 
+def test_each_stage_is_recorded_as_its_own_calibration_mode():
+    from modelopt.torch.opt.conversion import ModeloptStateManager
+
+    model = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": ["max", "mse"]}],
+        },
+        _forward_loop,
+    )
+    modes = [str(mode) for mode, _, _ in ModeloptStateManager(model).modes_with_states()]
+    assert modes == ["quantize", "max_calibrate", "mse_calibrate"]
+
+
 def test_a_max_collect_after_mse_does_not_reenter_the_spent_calibrator():
     from modelopt.torch.quantization.model_calib import max_calibrate, mse_calibrate
 
@@ -559,3 +705,99 @@ def test_a_max_collect_after_mse_does_not_reenter_the_spent_calibrator():
     mse_calibrate(model, _forward_loop)
     max_calibrate(model, _forward_loop)
     assert _weight_amax(model)
+
+
+def test_legacy_path_is_numerically_unchanged():
+    legacy = mtq.quantize(_model(), {"quant_cfg": QUANT_CFG, "algorithm": "max"}, _forward_loop)
+    planned = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"quantizer_name": "*", "cfg": ["max"]}],
+        },
+        _forward_loop,
+    )
+    legacy_amax, planned_amax = _weight_amax(legacy), _weight_amax(planned)
+    assert set(legacy_amax) == set(planned_amax)
+    assert all(torch.equal(legacy_amax[k], planned_amax[k]) for k in legacy_amax)
+
+
+# ---------------------------------------------------------------------------- nvfp4 grid
+
+NVFP4_DYN = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}}
+NVFP4_STA = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}}
+
+
+def _nvfp4_model(wcfg, icfg=None):
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(128, 64, bias=False))
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": {
+                "default": {"enable": False},
+                "*input_quantizer": {**icfg, "enable": True} if icfg else {"enable": False},
+                "*weight_quantizer": {**wcfg, "enable": True},
+            },
+            "algorithm": None,
+        },
+        forward_loop=None,
+    )
+    return model
+
+
+def _prepare(model, stage):
+    from modelopt.torch.quantization.algo_cfg import stage_targets
+    from modelopt.torch.quantization.mode import BaseCalibrateModeDescriptor, CalibrateModeRegistry
+
+    descriptor = CalibrateModeRegistry[BaseCalibrateModeDescriptor._get_mode_name(stage.algo)]
+    _, quantizers = stage_targets(model, stage)
+    return type(descriptor).prepare(model, quantizers, stage.cfg)
+
+
+def test_awq_needs_a_dynamic_grid_and_static_never_downgrades():
+    with pytest.raises(AlgoCfgValidationError, match="needs a dynamic NVFP4 weight grid"):
+        _compile(_nvfp4_model(NVFP4_STA), {"module_name": "*", "cfg": ["awq_lite"]})
+
+
+SWEEP = {"method": "mse", "fp8_scale_sweep": True}
+
+
+def test_fp8_scale_sweep_requires_static_and_a_dynamic_grid_is_upgraded():
+    from modelopt.torch.quantization.algo_cfg import capabilities_for
+
+    assert capabilities_for("mse", {"fp8_scale_sweep": True}).requires_weight_scales == "static"
+    assert capabilities_for("mse").requires_weight_scales is None
+
+    model = _nvfp4_model(NVFP4_DYN)
+    stage = _compile(model, {"module_name": "*", "cfg": [SWEEP]})[0]
+    assert model[0].weight_quantizer.block_sizes["type"] == "dynamic"
+    assert _prepare(model, stage)
+    assert model[0].weight_quantizer.block_sizes["type"] == "static"
+
+
+def test_upgrading_the_weight_grid_leaves_activations_alone():
+    # The shipped static presets pair a static weight grid with dynamic activations on
+    # purpose; the upgrade must not reach across and convert the input quantizer too.
+    model = _nvfp4_model(NVFP4_DYN, icfg=NVFP4_DYN)
+    stage = _compile(model, {"quantizer_name": "*", "cfg": [SWEEP]})[0]
+    _prepare(model, stage)
+    assert model[0].weight_quantizer.block_sizes["type"] == "static"
+    assert model[0].input_quantizer.block_sizes["type"] == "dynamic"
+
+
+def test_a_grid_upgrade_earlier_in_the_plan_is_visible_to_later_stages():
+    # Validating against the model as it is now would accept this: the weight grid is
+    # dynamic until the sweep stage upgrades it, which happens before awq_clip runs.
+    model = _nvfp4_model(NVFP4_DYN)
+    with pytest.raises(AlgoCfgValidationError, match="'mse' upgraded them"):
+        _compile(model, {"module_name": "*", "cfg": [SWEEP, "awq_clip"]})
+
+    # ... and the same pair in the order that works is still accepted.
+    _compile(_nvfp4_model(NVFP4_DYN), {"module_name": "*", "cfg": ["awq_clip", SWEEP]})
+
+
+def test_a_static_activation_grid_does_not_block_a_weight_side_algorithm():
+    model = _nvfp4_model(NVFP4_DYN, icfg=NVFP4_STA)
+    _compile(model, {"module_name": "*", "cfg": ["awq_clip"]})
