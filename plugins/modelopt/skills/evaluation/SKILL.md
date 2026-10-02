@@ -12,10 +12,7 @@ Guide the user through creating NEL YAML configs, running evaluations, and monit
 
 ### Completed-run analysis
 
-For existing runs, skip launch/config steps and read
-[run-validation.md](references/run-validation.md) before reporting scores; use
-`launching-evals` for artifact collection and benchmark analysis. This policy
-supersedes its blanket output-uncapping and fixed token/context-limit advice.
+For completed runs, skip launch/config; use launching-evals for artifacts/analysis and apply [run-validation.md](references/run-validation.md) before scores. Its policy overrides blanket uncapping and fixed token/context limits.
 
 ### Workspace integration
 
