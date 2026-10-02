@@ -555,16 +555,76 @@ class TestLiLiCorrExporter:
         return export_dir
 
     def test_export_weight_keys(self, tmp_path):
-        """Head tensors ship under `lilicorr.*`, with no training-time prefix."""
+        """Head tensors use the named LiLiCorr modules expected by vLLM."""
         state_dict = load_file(str(self._export(tmp_path) / "model.safetensors"))
         for key in state_dict:
             assert "dflash_module." not in key
             assert "rotary_emb" not in key
         for name in HEAD_PARAM_NAMES:
             assert f"lilicorr.{name}" in state_dict, name
+        assert "lilicorr.feature_norm.weight" in state_dict
+        assert "lilicorr.feature_mlp.up_proj.weight" in state_dict
+        assert "lilicorr.feature_mlp.down_proj.weight" in state_dict
+        for layer_idx in range(HEAD_LAYERS):
+            assert f"lilicorr.layers.{layer_idx}.mlp.up_proj.weight" in state_dict
+            assert f"lilicorr.layers.{layer_idx}.mlp.down_proj.weight" in state_dict
+
+        numeric_prefixes = (
+            "lilicorr.feature_mlp.0.",
+            "lilicorr.feature_mlp.1.",
+            "lilicorr.feature_mlp.3.",
+            *(f"lilicorr.layers.{i}.mlp.{j}." for i in range(HEAD_LAYERS) for j in (0, 2)),
+        )
+        assert not any(key.startswith(numeric_prefixes) for key in state_dict)
         # The backbone is exported unchanged alongside it.
         assert "fc.weight" in state_dict
         assert "norm.weight" in state_dict
+
+    def test_export_renames_quantized_scale_suffixes(self):
+        """The namespace mapping applies to packed weights and all of their scales."""
+        exporter = _converted().get_exporter()
+        source = {
+            "dflash_module.lilicorr.feature_mlp.1.weight_scale": torch.ones(1),
+            "dflash_module.lilicorr.feature_mlp.1.weight_scale_2": torch.ones(1),
+            "dflash_module.lilicorr.layers.12.mlp.2.weight_scale": torch.ones(1),
+        }
+
+        assert set(exporter._extract_state_dict(source)) == {
+            "lilicorr.feature_mlp.up_proj.weight_scale",
+            "lilicorr.feature_mlp.up_proj.weight_scale_2",
+            "lilicorr.layers.12.mlp.down_proj.weight_scale",
+        }
+
+    def test_export_renames_quantization_exclusions(self):
+        """Floating-point exceptions refer to the exported vLLM tensor namespace."""
+        exporter = _converted().get_exporter()
+        source = {
+            "producer": {"name": "modelopt"},
+            "quantization": {
+                "exclude_modules": [
+                    "lilicorr.feature_mlp.0",
+                    "*lilicorr.feature_mlp.0",
+                    "lilicorr.feature_mlp.1",
+                    "*lilicorr.feature_mlp.1",
+                    "lilicorr.feature_mlp.3",
+                    "*lilicorr.feature_mlp.3",
+                    "lilicorr.factor_input_proj",
+                ]
+            },
+        }
+
+        remapped = exporter._prepare_quantization_config(source)
+
+        assert remapped["quantization"]["exclude_modules"] == [
+            "lilicorr.feature_norm",
+            "*lilicorr.feature_norm",
+            "lilicorr.feature_mlp.up_proj",
+            "*lilicorr.feature_mlp.up_proj",
+            "lilicorr.feature_mlp.down_proj",
+            "*lilicorr.feature_mlp.down_proj",
+            "lilicorr.factor_input_proj",
+        ]
+        assert source["quantization"]["exclude_modules"][0] == "lilicorr.feature_mlp.0"
 
     def test_export_config_declares_the_lilicorr_architecture(self, tmp_path):
         """`architectures` is the serving router.

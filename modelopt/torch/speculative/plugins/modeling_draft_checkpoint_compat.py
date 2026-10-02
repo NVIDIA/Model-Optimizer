@@ -26,6 +26,7 @@ move released-layout keys onto the canonical names.
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -52,3 +53,33 @@ def remap_dspark_nested_head_keys(state_dict, prefix, *args, **kwargs):
             )
         else:
             state_dict[flat] = nested_value
+
+
+_LILICORR_VLLM_TO_MODELOPT_REWRITES = (
+    (r"lilicorr\.feature_norm(?=\.|$)", "lilicorr.feature_mlp.0"),
+    (r"lilicorr\.feature_mlp\.up_proj(?=\.|$)", "lilicorr.feature_mlp.1"),
+    (r"lilicorr\.feature_mlp\.down_proj(?=\.|$)", "lilicorr.feature_mlp.3"),
+    (r"(lilicorr\.layers\.\d+\.mlp)\.up_proj(?=\.|$)", r"\1.0"),
+    (r"(lilicorr\.layers\.\d+\.mlp)\.down_proj(?=\.|$)", r"\1.2"),
+)
+
+
+def remap_lilicorr_vllm_head_keys(state_dict, prefix, *args, **kwargs):
+    """Accept vLLM-compatible LiLiCorr exports when warm-starting ModelOpt."""
+    for key in list(state_dict):
+        modelopt_key = key
+        for pattern, replacement in _LILICORR_VLLM_TO_MODELOPT_REWRITES:
+            modelopt_key = re.sub(pattern, replacement, modelopt_key)
+        if modelopt_key == key:
+            continue
+
+        exported_value = state_dict.pop(key)
+        if modelopt_key in state_dict:
+            logger.warning(
+                "LiLiCorr: ignoring exported-layout %s because %s is also present in "
+                "the checkpoint.",
+                key,
+                modelopt_key,
+            )
+        else:
+            state_dict[modelopt_key] = exported_value
