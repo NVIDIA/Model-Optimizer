@@ -668,8 +668,8 @@ def test_attention_kv_defaults_ignore_unsupported_quantizers():
         assert not hasattr(quantizer, "_amax")
 
 
-def test_get_device_dtype_falls_back_for_quantized_kv_cache():
-    """A quantized cache dtype ("fp8", ...) names no torch dtype: keep the compute dtype, no raise."""
+def test_get_device_dtype_ignores_kv_cache_dtype():
+    """The dtype is the layer's compute dtype, whatever the KV-cache format (--kv-cache-dtype)."""
 
     def attention_like(**attrs):
         module = torch.nn.Module()
@@ -680,15 +680,11 @@ def test_get_device_dtype_falls_back_for_quantized_kv_cache():
         return module
 
     attention = attention_like(dtype=torch.bfloat16)  # vLLM Attention: dtype but no device attr
-    mla = attention_like()  # vLLM MLAAttention: neither
-    for cache_dtype in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
+    mla = attention_like(kv_b_proj=torch.nn.Linear(4, 4, dtype=torch.bfloat16))  # MLA: neither
+    for cache_dtype in ("auto", "bfloat16", "float16", "fp8", "fp8_e4m3", "fp8_ds_mla"):
         attention.kv_cache_dtype = mla.kv_cache_dtype = cache_dtype
         assert vllm_plugin._get_device_dtype(attention) == (torch.device("cpu"), torch.bfloat16)
-        device, dtype = vllm_plugin._get_device_dtype(mla)
-        assert device == torch.device("cpu")
-        assert isinstance(dtype, torch.dtype)
-    mla.kv_cache_dtype = "float16"
-    assert vllm_plugin._get_device_dtype(mla) == (torch.device("cpu"), torch.float16)
+        assert vllm_plugin._get_device_dtype(mla) == (torch.device("cpu"), torch.bfloat16)
 
 
 class _PrequantizedMethod:

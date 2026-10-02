@@ -310,20 +310,15 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
         if dt_resolved is not None:
             return dev, dt_resolved
 
-    # KV-cache tensors are available after allocation; respect kv_cache_dtype when set.
-    # kv_cache is a list of tensors (v0) or a single tensor (v1).
+    # The KV cache, once allocated, sits on the layer's device; kv_cache is a list of tensors (v0)
+    # or a single tensor (v1). Its dtype is the --kv-cache-dtype storage format, not the compute
+    # dtype, which comes from vLLM's ``dtype`` attr or, for MLAAttention (no such attr), its weights.
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
         t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
-            spec = getattr(module, "kv_cache_dtype", t0.dtype)
-            if spec == "auto":
-                return t0.device, t0.dtype
-            if not isinstance(spec, str) or isinstance(getattr(torch, spec, None), torch.dtype):
-                return t0.device, _vllm_attr_dtype_to_torch(spec) or t0.dtype
-            # A quantized cache ("fp8", "fp8_ds_mla", ...) names no torch dtype: keep the module's
-            # compute dtype if it has one (regular Attention), else fall through (MLAAttention).
-            compute_dtype = _vllm_attr_dtype_to_torch(dt) if dt is not None else None
+            weights = (p for m in (module, *module.children()) for p in m.parameters(recurse=False))
+            compute_dtype = _vllm_attr_dtype_to_torch(dt) or next((p.dtype for p in weights), None)
             if compute_dtype is not None:
                 return t0.device, compute_dtype
 
