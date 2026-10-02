@@ -13,20 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
-imports:
-  base: models/Qwen/Qwen3.8-27B/ptq/nvfp4_w4a4_mlp_fp8_attn_max
+# Alias recipe for nvidia/Gemma-4-26B-A4B-NVFP4 (source google/gemma-4-26B-A4B-it). Same recipe as `general/ptq/nvfp4_experts_only-kv_fp8_cast`: NVFP4 on the routed experts
+# only, max calibration, with an FP8 KV cache in cast mode. The dense MLPs, router,
+# attention, vision tower and `lm_head` stay BF16.
 
+imports:
+  base: general/ptq/nvfp4_experts_only-kv_fp8_cast
+
+$import: base
 metadata:
   description: >-
-    Qwen3.8-27B local-Hessian PTQ using the NVFP4 W4A4 and FP8 W8A8 assignment exported by
-    the 5.5-bit NVFP4-max AutoQuantize sweep, as published in nvidia/Qwen3.8-27B-NVFP4.
-
-quantize:
-  $import: base
-  algorithm:
-    method: local_hessian
-    fp8_scale_sweep: true
-    layerwise:
-      enable: true
-      get_qdq_activations_from_prev_layer: true
+    google/gemma-4-26B-A4B-it quantized with the general expert-only NVFP4 scheme (max
+    calibration) and an FP8 KV cache in cast mode, as published in
+    nvidia/Gemma-4-26B-A4B-NVFP4.
