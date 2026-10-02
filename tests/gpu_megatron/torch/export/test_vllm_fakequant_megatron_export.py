@@ -29,7 +29,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
 from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
     gather_mcore_vllm_fq_quantized_state_dict,
-    gather_mcore_vllm_fq_quantizer_state,
+    gather_mcore_vllm_fq_quantizer_recipe,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -198,7 +198,7 @@ def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
         if conflicting
         else nullcontext()
     ):
-        gather_mcore_vllm_fq_quantizer_state({name: recipe}, tmp_path)
+        gather_mcore_vllm_fq_quantizer_recipe({name: recipe}, tmp_path)
     if not conflicting:
         torch.distributed.barrier()
         with open(tmp_path / "quant_recipe.yaml") as f:
