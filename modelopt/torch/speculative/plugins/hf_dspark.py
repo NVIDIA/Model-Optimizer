@@ -70,6 +70,7 @@ from transformers.utils import ModelOutput
 
 from ..dflash.conversion import DSparkDMRegistry
 from .hf_dflash import HFDFlashModel
+from .modeling_dflash import DFlashBaseModelOutput
 from .modeling_dspark import DSparkModule
 
 logger = logging.getLogger(__name__)
@@ -361,17 +362,25 @@ class HFDSparkModel(HFDFlashModel):
             )
 
         # 1. Target hidden states, plus what the TVD/confidence terms read the base
-        #    distribution from.
-        base_outputs = self._base_outputs(
-            input_ids,
-            attention_mask,
-            position_ids,
-            past_key_values,
-            inputs_embeds,
-            output_attentions,
-            cache_position,
-            kwargs,
-        )
+        #    distribution from (the loss projects only the rows it uses).
+        if self.dflash_offline:
+            assert "base_model_outputs" in kwargs
+            base_outputs = DFlashBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
+        else:
+            # Call the inner base model directly (NOT super().forward(), which during
+            # training runs the full DFlash pipeline).
+            with torch.no_grad():
+                base_out = self._base_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+            offset = 1
+            selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
+            base_outputs = DFlashBaseModelOutput(
+                target_hidden=torch.cat(selected, dim=-1),  # [B, seq, num_layers * H]
+                base_hidden=base_out.last_hidden_state,
+            )
         target_hidden = base_outputs.target_hidden
 
         # 2. Build loss mask (same convention as DFlash/Domino).

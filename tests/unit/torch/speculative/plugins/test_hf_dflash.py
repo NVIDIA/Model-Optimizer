@@ -1388,16 +1388,30 @@ class TestTeacherLogits:
         )
         torch.testing.assert_close(loss, loss_full)
 
-    def test_training_step_never_projects_the_full_sequence(self):
-        """Online with KD on, lm_head only ever sees draft rows and teacher rows."""
-        model = self._model()
+    def test_offline_step_never_projects_the_full_sequence(self):
+        """Offline/streaming with KD on, lm_head only ever sees draft rows and teacher rows."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.num_orig_hidden_layers = 4
+        mtsp.convert(model, [("dflash", get_dflash_config(offline=True))])
         assert model.dflash_self_logit_distillation
         model.train()
         seen = []
         model._base_model_lm_head.register_forward_hook(
             lambda _module, args, _out: seen.append(tuple(args[0].shape))
         )
-        input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
-        model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids)).loss.backward()
+        bsz, hidden = 2, model.config.hidden_size
+        dtype = next(model.dflash_module.parameters()).dtype
+        base_model_outputs = {
+            "aux_hidden_states": torch.randn(
+                bsz, SEQ_LEN, len(model.target_layer_ids) * hidden, dtype=dtype
+            ),
+            "base_model_hidden_states": torch.randn(bsz, SEQ_LEN, hidden, dtype=dtype),
+        }
+        input_ids = torch.randint(1, model.config.vocab_size, (bsz, SEQ_LEN))
+        model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            base_model_outputs=base_model_outputs,
+        ).loss.backward()
         assert len(seen) == 2, seen  # the draft's logits, then the KD teacher rows
-        assert (2, SEQ_LEN, model.config.hidden_size) not in seen, seen
+        assert (bsz, SEQ_LEN, hidden) not in seen, seen
