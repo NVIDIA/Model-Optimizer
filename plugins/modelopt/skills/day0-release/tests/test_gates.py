@@ -152,6 +152,7 @@ def test_run_judge_error():
 
 
 def test_run_validated_warnings_do_not_waive_blockers():
+    """Accept validated warnings without overlooking coverage or integrity blockers."""
     task = _task(warnings=["protocol-valid scored timeout; trial rate 1/100 = 1%"])
     assert evaluate_run({"tasks": {"t": task}})["pass"]
     for blockers in (
