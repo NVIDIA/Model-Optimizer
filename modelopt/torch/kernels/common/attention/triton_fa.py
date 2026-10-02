@@ -23,53 +23,23 @@ metadata (b_start_loc, b_seq_len). Supports causal masking and autograd.
 """
 
 import math
-from typing import Any
 
 import torch
 import triton
 import triton.language as tl
 
-# Helpers for optional N:M sparsity and skip-softmax live in the sparsity
-# package. The baseline forward kernel below calls them conditionally under
-# constexpr guards, so the unified single-kernel design stays intact while
-# keeping feature-specific logic in its own subpackage.
-#
-# Lazy import: Triton resolves @triton.jit names at kernel compile time (first
-# call), not at definition time, so populating the module globals before the
-# first ``attention()`` call is sufficient. Deferring avoids a circular import
-# (common.attention/__init__.py ↔ sparsity.attention/__init__.py via this file).
-_apply_sparse_nm_to_qk_tile: Any = None
-_skip_softmax_decision: Any = None
-_qdq_fp8: Any = None
-_p_qdq_nvfp4: Any = None
-_v_qdq_nvfp4: Any = None
-
-
-def _load_sparsity_helpers() -> None:
-    global _apply_sparse_nm_to_qk_tile, _skip_softmax_decision
-    if _apply_sparse_nm_to_qk_tile is None:
-        from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
-            _apply_sparse_nm_to_qk_tile as _nm,
-        )
-        from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
-            _skip_softmax_decision as _skip,
-        )
-
-        _apply_sparse_nm_to_qk_tile = _nm
-        _skip_softmax_decision = _skip
-
-
-def _load_qdq_helpers() -> None:
-    global _qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
-    if _qdq_fp8 is None:
-        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4 as _p_nvfp4
-        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _v_qdq_nvfp4 as _v_nvfp4
-        from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
-
-        _qdq_fp8 = _fp8
-        _p_qdq_nvfp4 = _p_nvfp4
-        _v_qdq_nvfp4 = _v_nvfp4
-
+# Optional N:M sparsity / skip-softmax helpers and the softmax/V QDQ helpers are
+# called by the forward kernel under constexpr guards, so the unified
+# single-kernel design stays intact while the feature logic lives in its own
+# module. They are imported eagerly: Triton computes a kernel's dependency hash
+# once, on the first compile, by walking the full AST, so every @triton.jit
+# helper must be bound before the first ``attention()`` call.
+from modelopt.torch.kernels.common.attention.skip_softmax_helpers import (
+    _apply_sparse_nm_to_qk_tile,
+    _skip_softmax_decision,
+)
+from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
+from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _qdq_fp8
 
 # Maps public QDQ options to kernel constexpr values.
 _P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
@@ -1394,13 +1364,6 @@ def attention(
         require grad, because the saved ``k``/``v`` are dummy tensors in paged
         mode and dK/dV would be silently incorrect.
     """
-    # Both loaders must run unconditionally: Triton computes a kernel's
-    # dependency hash once, on the first call, walking the full AST. If the
-    # qdq helpers were still None at that point, their source would be
-    # permanently excluded from the cache key and later edits to them would
-    # silently reuse stale compiled kernels from the on-disk cache.
-    _load_sparsity_helpers()
-    _load_qdq_helpers()
     if p_qdq not in _P_QDQ_MODES:
         raise ValueError(
             f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
