@@ -358,9 +358,11 @@ class GPTModelExporter:
                 "Export at expert parallel size > 1 needs grouped-GEMM experts; "
                 "export SequentialMLP (--no_moe_grouped_gemm) checkpoints at EP=1."
             )
-        # One writer per pipeline stage: other TP / DP / EP ranks hold the same layers (EP>1 ranks
-        # hold no gathered experts at all), and writing them too would race on the same files.
-        writes_layers = (
+        # One layer-shard writer per pipeline stage: other TP / DP / EP ranks hold the same layers
+        # (EP>1 ranks hold no gathered experts at all), and writing them too would race on the same
+        # files. Unlike is_writer_rank (one global writer of save_directory metadata), this has no
+        # PP term on purpose: each stage owns a disjoint slice of the layer shards.
+        is_stage_layer_writer = (
             tp_rank == 0 and get_data_parallel_rank() == 0 and get_expert_model_parallel_rank() == 0
         )
 
@@ -428,7 +430,7 @@ class GPTModelExporter:
 
             # The live MTP export runs EP collectives, so every last-stage main rank joins it; the
             # collective-free copy from the source checkpoint only runs on the writer.
-            mtp_state_dict = self._get_mtp_state_dict(copy_from_pretrained=writes_layers)
+            mtp_state_dict = self._get_mtp_state_dict(copy_from_pretrained=is_stage_layer_writer)
             if len(mtp_state_dict) > 0:
                 layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
                 print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
@@ -466,7 +468,7 @@ class GPTModelExporter:
         # Add multimodal components to state_dict. Since only support decoder model quantization,
         # no changes will be made to the multimodal components. We copy the multimodal components
         # from the pretrained model directly to the state_dict to avoid implementing the export logic.
-        if is_first_stage_main_rank and writes_layers:
+        if is_first_stage_main_rank and is_stage_layer_writer:
             # layer_state_dicts is keyed by layer_number (1-indexed), so the first
             # decoder layer on this (first) PP stage is the smallest key, not 0.
             # Merge the multimodal components into that shard so they land in a file
@@ -495,7 +497,7 @@ class GPTModelExporter:
         torch.distributed.barrier()
 
         save_safetensors_by_layer_index(
-            layer_state_dicts=layer_state_dicts if writes_layers else {},
+            layer_state_dicts=layer_state_dicts if is_stage_layer_writer else {},
             total_layers=self.model.config.num_layers,
             save_directory=save_directory,
             name_template="model-{:05d}-of-{:05d}",
