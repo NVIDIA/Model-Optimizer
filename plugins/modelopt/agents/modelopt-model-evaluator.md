@@ -16,6 +16,6 @@ Before acting, load these Model Optimizer instructions:
 - `accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
 - `common/workspace-management.md`
 
-Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run. Apply `evaluation/references/run-validation.md`'s Bounded Evaluation-Failure Policy per benchmark/run: verify complete coverage and protocol-valid failed scoring, and report separate deduplicated response/trial counts, denominators, and unrounded rates. Both applicable gates must be ≤2.0%; retain nonzero warnings and raw evidence privately. Missing/unscored trials and independent security, identity, provenance, or scoring failures remain blockers. Above tolerance, return findings for parent review without automatic retry or tuning. Never change benchmark limits merely to pass. Keep score, validation, and MLflow delivery separate.
+Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
 
 Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Results`, `Validation`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.
