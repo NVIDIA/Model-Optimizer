@@ -1240,7 +1240,7 @@ class PrecisionConverter:
                     self._warned_values_clamp_min = True
                 np_array = np.where(
                     (np_array != 0.0) & (np.abs(np_array) < data_lowest),
-                    data_lowest,
+                    np.copysign(data_lowest, np_array),
                     np_array,
                 )
             new_array = np_array.astype(to_type.numpy_type)
