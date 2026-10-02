@@ -47,6 +47,7 @@ from transformers import (
 
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
@@ -894,15 +895,24 @@ def is_model_on_gpu(model) -> bool:
     return all("cuda" in str(param.device) for param in model.parameters())
 
 
-def is_enc_dec(model_type) -> bool:
-    """Return whether the model_type uses encoder-decoder-style preview decode.
+def is_trtllm_enc_dec_export(model_type: str | None) -> bool:
+    """Return whether the root Hugging Face model_type still exports a TensorRT-LLM checkpoint.
 
-    Controls whether ``hf_ptq.py`` slices off the prompt prefix from
-    ``.generate()`` output. ``diffusion_gemma`` is structurally encoder-decoder
-    but returns prompt+canvas concatenated, so it stays OFF this list (AR-style
-    decode applies).
+    These are the encoder-decoder families the deprecated TensorRT-LLM exporter supports. Other
+    encoder-decoder models (e.g. LongT5, PLBart, T5Gemma) use the unified HF export.
     """
-    return model_type in ["t5", "bart", "whisper"]
+    return model_type in ["t5", "mt5", "umt5", "bart", "mbart", "whisper"]
+
+
+def generate_excludes_prompt(model) -> bool:
+    """Return whether ``model.generate()`` returns only the decoder sequence, without the prompt.
+
+    True for encoder-decoder models, so ``hf_ptq.py`` decodes their preview output whole instead
+    of slicing off a prompt-length prefix. ``diffusion_gemma`` is structurally encoder-decoder but
+    returns prompt+canvas concatenated, so it is excluded (AR-style decode applies).
+    """
+    config = model.config
+    return bool(getattr(config, "is_encoder_decoder", False)) and not is_diffusion_gemma(config)
 
 
 def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False) -> str:
@@ -1105,7 +1115,11 @@ def _prepare_quant_cfg(
     return quant_cfg
 
 
-def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
+def assert_layerwise_export_compatible(
+    args: argparse.Namespace,
+    full_model: torch.nn.Module,
+    algorithm: str | dict | list | None,
+) -> None:
     """Refuse layerwise export before calibration starts, not after the run is paid for.
 
     Layerwise export writes each layer's shard during calibration and finishes the checkpoint
@@ -1147,8 +1161,8 @@ def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
             "export_tensorrt_llm_checkpoint()",
         ),
         (
-            "an encoder-decoder model_type (t5/bart/whisper)",
-            getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
+            "an encoder-decoder model_type",
+            is_trtllm_enc_dec_export(hf_model_type(full_model)),
             "export_tensorrt_llm_checkpoint()",
         ),
     ):

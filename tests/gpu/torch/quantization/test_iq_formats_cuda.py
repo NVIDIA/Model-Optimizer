@@ -22,6 +22,7 @@ derives the block scale in its own kernel instead of taking a precomputed one.
 
 import pytest
 import torch
+from _test_utils.torch.quantization.iq_llama_cpp_vectors import expected_values, packed_blocks
 
 import modelopt.torch.quantization.ggml.iq1_m as iq1_m_module
 import modelopt.torch.quantization.ggml.iq1_s as iq1_s_module
@@ -184,6 +185,42 @@ def test_cuda_float64_matches_pytorch_encoder(monkeypatch, name):
     monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
     reference, _ = getattr(module, f"quantize_{name}")(weight)
     assert torch.equal(reference, packed)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16, torch.float64])
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_decoder_matches_pytorch_decoder(monkeypatch, name, dtype):
+    """Fake quant decodes on every forward; the CUDA decoder must be the PyTorch one, bit for bit."""
+    module, _, block_bytes, _ = FORMATS[name]
+    assert hasattr(_extension(), f"{name}_unpack")
+    dequantize = getattr(module, f"dequantize_{name}")
+    generator = torch.Generator().manual_seed(5)
+    # Every byte pattern, including block scales that decode to inf or NaN.
+    random_payload = torch.randint(0, 256, (3000, 1, block_bytes), generator=generator).to(
+        device="cuda", dtype=torch.uint8
+    )
+    weight = torch.randn((64, 1024), generator=generator).cuda()
+    encoded, weight_shape = getattr(module, f"quantize_{name}")(weight)
+    cases = [(random_payload, torch.tensor([3000, 256])), (encoded, weight_shape)]
+
+    decoded = [dequantize(payload, shape, dtype=dtype) for payload, shape in cases]
+    monkeypatch.setattr(module, "get_cuda_ext_ggml", lambda: None)
+    for (payload, shape), got in zip(cases, decoded):
+        expected = dequantize(payload, shape, dtype=dtype)
+        assert got.dtype == dtype and got.is_cuda
+        torch.testing.assert_close(got, expected, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("name", sorted(FORMATS))
+def test_cuda_decoder_matches_llama_cpp_on_captured_blocks(name):
+    """The CUDA decoder reproduces llama.cpp's own values for bytes we did not produce."""
+    module, _, block_bytes, _ = FORMATS[name]
+    blocks = torch.from_numpy(packed_blocks(name)).cuda()
+    count = blocks.shape[0]
+    decoded = getattr(module, f"dequantize_{name}")(
+        blocks.reshape(count, 1, block_bytes), torch.tensor([count, 256]), dtype=torch.float32
+    )
+    assert torch.equal(decoded.reshape(count, 256).cpu(), torch.from_numpy(expected_values(name)))
 
 
 def test_every_registered_format_is_covered():

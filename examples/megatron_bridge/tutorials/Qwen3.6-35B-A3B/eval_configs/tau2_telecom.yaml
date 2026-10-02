@@ -16,7 +16,9 @@
 # mis-parse tool calls and silently invalidate the benchmark. Task-level token/parallelism budgets are
 # lower than this file's own defaults because each task holds a multi-turn conversation plus tool
 # round-trips open. `top_k`/`presence_penalty` go through tau2's `agent_args` passthrough -- NEL's
-# top-level params block does not accept them, which is why the other five configs omit them.
+# top-level params block does not accept them. On an `ns_*` task they go through the adapter's
+# `params_to_add` instead; the other five configs omit them deliberately, so they reproduce the
+# tutorial's results table.
 #
 # Results use 3 independent run(s): launch this config 3 times and pool the per-run pass@1.
 #

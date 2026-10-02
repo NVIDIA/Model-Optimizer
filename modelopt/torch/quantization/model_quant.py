@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
@@ -230,6 +231,63 @@ def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeCon
     )
 
 
+def _check_indexer_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config enables an indexer quantizer that quantizes no indexer.
+
+    ``indexer_q_quantizer`` and ``indexer_k_quantizer`` only exist on indexers that a framework
+    plugin (vLLM, Megatron-Core) converted. When a plugin does not recognize the installed
+    framework's indexer class, or the patterns match none of the indexers, the indexer silently
+    stays unquantized. Intent is read like in :func:`_check_weight_quantization_took_effect`, but
+    only from patterns naming the quantizer, so catch-all patterns do not count. A model without an
+    ``*Indexer`` module (another architecture) is skipped. Under ``torch.distributed`` the check
+    covers the whole model: a pipeline stage may hold none of the indexers a layer-selective recipe
+    selects. All ranks then raise together instead of some waiting in calibration for the others.
+    """
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    for quantizer_name in ("indexer_q_quantizer", "indexer_k_quantizer"):
+        if not any(
+            entry.enable and quantizer_name in pattern
+            for pattern, entry in last_entry_per_pattern.items()
+        ):
+            continue
+        quantizers = [
+            module
+            for name, module in model.named_modules()
+            # A list-valued ``cfg`` turns the quantizer into a SequentialQuantizer container.
+            if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+            and name.endswith(quantizer_name)
+        ]
+        indexers = {
+            type(module).__name__
+            for module in model.modules()
+            if type(module).__name__.endswith("Indexer")
+        }
+        # (unconverted indexer classes, has the quantizer, has an enabled one)
+        local = (
+            [] if quantizers else sorted(indexers),
+            bool(quantizers),
+            any(quantizer.is_enabled for quantizer in quantizers),
+        )
+        per_rank: list[Any] = [local]
+        if dist.size() > 1:  # every rank calls quantize() with the same indexer patterns
+            per_rank = [None] * dist.size()
+            torch.distributed.all_gather_object(per_rank, local)
+        unsupported = sorted({name for names, _, _ in per_rank for name in names})
+        if unsupported:
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no sparse-attention "
+                f"indexer of this model ({', '.join(unsupported)}) has one: the ModelOpt indexer "
+                "plugins do not support this model or the installed vLLM / Megatron-Core version "
+                "(supported models: see the configs/ptq/units/indexer_*_nvfp4 recipe units)."
+            )
+        if any(has for _, has, _ in per_rank) and not any(on for _, _, on in per_rank):
+            raise RuntimeError(
+                f"The quantization config enables {quantizer_name}, but no sparse-attention "
+                "indexer has an enabled one: the patterns naming it match none of them, or a "
+                "later config entry disabled it."
+            )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -335,6 +393,7 @@ def quantize(
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
+    _check_indexer_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 

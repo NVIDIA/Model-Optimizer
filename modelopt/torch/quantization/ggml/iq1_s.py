@@ -235,6 +235,11 @@ def dequantize_iq1_s(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ1_S_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq1_s_grid(blocks.device)
+            return extension.iq1_s_unpack(blocks, grid, dtype).reshape(shape)
     shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
     grid = iq1_s_grid(blocks.device)
     decoded = torch.empty((blocks.shape[0], IQ1_S_BLOCK_SIZE), dtype=dtype, device=blocks.device)

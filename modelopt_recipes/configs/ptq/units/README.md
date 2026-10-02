@@ -32,3 +32,5 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `experts_nvfp4.yaml` | NVFP4 W4A4 on `*.experts.*` weight/input quantizers |
 | `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |
+| `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
+| `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |

@@ -63,7 +63,12 @@ def test_image_calibration_model_target_follows_recipe(
     )
 
     monkeypatch.setattr(hf_ptq, "get_model", lambda *args, **kwargs: full_model)
-    monkeypatch.setattr(hf_ptq, "get_model_type", lambda model: "qwen3_vl")
+    # A VLM's extracted language model reports its own sub-config type; hf_ptq must keep the root's.
+    monkeypatch.setattr(
+        hf_ptq,
+        "hf_model_type",
+        lambda model: "qwen3_vl" if model is full_model else "qwen3_vl_text",
+    )
     monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
     monkeypatch.setattr(
         hf_ptq.AutoProcessor,
@@ -73,7 +78,7 @@ def test_image_calibration_model_target_follows_recipe(
 
     def extract_language_model(model):
         extraction_calls.append(model)
-        return extracted_language_model, "qwen3"
+        return extracted_language_model
 
     monkeypatch.setattr(
         hf_ptq, "extract_and_prepare_language_model_from_vl", extract_language_model
@@ -81,6 +86,7 @@ def test_image_calibration_model_target_follows_recipe(
 
     loaded = hf_ptq.load_model(args)
     quantization_target = loaded[1]
+    assert loaded[2] == "qwen3_vl"  # root model_type, even when the language model is extracted
 
     assert extraction_calls == ([full_model] if extracts_language_model else [])
     assert quantization_target is (

@@ -191,6 +191,53 @@ MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py 
 QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
+## Fake-quantize the sparse-attention indexer query and K cache
+
+The sparse-attention models DeepSeek-V4 and GLM-5.3-Flash keep a separate indexer key cache next
+to the attention KV cache and score it against an indexer query. Their fake quantizers are
+`indexer_k_quantizer` and `indexer_q_quantizer` on the indexer module; the KV-cache presets
+(`*[kv]_bmm_quantizer`) leave them disabled, so enable them by importing the
+`configs/ptq/units/indexer_k_nvfp4` and `configs/ptq/units/indexer_q_nvfp4` units into a recipe.
+For example, `indexer_nvfp4_only.yaml` quantizes the indexer key cache and query alone (weights,
+activations and the attention KV cache stay unquantized):
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  indexer_k_nvfp4: configs/ptq/units/indexer_k_nvfp4
+  indexer_q_nvfp4: configs/ptq/units/indexer_q_nvfp4
+
+metadata:
+  description: NVFP4 fake quantization of the sparse-attention indexer key cache and query only.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: indexer_k_nvfp4
+    - $import: indexer_q_nvfp4
+```
+
+```bash
+RECIPE_PATH=indexer_nvfp4_only.yaml python vllm_serve_fakequant.py <model_path> -tp 8 \
+  --host 0.0.0.0 --port 8000
+```
+
+Drop one of the two units to quantize only the key cache or only the query. To add them to an
+existing recipe, append the imports and their `$import` entries to that recipe's `quant_cfg`.
+
+Notes:
+
+- vLLM computes the indexer key and query inside fused kernels that quantize them to FP8, so the
+  FP8 results (the cache entries each step wrote, and the query) are dequantized, fake-quantized
+  and quantized to FP8 again. The QDQ input therefore carries the FP8 rounding (at most 2^-4
+  relative).
+- This requires vLLM's FP8 indexer cache, the default (`indexer_kv_dtype` in the attention
+  config); enabling the quantizers with DeepSeek-V4's MXFP4 indexer cache
+  (`indexer_kv_dtype="mxfp4"`) is rejected.
+- vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
+  GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.

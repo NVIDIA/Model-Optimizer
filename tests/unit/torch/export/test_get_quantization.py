@@ -50,6 +50,7 @@ from modelopt.torch.export.quant_utils import (
     uses_iq_quantization,
 )
 from modelopt.torch.quantization.nn import (
+    GroupedQuantizer,
     NVFP4StaticQuantizer,
     SequentialQuantizer,
     TensorQuantizer,
@@ -140,6 +141,34 @@ def test_uses_iq_quantization_false_without_iq_layers():
     )
 
     assert not uses_iq_quantization(model)
+
+
+class _FakeGroupedLinear(torch.nn.Module):
+    """TEGroupedLinear layout: ``weight0..N`` behind one GroupedQuantizer and no ``weight``."""
+
+    def __init__(self, weight_cfg):
+        super().__init__()
+        self.weight0 = torch.nn.Parameter(torch.randn(4, 4))
+        self.weight1 = torch.nn.Parameter(torch.randn(4, 4))
+        quantizers = [TensorQuantizer(), TensorQuantizer()]
+        for q in quantizers:
+            q.set_from_attribute_config(weight_cfg)
+        self.weight_quantizer = GroupedQuantizer(*quantizers)
+        self.input_quantizer = TensorQuantizer()
+        self.input_quantizer.set_from_attribute_config({"num_bits": (4, 3)})
+
+
+def test_grouped_experts_only_model_reports_its_format():
+    """An experts-only recipe leaves grouped experts as the only quantized modules."""
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), _FakeGroupedLinear({"num_bits": (4, 3)}))
+
+    assert get_quantization_format(model) == QUANTIZATION_FP8
+
+
+def test_uses_iq_quantization_sees_grouped_experts():
+    model = torch.nn.Sequential(_FakeGroupedLinear(_IQ_WEIGHT_CFG))
+
+    assert uses_iq_quantization(model)
 
 
 def test_uses_iq_quantization_tolerates_sequential_quantizer():
