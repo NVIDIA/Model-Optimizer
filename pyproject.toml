@@ -132,6 +132,11 @@ dev-test = [
     "torchvision",
     "torch-geometric",
 ]
+dev-fla = [
+    "apache-tvm-ffi==0.1.9",
+    "fla-core==0.5.1",
+    "tilelang==0.1.8",
+]
 # Compound extras via self-references
 mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
     "mlflow-skinny>=2.9", # client only; the tracking server's own deps are not needed here

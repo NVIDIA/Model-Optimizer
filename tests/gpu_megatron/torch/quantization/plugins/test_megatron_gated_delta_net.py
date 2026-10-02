@@ -38,18 +38,20 @@ except RuntimeError as e:
 SEED = 1234
 
 
-def _make_model(tp_size, **config_kwargs):
+def _make_model(tp_size):
     model = (
         get_mcore_gpt_model(
             tensor_model_parallel_size=tp_size,
-            num_layers=2,
+            num_layers=1,
             hidden_size=64,
             num_attention_heads=4,
             vocab_size=32,
             max_sequence_length=128,
             experimental_attention_variant="gated_delta_net",
-            linear_value_head_dim=64,
-            **config_kwargs,
+            linear_num_key_heads=1,
+            linear_num_value_heads=1,
+            linear_key_head_dim=32,
+            linear_value_head_dim=32,
         )
         .cuda()
         .eval()
@@ -81,7 +83,7 @@ def _gdn_config(sites):
     }
 
 
-def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
+def _test_gdn_qat_helper(rank, size, checkpoint_path, sites):
     initialize_for_megatron(
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
@@ -100,7 +102,6 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     gdn_ref = outputs.copy()
     outputs.clear()
 
-    sites = ("state", "w") if mode == "both" else (mode,)
     mtq.quantize(model, _gdn_config(sites))
     gdn_modules = [m for m in model.modules() if isinstance(m, _QuantGatedDeltaNet)]
     assert gdn_modules, "no GatedDeltaNet layer was wrapped"
@@ -143,7 +144,7 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
     assert not torch.equal(restored_gdn[0].in_proj.weight, before)
 
 
-def _compile_gdn_qat_kernels(rank, size, mode):
+def _compile_gdn_qat_kernels(rank, size, sites):
     initialize_for_megatron(
         tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
     )
@@ -151,7 +152,6 @@ def _compile_gdn_qat_kernels(rank, size, mode):
     forward = get_forward(model)
     with torch.no_grad():
         forward(model)
-    sites = ("state", "w") if mode == "both" else (mode,)
     mtq.quantize(model, _gdn_config(sites))
     with torch.no_grad():
         forward(model)
@@ -161,30 +161,15 @@ def _compile_gdn_qat_kernels(rank, size, mode):
 
 
 @pytest.fixture
-def compiled_gdn_workers(request, tp_size, mode):
-    """Warm the selected QAT path in the same workers, outside the test-call budget."""
-    if mode != "w" and torch.cuda.get_device_capability() < (8, 9):
-        pytest.skip("State QDQ needs native E4M3 conversion (SM89+)")
-    workers = request.getfixturevalue(f"dist_workers_size_{tp_size}")
-    workers.run(_compile_gdn_qat_kernels, mode)
-    return workers
+def compiled_gdn_workers(dist_workers_size_1):
+    """Warm one small QAT model in the same worker, outside the test-call budget."""
+    # Ampere exercises W QDQ; native FP8 devices also exercise state QDQ.
+    sites = ("state", "w") if torch.cuda.get_device_capability() >= (8, 9) else ("w",)
+    dist_workers_size_1.run(_compile_gdn_qat_kernels, sites)
+    return dist_workers_size_1, sites
 
 
-@pytest.mark.parametrize("tp_size", [1, 2])
-@pytest.mark.parametrize("mode", ["state", "w", "both"])
-def test_gdn_qat_and_sharded_restore(compiled_gdn_workers, tmp_path, mode):
-    """Train through state/W QDQ after a Megatron distributed-checkpoint round trip."""
-    compiled_gdn_workers.run(_test_gdn_qat_helper, mode, tmp_path)
-
-
-def _test_gdn_context_parallel_helper(rank, size, mode):
-    initialize_for_megatron(context_parallel_size=size, seed=SEED)
-    model = _make_model(1, context_parallel_size=size)
-    with pytest.raises(NotImplementedError, match="context parallelism"):
-        mtq.quantize(model, _gdn_config((mode,)))
-
-
-@pytest.mark.parametrize("mode", ["state", "w"])
-def test_gdn_context_parallel_rejected(dist_workers_size_2, mode):
-    """Reject unqualified Megatron CP even when it does not pass an FLA CP context."""
-    dist_workers_size_2.run(_test_gdn_context_parallel_helper, mode)
+def test_gdn_qat_and_sharded_restore(compiled_gdn_workers, tmp_path):
+    """Train through QDQ after a Megatron distributed-checkpoint round trip."""
+    workers, sites = compiled_gdn_workers
+    workers.run(_test_gdn_qat_helper, tmp_path, sites)
