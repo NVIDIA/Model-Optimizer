@@ -120,6 +120,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
             if state is None:
                 continue
             for name, tensor in state.items():
+                # Replicated keys must match instead of silently overwriting an earlier rank.
                 if name in merged:
                     previous = merged[name]
                     if previous.dtype != tensor.dtype or not torch.equal(previous, tensor):
