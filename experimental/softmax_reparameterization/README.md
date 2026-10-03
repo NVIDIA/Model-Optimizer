@@ -92,7 +92,7 @@ are **not validated** by this prototype; no latency benefit is claimed here.
 
 ```bash
 pytest tests/unit/torch/quantization/test_softmax_reparameterization.py -q
-pytest tests/gpu/torch/quantization/test_softmax_reparameterization.py -q
+pytest tests/gpu/torch/quantization/test_softmax_reparameterization_cuda.py -q
 ```
 
 CPU tests compare selection with independent ModelOpt candidates, check softmax
