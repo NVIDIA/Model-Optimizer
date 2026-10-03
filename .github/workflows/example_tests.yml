@@ -65,6 +65,8 @@ jobs:
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
               - "!**/*.{md,rst,png,ipynb}"
+            torch_docs:
+              - examples/llm_qat/README.md
             trtllm:
               - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"
               - examples/dataset/** # data prep for gpt-oss
@@ -81,7 +83,7 @@ jobs:
           # Nightly and on-demand runs have no diff to inspect, so they run everything.
           NON_PR: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
-          TORCH: ${{ steps.changed.outputs.torch_any_modified }}
+          TORCH: ${{ steps.changed.outputs.torch_any_modified == 'true' || steps.changed.outputs.torch_docs_any_modified == 'true' }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
           MEGATRON: ${{ steps.changed.outputs.megatron_any_modified }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
