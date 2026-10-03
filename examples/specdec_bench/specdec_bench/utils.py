@@ -17,10 +17,14 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from warnings import warn as _warn
 
+from huggingface_hub.errors import HFValidationError
+from huggingface_hub.utils import validate_repo_id
 from transformers import AutoTokenizer
 
 from . import __version__ as specdec_bench_version
@@ -32,6 +36,20 @@ _SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
 _SENSITIVE_KEY_ALLOWLIST = frozenset(
     {"tokenizer", "tokenizer_path", "tokenizer_mode", "tokenizer_revision"}
 )
+# Names that are credentials outright, whatever they hold. These redact on the
+# name alone: a numeric or boolean value is no proof of safety, and treating one
+# as such would persist e.g. an all-digit token. Matched against the key with
+# separators stripped, so hf_token / hfToken / hf-token are all covered.
+_ALWAYS_SENSITIVE_SUBSTRINGS = ("hftoken", "apikey", "accesskey", "secret", "password")
+# The remaining substrings are ambiguous rather than damning: a bare match over
+# `token` also swallows engine config, where the serving config alone
+# contributes num_speculative_tokens, max_num_batched_tokens,
+# skip_tokenizer_init and a dozen similar knobs, none of them credentials.
+# Enumerating those doesn't hold — the set grows with every engine release — so
+# for the ambiguous names only, a scalar value (int / bool / None) is taken as
+# evidence the field is a knob and kept. A string still redacts, because that is
+# the shape a credential takes.
+_NON_SECRET_VALUE_TYPES = (bool, int, float, type(None))
 
 
 def get_tokenizer(path, trust_remote_code=False):
@@ -208,15 +226,78 @@ def _checkpoint_provenance(model_dir):
         return {"path": str(model_dir)}
 
 
-def _is_sensitive_key(key):
+_UNSET = object()
+
+# `<org>/<name>`, the shape of a Hub repo id. Deliberately excludes `:@?#` and
+# whitespace so a URL with embedded credentials (`https://user:tok@host/...`)
+# can't reach configuration.json through the environment.
+_HUB_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
+
+
+def _hub_model_id(env_var):
+    """Return `$env_var` if it is a well-formed Hub repo id, else None.
+
+    These ids are copied verbatim into configuration.json and published, so an
+    unset or malformed value is dropped rather than recorded. A rejected value
+    warns instead of raising: provenance metadata should never fail a benchmark
+    that has already run.
+
+    Both checks are needed. The local pattern is the security boundary: it
+    excludes `:@?#` and whitespace, so a URL carrying an embedded credential
+    cannot get through, whereas `validate_repo_id` alone would also accept a
+    single-component name. `validate_repo_id` then adds canonicality, rejecting
+    `foo..bar`, `foo--bar` and `foo.git`.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return None
+    rejected = not _HUB_MODEL_ID_RE.match(raw)
+    if not rejected:
+        try:
+            validate_repo_id(raw)
+        except HFValidationError:
+            rejected = True
+    if rejected:
+        _warn(f"{env_var} is not a valid <org>/<name> Hub id; omitting it from configuration.json")
+        return None
+    return raw
+
+
+def _is_sensitive_key(key, value=_UNSET):
+    """Whether `key` names a secret.
+
+    Names in `_ALWAYS_SENSITIVE_SUBSTRINGS` redact unconditionally. For the
+    merely ambiguous ones, pass `value` when it is available: a scalar rules the
+    field an engine knob rather than a credential. Callers that only have the
+    name (e.g. argv scanning) omit it and every match redacts.
+    """
     # Engine configs can carry non-string dict keys (e.g. int layer ids in a
     # serving_config); those are never sensitive field *names*, so skip them.
     if not isinstance(key, str):
         return False
     klow = key.lower()
+    if any(s in klow.replace("_", "").replace("-", "") for s in _ALWAYS_SENSITIVE_SUBSTRINGS):
+        return True
     if klow in _SENSITIVE_KEY_ALLOWLIST:
         return False
-    return any(s in klow for s in _SENSITIVE_SUBSTRINGS)
+    if not any(s in klow for s in _SENSITIVE_SUBSTRINGS):
+        return False
+    if value is _UNSET:
+        return True
+    return not _is_non_secret_value(value)
+
+
+def _is_non_secret_value(value):
+    """Whether `value`'s shape rules out a credential.
+
+    Engine knobs are scalars or containers of them (a token-budget list is
+    `[256, 512]`). A credential is a non-trivial string, so a container is only
+    cleared when every leaf is itself non-secret; an empty one has nothing to
+    leak.
+    """
+    if isinstance(value, (list, tuple, set)):
+        return all(_is_non_secret_value(v) for v in value)
+    return isinstance(value, _NON_SECRET_VALUE_TYPES)
 
 
 def _redact_value(value):
@@ -229,7 +310,7 @@ def _redact_value(value):
     """
     if isinstance(value, dict):
         return {
-            k: ("***REDACTED***" if _is_sensitive_key(k) else _redact_value(v))
+            k: ("***REDACTED***" if _is_sensitive_key(k, v) else _redact_value(v))
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -283,6 +364,25 @@ def dump_env(args, save_dir, overrides=None):
     if overrides:
         config.update(_redact_config(overrides))
 
+    # The speculation width the engine was actually given. Which flag carries
+    # it depends on the algorithm: DFLASH is configured by --block_size and
+    # ignores --draft_length (which stays at its default), so recording the raw
+    # args makes a block_size=8 DFLASH run look like draft_length=3.
+    #
+    # Keyed on the algorithm rather than on flag precedence so this stays in
+    # step with the engine branches in models/vllm.py, which forward exactly
+    # one flag per algorithm. The value is the engine's `num_speculative_tokens`
+    # verbatim. Consumers should read this field rather than re-deriving it.
+    algorithm = getattr(args, "speculative_algorithm", None)
+    if algorithm == "NONE":
+        # Measured with speculation off. 0 rather than None, which means the
+        # harness never passed a width at all.
+        config["num_speculative_tokens"] = 0
+    elif algorithm == "DFLASH":
+        config["num_speculative_tokens"] = getattr(args, "block_size", None)
+    else:
+        config["num_speculative_tokens"] = getattr(args, "draft_length", None)
+
     config["engine_version"] = _get_engine_version(config.get("engine"))
     config["gpu"] = _get_gpu_name()
     config["python_version"] = sys.version
@@ -317,7 +417,13 @@ def dump_env(args, save_dir, overrides=None):
     # runs. The harness sets JIRA_TICKET only after verifying the checkpoint
     # resolves on Hub; standalone runs leave both empty.
     config["jira_ticket"] = os.environ.get("JIRA_TICKET") or None
-    config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
+    config["huggingface_model_id"] = _hub_model_id("HUGGINGFACE_MODEL_ID")
+    # Hub id of the external draft checkpoint, for algorithms that use one
+    # (EAGLE3 / DRAFT_TARGET / DFLASH / DSPARK). `draft_model_dir` only records
+    # a local path, which says nothing about which published drafter ran — two
+    # drafters for the same verifier are otherwise indistinguishable. Empty for
+    # in-model drafts (MTP heads).
+    config["draft_huggingface_model_id"] = _hub_model_id("DRAFT_HUGGINGFACE_MODEL_ID")
 
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "configuration.json"), "w") as f:
