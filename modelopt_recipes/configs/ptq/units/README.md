@@ -25,6 +25,7 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `kv_nvfp4_affine.yaml` | NVFP4 affine KV cache quantizer entries; supported on Blackwell+ GPUs |
 | `kv_nvfp4_cast.yaml` | NVFP4 KV cache with constant amax (skips KV calibration); supported on Blackwell+ GPUs |
 | `kv_nvfp4_rotate.yaml` | NVFP4 rotated KV cache quantizer entries; supported on Blackwell+ GPUs |
+| `kv_nvfp4_mla.yaml` | Fake quantization of the vLLM MLA KV cache: NVFP4 latent (`*kv_c_bmm_quantizer`, global scale fixed to 1) and FP8 RoPE key (`*k_pe_bmm_quantizer`, scale 1); compute capability 8.9+ GPUs |
 | `mamba_moe_disabled_quantizers.yaml` | Shared Mamba-MoE quantizer exclusions |
 | `w8a8_fp8_fp8.yaml` | FP8 weight + activation quantizer entries (W8A8); supported on Hopper+ GPUs |
 | `w4a4_nvfp4_nvfp4.yaml` | NVFP4 weight + activation quantizer entries (W4A4); supported on Blackwell+ GPUs |

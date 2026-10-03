@@ -53,7 +53,9 @@ from vllm.inputs import TokensPrompt
 from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
@@ -839,6 +841,86 @@ def test_update_kv_cfg_for_mla_skips_non_mla_and_warns_on_affine():
         "cfg": kv_cfg[0]["cfg"],
         "enable": True,
     }
+
+
+class _NativeMLAAttention(torch.nn.Module):
+    def forward(self, query, kv_c, k_pe, *args, **kwargs):
+        return query, kv_c, k_pe
+
+
+@pytest.mark.skipif(VllmMLAAttention is None, reason="this vLLM has no MLAAttention")
+@pytest.mark.parametrize("rope_dim", [0, 64], ids=("nope", "rope"))  # GLM-5.3-Flash, DeepSeek-V3
+def test_kv_nvfp4_mla_unit_quantizes_the_mla_kv_cache(monkeypatch, rope_dim):
+    """Like vLLM's ``nvfp4_ds_mla`` cache: an NVFP4 latent and an unscaled FP8 RoPE key ``k_pe``.
+    An empty NoPE ``k_pe`` passes through."""
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+
+    class _TestQuantVLLMMLAAttention(vllm_plugin._QuantVLLMMLAAttention, _NativeMLAAttention):
+        pass
+
+    mla = _new_attention(_TestQuantVLLMMLAAttention)
+    mla._setup()
+    set_quantizer_by_cfg(
+        mla,
+        [{"quantizer_name": "*", "enable": False}, *load_config("configs/ptq/units/kv_nvfp4_mla")],
+    )
+
+    assert mla.kv_c_bmm_quantizer.is_enabled
+    assert mla.kv_c_bmm_quantizer.amax == 6.0 * 448.0
+    assert mla.k_pe_bmm_quantizer.is_enabled
+    assert not mla.q_bmm_quantizer.is_enabled
+
+    mla.to("cuda")
+    query = torch.randn(5, 4, 512, device="cuda", dtype=torch.bfloat16)
+    kv_c = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
+    k_pe = torch.randn(5, 1, rope_dim, device="cuda", dtype=torch.bfloat16)
+    out_query, out_kv_c, out_k_pe = mla(query, kv_c, k_pe)
+    assert out_query is query
+    assert not torch.equal(out_kv_c, kv_c)
+    # NVFP4 with a fixed global scale is idempotent: the output is already on the grid.
+    assert torch.equal(mla.kv_c_bmm_quantizer(out_kv_c), out_kv_c)
+    if rope_dim:
+        assert not torch.equal(out_k_pe, k_pe)
+        assert torch.equal(out_k_pe, k_pe.to(torch.float8_e4m3fn).to(torch.bfloat16))
+    else:
+        assert out_k_pe is k_pe
+
+
+@pytest.mark.parametrize(
+    ("name", "shape"),
+    [("kv_c_bmm_quantizer", (8, 512)), ("k_pe_bmm_quantizer", (8, 1, 64))],
+    ids=("kv_c", "k_pe"),
+)
+def test_kv_nvfp4_mla_quantizer_replays_in_cuda_graph(name, shape):
+    """The latent's constant amax is created on the CPU; on the GPU (FakeQuantWorker moves every
+    quantizer there before CUDA graph capture) each fake quant of the unit captures and replays
+    like eager."""
+    layer = torch.nn.Module()
+    setattr(layer, name, TensorQuantizer())
+    set_quantizer_by_cfg(layer, load_config("configs/ptq/units/kv_nvfp4_mla"))
+    quantizer = getattr(layer, name)
+    if name == "kv_c_bmm_quantizer":
+        assert quantizer._amax.device.type == "cpu"
+    quantizer.to("cuda")
+
+    static_in = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        quantizer(static_in)  # compile the kernel before capture
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = quantizer(static_in)
+
+    new_in = torch.randn_like(static_in)
+    static_in.copy_(new_in)
+    graph.replay()
+    assert torch.equal(static_out, quantizer(new_in))
 
 
 def _quantize_and_summarize(self):
