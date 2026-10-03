@@ -48,7 +48,7 @@ import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
-from modelopt.torch.export.quant_format import IQ_FORMATS
+from modelopt.torch.export.quant_format import GGML_FORMATS, IQ_FORMATS
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -92,22 +92,24 @@ def _verify_model_quant_config(
             assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
-# Every IQ format the exporter accepts. Only the list of formats comes from the export
-# tables; each test resolves what it expects from the codec module itself, so a wrong entry
-# in IQ_FORMAT_REGISTRY cannot make both sides of an assertion agree.
+# Every GGML format the exporter accepts. Only the list of formats comes from the export
+# tables; each test resolves what it expects from the codec module itself, so a wrong registry
+# entry cannot make both sides of an assertion agree.
 IQ_FORMAT_NAMES = sorted(IQ_FORMATS)
+GGML_FORMAT_NAMES = sorted(GGML_FORMATS)
 
 
-@pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
-def test_megatron_name_remapping_exports_iq_payload(qformat):
-    """Megatron export writes the same scale-free IQ representation as HF export."""
+@pytest.mark.parametrize("qformat", GGML_FORMAT_NAMES)
+def test_megatron_name_remapping_exports_ggml_payload(qformat):
+    """Megatron export writes the same self-contained GGML representation as HF export."""
+    block_size = getattr(ggml, f"{qformat.upper()}_BLOCK_SIZE")
     payload_bytes = getattr(ggml, f"{qformat.upper()}_BLOCK_BYTES")
     dequantize = getattr(ggml, f"dequantize_{qformat}")
     linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.bfloat16)
     linear.weight_quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
             num_bits=qformat,
-            block_sizes={-1: 256},
+            block_sizes={-1: block_size},
             backend="ggml",
         )
     )
@@ -121,7 +123,7 @@ def test_megatron_name_remapping_exports_iq_payload(qformat):
 
     packed_key = "model.layers.0.mlp.down_proj.weight"
     packed = exporter._state_dict[packed_key]
-    assert packed.shape == (2, 1, payload_bytes)
+    assert packed.shape == (2, linear.in_features // block_size, payload_bytes)
     assert packed.dtype == torch.uint8
     # Exact bytes against the format's own packer, as the slicing tests below check.
     _assert_iq_payload_matches(qformat, packed, linear.weight)
@@ -129,7 +131,7 @@ def test_megatron_name_remapping_exports_iq_payload(qformat):
     # decoded reference, not the fake-quant forward: that returns the straight-through form
     # a + (r - a), which in bf16 differs from r by up to one ULP of a -- enough to fail a
     # relative tolerance wherever r is small next to a, as IQ1_S's grid near zero often is.
-    logical_shape = torch.tensor([*packed.shape[:-2], packed.shape[-2] * 256])
+    logical_shape = torch.tensor([*packed.shape[:-2], packed.shape[-2] * block_size])
     reference, _ = getattr(ggml, f"quantize_{qformat}")(linear.weight)
     torch.testing.assert_close(
         dequantize(packed, logical_shape, dtype=torch.bfloat16),
@@ -139,7 +141,7 @@ def test_megatron_name_remapping_exports_iq_payload(qformat):
     )
     assert exporter.layer_config_dict == {
         "model.layers.0.mlp.down_proj.quantization": qformat,
-        "model.layers.0.mlp.down_proj.awq_block_size": 256,
+        "model.layers.0.mlp.down_proj.awq_block_size": block_size,
     }
 
 
@@ -294,7 +296,7 @@ def test_megatron_packed_experts_reject_iq_without_deployment_loader(qformat):
     experts = _make_iq_experts(qformat, "linear_fc2")
     exporter = _make_iq_exporter()
 
-    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+    with pytest.raises(NotImplementedError, match="Fused-MoE GGML export requires"):
         exporter._pack_name_remapping(
             experts,
             "model.layers.0.mlp.experts.down_proj",
@@ -308,7 +310,7 @@ def test_megatron_gpt_oss_packed_experts_reject_iq_without_deployment_loader(qfo
     experts = _make_iq_experts(qformat, "linear_fc1", bias=True)
     exporter = _make_iq_exporter()
 
-    with pytest.raises(NotImplementedError, match="Fused-MoE IQ export requires"):
+    with pytest.raises(NotImplementedError, match="Fused-MoE GGML export requires"):
         exporter._pack_name_remapping_gpt_oss(
             experts,
             "model.layers.0.mlp.experts.gate_up_proj",
