@@ -1,39 +1,62 @@
 # Quantization-Aware Training for Linear Attention
 
-This example fine-tunes KDA attention parameters with recurrent-state fake
-quantization, then saves a Hugging Face checkpoint with ModelOpt state. GDN/KDA
-runtime support includes token writes, ReplaySSM, KDA decay approximation, and
+This example fine-tunes Megatron-Core GDN or KDA attention parameters with
+recurrent-state fake quantization, then saves a Megatron checkpoint with ModelOpt
+state. Training adapters support Megatron `GatedDeltaNet` and
+`KimiDeltaAttention`; FLA supplies kernels, not model-layer adapters.
+Runtime support includes token writes, ReplaySSM, KDA decay approximation, and
 FP8 or INT8 state QDQ. The INT8 recipes enable Hadamard rotation by default.
 
 ## Run the example
 
-Install ModelOpt using the [QAT setup instructions](../README.md#quick-start),
-then install the example dependencies. Run commands from the repository root.
+Use the [Megatron Bridge environment](../../megatron_bridge/README.md#pre-requisites)
+and install the example dependencies. Run commands from the repository root.
+
+KDA requires a Megatron revision exporting
+`megatron.core.ssm.gated_delta_net.KimiDeltaAttention`. It is available on
+[Megatron's dev branch](https://github.com/NVIDIA/Megatron-LM/tree/ac100f773f9d8fac918ce3e64698be4ed84fa428);
+Megatron-Core 0.19.2 does not include it. Older versions can still use GDN.
+Retain `fla-core==0.5.1` for the kernel dependency. ModelOpt registers no FLA
+model-layer adapters; Megatron or Bridge may still install the full
+`flash-linear-attention` package as their dependency. Use mutually compatible
+Bridge/Core revisions: Bridge's pinned Core revision may differ from the KDA
+`dev` revision. Native Megatron KDA training does not require Bridge.
 
 ```bash
 pip install -r examples/llm_qat/linear_attention/requirements.txt
-python examples/llm_qat/linear_attention/train.py \
-  --model /path/to/local-kda-model \
+torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train.py \
+  --model /path/to/local-model \
   --train-data /path/to/train.parquet \
-  --output /path/to/qat-checkpoint \
+  --output /path/to/megatron-qat-checkpoint \
   --train-steps 1 --length 128 --prefill-tokens 64
 ```
 
-Use a local model/tokenizer snapshot containing FLA `KimiDeltaAttention` layers,
-a Parquet file with a `text` column, and a CUDA GPU. The example requires
-`fla-core==0.5.1` and `flash-linear-attention==0.5.1`. If the local model requires
-custom Python code, review it and explicitly pass `--trust-remote-code`.
+Use a local HF model/tokenizer snapshot that your installed Megatron Bridge can
+convert to a Megatron model containing GDN or KDA layers, a Parquet file with a
+`text` column, and one CUDA GPU. Bridge's architecture/checkpoint conversion
+support is a separate requirement from ModelOpt's layer adapter; an arbitrary
+FLA model checkpoint cannot be loaded through this example. For a model already
+built in Megatron, use the training-loop integration below. If the local model
+requires custom Python code, explicitly pass `--trust-remote-code`.
 
-The default [INT8 configuration](configs/kda_decode_state_int8.json) leaves the
-64-token prefix state unquantized and applies INT8 QDQ in a 32-value Hadamard
-basis during the decode suffix. Value dimensions must be divisible by 32.
-Loss uses suffix labels. Only KDA attention parameters are trained, in FP32 under
-BF16 autocast; other parameters are frozen in BF16. The output contains model
-weights, tokenizer files, and ModelOpt quantizer/policy state. Call
-`mto.enable_huggingface_checkpointing()` before reloading it with
-`AutoModelForCausalLM.from_pretrained` to restore those quantizers and policies.
-It is a floating fake-quantized training checkpoint, not a compressed serving model.
-This short example does not measure model-quality recovery or performance.
+The shared [INT8 configuration](configs/decode_state_int8.json) enables GDN and
+KDA state quantizers. It leaves the 64-token prefix state unquantized and applies
+INT8 QDQ in a 32-value Hadamard basis during the decode suffix. Value dimensions
+must be divisible by 32. Only linear-attention parameters are trained, in FP32
+under BF16 autocast; other parameters are frozen in BF16. Megatron receives
+shifted next-token labels; loss is averaged over suffix positions.
+
+The output is a Megatron model checkpoint containing ModelOpt quantizers and
+execution policies, without optimizer state. Reload it through
+[the Megatron Bridge workflow](../../megatron_bridge/README.md), preserving
+ModelOpt state. Export to a supported serving model separately. The current vLLM
+state-only plugin accepts its own boundary-QDQ recipe; it does not implement
+the Hadamard or replay training policies.
+
+This one-GPU example demonstrates the integration. Distributed training needs a
+Megatron training schedule, gradient synchronization, and a compatible exporter.
+Context parallelism is currently unsupported by these ModelOpt adapters.
+This example does not measure model-quality recovery or performance.
 
 ## Enable state quantization
 
@@ -67,9 +90,9 @@ must be supplied again for each workload.
 
 ### Load a state recipe
 
-State quantizers start disabled. The state recipe enables `*kda_state_quantizer`
+State quantizers start disabled. The shared state recipe enables `*gdn_state_quantizer` and `*kda_state_quantizer`
 with signed narrow-range INT8, dynamic scales, and `axis=(0, 1)`. Use
-`*gdn_state_quantizer` for GDN. For E4M3, set the quantizer config to
+`*gdn_state_quantizer` or `*kda_state_quantizer` to select just one layer type. For E4M3, set the quantizer config to
 `{"num_bits": [4, 3], "type": "dynamic", "axis": [0, 1]}` and set
 `decode.state_codec="tile"`.
 Setting `prefill_state_qdq=True` alone does not enable a quantizer.
@@ -82,7 +105,7 @@ import json
 from pathlib import Path
 
 recipe = json.loads(
-    Path("examples/llm_qat/linear_attention/configs/kda_decode_state_int8.json").read_text()
+    Path("examples/llm_qat/linear_attention/configs/decode_state_int8.json").read_text()
 )
 policy = recipe["linear_attention"][0]["cfg"]
 decode = policy["decode"]
@@ -212,9 +235,9 @@ It requires `prefill_state_qdq=False`; use the tile codec to quantize prefix sta
 Save a modified recipe as JSON and pass it to `train.py --quant-config`. `--prefill-tokens` sets the phase split; it does not enable state
 quantization. The integration loop below applies the configured `recipe` directly.
 
-### GDN chunk-only FLA training
+### Megatron GDN with chunk-only FLA kernels
 
-For GDN's existing chunked FLA path, enable the GDN state quantizer and omit the
+For Megatron GDN's existing chunked FLA kernel path, enable the GDN state quantizer and omit the
 `linear_attention` execution-policy entry:
 
 ```python
@@ -255,16 +278,23 @@ model.train()
 optimizer.zero_grad(set_to_none=True)
 
 # Two 128-token sequences: 64 and 96 prefill tokens, respectively.
-# ids and labels have shape [2, 128] and are on the model's device.
+# ids and shifted next-token labels have shape [2, 128].
+# model is a Megatron model.
+positions = torch.arange(128, device=ids.device).expand_as(ids)
 with linear_attention_training_phase(model, [64, 96]):
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        loss = model(input_ids=ids, labels=labels, use_cache=False).loss
+        losses = model(
+            input_ids=ids, position_ids=positions, attention_mask=None, labels=labels
+        )
+        mask = torch.arange(128, device=ids.device)[None, :] >= torch.tensor(
+            [64, 96], device=ids.device
+        )[:, None]
+        loss = (losses * mask).sum() / mask.sum()
     loss.backward()
 optimizer.step()
 ```
 
-For GDN, select `*gdn_state_quantizer` in the recipe instead of
-`*kda_state_quantizer`. State quantization is dynamic, so these recipes use
+The shared recipe selects both GDN and KDA state quantizers. State quantization is dynamic, so these recipes use
 `algorithm=None` without a calibration pass. Replay factors have their own FP8
 toggle.
 
@@ -298,7 +328,7 @@ token writes, and replay refreshes. The decode recurrence runs token by token in
 Python, so long training suffixes can be slow.
 
 Prefill prefixes use exact chunk algebra with optional state QDQ. This example
-has no prefill GEMM QDQ or approximate inverse. FLA KDA requires `use_cache=False`;
-serving cache objects are rejected. ModelOpt saves execution policies, while
+has no prefill GEMM QDQ or approximate inverse. Use the Megatron training forward
+without a serving inference context. ModelOpt saves execution policies, while
 per-batch prefix lengths must be supplied again during training. Distributed
 decode training and model-quality recovery require separate qualification.

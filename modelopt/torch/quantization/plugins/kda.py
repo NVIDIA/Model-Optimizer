@@ -13,62 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT integration for the optional FLA KimiDeltaAttention layer."""
+"""Kernel routing for Megatron Kimi Delta Attention quantization."""
 
-import importlib.metadata
-import inspect
-from functools import lru_cache
-from types import FunctionType
+from functools import partial
 
 from ..linear_attention.kda import matmul_kda
-from ..nn import QuantModuleRegistry
-from .custom import CUSTOM_MODEL_PLUGINS
 from .linear_attention import _LinearAttentionQuantMixin
 
-__all__ = []
+__all__ = ["KimiDeltaAttentionStateQuantMixin"]
 
 
-@lru_cache(maxsize=8)
-def _forward_signature(function):
-    return inspect.signature(function)
+class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
+    """Adds state quantizers and decode-aware kernel routing to Kimi Delta Attention."""
 
-
-class _QuantKimiDeltaAttention(_LinearAttentionQuantMixin):
     linear_attention_quantizer_names = ("kda_state_quantizer", "kda_w_quantizer")
 
     def validate_linear_attention(self):
+        """Require the materialized backend for KDA numerical emulation."""
         super().validate_linear_attention()
         if self.linear_attention_is_enabled and self.linear_attention_config.backend != "matmul":
             raise ValueError("KDA numerical emulation requires backend='matmul'")
 
-    def forward(self, *args, **kwargs):
+    def _state_quantized_chunk_kda(self, kernel, *args, **kwargs):
         self.validate_linear_attention()
         if not self.linear_attention_is_enabled:
-            return super().forward(*args, **kwargs)
-        original = super().forward.__func__
-        if self.linear_attention_config.decode is not None:
-            arguments = _forward_signature(original).bind(self, *args, **kwargs).arguments
-            if arguments.get("use_cache", False) or arguments.get("past_key_values") is not None:
-                raise NotImplementedError(
-                    "Decode-aware QAT requires use_cache=False; use explicit numerical carry for continuation"
-                )
-        # Bind this invocation so copied modules cannot retain another module's quantizers.
-        namespace = {
-            **original.__globals__,
-            "chunk_kda": self._quantized_chunk,
-            "fused_recurrent_kda": self._unsupported_recurrent,
-        }
-        forward = FunctionType(
-            original.__code__,
-            namespace,
-            original.__name__,
-            original.__defaults__,
-            original.__closure__,
-        )
-        forward.__kwdefaults__ = original.__kwdefaults__
-        return forward(self, *args, **kwargs)
+            return kernel(*args, **kwargs)
+        # FLA kernels are an optional dependency; the training layer belongs to Megatron.
+        from fla.ops.kda import chunk_kda
 
-    def _quantized_chunk(self, *args, **kwargs):
+        while isinstance(kernel, partial):
+            args = (*kernel.args, *args)
+            kwargs = {**kernel.keywords, **kwargs}
+            kernel = kernel.func
+        if kernel is not chunk_kda:
+            raise NotImplementedError("KDA quantization requires FLA's chunk_kda callable")
         return matmul_kda(
             *args,
             policy=self.linear_attention_config,
@@ -77,27 +55,3 @@ class _QuantKimiDeltaAttention(_LinearAttentionQuantMixin):
             prefill_lengths=self._linear_attention_prefill_lengths,
             **kwargs,
         )
-
-    def _unsupported_recurrent(self, *args, **kwargs):
-        if self.linear_attention_config.decode is not None:
-            return self._quantized_chunk(*args, **kwargs)
-        raise NotImplementedError(
-            "KDA prefill QAT requires the chunk path; recurrent decode is not yet supported"
-        )
-
-
-def _register_fla_kda(model):
-    for module in model.modules():
-        cls = type(module)
-        if cls.__module__ != "fla.layers.kda" or cls.__name__ != "KimiDeltaAttention":
-            continue
-        if cls in QuantModuleRegistry:
-            continue
-        if importlib.metadata.version("flash-linear-attention") != "0.5.1":
-            raise RuntimeError("KDA QAT is qualified with flash-linear-attention==0.5.1")
-        if importlib.metadata.version("fla-core") != "0.5.1":
-            raise RuntimeError("KDA QAT requires fla-core==0.5.1")
-        QuantModuleRegistry.register({cls: "fla_KimiDeltaAttention"})(_QuantKimiDeltaAttention)
-
-
-CUSTOM_MODEL_PLUGINS.add(_register_fla_kda)

@@ -71,6 +71,8 @@ from ..utils import sync_moe_expert_amax
 from ..utils.layerwise_calib import LayerActivationCollector
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 from .gdn import GatedDeltaNetStateQuantMixin
+from .kda import KimiDeltaAttentionStateQuantMixin
+from .linear_attention import _LinearAttentionQuantMixin
 from .transformer_engine import _QuantTEGroupedLinear, _QuantTELayerNormLinear, _QuantTELinear
 
 try:
@@ -86,6 +88,13 @@ try:
     HAS_GDN = True
 except ImportError:
     HAS_GDN = False
+
+try:
+    from megatron.core.ssm.gated_delta_net import KimiDeltaAttention
+
+    HAS_KDA = True
+except ImportError:
+    HAS_KDA = False
 
 
 __all__ = []
@@ -1106,16 +1115,61 @@ if HAS_DSA:
             quant_module_set_extra_state(self, state)
 
 
+class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
+    """Wrap the kernel call in both direct and recomputed Megatron forwards."""
+
+    def _setup(self):
+        super()._setup()
+        try:
+            data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+        except AssertionError:
+            data_parallel_group = get_data_parallel_group()
+        self.parallel_state = ParallelState(
+            data_parallel_group,
+            mcore_parallel.get_tensor_model_parallel_group(),
+        )
+
+    @contextmanager
+    def _quantized_linear_attention_kernel(self):
+        kernel = self.gated_delta_rule
+        self.gated_delta_rule = partial(self._linear_attention_kernel, kernel)
+        try:
+            yield
+        finally:
+            self.gated_delta_rule = kernel
+
+    def forward(self, *args, **kwargs):
+        # Newer Megatron versions recompute the core independently during backward.
+        if hasattr(super(), "_forward_compute") or hasattr(
+            super(), "forward_pre_attn_and_core_attn"
+        ):
+            return super().forward(*args, **kwargs)
+        with self._quantized_linear_attention_kernel():
+            return super().forward(*args, **kwargs)
+
+    def _forward_compute(self, *args, **kwargs):
+        with self._quantized_linear_attention_kernel():
+            return super()._forward_compute(*args, **kwargs)
+
+    def forward_pre_attn_and_core_attn(self, *args, **kwargs):
+        with self._quantized_linear_attention_kernel():
+            return super().forward_pre_attn_and_core_attn(*args, **kwargs)
+
+    def validate_linear_attention(self):
+        super().validate_linear_attention()
+        if self.config.context_parallel_size > 1 and self.linear_attention_is_enabled:
+            raise NotImplementedError("GDN/KDA QAT does not support Megatron context parallelism.")
+
+
 if HAS_GDN:
 
     @QuantModuleRegistry.register({GatedDeltaNet: "megatron_GatedDeltaNet"})
-    class _QuantGatedDeltaNet(GatedDeltaNetStateQuantMixin):
-        """GatedDeltaNet with fake quantization of the recurrent state at kernel chunk boundaries.
+    class _QuantGatedDeltaNet(_MegatronLinearAttentionMixin, GatedDeltaNetStateQuantMixin):
+        """Megatron GDN with chunk or decode-aware state fake quantization."""
 
-        Routes ``self.gated_delta_rule`` through state/W QDQ from both Megatron's direct
-        forward and older split-forward layouts. The older dynamic-batching inference
-        paths (``ssm_prefill`` / ``ssm_decode``) are left untouched.
-        """
+        _linear_attention_kernel = (
+            GatedDeltaNetStateQuantMixin._state_quantized_chunk_gated_delta_rule
+        )
 
         # Class-level overrides so torch routes the quantizer state through ``_extra_state``
         # (GatedDeltaNet has none); see _QuantDSAttention.
@@ -1125,42 +1179,16 @@ if HAS_GDN:
         def set_extra_state(self, state):
             quant_module_set_extra_state(self, state)
 
-        def _setup(self):
-            super()._setup()
-            try:
-                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
-            except AssertionError:
-                data_parallel_group = get_data_parallel_group()
-            self.parallel_state = ParallelState(
-                data_parallel_group,
-                mcore_parallel.get_tensor_model_parallel_group(),
-            )
 
-        @contextmanager
-        def _quantized_gdn_kernel(self):
-            gated_delta_rule = self.gated_delta_rule
-            self.gated_delta_rule = partial(
-                self._state_quantized_chunk_gated_delta_rule, gated_delta_rule
-            )
-            try:
-                yield
-            finally:
-                self.gated_delta_rule = gated_delta_rule
+if HAS_KDA:
 
-        def forward(self, *args, **kwargs):
-            if hasattr(GatedDeltaNet, "forward_pre_attn_and_core_attn"):
-                return super().forward(*args, **kwargs)
-            with self._quantized_gdn_kernel():
-                return super().forward(*args, **kwargs)
+    @QuantModuleRegistry.register({KimiDeltaAttention: "megatron_KimiDeltaAttention"})
+    class _QuantKimiDeltaAttention(
+        _MegatronLinearAttentionMixin, KimiDeltaAttentionStateQuantMixin
+    ):
+        """Megatron KDA with decode-aware state fake quantization."""
 
-        def forward_pre_attn_and_core_attn(self, *args, **kwargs):
-            with self._quantized_gdn_kernel():
-                return super().forward_pre_attn_and_core_attn(*args, **kwargs)
-
-        def validate_linear_attention(self):
-            super().validate_linear_attention()
-            if self.config.context_parallel_size > 1 and self.linear_attention_is_enabled:
-                raise NotImplementedError("GDN QAT does not support Megatron context parallelism.")
+        _linear_attention_kernel = KimiDeltaAttentionStateQuantMixin._state_quantized_chunk_kda
 
 
 def _is_supported_megatron_model(model: torch.nn.Module) -> bool:

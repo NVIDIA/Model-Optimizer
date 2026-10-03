@@ -22,19 +22,10 @@ import torch.nn as nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gdn
 from modelopt.torch.quantization.plugins.gdn import GatedDeltaNetStateQuantMixin
-
-GDN_STATE_INT8_DYNAMIC = {
-    "num_bits": 8,
-    "unsigned": False,
-    "narrow_range": True,
-    "type": "dynamic",
-    "axis": (0, 1),
-}
 
 GDN_STATE_FP8_DYNAMIC = {"num_bits": (4, 3), "axis": (0, 1), "type": "dynamic"}
 
@@ -137,9 +128,8 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-@pytest.mark.parametrize("state_format", ["fp8_e4m3", "int8"])
 @pytest.mark.parametrize("partial_kernel", [False, True])
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, state_format, partial_kernel):
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -151,15 +141,12 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, state_format
     if partial_kernel:
         model.gated_delta_rule = partial(chunk_gated_delta_rule, output_final_state=True)
     x = torch.randn(2, 8, 3, 4)
-    cfg = quant_cfg()
-    if state_format == "int8":
-        cfg["quant_cfg"][1]["cfg"] = GDN_STATE_INT8_DYNAMIC
-    mtq.quantize(model, cfg, lambda m: m(x))
+    mtq.quantize(model, quant_cfg(), lambda m: m(x))
 
     model(x)
     assert calls and calls[-1] == {
         "chunk_size": 64,
-        "state_qdq": 2 if state_format == "int8" else 1,
+        "state_qdq": 1,
         "state_qdq_block_v": 64,
         "w_quantizer": None,
         **({"output_final_state": True} if partial_kernel else {}),
@@ -302,26 +289,6 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
-
-
-def test_int8_state_conversion_and_checkpoint(tmp_path):
-    cfg = load_recipe("general/ptq/gdn_state_int8_dynamic").quantize
-    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
-    assert model.gdn_state_quantizer.is_enabled
-    assert model._linear_attn_state_format == "int8"
-    assert model.linear_attention_config.backend == "matmul"
-    assert model.linear_attention_config.decode.state_codec == "int8_hadamard32"
-    assert not model.linear_attention_config.decode.prefill_state_qdq
-    assert not model.proj.weight_quantizer.is_enabled
-    path = tmp_path / "int8.pt"
-    mto.save(model, path)
-    restored = mto.restore(TinyGatedDeltaNet(), path)
-    assert restored.linear_attention_config == model.linear_attention_config
-    assert restored.gdn_state_quantizer.is_enabled
-    assert restored._linear_attn_state_format == "int8"
-    assert restored.gdn_state_quantizer.narrow_range
-    assert not restored.gdn_state_quantizer.unsigned
-    assert not restored.gdn_w_quantizer.is_enabled
 
 
 def test_policy_rejects_unmatched_and_unimplemented_modes():

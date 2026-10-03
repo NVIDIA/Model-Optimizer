@@ -55,7 +55,7 @@ def matmul_kda(
 ):
     """Normalize KDA inputs and run exact prefix plus configured suffix recurrence.
 
-    Gates use the loaded FLA model's activation formula and per-key log retention.
+    Gates follow FLA's kernel activation formula and per-key log retention.
     """
     if policy.backend != "matmul" or chunk_size != policy.chunk_size:
         raise ValueError("matmul_kda requires backend='matmul' and its configured chunk size")
