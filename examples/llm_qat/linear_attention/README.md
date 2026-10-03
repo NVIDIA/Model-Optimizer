@@ -38,9 +38,32 @@ The teacher stays frozen and unquantized. QAT uses next-token cross-entropy;
 QAD uses Bridge's logits distillation loss with the language-model loss disabled.
 Both losses are masked to the suffix after `--prefill-tokens`.
 
+For multiple GPUs, use the same `--tp_size`, `--pp_size`, and `--ep_size` options
+as [the Megatron Bridge example](../../megatron_bridge/distill.py). Bridge builds
+the process groups, schedules forward/backward, and manages the distributed optimizer.
+For example, run QAD with two-way tensor parallelism:
+
+```bash
+torchrun --standalone --nproc-per-node=2 examples/llm_qat/linear_attention/train.py \
+  --model /path/to/local-model \
+  --teacher-model /path/to/unquantized-model \
+  --train-data /path/to/tokenized/train_text_document \
+  --output /path/to/megatron-qad-checkpoint \
+  --tp_size 2 --pp_size 1 --ep_size 1 \
+  --global-batch-size 2 --train-steps 1 --length 128 --prefill-tokens 64
+```
+
+Student and teacher use the same topology. Sequence parallelism is enabled with
+TP greater than one. With TP/PP/EP all set to one, additional ranks use data
+parallelism; the model weights remain replicated on each GPU. The global batch
+size must be divisible by the data-parallel size (microbatch size is one).
+Choose a topology supported by the model's Bridge/Core implementation. This example
+currently requires linear-attention layers on every pipeline stage. Context
+parallelism stays fixed at one; GDN/KDA state QAT does not yet support CP.
+
 Use a local HF model/tokenizer snapshot that your installed Megatron Bridge can
 convert to a Megatron model containing GDN or KDA layers, a tokenized Megatron
-`.bin`/`.idx` dataset pair, and one CUDA GPU. `--train-data` is the shared filename
+`.bin`/`.idx` dataset pair, and CUDA GPUs. `--train-data` is the shared filename
 prefix without either extension; use the model's tokenizer when
 [preparing the data](../../megatron_bridge/README.md#data-preparation).
 Bridge's architecture/checkpoint conversion support is a separate requirement
@@ -54,22 +77,22 @@ KDA state quantizers. It leaves the 64-token prefix state unquantized and applie
 INT8 QDQ in a 32-value Hadamard basis during the decode suffix. Value dimensions
 must be divisible by 32. Only linear-attention parameters are trained, using
 Bridge's BF16 mixed precision and optimizer; other model parameters are frozen.
-Every dense sequence has the same fixed prefill boundary. The example retains
-the phase context throughout training so backward recomputation sees that boundary.
+Every dense sequence has the same fixed prefill boundary. The example attaches
+the phase context to local linear-attention layers on each rank and retains it
+throughout training so backward recomputation sees that boundary.
 Packed sequences and variable per-sequence boundaries require their own batch integration.
 
 Bridge saves model weights, optimizer/scheduler state, and ModelOpt state under
 `<output>/checkpoints`. Reusing `--output` resumes from its latest checkpoint;
 increase `--train-steps` to the desired total step count and retain the same model,
-teacher, dataset, and prefill boundary. A resumed checkpoint supplies the saved
+teacher, topology, dataset, and prefill boundary. A resumed checkpoint supplies the saved
 quantization policy. `--global-batch-size` controls accumulation with microbatch size one.
 Export to a supported serving model separately. The current vLLM
 state-only plugin accepts its own boundary-QDQ recipe; it does not implement
 the Hadamard or replay training policies.
 
-This one-GPU example demonstrates integration with Bridge's existing training
-workflows; distributed execution needs separate qualification. Context parallelism
-is currently unsupported by these ModelOpt adapters. The Hugging Face
+This example uses Bridge's existing training workflows with state quantization.
+The Hugging Face
 `QATTrainer`/`QADTrainer` example in [the parent directory](../README.md#using-qattrainer-and-qadtrainer)
 targets a different training framework. This example does not measure model-quality
 recovery or performance.

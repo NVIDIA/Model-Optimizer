@@ -20,6 +20,7 @@ import pytest
 import torch
 from _test_utils.examples.megatron_example_runner import reset_megatron_global_state
 from _test_utils.examples.run_command import MODELOPT_ROOT
+from _test_utils.torch.distributed.utils import DistributedWorkerPool
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -44,7 +45,7 @@ run_training = runpy.run_path(str(MODELOPT_ROOT / "examples/llm_qat/linear_atten
 ]
 
 
-def _train(tmp_path, qad, recipe, train_steps=1):
+def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
     captured = {}
 
     def provider(name):
@@ -55,6 +56,8 @@ def _train(tmp_path, qad, recipe, train_steps=1):
             num_attention_heads=2,
             hybrid_layer_pattern="G",
             vocab_size=128,
+            tensor_model_parallel_size=tp_size,
+            sequence_parallel=tp_size > 1,
             seq_length=16,
             linear_num_key_heads=2,
             linear_num_value_heads=2,
@@ -97,7 +100,9 @@ def _train(tmp_path, qad, recipe, train_steps=1):
         model=provider("student"),
         train=TrainingConfig(train_iters=train_steps, global_batch_size=2, micro_batch_size=1),
         validation=ValidationConfig(eval_iters=0, eval_interval=1),
-        optimizer=OptimizerConfig(optimizer="adam", lr=1e-2, min_lr=0, weight_decay=0),
+        optimizer=OptimizerConfig(
+            optimizer="adam", lr=1e-2, min_lr=0, weight_decay=0, use_distributed_optimizer=True
+        ),
         scheduler=SchedulerConfig(
             lr_decay_style="constant",
             lr_warmup_iters=0,
@@ -105,7 +110,9 @@ def _train(tmp_path, qad, recipe, train_steps=1):
             end_weight_decay=0,
             use_checkpoint_opt_param_scheduler=True,
         ),
-        ddp=DistributedDataParallelConfig(average_in_collective=False),
+        ddp=DistributedDataParallelConfig(
+            average_in_collective=False, use_distributed_optimizer=True
+        ),
         dataset=MockGPTDatasetConfig(
             seq_length=16,
             random_seed=123,
@@ -127,24 +134,43 @@ def _train(tmp_path, qad, recipe, train_steps=1):
     return captured, checkpoint
 
 
+def _reset_worker(rank, world_size):
+    reset_megatron_global_state()
+
+
+def _warmup(rank, world_size, path, recipe):
+    _train(path / "dp", False, recipe)
+    reset_megatron_global_state()
+    _train(path / "tp", True, recipe, tp_size=world_size)
+
+
 @pytest.fixture(scope="module")
-def compiled_state_training(tmp_path_factory, project_root_path):
-    """Compile one small GDN shape before timing the QAT/QAD integration tests."""
+def compiled_state_training(tmp_path_factory, project_root_path, num_gpus):
+    """Warm up at most two ranks before timing the DP QAT / TP QAD tests."""
+    if not num_gpus:
+        pytest.skip("Requires CUDA")
     recipe = json.loads(
         (
             project_root_path / "examples/llm_qat/linear_attention/configs/decode_state_int8.json"
         ).read_text()
     )
+    workers = DistributedWorkerPool(min(num_gpus, 2), teardown_fn=_reset_worker)
     try:
-        _train(tmp_path_factory.mktemp("compile_state_training"), True, recipe)
+        workers.run(_warmup, tmp_path_factory.mktemp("compile_state_training"), recipe)
+        yield workers, recipe
     finally:
-        reset_megatron_global_state()
-    return recipe
+        workers.shutdown()
 
 
 @pytest.mark.parametrize("qad", [False, True], ids=["qat", "qad"])
 def test_state_training(compiled_state_training, tmp_path, qad):
-    captured, checkpoint = _train(tmp_path, qad, compiled_state_training)
+    workers, recipe = compiled_state_training
+    workers.run(_check_training, tmp_path, qad, recipe)
+
+
+def _check_training(rank, world_size, tmp_path, qad, recipe):
+    tp_size = world_size if qad else 1
+    captured, checkpoint = _train(tmp_path, qad, recipe, tp_size=tp_size)
     student = captured["student"]
     assert has_modelopt_state(checkpoint)
     assert is_quantized(student)
@@ -177,7 +203,7 @@ def test_state_training(compiled_state_training, tmp_path, qad):
         }
         reset_megatron_global_state()
         # An empty recipe verifies that resume restores the saved quantization policy.
-        resumed, _ = _train(tmp_path, True, {}, train_steps=2)
+        resumed, _ = _train(tmp_path, True, {}, train_steps=2, tp_size=tp_size)
         assert has_modelopt_state(str(tmp_path / "checkpoints/iter_0000002"))
         assert is_quantized(resumed["student"])
         assert not is_quantized(resumed["teacher"])

@@ -17,10 +17,10 @@
 
 import argparse
 import json
-import os
 from contextlib import ExitStack
 from pathlib import Path
 
+import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.training.config import (
@@ -67,44 +67,49 @@ def run_training(config, quant_config, prefill_tokens, teacher_provider=None):
             # Restore the saved policy before quantization and before the QAD conversion hook.
             if resume:
                 load_modelopt_state(models, config.checkpoint.load)
-            student = unwrap_model(models[0])
             layer_types = (gated_delta_net.GatedDeltaNet,)
             if hasattr(gated_delta_net, "KimiDeltaAttention"):
                 layer_types += (gated_delta_net.KimiDeltaAttention,)
-            layers = [m for m in student.modules() if isinstance(m, layer_types)]
-            if not layers:
-                raise ValueError(
-                    "The model must contain Megatron GatedDeltaNet or KimiDeltaAttention"
-                )
-            student.requires_grad_(False)
-            for layer in layers:
-                layer.requires_grad_(True)
-            if config.model.recompute_granularity == "full":
+            for student in unwrap_model(models):
+                layers = [m for m in student.modules() if isinstance(m, layer_types)]
+                if not layers:
+                    raise ValueError(
+                        "Each local model chunk must contain Megatron GatedDeltaNet or "
+                        "KimiDeltaAttention; choose a pipeline layout with linear attention on every stage"
+                    )
+                student.requires_grad_(False)
+                for layer in layers:
+                    layer.requires_grad_(True)
+                if config.model.recompute_granularity == "full":
 
-                def require_input_grad(module, args, output):
-                    return output.requires_grad_(True) if module.training else output
+                    def require_input_grad(module, args, output):
+                        return output.requires_grad_(True) if module.training else output
 
-                # Reentrant checkpointing needs a differentiable input even with frozen embeddings.
-                for module in student.modules():
-                    if isinstance(module, LanguageModelEmbedding):
-                        handle = module.register_forward_hook(require_input_grad)
-                        phases.callback(handle.remove)
-            if not is_quantized(student):
-                mtq.quantize(student, quant_config)
-            # Every dense microbatch uses the same boundary; retain it through recomputed backward.
-            phases.enter_context(
-                linear_attention_training_phase(
-                    student, [prefill_tokens] * config.train.micro_batch_size
+                    # Reentrant checkpointing needs a differentiable input with frozen embeddings.
+                    for module in student.modules():
+                        if isinstance(module, LanguageModelEmbedding):
+                            handle = module.register_forward_hook(require_input_grad)
+                            phases.callback(handle.remove)
+                if not is_quantized(student):
+                    mtq.quantize(student, quant_config)
+                phases.enter_context(
+                    linear_attention_training_phase(
+                        student, [prefill_tokens] * config.train.micro_batch_size
+                    )
                 )
-            )
             return models
 
-        def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
+        def masked_batch(data_iterator):
             batch = dict(next(data_iterator))
             batch["loss_mask"] = batch["loss_mask"].clone()
             batch["loss_mask"][..., :prefill_tokens] = 0
-            # Bridge applies this same mask to the language-model and distillation losses.
-            return forward_step_modelopt(state, iter([batch]), model, return_schedule_plan)
+            yield batch
+
+        def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
+            # Consume lazily: middle pipeline stages may not need any batch tensors.
+            return forward_step_modelopt(
+                state, masked_batch(data_iterator), model, return_schedule_plan
+            )
 
         config.model.register_pre_wrap_hook(prepare_student)
         if teacher_provider is not None:
@@ -117,15 +122,16 @@ def run_training(config, quant_config, prefill_tokens, teacher_provider=None):
 
 
 def model_provider(path, options, *, load_weights=True):
-    """Build a single-GPU Megatron provider using the model's Bridge converter."""
+    """Build a Megatron provider with the same topology options as the Bridge example."""
     bridge = AutoBridge.from_hf_pretrained(str(path), trust_remote_code=options.trust_remote_code)
     provider = bridge.to_megatron_provider(load_weights=load_weights)
-    provider.tensor_model_parallel_size = 1
-    provider.pipeline_model_parallel_size = 1
+    provider.tensor_model_parallel_size = options.tp_size
+    provider.pipeline_model_parallel_size = options.pp_size
+    provider.pipeline_dtype = torch.bfloat16
     provider.context_parallel_size = 1
-    provider.expert_model_parallel_size = 1
+    provider.expert_model_parallel_size = options.ep_size
     provider.expert_tensor_parallel_size = 1
-    provider.sequence_parallel = False
+    provider.sequence_parallel = options.tp_size > 1
     provider.gradient_accumulation_fusion = False
     provider.calculate_per_token_loss = True
     provider.seq_length = options.length
@@ -156,6 +162,9 @@ def main():
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--global-batch-size", type=int, default=1)
+    parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     options = parser.parse_args()
     if options.train_steps < 1 or options.length < 2:
         parser.error("train-steps must be positive and length must be at least two")
@@ -163,10 +172,8 @@ def main():
         parser.error("prefill-tokens must leave at least one suffix label")
     if options.global_batch_size < 1:
         parser.error("global-batch-size must be positive")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-        parser.error(
-            "This example uses one GPU; use a Megatron training schedule for multiple GPUs"
-        )
+    if min(options.tp_size, options.pp_size, options.ep_size) < 1:
+        parser.error("Parallel sizes must be positive")
     if any(not Path(f"{options.train_data}.{suffix}").is_file() for suffix in ("bin", "idx")):
         parser.error("train-data must name an existing Megatron .bin/.idx dataset prefix")
 
@@ -201,7 +208,12 @@ def main():
         ),
         validation=ValidationConfig(eval_iters=0, eval_interval=options.train_steps),
         optimizer=OptimizerConfig(
-            optimizer="adam", lr=options.learning_rate, min_lr=0, weight_decay=0, clip_grad=1.0
+            optimizer="adam",
+            lr=options.learning_rate,
+            min_lr=0,
+            weight_decay=0,
+            clip_grad=1.0,
+            use_distributed_optimizer=True,
         ),
         scheduler=SchedulerConfig(
             lr_decay_style="constant",
@@ -210,7 +222,9 @@ def main():
             end_weight_decay=0,
             use_checkpoint_opt_param_scheduler=True,
         ),
-        ddp=DistributedDataParallelConfig(average_in_collective=False),
+        ddp=DistributedDataParallelConfig(
+            average_in_collective=False, use_distributed_optimizer=True
+        ),
         dataset=GPTDatasetConfig(
             seq_length=options.length,
             blend=([str(options.train_data)], None),
