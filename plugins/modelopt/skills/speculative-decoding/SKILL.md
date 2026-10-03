@@ -59,11 +59,16 @@ All recipes live in `modelopt_recipes/general/speculative_decoding/<algorithm>.y
 | DFlash | `references/algorithms/dflash.md` | Block diffusion |
 | DSpark | `references/algorithms/dspark.md` | DFlash backbone + Markov head + optional confidence head |
 | Domino | `references/algorithms/domino.md` | DFlash backbone + GRU causal correction head |
+| DFlash2 | `references/algorithms/dflash2.md` | DFlash backbone + sublayer convolutions + candidate selector |
+| LiLiCorr | `references/algorithms/lilicorr.md` | DFlash backbone + candidate-lattice reranker (covers `lilicorr_conv.yaml`) |
 
-DSpark and Domino are **DFlash variants**, not separate pipelines: same
+Everything below EAGLE3 is a **DFlash variant**, not a separate pipeline: same
 `recipe_type: speculative_dflash`, same training script, same `dflash.*` config
 namespace, selected by `dflash_architecture_config.projector_type`. Read
 `references/algorithms/dflash.md` first, then the variant's sheet for the delta.
+
+LiLiCorr ships two recipes — `lilicorr.yaml` and `lilicorr_conv.yaml`, the latter
+adding DFlash2's sublayer convolutions — but one sheet covers both.
 
 If the user's algorithm has no sheet yet, the stage procedures still apply — derive
 the missing values from an existing launcher example for that algorithm
