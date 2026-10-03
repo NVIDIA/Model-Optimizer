@@ -311,6 +311,23 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
     )
 
 
+def _translate_warmup_keys(config: dict, actions) -> None:
+    """Accept either warmup spelling across transformers versions.
+
+    transformers 5.15 removed ``warmup_ratio``; from 5.0, a ``warmup_steps`` below 1 is a ratio.
+    """
+    types = {a.dest: a.type for a in actions}
+    if "warmup_steps" not in types:
+        return
+    if "warmup_ratio" in config and "warmup_ratio" not in types:
+        ratio = config.pop("warmup_ratio")
+        config.setdefault("warmup_steps", ratio)
+    elif "warmup_ratio" in types and types["warmup_steps"] is int:
+        steps = config.get("warmup_steps")
+        if isinstance(steps, float) and 0 < steps < 1:
+            config["warmup_ratio"] = config.pop("warmup_steps")
+
+
 class ModelOptArgParser(HfArgumentParser):
     """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
 
@@ -347,6 +364,7 @@ class ModelOptArgParser(HfArgumentParser):
             with open(config_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             if config:
+                _translate_warmup_keys(config, self._actions)
                 known_by_parser = {a.dest for a in self._actions}
                 all_modelopt_fields = self._all_modelopt_fields()
                 applicable = {}

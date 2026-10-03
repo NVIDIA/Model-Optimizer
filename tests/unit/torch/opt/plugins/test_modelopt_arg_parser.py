@@ -35,6 +35,39 @@ class _TrainArgs(ModelOptHFArguments):
     epochs: int = field(default=3, metadata={"help": "Number of epochs."})
 
 
+class _NewWarmupArgs(ModelOptHFArguments):
+    """transformers >= 5.15: only ``warmup_steps`` (a float; below 1 it is a ratio)."""
+
+    warmup_steps: float = field(default=0)
+
+
+class _OldWarmupArgs(ModelOptHFArguments):
+    """transformers 4.x: an int ``warmup_steps`` plus ``warmup_ratio``."""
+
+    warmup_steps: int = field(default=0)
+    warmup_ratio: float = field(default=0.0)
+
+
+@pytest.mark.parametrize(
+    ("arg_type", "yaml", "expected"),
+    [
+        (_NewWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0.05}),
+        (_NewWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0.05}),
+        (_OldWarmupArgs, "warmup_steps: 0.05\n", {"warmup_steps": 0, "warmup_ratio": 0.05}),
+        (_OldWarmupArgs, "warmup_steps: 10\n", {"warmup_steps": 10, "warmup_ratio": 0.0}),
+        (_OldWarmupArgs, "warmup_ratio: 0.05\n", {"warmup_steps": 0, "warmup_ratio": 0.05}),
+    ],
+)
+def test_yaml_warmup_spelling_follows_transformers(tmp_path, arg_type, yaml, expected):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml)
+
+    (args,) = ModelOptArgParser((arg_type,)).parse_args_into_dataclasses(
+        args=["--config", str(config_file)]
+    )
+    assert {k: getattr(args, k) for k in expected} == expected
+
+
 class TestModelOptArgParser:
     """Tests for ModelOptArgParser --config and --generate_docs features."""
 
