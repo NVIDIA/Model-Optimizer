@@ -15,6 +15,7 @@
 
 """Lightweight fake base model for offline speculative decoding training."""
 
+import copy
 import json
 import os
 
@@ -33,6 +34,41 @@ from transformers import (
 )
 
 from .modeling_final_norm import _FINAL_NORM_CLASSES, _select_final_norm_type
+
+# Model types whose embedding layer scales its output by sqrt(hidden_size) inside
+# ``forward()`` rather than baking the factor into the stored weight. FakeBaseModel
+# rebuilds the embedding as a plain ``nn.Embedding`` and copies only the raw weight,
+# so that scaling is silently lost -- the draft then trains on inputs ~sqrt(H) times
+# smaller than the ones vLLM feeds it at serving time, and acceptance collapses with
+# no error anywhere. Measured on Gemma-4-E4B: serve/train noise_embedding ratio was
+# 50.5998 == sqrt(2560), and draft layer 0 diverged to cos 0.467.
+_SQRT_HIDDEN_EMBED_SCALE_MODEL_TYPES = {
+    "gemma",
+    "gemma2",
+    "gemma3",
+    "gemma3_text",
+    "gemma4",
+    "gemma4_text",
+}
+
+
+def _resolve_embed_scale(base_cfg) -> float:
+    """The multiplier the base model applies to its embedding lookup.
+
+    Prefers an explicit ``embed_scale`` on the config; otherwise falls back to
+    sqrt(hidden_size) for the model families known to scale in ``forward()``.
+    Returns 1.0 for everything else, which keeps Qwen/Llama-style bases bit-exact.
+    """
+    explicit = getattr(base_cfg, "embed_scale", None)
+    if explicit is not None:
+        return float(explicit)
+    model_type = str(getattr(base_cfg, "model_type", "") or "")
+    if model_type in _SQRT_HIDDEN_EMBED_SCALE_MODEL_TYPES:
+        hidden = getattr(base_cfg, "hidden_size", None)
+        if hidden:
+            return float(hidden) ** 0.5
+    return 1.0
+
 
 # Candidate module paths searched in order — shared with HFEagleModel._find_base_model_parts
 _EMBED_TOKENS_PATHS = [
@@ -72,6 +108,97 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
+def _resolve_rope_theta(base_cfg, attn_kind: str = "sliding_attention") -> float | None:
+    """Return the base model's RoPE theta, handling nested ``rope_parameters``.
+
+    Most models expose a flat ``rope_theta``. Gemma 4 instead nests per-attention-kind RoPE
+    settings under ``rope_parameters``, e.g.::
+
+        {
+            "full_attention": {
+                "rope_theta": 1e6,
+                "rope_type": "proportional",
+                "partial_rotary_factor": 0.25,
+            },
+            "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"},
+        }
+
+    A flat ``getattr(base_cfg, "rope_theta", None)`` returns ``None`` there, and the draft then
+    silently trains on the draft class's default theta instead of the base's — training loss and
+    accuracy still improve while MT-Bench AAL is capped, because RoPE frequencies get baked into
+    the trained weights.
+
+    ``attn_kind`` selects which entry to read; it must match the attention the DRAFT uses. The
+    default is ``sliding_attention`` because SWA drafts are the common case for Gemma 4, and its
+    ``rope_type`` is plain ``default`` (the ``full_attention`` entry uses ``proportional`` rope
+    with ``partial_rotary_factor``, which the draft classes do not implement).
+
+    Every other form -- a flat ``rope_theta``, or a single-kind ``rope_parameters`` dict -- goes
+    through the exporter's shared ``_get_rope_theta`` first, so the two keep agreeing on which
+    field wins when a config carries both. Only the nested per-kind form, which that reader does
+    not look into, is resolved here.
+    """
+    from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
+
+    theta = _get_rope_theta(base_cfg)
+    if theta is not None:
+        return theta
+    params = getattr(base_cfg, "rope_parameters", None)
+    if not isinstance(params, dict):
+        return None
+    entry = params.get(attn_kind)
+    if entry is None:
+        # Single-kind nested form, or an unknown kind name: fall back to the sole entry.
+        values = [v for v in params.values() if isinstance(v, dict) and "rope_theta" in v]
+        entry = values[0] if len(values) == 1 else None
+    return entry.get("rope_theta") if isinstance(entry, dict) else None
+
+
+def _resolve_rope_parameters(base_cfg) -> dict | None:
+    """Return the base model's nested per-attention-kind ``rope_parameters``, or ``None``.
+
+    ``_resolve_rope_theta`` collapses the nested form to a single scalar. That is enough for a
+    model whose RoPE is plain ``default`` rope over the whole head dim, but NOT for Gemma 4:
+    its ``full_attention`` entry also carries ``rope_type: "proportional"`` and
+    ``partial_rotary_factor: 0.25``, which rotate only the first quarter of the head dim and
+    leave the rest as NoPE (``inv_freq == 0``). Passing theta alone makes the draft rotate every
+    channel at default frequencies while the target rotates a quarter of them — a silent
+    train/serve mismatch of the same class as the dropped embedding scale.
+
+    Returned verbatim so the draft can build one rotary module per attention kind (see
+    ``DFlashModule._build_gemma4_rope_kinds``). Only the nested dict-of-dicts form is returned;
+    a flat ``{"rope_theta": ..., "rope_type": ...}`` is already covered by the scalar path and
+    would be rewritten by ``PretrainedConfig.standardize_rope_params()``.
+    """
+    params = getattr(base_cfg, "rope_parameters", None)
+    if not isinstance(params, dict):
+        return None
+    if not any(isinstance(v, dict) for v in params.values()):
+        return None
+    return copy.deepcopy(params)
+
+
+class _ScaledEmbedding(nn.Embedding):
+    """``nn.Embedding`` that scales its output, like Gemma's embedding layer.
+
+    Gemma-family bases multiply the embedding lookup by sqrt(hidden_size) inside
+    ``forward()``; the factor is NOT part of the stored weight. FakeBaseModel is
+    reconstructed from weights alone, so without this the factor is dropped and
+    the draft trains on inputs sqrt(H) times smaller than vLLM feeds it at serve
+    time. ``embed_scale=1.0`` makes this exactly ``nn.Embedding``.
+    """
+
+    def __init__(self, *args, embed_scale: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embed_scale = float(embed_scale)
+
+    def forward(self, input_ids):
+        out = super().forward(input_ids)
+        if self.embed_scale == 1.0:
+            return out
+        return out * torch.tensor(self.embed_scale, dtype=out.dtype, device=out.device)
+
+
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -91,7 +218,9 @@ class FakeBaseConfig(PretrainedConfig):
         intermediate_size=None,
         rms_norm_eps=1e-6,
         rope_theta=None,
+        rope_parameters=None,
         final_norm_type=None,
+        embed_scale=1.0,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
@@ -101,6 +230,10 @@ class FakeBaseConfig(PretrainedConfig):
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
         self.final_norm_type = final_norm_type
+        # Multiplier applied to the embedding lookup (sqrt(hidden_size) on Gemma-family
+        # bases, 1.0 elsewhere). Persisted so a reloaded checkpoint rebuilds the same
+        # scaling; see _resolve_embed_scale.
+        self.embed_scale = embed_scale
         self.num_hidden_layers = num_hidden_layers
         # Mirror the original base layer count. The non-fake offline path loads with
         # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
@@ -128,7 +261,13 @@ class FakeBaseConfig(PretrainedConfig):
         # to be well-formed -- the EAGLE draft config is built from this class too, and
         # rotary embeddings index rope_parameters["rope_type"] unconditionally.
         self.rope_theta = rope_theta
-        if rope_theta is not None:
+        # Nested per-attention-kind RoPE settings (Gemma 4), carrying rope_type and
+        # partial_rotary_factor, which the flat rope_theta above cannot express. Persisted so a
+        # reloaded fake base rebuilds identical draft rotary modules. Flat-rope models get the
+        # single-kind dict instead.
+        if rope_parameters is not None:
+            self.rope_parameters = rope_parameters
+        elif rope_theta is not None:
             self.rope_parameters = {"rope_theta": rope_theta, "rope_type": "default"}
         if isinstance(dtype, str):
             dtype = getattr(torch, dtype)
@@ -158,7 +297,12 @@ class FakeBaseModel(PreTrainedModel):
         self.model = nn.Module()
         self.model.layers = nn.ModuleList()
         self.model.dtype = config.dtype
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
+        self.embed_tokens = _ScaledEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            dtype=config.dtype,
+            embed_scale=getattr(config, "embed_scale", 1.0),
+        )
         self.lm_head = nn.Linear(
             config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
         )
@@ -184,8 +328,6 @@ class FakeBaseModel(PreTrainedModel):
                 local checkpoint; otherwise it is treated as a Hub repo ID and the required
                 files are downloaded via ``huggingface_hub``.
         """
-        from modelopt.torch.export.plugins.hf_spec_export import _get_rope_theta
-
         orig_config = transformers.AutoConfig.from_pretrained(
             source, trust_remote_code=trust_remote_code
         )
@@ -210,12 +352,14 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            # Shared with the exporter: where a config keeps rope_theta depends on the
-            # transformers version, and reading it wrong is silent until serve time.
-            rope_theta=_get_rope_theta(base_cfg),
+            # Shared with the exporter (via _resolve_rope_theta): where a config keeps rope_theta
+            # depends on the transformers version, and reading it wrong is silent until serve time.
+            rope_theta=_resolve_rope_theta(base_cfg),
+            rope_parameters=_resolve_rope_parameters(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
+            embed_scale=_resolve_embed_scale(base_cfg),
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.

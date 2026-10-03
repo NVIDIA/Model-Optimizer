@@ -41,6 +41,7 @@ Draft model components use Qwen3 (MLP, RMSNorm, RotaryEmbedding) from
 The draft architecture is independent of the target model.
 """
 
+import copy
 from dataclasses import dataclass
 
 import torch
@@ -196,6 +197,18 @@ class DFlashAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = getattr(config, "attention_dropout", 0.0)
+        # DFlash/DSpark drafts attend bidirectionally: a block of draft tokens is
+        # predicted in one shot, so those tokens must see each other. Serving must
+        # agree -- vLLM resolves per-layer causality in
+        # qwen3_dflash._dflash_layer_causal(): an explicit ``dflash_config.causal``
+        # overrides all layers, otherwise a layer is causal only when
+        # ``layer_types[i] == "sliding_attention"``. The exporter emits no
+        # ``causal`` field for a plain full-attention draft, so it stays non-causal
+        # on both sides. With ``dflash_swa_window_size`` set, the exporter instead
+        # emits ``use_swa: True`` + an explicit ``causal: False`` and leaves
+        # ``layer_types`` all-full, which keeps vLLM non-causal too. Only mark
+        # layers ``sliding_attention`` if you also intend them to be CAUSAL at
+        # serving time, and train them that way -- see _build_draft_attention_mask.
         self.is_causal = False
 
         attn_bias = getattr(config, "attention_bias", False)
@@ -271,6 +284,14 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
+
+    def _attend(self, q, k, v, attention_mask, bsz, q_len):
+        """Attend with the rotated Q/K and V, then project. Returns ``[B, q_len, hidden]``.
+
+        Shared by every draft attention class, so the sink path and the HF dispatch exist
+        once; a subclass only changes how Q/K/V are formed.
+        """
         if self.attention_sink_bias is not None:
             if self.sliding_window is not None:
                 # The eager sink path applies only the caller-supplied mask; a per-layer
@@ -296,8 +317,7 @@ class DFlashAttention(nn.Module):
                 scaling=self.scaling,
                 sliding_window=self.sliding_window,
             )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self.o_proj(attn_output.reshape(bsz, q_len, -1))
 
     def _sink_attention(self, q, k, v, attention_mask):
         """Attention with a learnable per-head sink logit.
@@ -323,6 +343,136 @@ class DFlashAttention(nn.Module):
             self.attention_dropout if self.training else 0.0,
             self.training,
         )
+
+
+class DFlashGemma4Attention(DFlashAttention):
+    """DFlash attention for a Gemma4-style draft.
+
+    Two deltas versus the Qwen3-style :class:`DFlashAttention`:
+
+    * ``attention_k_eq_v``: Gemma4 can derive V from the K projection instead of
+      carrying a separate ``v_proj``, halving the KV parameters. vLLM's
+      ``Gemma4DSparkAttention`` does exactly this (``v_src = k`` when
+      ``use_k_eq_v``), and its fused context-KV precompute *asserts* every draft
+      layer is built this way, so a draft trained with a separate ``v_proj``
+      cannot be served by that path at all.
+    * ``v_norm``: applied to V, with **no learnable weight**, mirroring vLLM's
+      ``RMSNorm(..., has_weight=False)``. Plain (Qwen3) DFlash does not norm V.
+
+    ``use_k_eq_v`` follows vLLM: full-attention layers only, and only when the
+    config opts in. Sliding layers keep their own ``v_proj``.
+    """
+
+    def __init__(self, config, layer_idx):
+        """Initialize Gemma4 draft attention with per-layer dims, dropping ``v_proj`` under k_eq_v."""
+        super().__init__(config, layer_idx)
+        layer_types = getattr(config, "layer_types", None)
+        is_full = layer_types is None or layer_types[layer_idx] == "full_attention"
+        self.use_k_eq_v = is_full and getattr(config, "attention_k_eq_v", False)
+
+        # Gemma4's attention dims are PER LAYER: full-attention layers use a larger
+        # ``global_head_dim`` and, under k_eq_v, a smaller ``num_global_key_value_heads``.
+        # This mirrors vLLM's ``gemma4_layer_config`` (transformers_utils/configs/gemma4.py),
+        # which Gemma4DSparkAttention calls to size q/k/o. Getting this wrong is silent:
+        # the DSpark weight loader only fills names it finds, so a mis-shaped k_proj is
+        # simply left randomly initialized.
+        if is_full:
+            self.head_dim = getattr(config, "global_head_dim", None) or self.head_dim
+            if self.use_k_eq_v:
+                self.num_kv_heads = (
+                    getattr(config, "num_global_key_value_heads", None) or self.num_kv_heads
+                )
+            self.num_key_value_groups = self.num_heads // self.num_kv_heads
+            attn_bias = getattr(config, "attention_bias", False)
+            self.q_proj = nn.Linear(
+                config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias
+            )
+            self.k_proj = nn.Linear(
+                config.hidden_size, self.num_kv_heads * self.head_dim, bias=attn_bias
+            )
+            self.o_proj = nn.Linear(
+                self.num_heads * self.head_dim, config.hidden_size, bias=attn_bias
+            )
+            self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+            self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+
+        # Gemma 4 puts no ``1/sqrt(head_dim)`` in attention: HF's
+        # ``Gemma4TextAttention.__init__`` sets ``self.scaling = 1.0`` and the config
+        # carries no ``query_pre_attn_scalar``, unlike Gemma2/3. The learnable per-dim
+        # weight of ``q_norm`` absorbs the scale instead. vLLM matches the reference --
+        # both ``gemma4.py`` and ``gemma4_mtp.py`` hardcode 1.0, and
+        # ``Gemma4DSparkAttention`` inherits the latter -- so a draft trained at
+        # ``head_dim**-0.5`` is trained under a scale no serving stack ever applies.
+        #
+        # Outside the ``is_full`` branch on purpose: vLLM uses 1.0 for EVERY Gemma 4
+        # layer type, so sliding layers must not fall through to the parent's
+        # ``head_dim**-0.5`` either.
+        #
+        # Cost of the old mismatch, measured directly by forcing vLLM's draft attention
+        # to the training scale (checkpoint-56000 of the lr 2e-3 5-epoch run, real vLLM,
+        # 80q MT-Bench, num_spec 7):
+        #
+        #     served at        128 tok   1024 tok
+        #     1.0 (stock)      2.7981    2.7685
+        #     512**-0.5        3.1577    3.1363     -> +12.9% / +13.3%
+        #
+        # This line was reverted once before (edcbe3adcf) on the strength of an A/B of
+        # two TRAINING scales: 2.0645 vs 1.9710 at step 1000, 2.5715 vs 2.5234 at step
+        # 5000, both favouring ``head_dim**-0.5``. That A/B served BOTH arms at 1.0, so
+        # it compared a matched configuration against a mismatched one and never measured
+        # the mismatch itself; both points are also under 0.3 epoch, and its gap was
+        # already closing (-4.5% -> -1.9%). Matching is worth ~13%, which the training-side
+        # preference does not come close to paying for.
+        #
+        # Drafters trained before this change carry the old convention and lose that 13%
+        # under stock vLLM; they need a retrain, not a config flag.
+        self.scaling = 1.0
+
+        if self.use_k_eq_v:
+            # Registered by the parent; drop it so it is neither trained nor exported.
+            del self.v_proj
+            self.v_proj = None
+        elif is_full:
+            self.v_proj = nn.Linear(
+                config.hidden_size,
+                self.num_kv_heads * self.head_dim,
+                bias=getattr(config, "attention_bias", False),
+            )
+        # vLLM builds this as ``RMSNorm(..., has_weight=False)`` and the reference
+        # checkpoint ships NO v_norm tensor, so keep the scale fixed at ones and
+        # non-persistent: it must not appear in the exported state_dict.
+        self.v_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+        del self.v_norm.weight
+        self.v_norm.register_buffer("weight", torch.ones(self.head_dim), persistent=False)
+
+    def _project_v(self, target_hidden, hidden_states, k_ctx, k_noise):
+        """Return the V sequence, from K under k_eq_v or from ``v_proj`` otherwise."""
+        if self.use_k_eq_v:
+            return k_ctx, k_noise
+        return self.v_proj(target_hidden), self.v_proj(hidden_states)
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with KV injection; V is normed and, under k_eq_v, shares K's projection."""
+        bsz, q_len, _ = hidden_states.shape
+        ctx_len = target_hidden.shape[1]
+
+        q = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim)
+        q = self.q_norm(q).transpose(1, 2)
+
+        k_ctx = self.k_proj(target_hidden)
+        k_noise = self.k_proj(hidden_states)
+        k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        k = self.k_norm(k).transpose(1, 2)
+
+        v_ctx, v_noise = self._project_v(target_hidden, hidden_states, k_ctx, k_noise)
+        v = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        # vLLM norms V (no RoPE on V), unlike the Qwen3-style path.
+        v = self.v_norm(v).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
 
 class _IdentitySublayerWrapper(nn.Module):
@@ -380,6 +530,66 @@ class DFlashDecoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
+class DFlashGemma4DecoderLayer(GradientCheckpointingLayer):
+    """Draft decoder layer matching Gemma4's block, with KV injection.
+
+    Gemma4 wraps each sub-block in a *pair* of norms ("sandwich norm") and scales
+    the layer output by a learned ``layer_scalar``, where Qwen3 uses a single
+    pre-norm per sub-block. vLLM's ``Gemma4MTPDecoderLayer`` -- which
+    ``Gemma4DSparkDecoderLayer`` inherits -- looks up
+    ``pre_feedforward_layernorm`` / ``post_feedforward_layernorm`` /
+    ``layer_scalar`` by name, and its DSpark weight loader silently leaves any
+    parameter it cannot find randomly initialized. A Qwen3-shaped draft
+    therefore *loads without error* and produces garbage, so the shapes must
+    match exactly.
+
+    The residual/norm order below mirrors ``Gemma4MTPDecoderLayer.forward``:
+    norm -> attn -> norm -> +residual -> norm -> mlp -> norm -> +residual, then
+    scale by ``layer_scalar``.
+    """
+
+    def __init__(self, config, layer_idx):
+        """Initialize a Gemma4-style draft layer (sandwich norms + layer scalar)."""
+        super().__init__()
+        self.self_attn = DFlashGemma4Attention(config, layer_idx)
+        self.mlp = _MLP_CLS(config)
+        self.input_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_feedforward_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        # A buffer (not a parameter) to match vLLM's `register_buffer`, so the
+        # exported tensor name and shape line up with the reference checkpoint.
+        self.register_buffer("layer_scalar", torch.ones(1))
+        # Sublayer wrappers; no-ops unless a variant replaces them (DFlash2). They wrap the RAW
+        # sublayer, INSIDE the sandwich norms: finish() runs before the post-norm, so a
+        # variant's output is normalised before it reaches the residual stream -- the same
+        # thing the sandwich norm does for the plain sublayer.
+        self.attention_conv = _IdentitySublayerWrapper()
+        self.mlp_conv = _IdentitySublayerWrapper()
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with sandwich norms, KV injection, and the layer scalar."""
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, conv_state = self.attention_conv.prepare(hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states, target_hidden, position_embeddings, attention_mask
+        )
+        hidden_states = self.attention_conv.finish(hidden_states, conv_state)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+
+        residual = hidden_states
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states, conv_state = self.mlp_conv.prepare(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp_conv.finish(hidden_states, conv_state)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+
+        return hidden_states * self.layer_scalar
+
+
 class DFlashModule(nn.Module):
     """DFlash draft module using Qwen3 components (MLP, RMSNorm, RotaryEmbedding).
 
@@ -402,11 +612,20 @@ class DFlashModule(nn.Module):
         self.hidden_norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
 
         # Decoder layers
+        # Gemma4 drafts need Gemma4's block shape (sandwich norms + layer_scalar,
+        # optional k_eq_v); everything else keeps the Qwen3-style block.
+        layer_cls = (
+            DFlashGemma4DecoderLayer
+            if str(getattr(config, "model_type", "")).startswith("gemma4")
+            else DFlashDecoderLayer
+        )
         self.layers = nn.ModuleList(
-            [DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
+        self._gemma4_rope_kinds = self._build_gemma4_rope_kinds(config)
+        self._layer_types = list(getattr(config, "layer_types", []) or [])
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
@@ -419,9 +638,61 @@ class DFlashModule(nn.Module):
         Same pattern as EAGLE3's _maybe_init_rope. Avoids creating rotary_emb
         during __init__ (which runs on meta device during from_pretrained),
         preventing the meta-tensor inv_freq issue on checkpoint resume.
+
+        Gemma4 needs one module PER attention kind, not one for the whole draft:
+        its full-attention layers use ``global_head_dim`` while sliding layers use
+        ``head_dim``, and the two kinds carry different ``rope_parameters`` (theta
+        1e6 vs 1e4). vLLM builds RoPE per layer for exactly this reason; a single
+        shared module silently mismatches the head dim on one of the two kinds.
         """
-        if not hasattr(self, "rotary_emb"):
+        # The shared module is only used when there are no per-kind ones. Building it anyway
+        # would crash on a Gemma4 draft: its config carries the NESTED, dict-of-dicts
+        # ``rope_parameters`` (keyed by attention kind), and ``_ROTARY_CLS`` indexes it as a
+        # flat dict via ``rope_parameters["rope_type"]``. The per-kind configs built below
+        # each hold a flattened single-kind dict, so they are the ones that can be built.
+        if not self._gemma4_rope_kinds and not hasattr(self, "rotary_emb"):
             self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
+        if self._gemma4_rope_kinds and not hasattr(self, "rotary_emb_by_kind"):
+            self.rotary_emb_by_kind = nn.ModuleDict(
+                {
+                    kind: _ROTARY_CLS(config=cfg, device=device)
+                    for kind, cfg in self._gemma4_rope_kinds.items()
+                }
+            )
+
+    @staticmethod
+    def _build_gemma4_rope_kinds(config):
+        """Per-attention-kind rotary configs for a Gemma4 draft, or ``{}`` otherwise.
+
+        Returns a shallow copy of ``config`` per distinct ``layer_types`` entry with
+        ``head_dim`` and ``rope_parameters`` resolved for that kind.
+        """
+        if not str(getattr(config, "model_type", "")).startswith("gemma4"):
+            return {}
+        layer_types = getattr(config, "layer_types", None)
+        if not layer_types:
+            return {}
+        rope_params = getattr(config, "rope_parameters", None)
+        kinds = {}
+        for kind in dict.fromkeys(layer_types):
+            cfg = copy.copy(config)
+            if kind == "full_attention":
+                cfg.head_dim = getattr(config, "global_head_dim", None) or config.head_dim
+            entry = rope_params.get(kind) if isinstance(rope_params, dict) else None
+            if entry is None and isinstance(rope_params, dict):
+                # The RoPE kind need not equal the LAYER kind. `rope_attention_kind` lets a
+                # recipe inherit e.g. the sliding entry for an all-full_attention draft, so
+                # rope_params can hold exactly one entry keyed by a name absent from
+                # layer_types. Fall back to that sole entry -- leaving rope_parameters
+                # nested here makes the rotary class raise KeyError('rope_type'), since it
+                # indexes rope_parameters as a FLAT dict.
+                sole = [v for v in rope_params.values() if isinstance(v, dict)]
+                entry = sole[0] if len(sole) == 1 else None
+            if isinstance(entry, dict):
+                cfg.rope_parameters = dict(entry)
+                cfg.rope_theta = cfg.rope_parameters.get("rope_theta", config.rope_theta)
+            kinds[kind] = cfg
+        return kinds
 
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""
@@ -437,9 +708,23 @@ class DFlashModule(nn.Module):
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
         self._maybe_init_rotary_emb(device=hidden_states.device)
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        per_kind = {
+            kind: emb(hidden_states, position_ids)
+            for kind, emb in getattr(self, "rotary_emb_by_kind", {}).items()
+        }
+        # A Gemma4 draft has per-kind modules and NO shared one (its nested rope_parameters
+        # cannot build a single rotary module — see _maybe_init_rotary_emb), so fall back to
+        # the first kind rather than to a `self.rotary_emb` that does not exist.
+        position_embeddings = (
+            next(iter(per_kind.values()))
+            if per_kind
+            else self.rotary_emb(hidden_states, position_ids)
+        )
 
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, target_hidden, position_embeddings, attention_mask)
+        for layer_idx, layer in enumerate(self.layers):
+            layer_pos = position_embeddings
+            if per_kind and layer_idx < len(self._layer_types):
+                layer_pos = per_kind.get(self._layer_types[layer_idx], position_embeddings)
+            hidden_states = layer(hidden_states, target_hidden, layer_pos, attention_mask)
 
         return self.norm(hidden_states)

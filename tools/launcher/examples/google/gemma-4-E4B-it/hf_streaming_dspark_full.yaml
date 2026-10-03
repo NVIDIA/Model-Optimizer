@@ -1,0 +1,96 @@
+# DSpark FULL training run for Gemma-4-E4B-it on AWS-PDX.
+#
+# First real training run (the earlier 20-step smoke was a pipeline test only).
+# Corpus: 1,130,852 synthesized rows from ~/lustre/g4_corpus_train.
+#
+# TOPOLOGY: 4 nodes on the interactive QOS (its hard cap), split 2 serve + 2
+# trainer. The launcher does NOT support "own serve on every node" -- for
+# nodes >= 2 it splits WHOLE nodes (see train_eagle_streaming.sh header), so
+# 2:2 is what yields a clean global batch of 64:
+#
+#   2 trainer nodes x 8 GPU        = 16 DP ranks
+#   per_device_train_batch_size 4  x grad_accum 1
+#   -> global batch = 16 * 4 * 1   = 64
+#
+#   2 epochs: 1,130,852 * 2 / 64   ~= 35,340 steps
+#
+# CORPUS: must be the CLEANED copy (g4_corpus_train). The raw synthesis output
+# carries a user-only `messages` column, and hf_streaming_dataset prefers
+# `messages` over `conversations` -- that yields an all-zero loss mask under
+# answer_only_loss, every row is rejected, and streaming SILENTLY HANGS with no
+# error. Verified 200/200 raw rows were user-only; the cleaned copy has 0.
+#
+# Gemma-4-E4B specifics (verified on PDX 2026-08-12, unchanged):
+#  * EAGLE_CAPTURE_IDS: vLLM captures POST-layer with the residual added and
+#    indexes as layer_idx+1, so valid ids are 1..42 and 42 is the TRUE final
+#    layer. Gemma 4 repeats 5x sliding + 1x full attention, so full-attention
+#    layers sit at ids [6,12,18,24,30,36,42]; we sample 6 of those (must be
+#    num_draft_layers + 1 = 6) to land on residual-stream boundaries.
+#  * No --trust-remote-code needed and no vLLM patch; gemma4 is native in the
+#    2026-08-11 nightly.
+
+job_name: Gemma-4-E4B_DSpark_full_2ep
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/gemma-4-E4B-it
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark_gemma4_e4b.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - data.mode=streaming
+      # Gemma 4's stock chat template has NO generation markers, so
+      # answer_only_loss silently yields an all-zero loss_mask and every row is
+      # rejected. This copy adds them; see the template file header.
+      - data.chat_template=examples/google/gemma-4-E4B-it/chat_template_train.jinja
+      - data.data_path=/traindata
+      - training.output_dir=/scratchspace/dspark_full_2ep
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=0
+      - training.num_train_epochs=2
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      - training.learning_rate=1.0e-4
+      - training.warmup_steps=500
+      - training.logging_steps=20
+      - training.save_steps=1000
+      # All checkpoints are kept (user's call): HF save_total_limit defaults to
+      # None, which retains every one, so no override is needed.
+      - training.answer_only_loss=true
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # MUST be exactly num_draft_layers + 1 (5 draft layers -> 6 ids).
+      - EAGLE_CAPTURE_IDS: "[6,12,18,24,36,42]"
+      # 2 serve nodes + 2 trainer nodes (of the 4 allocated).
+      - SERVE_NODES: "2"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_MAX_MODEL_LEN: "4352"
+      - SERVE_MAX_NUM_SEQS: "64"
+      - SERVE_READY_TIMEOUT: "2400"
+      - STREAMING_NUM_WORKERS: "4"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # NIXL hidden-state transport. Without these NIXL falls back to UCX, which
+      # reports "UCX CUDA support was not found" and dies with
+      # NIXL_ERR_REMOTE_DISCONNECT the moment the trainer pulls hidden states.
+      - NIXL_BACKENDS: LIBFABRIC
+      - FI_PROVIDER: efa
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 4
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # The auxfix image carries the AWS libfabric stack that NIXL needs; the
+      # nem35 image has no libfabric and no NIXL plugins.
+      container: /home/haoguo/lustre/containers/vllm-nightly-efa-x86_64-auxfix.sqsh
+      container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
+        - /home/haoguo/lustre/g4_corpus_train:/traindata

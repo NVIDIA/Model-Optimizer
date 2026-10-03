@@ -92,7 +92,21 @@ dependencies = [
 include = ["modelopt*", "modelopt_recipes*"]
 EOF
 fi
+# All nodes of the allocation run this against the SAME shared lustre checkout, and
+# `pip install -e` writes build state into it (nvidia_modelopt.egg-info/). Concurrent
+# installs clobber each other: one node reports "Successfully installed nvidia-modelopt"
+# while another silently ends up without the .dist-info, and every rank on that node then
+# dies at import with "PackageNotFoundError: No package metadata was found for
+# nvidia-modelopt" -- ~5 min in, after vllm serve has already been paid for. Stagger by
+# node id, then verify and retry, since staggering alone only narrows the window.
+sleep $(( ${SLURM_NODEID:-0} * 15 ))
 pip install --no-cache-dir -e modules/Model-Optimizer/
+if ! python3 -c 'from importlib.metadata import version; version("nvidia-modelopt")' 2>/dev/null; then
+    echo "nvidia-modelopt metadata missing after install (concurrent-install race); retrying..." >&2
+    sleep $(( 10 + ${SLURM_NODEID:-0} * 5 ))
+    pip install --no-cache-dir --force-reinstall --no-deps -e modules/Model-Optimizer/
+    python3 -c 'from importlib.metadata import version; print("nvidia-modelopt", version("nvidia-modelopt"))'
+fi
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
 
@@ -135,6 +149,68 @@ fi
 
 # Forwarded verbatim to the trainer; capture before the helpers below run.
 SCRIPT_ARGS=("$@")
+
+# EAGLE_CAPTURE_IDS configures the producer: the draft's aux layers, normally followed by
+# one extra final entry that is the KD target (hf_streaming_dataset peels it off as
+# base_model_hidden_states; under data.final_aux_is_base_hidden every plane is an aux
+# feature instead). The trainer consumes aux_hidden_states verbatim and cannot tell which
+# layers produced them, so a DFlash-family trainer is handed the same list as its
+# dflash_architecture_config.target_layer_ids. Without this, build_target_layer_ids()
+# invents a uniformly-spaced list, it is written to the exported config, and vLLM reads it
+# to choose SERVING capture layers -- so the draft is served on layers it never trained
+# on. It fails silently because the invented list has the same LENGTH and only fc's input
+# width is validated.
+#
+# The recipe is loaded with this run's overrides, by the loader the trainer uses: to read
+# final_aux_is_base_hidden, and because only DFlash-family recipes take the ids -- the
+# EAGLE3 recipes share this script and their schema forbids a `dflash` section. A recipe
+# that cannot be loaded stops the run here rather than training on invented layers.
+#
+# The ids come back on fd 3 and the helper's stdout goes to stderr: importing modelopt pulls
+# in vLLM, which logs to stdout at import time ("INFO ... DeepEP v2 requires NCCL ..."), and
+# a captured stdout would hand that line to the trainer as part of the list.
+DFLASH_LAYER_ARGS=()
+AUX_IDS_JSON="$(python3 - "$EAGLE_CAPTURE_IDS" "${SCRIPT_ARGS[@]}" 3>&1 1>&2 <<'PY'
+import json
+import os
+import sys
+
+from modelopt.recipe import load_recipe
+
+capture = json.loads(sys.argv[1])
+config, overrides, rest = None, [], sys.argv[2:]
+while rest:
+    arg = rest.pop(0)
+    if arg == "--config":
+        config = rest.pop(0)
+    elif arg.startswith("--config="):
+        config = arg.split("=", 1)[1]
+    else:
+        overrides.append(arg)
+recipe = load_recipe(config, overrides=overrides)
+if hasattr(recipe, "dflash"):
+    aux = capture if recipe.data.final_aux_is_base_hidden else capture[:-1]
+    if not aux:
+        raise SystemExit("EAGLE_CAPTURE_IDS needs at least one aux id plus the final KD id")
+    # Convert capture ids -> DFlash ids by subtracting 1. vLLM reads EAGLE_CAPTURE_IDS
+    # verbatim (eagle_aux_hidden_state_layer_ids, the highest-priority branch) but adds 1 to
+    # target_layer_ids, and both are matched against ``layer_idx + 1``. So capture id N and
+    # target_layer_id N-1 name the same layer; forwarding the capture ids unconverted would
+    # shift serving one layer deeper.
+    aux = [i - 1 for i in aux]
+    if min(aux) < 0:
+        raise SystemExit("EAGLE_CAPTURE_IDS are 1-based; id 0 has no DFlash equivalent")
+    with os.fdopen(3, "w") as result:
+        result.write(json.dumps(aux))
+PY
+)" || {
+    echo "ERROR: could not derive the draft's aux layer ids from EAGLE_CAPTURE_IDS=$EAGLE_CAPTURE_IDS" >&2
+    exit 1
+}
+if [ -n "$AUX_IDS_JSON" ]; then
+    echo "Trainer aux layer ids (capture ids minus KD target, minus 1): $AUX_IDS_JSON"
+    DFLASH_LAYER_ARGS=(dflash.dflash_architecture_config.target_layer_ids="$AUX_IDS_JSON")
+fi
 
 SERVE_PORT="${SERVE_PORT:-8765}"
 SERVE_READY_TIMEOUT="${SERVE_READY_TIMEOUT:-900}"
@@ -248,6 +324,7 @@ run_trainer_and_export() {
         "${mn_args[@]}" \
         data.streaming_server_url="$url" \
         data.streaming_model_name="$HF_MODEL_CKPT" \
+        "${DFLASH_LAYER_ARGS[@]}" \
         training.dataloader_num_workers="${STREAMING_NUM_WORKERS:-4}" \
         || { echo "ERROR: trainer failed." >&2; return 1; }
 
