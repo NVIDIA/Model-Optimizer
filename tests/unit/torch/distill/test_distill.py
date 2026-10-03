@@ -127,6 +127,23 @@ def test_distillation_model_mft():
     assert isinstance(loss, torch.Tensor) and loss.numel() == 1
 
 
+def test_mft_loss_accepts_sequence_shaped_logits():
+    """MFTLoss flattens the logits it is given, so the labels have to follow them."""
+    torch.manual_seed(0)
+    batch, seq_len, vocab = 2, 8, 50
+    logits_s = torch.randn(batch, seq_len, vocab)
+    logits_t = torch.randn(batch, seq_len, vocab)
+    labels = torch.randint(0, vocab, (batch, seq_len))
+
+    loss = mtd.MFTLoss()(logits_s, logits_t, labels)
+
+    # One label per position, so flattening first must not change the result.
+    flattened = mtd.MFTLoss()(
+        logits_s.reshape(-1, vocab), logits_t.reshape(-1, vocab), labels.reshape(-1)
+    )
+    assert torch.allclose(loss, flattened)
+
+
 def test_distillation_mode_default_config():
     student = tiny_mobilenet()
     with pytest.raises(AssertionError):

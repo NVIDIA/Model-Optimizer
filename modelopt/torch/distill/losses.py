@@ -103,7 +103,9 @@ class MFTLoss(Loss):
         Args:
             logits_s: Student's logits, treated as prediction.
             logits_t: Teacher's logits, treated as training target.
-            labels: Labels for the ground truth, used to prepare the corrected teacher distributions.
+            labels: Labels for the ground truth, used to prepare the corrected teacher
+                distributions. Flattened alongside the logits, so it carries one label per
+                position, e.g. ``(batch, seq_len)`` against ``(batch, seq_len, vocab)`` logits.
 
         .. note::
 
@@ -115,7 +117,7 @@ class MFTLoss(Loss):
         target_logits: torch.Tensor = logits_t / self._temperature  # (B, ..., C)
         target_logits = target_logits.view(-1, target_logits.size(-1))  # (new B, C)
         soft_targets = self._prepare_corrected_distributions(
-            target_logits, labels, self._threshold, apply_threshold_to_all=True
+            target_logits, labels.reshape(-1), self._threshold, apply_threshold_to_all=True
         )
 
         kd_loss = F.kl_div(
