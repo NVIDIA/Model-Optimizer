@@ -397,6 +397,12 @@ def _disable_inplace_relu(model):
 def _mtq_inputs_from_auto_quantize_config(auto_config, fixed_quantize_config=None):
     """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs."""
     constraints = auto_config.constraints.model_dump(exclude_none=True)
+    method_options = auto_config.method_options or {}
+    if auto_config.uses_predicted_damage_target:
+        constraints.pop("effective_bits", None)
+    method = auto_config.auto_quantize_method
+    if method_options:
+        method = {"method": method, **method_options}
     if auto_config.cost_excluded_layers:
         constraints.setdefault("cost", {})["excluded_module_name_patterns"] = (
             auto_config.cost_excluded_layers
@@ -423,7 +429,7 @@ def _mtq_inputs_from_auto_quantize_config(auto_config, fixed_quantize_config=Non
             for search_space in auto_config.module_search_spaces
         ],
         "disabled_layers": auto_config.disabled_layers,
-        "method": auto_config.auto_quantize_method,
+        "method": method,
         "num_score_steps": auto_config.score_size,
     }
 
@@ -472,7 +478,7 @@ def auto_quantize_model(
         for search_space in inputs["module_search_spaces"] or []
     )
     print(f"Starting auto-quantization search with {format_count} formats...")
-    print(f"Effective bits constraint: {inputs['constraints']['effective_bits']}")
+    print(f"Search constraints: {inputs['constraints']}")
     print(f"Calibration steps: {num_calib_steps}, Scoring steps: {inputs['num_score_steps']}")
 
     quantized_model, search_state = mtq.auto_quantize(
