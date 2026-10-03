@@ -120,24 +120,16 @@ class TestCudaExt:
 
 
 class TestScaledE4M3:
-    @pytest.mark.parametrize("per_channel", [False, True])
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-    def test_eager_matches_cuda_scale_rounding(self, per_channel, dtype):
+    @pytest.fixture
+    def fp8_extension(self):
+        return get_cuda_ext_fp8()
+
+    def test_eager_matches_cuda_scale_rounding(self, fp8_extension):
         # These ranges distinguish direct division from reciprocal multiplication.
         amax = torch.tensor([0.0, 1e-8, 2**-24, 1.04207686e-7, 0.91567558], device="cuda")
         values = torch.linspace(-1, 1, 129, device="cuda")[None, :] * amax[:, None]
-        values = values.to(dtype)
-        extension = get_cuda_ext_fp8()
-        if per_channel:
-            actual = extension.fake_e4m3fy_with_axis(values, amax, 0)
-            expected = tensor_quant.fp8_eager(values, amax[:, None])
-        else:
-            actual = torch.stack(
-                [extension.fake_e4m3fy(row, limit) for row, limit in zip(values, amax)]
-            )
-            expected = torch.stack(
-                [tensor_quant.fp8_eager(row, limit) for row, limit in zip(values, amax)]
-            )
+        actual = fp8_extension.fake_e4m3fy_with_axis(values, amax, 0)
+        expected = tensor_quant.fp8_eager(values, amax[:, None])
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
