@@ -198,7 +198,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save ``quantizer_state.pth`` and ``quant_recipe.yaml`` before delegating to base export.
+        """Save folded weights and quantizer sidecars, including the live MTP head.
 
         Args:
             save_directory: The directory to save the exported model.
@@ -220,18 +220,21 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         # Cached shards still reference markers collected when they were built.
         if not self._layer_state_dicts:
             self._quantizer_recipe_markers = []
-        layer_state_dicts = self.layer_state_dicts
-        self._extract_quantizer_recipe_markers(layer_state_dicts)
-
-        gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_dir)
-        gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_dir)
-
-        # Avoid rebuilding nonfinal PP stages whose trailing state is empty.
-        for _layer_sd in layer_state_dicts.values():
-            self._pop_quantizer_keys(_layer_sd)
-        self._pop_quantizer_keys(self._state_dict)
-
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
+
+    def _finalize_layer_state_dicts(
+        self,
+        layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]],
+        save_directory: str | os.PathLike,
+    ) -> None:
+        """Save all quantizer sidecars and remove their tensors from weight shards."""
+        # The base exporter has collected the live MTP head and copied source files.
+        self._extract_quantizer_recipe_markers(layer_state_dicts)
+        gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_directory)
+        gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_directory)
+        for layer_state_dict in layer_state_dicts.values():
+            self._pop_quantizer_keys(layer_state_dict)
+        self._pop_quantizer_keys(self._state_dict)
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
