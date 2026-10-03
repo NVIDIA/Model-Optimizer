@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import pytest
 import torch
 from _test_utils.import_helper import skip_if_no_mamba
 
@@ -43,53 +44,68 @@ from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_confi
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
+CHANNEL_DIVISOR = 4
+MAMBA_HEAD_DIM_DIVISOR = 4
 
 
-def _test_mamba_search_space(rank, size):
-    channel_divisor = 4
-    mamba_head_dim_divisor = 4
-
-    num_layers = size
-    hybrid_layer_pattern = "M" * size  # all layers are Mamba layers
-    hidden_size = channel_divisor * 4
-    mamba_state_dim = channel_divisor
-    mamba_head_dim = mamba_head_dim_divisor * 2
-    mamba_num_groups = 2
-    max_sequence_length = 8
-    vocab_size = 32
-    batch_size = 2
-
+def _get_mamba_search_space(size):
     model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
-        num_layers=num_layers,
-        hybrid_layer_pattern=hybrid_layer_pattern,
-        hidden_size=hidden_size,
-        mamba_state_dim=mamba_state_dim,
-        mamba_head_dim=mamba_head_dim,
-        mamba_num_groups=mamba_num_groups,
-        max_sequence_length=max_sequence_length,
-        vocab_size=vocab_size,
+        num_layers=size,
+        hybrid_layer_pattern="M" * size,
+        hidden_size=CHANNEL_DIVISOR * 4,
+        mamba_state_dim=CHANNEL_DIVISOR,
+        mamba_head_dim=MAMBA_HEAD_DIM_DIVISOR * 2,
+        mamba_num_groups=2,
+        max_sequence_length=8,
+        vocab_size=32,
         transformer_impl="transformer_engine",
         bf16=False,
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
-
     mtn.convert(
         model,
         [
             (
                 "mcore_minitron",
                 get_mcore_minitron_config(
-                    hidden_size_divisor=channel_divisor,
-                    ffn_hidden_size_divisor=channel_divisor,
-                    mamba_head_dim_divisor=mamba_head_dim_divisor,
+                    hidden_size_divisor=CHANNEL_DIVISOR,
+                    ffn_hidden_size_divisor=CHANNEL_DIVISOR,
+                    mamba_head_dim_divisor=MAMBA_HEAD_DIM_DIVISOR,
                     num_layers_divisor=1,
                 ),
             )
         ],
     )
+    return model, mamba_num_heads
+
+
+def _mamba_subnet_outputs(model):
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+    for sample_func in [min, max, centroid]:
+        mtn.sample(model, sample_func)
+        yield run_mcore_inference(model, prompt_tokens, model.hidden_size)
+    mtn.export(model)
+    yield run_mcore_inference(model, prompt_tokens, model.hidden_size)
+
+
+def _compile_mamba_kernels(rank, size):
+    model, _ = _get_mamba_search_space(size)
+    for _ in _mamba_subnet_outputs(model):
+        pass
+    torch.cuda.synchronize()
+
+
+# Keep compilation first so the functional test reuses the module's warmed workers.
+@pytest.mark.timeout(240)
+def test_mamba_kernel_compilation(dist_workers):
+    dist_workers.run(_compile_mamba_kernels)
+
+
+def _test_mamba_search_space(rank, size):
+    model, mamba_num_heads = _get_mamba_search_space(size)
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     if is_pipeline_first_stage():
@@ -109,27 +125,19 @@ def _test_mamba_search_space(rank, size):
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
-    num_heads_choices = mamba_num_heads // mamba_num_groups
-    head_dim_choices = mamba_head_dim // mamba_head_dim_divisor
-    hidden_size_choices = hidden_size // channel_divisor
-    num_layers_per_pp = num_layers // size
+    num_heads_choices = mamba_num_heads // model.config.mamba_num_groups
+    head_dim_choices = model.config.mamba_head_dim // MAMBA_HEAD_DIM_DIVISOR
+    hidden_size_choices = model.config.hidden_size // CHANNEL_DIVISOR
+    num_layers_per_pp = model.config.num_layers // size
     assert (
         ss_size_per_pp
         == (num_heads_choices * head_dim_choices) ** num_layers_per_pp
-        * num_layers
+        * model.config.num_layers
         * hidden_size_choices
     )
 
-    # Make sure forward pass works on min and centroid subnets
-    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    for sample_func in [min, max, centroid]:
-        mtn.sample(model, sample_func)
-        output = run_mcore_inference(model, prompt_tokens, model.hidden_size)
-        assert output.shape == (batch_size, max_sequence_length, vocab_size)
-
-    # Make sure export and forward pass works on centroid model
-    mtn.export(model)
-    _ = run_mcore_inference(model, prompt_tokens, model.hidden_size)
+    for output in _mamba_subnet_outputs(model):
+        assert output.shape == (2, model.max_sequence_length, model.vocab_size)
     assert not any(named_dynamic_modules(model))
 
 
