@@ -1,0 +1,787 @@
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/0/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+Using CPython 3.12.13 interpreter at: /usr/local/bin/python
+Creating virtual environment at: .venv
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+   Updating https://github.com/NVIDIA-NeMo/Run (HEAD)
+    Updated https://github.com/NVIDIA-NeMo/Run (1e26b6a98a756575c10a9a0ea9661fac0c7ad776)
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 149 packages in 2.81s
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/users/chenhany/experiment… │
+│ job_name         │ 'Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3'              │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(hf_model='/hf-local/Qwen/Q… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:qwen3_5-cu130',         │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm DFlash',        │
+│                  │ '--draft_length 3', '--runtime_params                     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 32',         │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/qualitative'], │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:qwen3_5-cu130',         │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm DFlash',        │
+│                  │ '--draft_length 3', '--runtime_params                     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 8',          │
+│                  │ '--num_requests 80', '--output_length 4096',              │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/throughput_32… │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       e916b41      (main)
+  Model-Optimizer                16d562a0     (pensieve-intern/OMNIML-4961/cell-t1-d3)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781183495 ───────────────
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:qwen3_5-cu130', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:qwen3_5-cu130', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[13:11:40] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[13:11:40] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+[13:11:41] INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781183495 to                           
+                    /lustre/fsw/portfolios/coreai/users/chenhany/exp            
+                    eriments/cicd ...                                           
+[13:12:05] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781183495                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/users/chenhany/experime            
+                    nts/cicd`                                                   
+[13:12:05] Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0 for                     
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726706                            
+           Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1 for                     
+           experiment cicd                                                      
+[SLURM] Job 12726706 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:12:06
+[13:12:06] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726707                            
+────────────────── Detaching from Experiment cicd_1781183495. ──────────────────
+[13:12:06] Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12726707 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:12:06
+
+Experiment Status for cicd_1781183495
+
+Task 0: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726706
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781183495/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781183495/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+
+Task 1: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726707
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781183495/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781183495/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+
+                                                                                
+# The experiment was run with the following tasks: ['Qwen3.5-4B_specdec_bench_df
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781183495")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Gets the log f
+experiment.cancel("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Cancels the 
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781183495                                          
+nemo experiment logs cicd_1781183495 0                                          
+nemo experiment cancel cicd_1781183495 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781183495
+
+=== [2026-06-11 13:12:12] Polling iteration 1/320 ===
+  cicd_1781183495 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781183495 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:15:15] Polling iteration 2/320 ===
+  cicd_1781183495 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: FAILED
+  cicd_1781183495 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: CANCELLED
+
+  Summary: 0 succeeded, 1 failed, 1 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 0
+  FAILED: 1
+  CANCELLED: 1
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781183495 task 0
+Fetching logs: cicd_1781183495 task 1
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/0/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Error processing argument 'pipeline.global_vars.hf_draft_model=/hf-local/z-lab/Qwen3.5-4B-DFlash': Invalid argument: No parameter named 'hf_draft_model' exists for <function cicd at 0x7effef6f3b00> (Argument: pipeline.global_vars.hf_draft_model=/hf-local/z-lab/Qwen3.5-4B-DFlash, Context: {'key': 'pipeline.global_vars.hf_draft_model', 'value': '/hf-local/z-lab/Qwen3.5-4B-DFlash'})
+Unexpected error: Invalid argument: No parameter named 'hf_draft_model' exists for <function cicd at 0x7effef6f3b00> (Argument: pipeline.global_vars.hf_draft_model=/hf-local/z-lab/Qwen3.5-4B-DFlash, Context: {'key': 'pipeline.global_vars.hf_draft_model', 'value': '/hf-local/z-lab/Qwen3.5-4B-DFlash'})
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/0/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/users/chenhany/experiment… │
+│ job_name         │ 'Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3'              │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(hf_model='/hf-local/Qwen/Q… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:qwen3_5-cu130',         │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 32',         │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/qualitative'], │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:qwen3_5-cu130',         │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 8',          │
+│                  │ '--num_requests 80', '--output_length 4096',              │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/throughput_32… │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       e916b41      (main)
+  Model-Optimizer                16d562a0     (pensieve-intern/OMNIML-4961/cell-t1-d3)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781183791 ───────────────
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:qwen3_5-cu130', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:qwen3_5-cu130', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[13:16:37] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[13:16:37] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+           INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781183791 to                           
+                    /lustre/fsw/portfolios/coreai/users/chenhany/exp            
+                    eriments/cicd ...                                           
+[13:17:02] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781183791                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/users/chenhany/experime            
+                    nts/cicd`                                                   
+[13:17:02] Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0 for                     
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726736                            
+           Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1 for                     
+           experiment cicd                                                      
+[SLURM] Job 12726736 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:17:02
+[13:17:03] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726737                            
+────────────────── Detaching from Experiment cicd_1781183791. ──────────────────
+[13:17:03] Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12726737 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:17:03
+
+Experiment Status for cicd_1781183791
+
+Task 0: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Status: PENDING
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726736
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781183791/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781183791/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+
+Task 1: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726737
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781183791/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781183791/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+
+                                                                                
+# The experiment was run with the following tasks: ['Qwen3.5-4B_specdec_bench_df
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781183791")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Gets the log f
+experiment.cancel("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Cancels the 
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781183791                                          
+nemo experiment logs cicd_1781183791 0                                          
+nemo experiment cancel cicd_1781183791 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781183791
+
+=== [2026-06-11 13:17:11] Polling iteration 1/320 ===
+  cicd_1781183791 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781183791 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:20:14] Polling iteration 2/320 ===
+  cicd_1781183791 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: FAILED
+  cicd_1781183791 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: CANCELLED
+
+  Summary: 0 succeeded, 1 failed, 1 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 0
+  FAILED: 1
+  CANCELLED: 1
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781183791 task 0
+Fetching logs: cicd_1781183791 task 1
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/0/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/users/chenhany/experiment… │
+│ job_name         │ 'Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3'              │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(hf_model='/hf-local/Qwen/Q… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:nightly',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 32',         │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/qualitative'], │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:nightly',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 8',          │
+│                  │ '--num_requests 80', '--output_length 4096',              │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/throughput_32… │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       e916b41      (main)
+  Model-Optimizer                16d562a0     (pensieve-intern/OMNIML-4961/cell-t1-d3)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781184058 ───────────────
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:nightly', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:nightly', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[13:21:04] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[13:21:04] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+           INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781184058 to                           
+                    /lustre/fsw/portfolios/coreai/users/chenhany/exp            
+                    eriments/cicd ...                                           
+[13:21:31] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781184058                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/users/chenhany/experime            
+                    nts/cicd`                                                   
+[13:21:31] Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0 for                     
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726765                            
+           Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1 for                     
+           experiment cicd                                                      
+[13:21:32] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726766                            
+────────────────── Detaching from Experiment cicd_1781184058. ──────────────────
+[13:21:32] Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12726765 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:21:32
+[SLURM] Job 12726766 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:21:32
+
+Experiment Status for cicd_1781184058
+
+Task 0: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Status: PENDING
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726765
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781184058/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781184058/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+
+Task 1: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726766
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781184058/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781184058/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+
+                                                                                
+# The experiment was run with the following tasks: ['Qwen3.5-4B_specdec_bench_df
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781184058")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Gets the log f
+experiment.cancel("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Cancels the 
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781184058                                          
+nemo experiment logs cicd_1781184058 0                                          
+nemo experiment cancel cicd_1781184058 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781184058
+
+=== [2026-06-11 13:21:39] Polling iteration 1/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:24:42] Polling iteration 2/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:27:44] Polling iteration 3/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:30:47] Polling iteration 4/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:33:49] Polling iteration 5/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:36:52] Polling iteration 6/320 ===
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781184058 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: FAILED
+
+  Summary: 1 succeeded, 1 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 1
+  FAILED: 1
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781184058 task 0
+Fetching logs: cicd_1781184058 task 1
+=== Done fetching logs ===
+warning: `VIRTUAL_ENV=/tmp/builds/YQxxH4yPp/0/omniml/integration/nmm-sandbox/.venv-intern-agent` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.12`.
+Configuring global options
+Dry run for task __main__:cicd
+Resolved Arguments
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Argument Name    ┃ Resolved Value                                            ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ detach           │ True                                                      │
+│ hf_local         │ None                                                      │
+│ identity         │ '/.ssh/id_ed25519'                                        │
+│ job_dir          │ '/lustre/fsw/portfolios/coreai/users/chenhany/experiment… │
+│ job_name         │ 'Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3'              │
+│ pipeline         │ SandboxPipeline(                                          │
+│                  │   global_vars=GlobalVariables(hf_model='/hf-local/Qwen/Q… │
+│                  │   task_0=SandboxTask0(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:nightly',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/qualitative',       │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 32',         │
+│                  │ '--output_length 4096', '--aa_timing', '--show_progress', │
+│                  │ '--save_dir                                               │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/qualitative'], │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}]), │
+│                  │   task_1=SandboxTask1(                                    │
+│                  │     script='common/specdec_bench/run.sh',                 │
+│                  │     slurm_config=SlurmConfig(                             │
+│                  │       host='cw-dfw-cs-001-login-01.nvidia.com',           │
+│                  │       account='coreai_dlalgo_modelopt',                   │
+│                  │       partition='batch',                                  │
+│                  │       container='vllm/vllm-openai:nightly',               │
+│                  │       modelopt_install_path='/usr/local/lib/python3.12/d… │
+│                  │       container_mounts=['/lustre/fsw/portfolios/coreai/p… │
+│                  │ '/lustre:/lustre', '/cm:/cm',                             │
+│                  │ '/var/run/munge:/var/run/munge'],                         │
+│                  │       srun_args=['--no-container-mount-home'],            │
+│                  │       array=None,                                         │
+│                  │       nodes=1,                                            │
+│                  │       ntasks_per_node=1,                                  │
+│                  │       gpus_per_node=2),                                   │
+│                  │     args=['--dataset speed', '--dataset_path              │
+│                  │ /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k',    │
+│                  │ '--engine VLLM', '--speculative_algorithm DFLASH',        │
+│                  │ '--draft_length 3', '--block_size 4', '--draft_model_dir  │
+│                  │ /hf-local/z-lab/Qwen3.5-4B-DFlash', '--runtime_params     │
+│                  │ common/specdec_bench/_cells/Qwen3.5-4B_dflash_vllm_t1_d3… │
+│                  │ '--tp_size 2', '--ep_size 1', '--concurrency 8',          │
+│                  │ '--num_requests 80', '--output_length 4096',              │
+│                  │ '--aa_timing', '--show_progress', '--save_dir             │
+│                  │ /scratchspace/Qwen3.5-4B_dflash_vllm_t1_d3/throughput_32… │
+│                  │     environment=[{'HF_MODEL_CKPT':                        │
+│                  │ '<<global_vars.hf_model>>'}, {'HF_LOCAL': '/hf-local'}])) │
+│ task             │ None                                                      │
+│ test_level       │ 0                                                         │
+│ user             │ 'chenhany'                                                │
+└──────────────────┴───────────────────────────────────────────────────────────┘
+Launching cicd...
+============================================================
+Version Report
+============================================================
+  Launcher                       e916b41      (main)
+  Model-Optimizer                16d562a0     (pensieve-intern/OMNIML-4961/cell-t1-d3)
+============================================================
+────────────── Entering Experiment cicd with id: cicd_1781185067 ───────────────
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 0 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:nightly', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+job Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3 task 1 slurm_config: SlurmConfig(host='cw-dfw-cs-001-login-01.nvidia.com', port=22, account='coreai_dlalgo_modelopt', partition='batch', qos=None, container='vllm/vllm-openai:nightly', modelopt_install_path='/usr/local/lib/python3.12/dist-packages/modelopt', container_mounts=['/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local:/hf-local', '/lustre:/lustre', '/cm:/cm', '/var/run/munge:/var/run/munge'], srun_args=['--no-container-mount-home'], array=None, nodes=1, ntasks_per_node=1, gpus_per_node=2, time='04:00:00', local=False)
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+find: ‘modules/Megatron-LM/megatron/*’: No such file or directory
+find: ‘modules/Megatron-LM/examples/*’: No such file or directory
+find: ‘modules/Megatron-LM/*.py’: No such file or directory
+find: ‘modules/Model-Optimizer-Internal/**’: No such file or directory
+[13:37:53] Connecting to                                           client.py:257
+           chenhany@cw-dfw-cs-001-login-01.nvidia.com                           
+[13:37:53] INFO     Connected (version 2.0, client             transport.py:1786
+                    OpenSSH_8.9p1)                                              
+           INFO     Authentication (publickey) successful!     transport.py:1786
+           INFO     rsyncing                                         rsync.py:37
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781185067 to                           
+                    /lustre/fsw/portfolios/coreai/users/chenhany/exp            
+                    eriments/cicd ...                                           
+[13:38:17] INFO     Successfully ran `rsync  -pthrvz  --rsh='ssh -i  rsync.py:93
+                    /.ssh/id_ed25519 -p 22 '                                    
+                    /tmp/pensieve-intern-agent-wsy7i9j7/workspace/ex            
+                    periments/cicd/cicd_1781185067                              
+                    chenhany@cw-dfw-cs-001-login-01.nvidia.com:/lust            
+                    re/fsw/portfolios/coreai/users/chenhany/experime            
+                    nts/cicd`                                                   
+[13:38:17] Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0 for                     
+           experiment cicd                                                      
+           INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726980                            
+           Launching job                                       experiment.py:800
+           Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1 for                     
+           experiment cicd                                                      
+[SLURM] Job 12726980 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:38:18
+[13:38:18] INFO     Launched app:                                launcher.py:116
+                    slurm_tunnel://nemo_run/12726981                            
+────────────────── Detaching from Experiment cicd_1781185067. ──────────────────
+[13:38:18] Task specific cleanup won't be run.                experiment.py:1212
+           Ephemeral logs and artifacts may be lost.                            
+[SLURM] Job 12726981 - State: PENDING, Estimated start: N/A, Current time: 2026-06-11 13:38:18
+
+Experiment Status for cicd_1781185067
+
+Task 0: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726980
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781185067/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781185067/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0
+
+Task 1: Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Status: SUBMITTED
+- Executor: SlurmExecutor on chenhany@cw-dfw-cs-001-login-01.nvidia.com
+- Job id: 12726981
+- Local Directory: /tmp/pensieve-intern-agent-wsy7i9j7/workspace/experiments/cicd/cicd_1781185067/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+- Remote Directory: /lustre/fsw/portfolios/coreai/users/chenhany/experiments/cicd/cicd_1781185067/Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1
+
+                                                                                
+# The experiment was run with the following tasks: ['Qwen3.5-4B_specdec_bench_df
+# You can inspect and reconstruct this experiment at a later point in time using
+experiment = run.Experiment.from_id("cicd_1781185067")                          
+experiment.status() # Gets the overall status                                   
+experiment.logs("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Gets the log f
+experiment.cancel("Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0") # Cancels the 
+                                                                                
+                                                                                
+# You can inspect this experiment at a later point in time using the CLI as well
+nemo experiment status cicd_1781185067                                          
+nemo experiment logs cicd_1781185067 0                                          
+nemo experiment cancel cicd_1781185067 0                                        
+                                                                                
+Found 1 experiment(s): cicd_1781185067
+
+=== [2026-06-11 13:38:25] Polling iteration 1/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: PENDING
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 0 running, 2 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:41:28] Polling iteration 2/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:44:30] Polling iteration 3/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: RUNNING
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: PENDING
+
+  Summary: 0 succeeded, 0 failed, 0 cancelled, 1 running, 1 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:47:33] Polling iteration 4/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:50:35] Polling iteration 5/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: RUNNING
+
+  Summary: 1 succeeded, 0 failed, 0 cancelled, 1 running, 0 pending
+Waiting 180s before next poll...
+
+=== [2026-06-11 13:53:38] Polling iteration 6/320 ===
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_0: SUCCEEDED
+  cicd_1781185067 / Qwen3.5-4B_specdec_bench_dflash_vllm_t1_d3_1: SUCCEEDED
+
+  Summary: 2 succeeded, 0 failed, 0 cancelled, 0 running, 0 pending
+
+All experiments complete.
+  SUCCEEDED: 2
+  FAILED: 0
+  CANCELLED: 0
+
+=== Fetching experiment logs ===
+Fetching logs: cicd_1781185067 task 0
+Fetching logs: cicd_1781185067 task 1
+=== Done fetching logs ===
