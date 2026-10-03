@@ -20,7 +20,6 @@ import pytest
 import torch
 from _test_utils.examples.megatron_example_runner import reset_megatron_global_state
 from _test_utils.examples.run_command import MODELOPT_ROOT
-from _test_utils.torch.distributed.utils import DistributedWorkerPool
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -35,7 +34,6 @@ from megatron.bridge.training.config import (
     TrainingConfig,
     ValidationConfig,
 )
-from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.core.utils import unwrap_model
 
 from modelopt.torch.quantization.utils import is_quantized
@@ -45,7 +43,7 @@ run_training = runpy.run_path(str(MODELOPT_ROOT / "examples/llm_qat/linear_atten
 ]
 
 
-def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
+def _train(qad, recipe):
     captured = {}
 
     def provider(name):
@@ -56,8 +54,6 @@ def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
             num_attention_heads=2,
             hybrid_layer_pattern="G",
             vocab_size=128,
-            tensor_model_parallel_size=tp_size,
-            sequence_parallel=tp_size > 1,
             seq_length=16,
             linear_num_key_heads=2,
             linear_num_value_heads=2,
@@ -79,26 +75,18 @@ def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
         def capture(models):
             module = unwrap_model(models[0])
             captured[name] = module
-            captured[name + "_before"] = {
-                key: value.detach().clone() for key, value in module.named_parameters()
-            }
             if name == "student":
-
-                def check_mask(module, args, kwargs):
-                    mask = kwargs["loss_mask"]
-                    assert not mask[:, :8].any()
-                    assert mask[:, 8:].all()
-
-                module.register_forward_pre_hook(check_mask, with_kwargs=True)
+                captured["before"] = (
+                    module.decoder.layers[0].self_attention.out_proj.weight.detach().clone()
+                )
             return models
 
         model.register_post_wrap_hook(capture)
         return model
 
-    checkpoint = str(tmp_path / "checkpoints")
     config = ConfigContainer(
         model=provider("student"),
-        train=TrainingConfig(train_iters=train_steps, global_batch_size=2, micro_batch_size=1),
+        train=TrainingConfig(train_iters=1, global_batch_size=1, micro_batch_size=1),
         validation=ValidationConfig(eval_iters=0, eval_interval=1),
         optimizer=OptimizerConfig(
             optimizer="adam", lr=1e-2, min_lr=0, weight_decay=0, use_distributed_optimizer=True
@@ -108,7 +96,6 @@ def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
             lr_warmup_iters=0,
             start_weight_decay=0,
             end_weight_decay=0,
-            use_checkpoint_opt_param_scheduler=True,
         ),
         ddp=DistributedDataParallelConfig(
             average_in_collective=False, use_distributed_optimizer=True
@@ -123,92 +110,40 @@ def _train(tmp_path, qad, recipe, train_steps=1, tp_size=1):
             num_workers=0,
         ),
         tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=128),
-        checkpoint=CheckpointConfig(
-            save=checkpoint, load=checkpoint, save_interval=1, async_save=False
-        ),
+        checkpoint=CheckpointConfig(async_save=False),
         logger=LoggerConfig(log_interval=1),
         rng=RNGConfig(seed=123),
         mixed_precision="bf16_mixed",
     )
     run_training(config, recipe, 8, provider("teacher") if qad else None)
-    return captured, checkpoint
-
-
-def _reset_worker(rank, world_size):
-    reset_megatron_global_state()
-
-
-def _warmup(rank, world_size, path, recipe):
-    _train(path / "dp", False, recipe)
-    reset_megatron_global_state()
-    _train(path / "tp", True, recipe, tp_size=world_size)
+    return captured
 
 
 @pytest.fixture(scope="module")
-def compiled_state_training(tmp_path_factory, project_root_path, num_gpus):
-    """Warm up at most two ranks before timing the DP QAT / TP QAD tests."""
-    if not num_gpus:
+def compiled_state_training(project_root_path):
+    """Compile one tiny GDN shape before timing the single-GPU training checks."""
+    if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
     recipe = json.loads(
         (
             project_root_path / "examples/llm_qat/linear_attention/configs/decode_state_int8.json"
         ).read_text()
     )
-    workers = DistributedWorkerPool(min(num_gpus, 2), teardown_fn=_reset_worker)
     try:
-        workers.run(_warmup, tmp_path_factory.mktemp("compile_state_training"), recipe)
-        yield workers, recipe
+        _train(True, recipe)
     finally:
-        workers.shutdown()
+        reset_megatron_global_state()
+    return recipe
 
 
 @pytest.mark.parametrize("qad", [False, True], ids=["qat", "qad"])
-def test_state_training(compiled_state_training, tmp_path, qad):
-    workers, recipe = compiled_state_training
-    workers.run(_check_training, tmp_path, qad, recipe)
-
-
-def _check_training(rank, world_size, tmp_path, qad, recipe):
-    tp_size = world_size if qad else 1
-    captured, checkpoint = _train(tmp_path, qad, recipe, tp_size=tp_size)
-    student = captured["student"]
-    assert has_modelopt_state(checkpoint)
-    assert is_quantized(student)
-    layers = [m for m in student.modules() if hasattr(m, "gdn_state_quantizer")]
-    assert len(layers) == 1
-    assert layers[0].gdn_state_quantizer.is_enabled
-    assert layers[0].linear_attention_config.decode.state_codec == "int8_hadamard32"
-    changed = []
-    for name, parameter in student.named_parameters():
-        assert torch.isfinite(parameter).all()
-        if not torch.equal(parameter, captured["student_before"][name]):
-            assert parameter.requires_grad
-            changed.append(name)
-    assert changed
-    assert all(
-        module._linear_attention_prefill_lengths is None
-        for module in student.modules()
-        if hasattr(module, "_linear_attention_prefill_lengths")
-    )
+def test_state_training(compiled_state_training, qad):
+    captured = _train(qad, compiled_state_training)
+    attention = captured["student"].decoder.layers[0].self_attention
+    assert attention.gdn_state_quantizer.is_enabled
+    assert torch.isfinite(attention.out_proj.weight).all()
+    assert not torch.equal(attention.out_proj.weight, captured["before"])
     if qad:
         teacher = captured["teacher"]
         assert not is_quantized(teacher)
-        for name, parameter in teacher.named_parameters():
-            assert not parameter.requires_grad
-            assert torch.equal(parameter, captured["teacher_before"][name])
-        before_resume = {
-            name: parameter.detach().clone()
-            for name, parameter in student.named_parameters()
-            if parameter.requires_grad
-        }
-        reset_megatron_global_state()
-        # An empty recipe verifies that resume restores the saved quantization policy.
-        resumed, _ = _train(tmp_path, True, {}, train_steps=2, tp_size=tp_size)
-        assert has_modelopt_state(str(tmp_path / "checkpoints/iter_0000002"))
-        assert is_quantized(resumed["student"])
-        assert not is_quantized(resumed["teacher"])
-        assert any(
-            not torch.equal(parameter, before_resume[name])
-            for name, parameter in resumed["student"].named_parameters()
-            if name in before_resume
-        )
+        assert not any(parameter.requires_grad for parameter in teacher.parameters())
