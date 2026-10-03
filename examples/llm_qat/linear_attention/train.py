@@ -13,29 +13,135 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fine-tune Megatron GDN/KDA attention with recurrent-state fake quantization."""
+"""Run Megatron Bridge QAT or QAD with GDN/KDA recurrent-state fake quantization."""
 
 import argparse
 import json
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
-import pyarrow.parquet as pq
-import torch
-from megatron.core import parallel_state
+from megatron.bridge import AutoBridge
+from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
+from megatron.bridge.training.config import (
+    CheckpointConfig,
+    ConfigContainer,
+    DistributedDataParallelConfig,
+    GPTDatasetConfig,
+    LoggerConfig,
+    OptimizerConfig,
+    RNGConfig,
+    SchedulerConfig,
+    TokenizerConfig,
+    TrainingConfig,
+    ValidationConfig,
+)
+from megatron.bridge.training.distill import distill
+from megatron.bridge.training.gpt_step import forward_step_modelopt
+from megatron.bridge.training.post_training.checkpointing import (
+    has_modelopt_state,
+    load_modelopt_state,
+)
+from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
+from megatron.bridge.training.pretrain import pretrain
+from megatron.bridge.training.state import GlobalState
+from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
+from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.ssm import gated_delta_net
+from megatron.core.utils import unwrap_model
+from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.quantization.utils import is_quantized
+
+
+def run_training(config, quant_config, prefill_tokens, teacher_provider=None):
+    """Delegate optimization and checkpointing to Bridge, with a fixed phase per sequence."""
+    if not 0 <= prefill_tokens < config.dataset.seq_length:
+        raise ValueError("prefill-tokens must leave at least one suffix label")
+    resume = config.checkpoint.load and has_modelopt_state(config.checkpoint.load)
+    with ExitStack() as phases:
+
+        def prepare_student(models):
+            # Restore the saved policy before quantization and before the QAD conversion hook.
+            if resume:
+                load_modelopt_state(models, config.checkpoint.load)
+            student = unwrap_model(models[0])
+            layer_types = (gated_delta_net.GatedDeltaNet,)
+            if hasattr(gated_delta_net, "KimiDeltaAttention"):
+                layer_types += (gated_delta_net.KimiDeltaAttention,)
+            layers = [m for m in student.modules() if isinstance(m, layer_types)]
+            if not layers:
+                raise ValueError(
+                    "The model must contain Megatron GatedDeltaNet or KimiDeltaAttention"
+                )
+            student.requires_grad_(False)
+            for layer in layers:
+                layer.requires_grad_(True)
+            if config.model.recompute_granularity == "full":
+
+                def require_input_grad(module, args, output):
+                    return output.requires_grad_(True) if module.training else output
+
+                # Reentrant checkpointing needs a differentiable input even with frozen embeddings.
+                for module in student.modules():
+                    if isinstance(module, LanguageModelEmbedding):
+                        handle = module.register_forward_hook(require_input_grad)
+                        phases.callback(handle.remove)
+            if not is_quantized(student):
+                mtq.quantize(student, quant_config)
+            # Every dense microbatch uses the same boundary; retain it through recomputed backward.
+            phases.enter_context(
+                linear_attention_training_phase(
+                    student, [prefill_tokens] * config.train.micro_batch_size
+                )
+            )
+            return models
+
+        def forward_step(state: GlobalState, data_iterator, model, return_schedule_plan=False):
+            batch = dict(next(data_iterator))
+            batch["loss_mask"] = batch["loss_mask"].clone()
+            batch["loss_mask"][..., :prefill_tokens] = 0
+            # Bridge applies this same mask to the language-model and distillation losses.
+            return forward_step_modelopt(state, iter([batch]), model, return_schedule_plan)
+
+        config.model.register_pre_wrap_hook(prepare_student)
+        if teacher_provider is not None:
+            config.model = convert_to_distillation_provider(
+                config.model, teacher_provider, ModelOptDistillConfig(skip_lm_loss=True)
+            )
+            distill(config, forward_step)
+        else:
+            pretrain(config, forward_step)
+
+
+def model_provider(path, options, *, load_weights=True):
+    """Build a single-GPU Megatron provider using the model's Bridge converter."""
+    bridge = AutoBridge.from_hf_pretrained(str(path), trust_remote_code=options.trust_remote_code)
+    provider = bridge.to_megatron_provider(load_weights=load_weights)
+    provider.tensor_model_parallel_size = 1
+    provider.pipeline_model_parallel_size = 1
+    provider.context_parallel_size = 1
+    provider.expert_model_parallel_size = 1
+    provider.expert_tensor_parallel_size = 1
+    provider.sequence_parallel = False
+    provider.gradient_accumulation_fusion = False
+    provider.calculate_per_token_loss = True
+    provider.seq_length = options.length
+    return provider
 
 
 def main():
-    """Load a local model through Megatron Bridge and save a Megatron QAT checkpoint."""
+    """Train a local model with QAT, or add a frozen teacher for QAD."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--teacher-model", type=Path, help="Unquantized teacher; enables QAD")
     parser.add_argument(
-        "--train-data", type=Path, required=True, help="Parquet file with a text column"
+        "--train-data",
+        type=Path,
+        required=True,
+        help="Megatron tokenized dataset prefix (.bin/.idx)",
     )
     parser.add_argument(
         "--quant-config",
@@ -49,83 +155,92 @@ def main():
     parser.add_argument("--prefill-tokens", type=int, default=64)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--global-batch-size", type=int, default=1)
     options = parser.parse_args()
     if options.train_steps < 1 or options.length < 2:
         parser.error("train-steps must be positive and length must be at least two")
     if not 0 <= options.prefill_tokens < options.length:
         parser.error("prefill-tokens must leave at least one suffix label")
+    if options.global_batch_size < 1:
+        parser.error("global-batch-size must be positive")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         parser.error(
             "This example uses one GPU; use a Megatron training schedule for multiple GPUs"
         )
-    torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-    torch.distributed.init_process_group("nccl")
-    try:
-        bridge, _, models, model, tokenizer = load_mbridge_model_from_hf(
-            hf_model_name_or_path=str(options.model),
-            trust_remote_code=options.trust_remote_code,
-            provider_overrides={
-                "tensor_model_parallel_size": 1,
-                "pipeline_model_parallel_size": 1,
-                "context_parallel_size": 1,
-                "expert_model_parallel_size": 1,
-                "expert_tensor_parallel_size": 1,
-                "sequence_parallel": False,
-                "seq_length": options.length,
-                "gradient_accumulation_fusion": False,
-                "bf16": False,
-                "params_dtype": torch.float32,
-                "pipeline_dtype": torch.float32,
-            },
-        )
-        torch.manual_seed(options.seed)
-        layer_types = (gated_delta_net.GatedDeltaNet,)
-        if hasattr(gated_delta_net, "KimiDeltaAttention"):
-            layer_types += (gated_delta_net.KimiDeltaAttention,)
-        layers = [module for module in model.modules() if isinstance(module, layer_types)]
-        if not layers:
-            raise ValueError("The model must contain Megatron GatedDeltaNet or KimiDeltaAttention")
-        # Keep attention parameters and optimizer moments in FP32; freeze the rest in BF16.
-        model.requires_grad_(False)
-        for layer in layers:
-            layer.requires_grad_(True)
-        for parameter in model.parameters():
-            if not parameter.requires_grad:
-                parameter.data = parameter.data.to(torch.bfloat16)
-        mtq.quantize(model, json.loads(options.quant_config.read_text()))
-        text = "\n\n".join(pq.read_table(options.train_data, columns=["text"])["text"].to_pylist())
-        tokens = tokenizer.encode(text, add_special_tokens=False)
-        needed = options.train_steps * (options.length + 1)
-        if len(tokens) < needed:
-            parser.error(f"Training data has {len(tokens)} tokens; {needed} are required")
-        blocks = torch.tensor(tokens[:needed]).reshape(options.train_steps, options.length + 1)
-        trainable = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable, lr=options.learning_rate, weight_decay=0)
-        model.train()
-        for step, block in enumerate(blocks, 1):
-            ids, labels = block[:-1].unsqueeze(0).cuda(), block[1:].unsqueeze(0).cuda()
-            positions = torch.arange(options.length, device=ids.device).unsqueeze(0)
-            optimizer.zero_grad(set_to_none=True)
-            # Megatron takes shifted labels and returns per-token losses, unlike HF models.
-            with linear_attention_training_phase(model, [options.prefill_tokens]):
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    losses = model(
-                        input_ids=ids, position_ids=positions, attention_mask=None, labels=labels
-                    )
-                    loss = losses[:, options.prefill_tokens :].float().mean()
-                loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0, error_if_nonfinite=True)
-            optimizer.step()
-            print(f"step={step} loss={loss.item():.4f}", flush=True)
-        bridge.save_megatron_model(
-            models,
-            str(options.output),
-            hf_tokenizer_path=str(options.model),
+    if any(not Path(f"{options.train_data}.{suffix}").is_file() for suffix in ("bin", "idx")):
+        parser.error("train-data must name an existing Megatron .bin/.idx dataset prefix")
+
+    checkpoint_dir = str(options.output / "checkpoints")
+    resume = has_modelopt_state(checkpoint_dir)
+    student = model_provider(options.model, options, load_weights=not resume)
+    teacher = None
+    if options.teacher_model is not None:
+        tokenizer_kwargs = {"trust_remote_code": options.trust_remote_code}
+        student_vocab = AutoTokenizer.from_pretrained(options.model, **tokenizer_kwargs).get_vocab()
+        teacher_vocab = AutoTokenizer.from_pretrained(
+            options.teacher_model, **tokenizer_kwargs
+        ).get_vocab()
+        if student_vocab != teacher_vocab:
+            parser.error("QAD requires student and teacher to use the same tokenizer vocabulary")
+        teacher = model_provider(options.teacher_model, options)
+        vocab_sizes = [
+            calculate_padded_vocab_size(
+                p.vocab_size, p.make_vocab_size_divisible_by, p.tensor_model_parallel_size
+            )
+            for p in (student, teacher)
+        ]
+        if vocab_sizes[0] != vocab_sizes[1]:
+            parser.error("QAD requires matching student and teacher output vocabulary dimensions")
+
+    config = ConfigContainer(
+        model=student,
+        train=TrainingConfig(
+            train_iters=options.train_steps,
+            global_batch_size=options.global_batch_size,
+            micro_batch_size=1,
+        ),
+        validation=ValidationConfig(eval_iters=0, eval_interval=options.train_steps),
+        optimizer=OptimizerConfig(
+            optimizer="adam", lr=options.learning_rate, min_lr=0, weight_decay=0, clip_grad=1.0
+        ),
+        scheduler=SchedulerConfig(
+            lr_decay_style="constant",
+            lr_warmup_iters=0,
+            start_weight_decay=0,
+            end_weight_decay=0,
+            use_checkpoint_opt_param_scheduler=True,
+        ),
+        ddp=DistributedDataParallelConfig(average_in_collective=False),
+        dataset=GPTDatasetConfig(
+            seq_length=options.length,
+            blend=([str(options.train_data)], None),
+            split="100,0,0",
+            random_seed=options.seed,
+            reset_position_ids=False,
+            reset_attention_mask=False,
+            eod_mask_loss=False,
+            dataloader_type="single",
+            num_workers=0,
+        ),
+        tokenizer=TokenizerConfig(
+            tokenizer_type="HuggingFaceTokenizer",
+            tokenizer_model=str(options.model),
             hf_tokenizer_kwargs={"trust_remote_code": options.trust_remote_code},
-        )
-    finally:
-        parallel_state.destroy_model_parallel()
-        torch.distributed.destroy_process_group()
+        ),
+        checkpoint=CheckpointConfig(
+            save=checkpoint_dir,
+            load=checkpoint_dir,
+            save_interval=options.train_steps,
+            async_save=False,
+            ckpt_format="torch_dist",
+        ),
+        logger=LoggerConfig(log_interval=1),
+        rng=RNGConfig(seed=options.seed),
+        mixed_precision="bf16_mixed",
+    )
+    run_training(
+        config, json.loads(options.quant_config.read_text()), options.prefill_tokens, teacher
+    )
 
 
 if __name__ == "__main__":
