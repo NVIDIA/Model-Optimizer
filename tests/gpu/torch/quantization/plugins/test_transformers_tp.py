@@ -26,6 +26,14 @@ def _test_transformers_tp(model_path, rank, size):
     model_tp = AutoModelForCausalLM.from_pretrained(model_path, tp_plan="auto")
     input_ids = torch.randint(0, model_tp.config.vocab_size, (10, 512), device=f"cuda:{rank}")
     mtq.quantize(model_tp, mtq.NVFP4_AWQ_LITE_CFG, lambda model: model(input_ids))
+    # Every TP-sharded decoder linear must be quantized as a TP-aware layer, on every transformers
+    # TP layout (module-level plan attribute before 5.16, DTensor weights after).
+    decoder_linears = [m for m in model_tp.model.layers.modules() if isinstance(m, torch.nn.Linear)]
+    assert decoder_linears
+    assert all(
+        getattr(m, "_is_column_parallel", False) or getattr(m, "_is_row_parallel", False)
+        for m in decoder_linears
+    )
     outputs_ref = model_tp(input_ids)  # Test that the model forward pass works
 
     mtq.fold_weight(model_tp)

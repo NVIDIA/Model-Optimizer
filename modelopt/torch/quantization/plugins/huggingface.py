@@ -75,6 +75,11 @@ if TYPE_CHECKING:
 __all__ = ["register_hf_attentions_on_the_fly"]
 
 TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
+# transformers 5.0-5.14 multiply DBRX expert weights transposed (``x @ w1[i]``); 4.x and 5.15+ use
+# the standard ``x @ w1[i].T``.
+_DBRX_TRANSPOSED_EXPERTS = TRANSFORMERS_VERSION_GE_5_0 and version.parse(
+    transformers.__version__
+) < version.parse("5.15")
 
 
 class _QuantAttention(QuantModule):
@@ -486,26 +491,43 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
     shard = None
 
     def _setup(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        # transformers<5.0 and >=5.16 keep the sharded weight as a DTensor
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
             device_mesh = self.weight.device_mesh
-        else:  # transformers>=5.0: weights are plain Parameters, mesh is on the module
+            # transformers>=5.16: keep HF's TP wrapper on its local-tensor path (also in training),
+            # so the quantized linear sees this rank's plain weight shard.
+            self._hf_quantized_needs_local_tp = True
+        else:  # transformers 5.0-5.15: weights are plain Parameters, mesh is on the module
             device_mesh = self._hf_device_mesh
         tp_group = device_mesh.get_group()
         self._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
 
     @classmethod
-    def is_compatible(cls, linear) -> bool:
+    def is_compatible(cls, linear, tp_mesh=None) -> bool:
         if not isinstance(linear, torch.nn.Linear):
             return False
-        if not hasattr(linear, "_hf_tp_plan"):
-            return False
-        return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        if hasattr(linear, "_hf_tp_plan"):  # transformers<5.16
+            return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        # transformers>=5.16 marks nothing on the module: the weight is a DTensor on the model's TP
+        # mesh, sharded along the TP style's dim. Matching the mesh keeps FSDP2 shards out.
+        weight = linear.weight
+        return (
+            tp_mesh is not None
+            and isinstance(weight, torch.distributed.tensor.DTensor)
+            and weight.device_mesh is tp_mesh
+            and tuple(weight.placements) == cls.shard
+        )
 
-    # This is hack for now, otherwise DMRegistry treats this class same as nn.Linear
+    # Defined so DMRegistry does not treat this class the same as nn.Linear.
     def forward(self, x):
+        # transformers>=5.16 installs its TP input/output transforms as an instance forward, which
+        # DynamicModule.convert keeps as _forward_pre_dm; it wraps the unconverted nn.Linear.forward.
+        pre_fwd = getattr(self, "_forward_pre_dm", None)
+        if pre_fwd is not None:
+            return pre_fwd(x)
         return super().forward(x)
 
 
@@ -528,7 +550,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0, >=5.16
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
@@ -539,7 +561,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
                 yield
             finally:
                 self.weight = weight
-        else:  # transformers>=5.0: weights are already plain Parameters
+        else:  # transformers 5.0-5.15: weights are already plain Parameters
             yield
 
 
@@ -560,10 +582,11 @@ def convert_hf_parallel_linears_on_the_fly(model):
     This method converts them to `HFColumnParallelLinear` and `HFRowParallelLinear` so that they
     can be treated as TP sharded layers and not like regular nn.Linear layers.
     """
+    tp_mesh = getattr(model, "_device_mesh", None)  # transformers>=5.16
     for name, module in model.named_modules():
-        if HFColumnParallelLinear.is_compatible(module):
+        if HFColumnParallelLinear.is_compatible(module, tp_mesh):
             HFColumnParallelLinear.convert(module)
-        elif HFRowParallelLinear.is_compatible(module):
+        elif HFRowParallelLinear.is_compatible(module, tp_mesh):
             HFRowParallelLinear.convert(module)
 
 
@@ -832,49 +855,32 @@ class _QuantDbrxExpertGLU(QuantModule):
                 with torch.no_grad():
                     module.weight.copy_(weights[expert_idx].detach())
 
-        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
-        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
-        # computes x @ W.T), we store weights transposed: W = w1[i].T.
-        self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
+        # F.linear(x, W) computes x @ W.T, so the standard orientation (gate = x @ w1[i].T,
+        # down = inter @ w2[i]) uses W = w1[i] and W = w2[i].T; transformers 5.0-5.14 swap both.
+        experts = (self.moe_num_experts, self.ffn_hidden_size, self.hidden_size)
+        in_proj = [w.view(experts) for w in (self.w1, self.v1)]
+        out_proj = self.w2.view(experts)
+        if _DBRX_TRANSPOSED_EXPERTS:
+            in_proj = [w.transpose(1, 2) for w in in_proj]
+        else:
+            out_proj = out_proj.transpose(1, 2)
+
+        def _make_linears(weights):
+            out_features, in_features = weights.shape[1:]
+            modules = nn.ModuleList(
+                [
+                    nn.Linear(in_features, out_features, bias=False)
+                    for _ in range(self.moe_num_experts)
+                ]
+            )
+            _copy_weights(modules, weights)
+            return modules
+
+        self.w1_linear = _make_linears(in_proj[0])
+        self.v1_linear = _make_linears(in_proj[1])
+        self.w2_linear = _make_linears(out_proj)
         delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
         delattr(self, "v1")
-
-        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
-        # so W = w2[i] directly (no extra transpose needed).
-        self.w2_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
         delattr(self, "w2")
 
     def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
