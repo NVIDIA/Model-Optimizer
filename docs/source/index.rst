@@ -28,6 +28,12 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+    <article class="announcement-card" data-date="2026-09-28" data-title="Saturation-Aware AutoQuantize: Pricing Mixed-Precision Configurations with Aumann–Shapley Attributions" data-summary="A coverage model of quantization damage, fitted from Aumann–Shapley path gradients, prices mixed-precision configurations with saturation and cuts KL by up to 37% at matched effective bits." data-tags="autoquantize quantization mixed-precision modelopt">
+      <div class="announcement-card-meta">September 28, 2026 &middot; Joshua Hill (Baseten Labs, Inc.)</div>
+      <h2><a href="announcements/saturation-aware-autoquantize.html">Saturation-Aware AutoQuantize: Pricing Mixed-Precision Configurations with Aumann–Shapley Attributions</a></h2>
+      <p>Summing per-layer sensitivities overprices aggressive configurations because quantization damage saturates. A coverage model fitted from Aumann–Shapley path gradients prices them correctly and cuts KL by up to 37% at matched effective bits.</p>
+      <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
+    </article>
      <article class="announcement-card" data-date="2026-09-16" data-title="Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation" data-summary="Weight-only NVFP4 is slower than BF16 on Blackwell; W4A4 unlocks the FP4 kernels, and QAD recovers the accuracy it costs." data-tags="quantization nvfp4 w4a4 qad distillation megatron-bridge">
        <div class="announcement-card-meta">September 16, 2026 &middot; Model Optimizer Team</div>
        <h2><a href="announcements/qwen36-w4a4-qad.html">Recovering W4A4 NVFP4 Accuracy with Quantization-Aware Distillation</a></h2>
