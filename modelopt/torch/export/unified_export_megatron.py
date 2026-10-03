@@ -496,6 +496,8 @@ class GPTModelExporter:
                 json.dump(config_dict, f, indent=4)
         torch.distributed.barrier()
 
+        self._finalize_layer_state_dicts(layer_state_dicts, save_directory)
+
         save_safetensors_by_layer_index(
             layer_state_dicts=layer_state_dicts if is_stage_layer_writer else {},
             total_layers=self.model.config.num_layers,
@@ -523,6 +525,9 @@ class GPTModelExporter:
             failure = next((f for f in gathered if f), "")
         if failure:
             raise RuntimeError(failure)
+
+    def _finalize_layer_state_dicts(self, layer_state_dicts, save_directory) -> None:
+        """Finalize all collected export shards on every rank before writing weights."""
 
     def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
         """Raise if the export dropped tensors the source has: a missing rule emits nothing."""

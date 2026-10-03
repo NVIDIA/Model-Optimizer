@@ -16,13 +16,19 @@
 import json
 from collections import Counter
 from contextlib import nullcontext
+from copy import deepcopy
 from functools import partial
 
 import pytest
 import torch
 import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
-from _test_utils.torch.megatron.utils import run_mcore_inference
+from _test_utils.torch.megatron.utils import initialize_for_megatron, run_mcore_inference
+from _test_utils.torch.transformers_models import create_tiny_nemotron_h_dir
+from megatron.core.models.hybrid.hybrid_model import HybridModel
+from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
+from megatron.core.post_training.modelopt.hybrid.model_specs import get_hybrid_stack_modelopt_spec
+from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
 
 import modelopt.torch.quantization as mtq
@@ -201,6 +207,146 @@ def test_mcore_vllm_export_after_state_dict_access(dist_workers_size_1, tmp_path
     dist_workers_size_1.run(
         partial(_test_mcore_vllm_export, tmp_path, mtq.FP8_DEFAULT_CFG, prebuild=True)
     )
+
+
+def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
+    initialize_for_megatron(pipeline_model_parallel_size=size)
+    config = TransformerConfig(
+        pipeline_model_parallel_size=size,
+        num_layers=4,
+        hidden_size=64,
+        num_attention_heads=8,
+        num_query_groups=4,
+        ffn_hidden_size=128,
+        normalization="RMSNorm",
+        add_bias_linear=False,
+        pipeline_dtype=torch.bfloat16,
+        bf16=True,
+        mamba_state_dim=32,
+        mamba_num_heads=8,
+        mamba_head_dim=16,
+        mamba_num_groups=2,
+        num_moe_experts=4,
+        moe_grouped_gemm=False,
+        moe_ffn_hidden_size=64,
+        moe_shared_expert_intermediate_size=32,
+        moe_router_enable_expert_bias=True,
+        moe_router_score_function="sigmoid",
+        mtp_num_layers=1,
+    )
+    model = HybridModel(
+        config=config,
+        hybrid_stack_spec=get_hybrid_stack_modelopt_spec(remap_te_layernorm=True),
+        hybrid_layer_pattern="M*EE/*E",
+        vocab_size=32,
+        max_sequence_length=32,
+        pre_process=is_pipeline_first_stage(),
+        post_process=is_pipeline_last_stage(),
+        share_embeddings_and_output_weights=False,
+        position_embedding_type="none",
+    ).to(dtype=torch.bfloat16, device="cuda")
+    model.eval()
+
+    def forward_loop(model):
+        with torch.no_grad():
+            run_mcore_inference(model, torch.randint(0, 32, (1, 32), device="cuda"))
+
+    quant_cfg = deepcopy(mtq.FP8_DEFAULT_CFG)
+    # The default preset excludes MTP; this regression exercises a quantized live head.
+    quant_cfg["quant_cfg"] = [
+        entry for entry in quant_cfg["quant_cfg"] if entry.get("quantizer_name") != "mtp.*"
+    ]
+    model = mtq.quantize(model, quant_cfg, forward_loop)
+    mtp_quantizers = {
+        name: quantizer
+        for name, quantizer in model.named_modules()
+        if name.startswith("mtp.") and isinstance(quantizer, TensorQuantizer)
+    }
+    if is_pipeline_last_stage():
+        assert mtp_quantizers
+        for name, quantizer in mtp_quantizers.items():
+            if quantizer.is_enabled:
+                assert getattr(quantizer, "_amax", None) is not None
+                if name.endswith("input_quantizer"):
+                    quantizer.float()
+                    quantizer.amax = torch.full_like(quantizer.amax, 1.001)
+
+    source = tmp_path / "tiny_nemotron_h"
+    if rank == 0:
+        create_tiny_nemotron_h_dir(
+            tmp_path,
+            num_hidden_layers=4,
+            hybrid_override_pattern="M*EE",
+            n_routed_experts=4,
+            num_nextn_predict_layers=1,
+        )
+    torch.distributed.barrier()
+
+    weight_quantizers = [
+        quantizer
+        for name, quantizer in model.named_modules()
+        if name.startswith("mtp.")
+        and name.endswith("weight_quantizer")
+        and isinstance(quantizer, TensorQuantizer)
+        and quantizer.is_enabled
+    ]
+    calls = Counter()
+
+    def count_qdq(module, args, output):
+        calls[module] += 1
+
+    handles = [quantizer.register_forward_hook(count_qdq) for quantizer in weight_quantizers]
+    export_dir = tmp_path / "mtp_export"
+    try:
+        export_mcore_gpt_to_hf_vllm_fq(
+            model,
+            pretrained_model_name_or_path=str(source),
+            dtype=torch.bfloat16,
+            export_dir=str(export_dir),
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert all(calls[quantizer] == 1 for quantizer in weight_quantizers), calls
+
+    state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
+    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
+    expected_names = {
+        "mtp.layers.0.eh_proj.input_quantizer",
+        *(f"mtp.layers.0.mixer.{proj}_proj.input_quantizer" for proj in ("q", "k", "v", "o")),
+        *(
+            f"mtp.layers.1.mixer.experts.{expert}.{proj}_proj.input_quantizer"
+            for expert in range(4)
+            for proj in ("up", "down")
+        ),
+        *(
+            f"mtp.layers.1.mixer.shared_experts.{proj}_proj.input_quantizer"
+            for proj in ("up", "down")
+        ),
+    }
+    assert expected_names <= recipe.keys()
+    assert {name + "._amax" for name in expected_names} <= state.keys()
+    for name in expected_names:
+        assert not recipe[name]["_disabled"]
+        amax = state[name + "._amax"]
+        assert amax.dtype == torch.float32
+        torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
+    assert not any(key.endswith("._quant_recipe_marker") for key in state)
+    assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
+    with open(export_dir / "model.safetensors.index.json") as f:
+        weight_map = json.load(f)["weight_map"]
+    assert "mtp.layers.0.eh_proj.weight" in weight_map
+    for shard in set(weight_map.values()):
+        with safe_open(export_dir / shard, framework="pt") as f:
+            shard_keys = f.keys()
+            assert not any("quantizer" in key for key in shard_keys)
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_mcore_vllm_export_mtp(request, tmp_path, pp_size):
+    """Live Nemotron MTP quantizers reach sidecars and never leak into weight shards."""
+    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
+    workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
 
 
 def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
