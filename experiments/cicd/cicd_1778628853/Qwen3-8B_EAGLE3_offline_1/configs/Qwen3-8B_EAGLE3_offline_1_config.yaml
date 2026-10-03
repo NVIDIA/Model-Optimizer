@@ -1,0 +1,19 @@
+_target_: nemo_run.config.Script
+args:
+- --input-data /scratchspace/data
+- --output-dir /scratchspace/offline_hidden_states
+- --max-seq-len 8192
+- --tp 8
+- --moe-ep 8
+entrypoint: bash
+env:
+  HF_HOME: /cicd/hf-cache
+  HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+  HF_TOKEN: ''
+  LAUNCH_SCRIPT: python
+  MLM_SKIP_INSTALL: '1'
+  TRITON_CACHE_DIR: /cicd/triton-cache
+inline: ''
+m: false
+metadata: {}
+path: common/eagle3/dump_offline_data.sh

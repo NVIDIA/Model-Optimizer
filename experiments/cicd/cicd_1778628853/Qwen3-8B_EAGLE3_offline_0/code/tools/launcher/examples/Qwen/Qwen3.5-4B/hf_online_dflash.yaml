@@ -1,0 +1,81 @@
+# DFlash online speculative decoding training for Qwen3.5-4B.
+#
+# 3-step pipeline:
+#   task_0: Online DFlash training
+#   task_1: vLLM smoke test with DFlash speculative decoding
+#   task_2: HF AR evaluation (1 GPU)
+#
+# NOTE: Qwen3.5-4B has non-standard head_dim=160. The draft model uses z-lab's
+# architecture (32 heads, head_dim=128) for vLLM KV cache compatibility.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3.5-4B/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3.5-4B/hf_online_dflash.yaml --yes
+
+job_name: Qwen3.5-4B_DFlash_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-4B
+
+  # Step 1: Online DFlash training
+  task_0:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.trust_remote_code=false
+      - data.data_path=/hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-1K-openai.jsonl
+      - data.chat_template=examples/Qwen/Qwen3.5-4B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash_qwen3.5_4b
+      - training.num_train_epochs=1
+      - training.training_seq_len=4096
+      - training.save_steps=5000
+      - training.logging_steps=1000
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      - dflash.dflash_block_size=8
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=4
+      - dflash.dflash_mask_token_id=248070
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+      - dflash.dflash_architecture_config.num_attention_heads=32
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.head_dim=128
+      - dflash.dflash_architecture_config.intermediate_size=9728
+      - dflash.dflash_architecture_config.rope_theta=10000000
+    environment:
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: vLLM smoke test with exported DFlash draft
+  task_1:
+    script: common/specdec/vllm_smoke_test.sh
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - DRAFT_CKPT_DIR: /scratchspace/dflash_qwen3.5_4b
+      - SPEC_METHOD: "dflash"
+      - NUM_SPEC_TOKENS: "7"
+      - REASONING_PARSER: "qwen3"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+
+  # Step 3: HF AR evaluation
+  task_2:
+    script: common/specdec/ar_eval_mtbench.sh
+    args:
+      - --ckpt_dir /scratchspace/dflash_qwen3.5_4b
+      - --osl 512
+      - --steps 15
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1

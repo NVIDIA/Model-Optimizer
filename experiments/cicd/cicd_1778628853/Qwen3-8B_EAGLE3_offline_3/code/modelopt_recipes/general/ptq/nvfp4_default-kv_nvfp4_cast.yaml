@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
+  kv_nvfp4_cast: configs/ptq/units/kv_nvfp4_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    NVFP4 W4A4, NVFP4 KV cache with constant amax (skips KV calibration; amax
+    hardcoded to FP8 E4M3 max 448.0 — the deployment kernel upcasts NVFP4 KV
+    values to FP8 before attention, so the scale must land in the FP8 range),
+    max calibration.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w4a4_nvfp4_nvfp4
+    - $import: kv_nvfp4_cast
+    - $import: default_disabled_quantizers
