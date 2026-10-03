@@ -1,9 +1,10 @@
-# Quantization-Aware Training for Linear Attention
+# Quantization-Aware Training and Distillation for Linear Attention
 
 This example fine-tunes Megatron-Core GDN or KDA attention parameters with
-recurrent-state fake quantization, then saves a Megatron checkpoint with ModelOpt
-state. Training adapters support Megatron `GatedDeltaNet` and
-`KimiDeltaAttention`; FLA supplies kernels, not model-layer adapters.
+recurrent-state fake quantization using Megatron Bridge's training loop (QAT), or
+its distillation loop with an unquantized teacher (QAD). Bridge handles optimization,
+gradient accumulation, logging, and checkpoints. Training adapters support Megatron
+`GatedDeltaNet` and `KimiDeltaAttention`; FLA supplies kernels, not model-layer adapters.
 Runtime support includes token writes, ReplaySSM, KDA decay approximation, and
 FP8 or INT8 state QDQ. The INT8 recipes enable Hadamard rotation by default.
 
@@ -26,15 +27,24 @@ Bridge/Core revisions: Bridge's pinned Core revision may differ from the KDA
 pip install -r examples/llm_qat/linear_attention/requirements.txt
 torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train.py \
   --model /path/to/local-model \
-  --train-data /path/to/train.parquet \
+  --train-data /path/to/tokenized/train_text_document \
   --output /path/to/megatron-qat-checkpoint \
   --train-steps 1 --length 128 --prefill-tokens 64
 ```
 
+Add `--teacher-model /path/to/unquantized-model` to run QAD. The teacher and
+student must share the tokenizer vocabulary and output vocabulary dimensions.
+The teacher stays frozen and unquantized. QAT uses next-token cross-entropy;
+QAD uses Bridge's logits distillation loss with the language-model loss disabled.
+Both losses are masked to the suffix after `--prefill-tokens`.
+
 Use a local HF model/tokenizer snapshot that your installed Megatron Bridge can
-convert to a Megatron model containing GDN or KDA layers, a Parquet file with a
-`text` column, and one CUDA GPU. Bridge's architecture/checkpoint conversion
-support is a separate requirement from ModelOpt's layer adapter; an arbitrary
+convert to a Megatron model containing GDN or KDA layers, a tokenized Megatron
+`.bin`/`.idx` dataset pair, and one CUDA GPU. `--train-data` is the shared filename
+prefix without either extension; use the model's tokenizer when
+[preparing the data](../../megatron_bridge/README.md#data-preparation).
+Bridge's architecture/checkpoint conversion support is a separate requirement
+from ModelOpt's layer adapter; an arbitrary
 FLA model checkpoint cannot be loaded through this example. For a model already
 built in Megatron, use the training-loop integration below. If the local model
 requires custom Python code, explicitly pass `--trust-remote-code`.
@@ -42,21 +52,27 @@ requires custom Python code, explicitly pass `--trust-remote-code`.
 The shared [INT8 configuration](configs/decode_state_int8.json) enables GDN and
 KDA state quantizers. It leaves the 64-token prefix state unquantized and applies
 INT8 QDQ in a 32-value Hadamard basis during the decode suffix. Value dimensions
-must be divisible by 32. Only linear-attention parameters are trained, in FP32
-under BF16 autocast; other parameters are frozen in BF16. Megatron receives
-shifted next-token labels; loss is averaged over suffix positions.
+must be divisible by 32. Only linear-attention parameters are trained, using
+Bridge's BF16 mixed precision and optimizer; other model parameters are frozen.
+Every dense sequence has the same fixed prefill boundary. The example retains
+the phase context throughout training so backward recomputation sees that boundary.
+Packed sequences and variable per-sequence boundaries require their own batch integration.
 
-The output is a Megatron model checkpoint containing ModelOpt quantizers and
-execution policies, without optimizer state. Reload it through
-[the Megatron Bridge workflow](../../megatron_bridge/README.md), preserving
-ModelOpt state. Export to a supported serving model separately. The current vLLM
+Bridge saves model weights, optimizer/scheduler state, and ModelOpt state under
+`<output>/checkpoints`. Reusing `--output` resumes from its latest checkpoint;
+increase `--train-steps` to the desired total step count and retain the same model,
+teacher, dataset, and prefill boundary. A resumed checkpoint supplies the saved
+quantization policy. `--global-batch-size` controls accumulation with microbatch size one.
+Export to a supported serving model separately. The current vLLM
 state-only plugin accepts its own boundary-QDQ recipe; it does not implement
 the Hadamard or replay training policies.
 
-This one-GPU example demonstrates the integration. Distributed training needs a
-Megatron training schedule, gradient synchronization, and a compatible exporter.
-Context parallelism is currently unsupported by these ModelOpt adapters.
-This example does not measure model-quality recovery or performance.
+This one-GPU example demonstrates integration with Bridge's existing training
+workflows; distributed execution needs separate qualification. Context parallelism
+is currently unsupported by these ModelOpt adapters. The Hugging Face
+`QATTrainer`/`QADTrainer` example in [the parent directory](../README.md#using-qattrainer-and-qadtrainer)
+targets a different training framework. This example does not measure model-quality
+recovery or performance.
 
 ## Enable state quantization
 

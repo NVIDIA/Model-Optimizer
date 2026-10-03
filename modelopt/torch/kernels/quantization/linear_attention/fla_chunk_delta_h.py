@@ -54,6 +54,7 @@ STATE_QDQ_MAX_BLOCK_V = 128
 @triton.jit
 def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.constexpr):
     """[ModelOpt] Dynamic scale per full [K, BV] tile of one sequence and head."""
+    # The b_h blocks partition K; their joint amax gives one scale for the full [K, BV] tile.
     b_amax = tl.max(tl.abs(b_h1))
     if K > 64:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h2)))
@@ -61,6 +62,8 @@ def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.cons
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h3)))
     if K > 192:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h4)))
+    # STATE_QDQ=2 uses symmetric INT8 (max 127); STATE_QDQ=1 uses FP8 E4M3 (max 448).
+    # Use scale=1 for zero tiles to avoid division by zero during QDQ.
     if STATE_QDQ == 2:
         return tl.where(b_amax > 0, b_amax * (1.0 / 127.0), 1.0)
     else:
