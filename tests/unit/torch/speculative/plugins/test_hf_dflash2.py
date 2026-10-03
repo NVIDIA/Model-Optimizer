@@ -352,11 +352,15 @@ class TestDFlash2Forward:
     def test_overfits_a_single_batch(self):
         """A few steps on one batch drive backbone and selector accuracy up.
 
-        Guards the target/predecessor alignment: a misaligned selector objective still
-        produces a finite decreasing loss, but its accuracy does not reach 1.
+        Guards the selector's target alignment: with the gold token off by a position the
+        loss still falls, but the backbone's top-k rarely holds that token, so coverage
+        stays low.
         """
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(model, [("dflash", _get_dflash2_config())])
+        # fp32: CPUs without AVX-512 have no fast bf16 matmul, and the draft keeps Qwen3's
+        # default 22016-wide MLP.
+        model.float()
         model.train()
 
         input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
@@ -369,6 +373,7 @@ class TestDFlash2Forward:
 
         assert out.train_acc[0][0] > 0.9
         assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["selector_metrics"]["selector_coverage"].item() > 0.9
 
 
 class TestCandidateSelectorAlignment:

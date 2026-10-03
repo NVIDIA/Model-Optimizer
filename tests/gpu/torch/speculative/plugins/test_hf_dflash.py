@@ -220,6 +220,7 @@ class TestDFlashOfflineForwardGPU:
 
     def test_offline_forward_returns_loss(self, offline_model):
         """Offline forward consumes precomputed base_model_outputs and returns a finite loss."""
+        assert offline_model.dflash_self_logit_distillation  # KD: teacher projected from hidden
         bsz = 2
         input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
         attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
@@ -232,23 +233,6 @@ class TestDFlashOfflineForwardGPU:
         )
         assert hasattr(output, "loss")
         assert output.loss.requires_grad
-        assert torch.isfinite(output.loss).item()
-
-    def test_offline_forward_self_logit_distillation_recomputes_logits(self, offline_model):
-        """When base_model_logits is absent, self-distillation path computes them from hidden states."""
-        assert offline_model.dflash_self_logit_distillation
-        bsz = 2
-        input_ids = torch.randint(0, offline_model.config.vocab_size, (bsz, SEQ_LEN), device="cuda")
-        attention_mask = torch.ones(bsz, SEQ_LEN, dtype=torch.long, device="cuda")
-        base_model_outputs = self._make_base_model_outputs(offline_model, bsz)
-
-        output = offline_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            base_model_outputs=base_model_outputs,
-        )
-        assert hasattr(output, "logits")
-        assert output.logits is not None
         assert torch.isfinite(output.loss).item()
 
 
@@ -309,3 +293,110 @@ class TestShardedBaseGeneration:
         assert base_token.device == input_ids.device
         assert draft_tokens.device == input_ids.device
         assert draft_tokens.shape == (1, 2)
+
+
+class TestDFlashFlexAttentionGPU:
+    """FlexAttention path must match the dense-mask SDPA path it replaces.
+
+    The model is wider than the rest of this file because FlexAttention's Triton templates
+    need head_dim >= 16 (``get_tiny_llama`` defaults to head_dim 2).
+    """
+
+    SEQ = 64
+    BASE_KWARGS = {
+        "num_hidden_layers": 4,
+        "hidden_size": 128,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "intermediate_size": 64,
+        "max_position_embeddings": 256,
+        "vocab_size": 64,
+    }
+
+    @classmethod
+    def _model(cls, **cfg_overrides):
+        model = get_tiny_llama(**cls.BASE_KWARGS)
+        config = get_dflash_config()
+        config.update(cfg_overrides)
+        mtsp.convert(model, [("dflash", config)])
+        return model.cuda().train()
+
+    @classmethod
+    def _pair(cls, **cfg_overrides):
+        """A dense model and a flex model with identical draft weights."""
+        dense = cls._model(**cfg_overrides)
+        flex = cls._model(dflash_use_flex_attention=True, **cfg_overrides)
+        flex.dflash_module.load_state_dict(dense.dflash_module.state_dict())
+        return dense, flex
+
+    @classmethod
+    def _inputs(cls, bsz=2):
+        input_ids = torch.randint(0, cls.BASE_KWARGS["vocab_size"], (bsz, cls.SEQ), device="cuda")
+        attention_mask = torch.ones(bsz, cls.SEQ, dtype=torch.long, device="cuda")
+        return input_ids, attention_mask
+
+    def test_mask_builder_returns_block_mask(self):
+        """With the flag on, the mask builder hands back a BlockMask, not a dense tensor."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        from modelopt.torch.speculative.plugins.dflash_flex_attention import is_block_mask
+
+        model = self._model(dflash_use_flex_attention=True)
+        mask = model._build_draft_attention_mask(
+            self.SEQ,
+            torch.tensor([[4, 8]], device="cuda"),
+            torch.tensor([[True, True]], device="cuda"),
+            2,
+            torch.float32,
+            torch.device("cuda"),
+            window=None,
+        )
+        assert is_block_mask(mask)
+        assert not torch.is_tensor(mask)
+
+    @pytest.mark.parametrize("window", [None, 8])
+    def test_matches_dense_mask_path(self, window):
+        """Loss agrees with the dense path to bf16 tolerance, with and without SWA."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        overrides = {} if window is None else {"dflash_swa_window_size": window}
+        dense, flex = self._pair(**overrides)
+        input_ids, attention_mask = self._inputs()
+
+        # Anchors are resampled every forward: same seed, so only the kernel differs.
+        torch.manual_seed(1234)
+        out_dense = dense(input_ids=input_ids, attention_mask=attention_mask)
+        torch.manual_seed(1234)
+        out_flex = flex(input_ids=input_ids, attention_mask=attention_mask)
+
+        torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
+
+    def test_matches_dense_mask_path_with_invalid_blocks(self):
+        """Fully-masked query rows (invalid blocks), a softmax over nothing, match too."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        dense, flex = self._pair()
+        input_ids, attention_mask = self._inputs()
+        # Row 1 has few supervised positions, so its trailing blocks are invalid.
+        labels = input_ids.clone()
+        labels[1, : self.SEQ - BLOCK_SIZE] = -100
+
+        torch.manual_seed(7)
+        out_dense = dense(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        torch.manual_seed(7)
+        out_flex = flex(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+        assert torch.isfinite(out_flex.loss), "flex produced a non-finite loss"
+        torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
+
+    def test_backward_produces_finite_grads(self):
+        """The flex path is differentiable and its grads are finite."""
+        pytest.importorskip("torch.nn.attention.flex_attention")
+        flex = self._model(dflash_use_flex_attention=True)
+        input_ids, attention_mask = self._inputs()
+
+        flex(input_ids=input_ids, attention_mask=attention_mask).loss.backward()
+        grads = [
+            p.grad
+            for p in flex.dflash_module.parameters()
+            if p.requires_grad and p.grad is not None
+        ]
+        assert grads, "no draft gradients were produced"
+        assert all(torch.isfinite(g).all() for g in grads)

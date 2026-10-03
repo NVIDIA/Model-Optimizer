@@ -230,7 +230,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        base_logits=None,
+        *,
         draft_hidden=None,
         base_outputs=None,
     ):
@@ -260,7 +260,7 @@ class HFLiLiCorrModel(HFDFlashModel):
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            base_logits,
+            base_outputs=base_outputs,
         )
         target_ids, slot_mask = self._block_targets(
             input_ids, anchor_positions, block_keep_mask, loss_mask
