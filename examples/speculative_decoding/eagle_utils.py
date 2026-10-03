@@ -152,6 +152,40 @@ def make_speculative_data_module(
                 chat_template=chat_template,
             )
 
+    elif mode == "sparse":
+        # Sparse teacher policy: the dump stores the base's top-k deployment
+        # distribution per response token instead of its hidden states, so no base
+        # forward (and no base lm_head) is needed at train time. Only tvd_deploy can
+        # consume it -- the dense losses want full logits.
+        from modelopt.torch.speculative.external.sparse_data import (
+            SparsePolicyCollator,
+            SparsePolicyDataset,
+        )
+
+        print_rank_0("Loading sparse teacher-policy data for external draft training...")
+        assert not data_args.vlm_processor, "Sparse data is not supported for VLM."
+        sparse_path = Path(data_args.sparse_data_path)
+        files = sorted(
+            str(p) for p in sparse_path.rglob("*.jsonl.gz") if not p.name.startswith(".")
+        ) or sorted(str(p) for p in sparse_path.rglob("*.jsonl"))
+        if not files:
+            raise ValueError(f"No .jsonl.gz or .jsonl files found in {data_args.sparse_data_path}")
+        if data_args.sample_size == 0 or data_args.sample_size < -1:
+            raise ValueError("sample_size must be -1 (use all samples) or a positive integer")
+        train_dataset = SparsePolicyDataset(
+            files,
+            max_length=train_len,
+            limit=data_args.sample_size if data_args.sample_size > 0 else None,
+            source_weights=data_args.sparse_source_weights,
+        )
+        print_rank_0(
+            f"Loaded {len(train_dataset)} records from {len(files)} shard(s), "
+            f"teacher top-k={train_dataset.top_k}"
+        )
+        if data_args.sparse_source_weights:
+            print_rank_0(f"[sparse] source weights applied: {data_args.sparse_source_weights}")
+        data_collator = SparsePolicyCollator(train_len=train_len)
+
     else:
         print_rank_0("Loading pre-processed data for offline training...")
         assert not data_args.vlm_processor, "Offline data is not supported for VLM."
