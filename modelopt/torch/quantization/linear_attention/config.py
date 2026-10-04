@@ -78,6 +78,8 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     ``gdn_state_quantizer`` is enabled. Outputs use the incoming rounded state.
     Decode's ``int8_hadamard32`` codec instead fixes scales to one key channel and
     32 values; ``state.block_v`` remains the execution tile width.
+    With INT8 ``TensorQuantizer.block_sizes``, scales instead follow per-key value
+    groups; ``state.block_v`` controls only execution tiling (at least one group).
     """
 
     schema_version: Literal[1] = ModeloptField(default=1)

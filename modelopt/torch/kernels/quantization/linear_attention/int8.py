@@ -26,3 +26,20 @@ __all__ = []
 def int8_scalar_qdq(value, scale):
     codes = libdevice.nearbyint(tl.div_rn(value, scale))
     return tl.minimum(tl.maximum(codes, -127.0), 127.0) * scale
+
+
+@triton.jit
+def int8_block_qdq(value, GROUP_SIZE: tl.constexpr, STATE_V_FIRST: tl.constexpr):
+    """Match TensorQuantizer's dynamic INT8 QDQ per key row and value group."""
+    if STATE_V_FIRST:
+        value = tl.trans(value)
+    groups = tl.reshape(value, (value.shape[0], value.shape[1] // GROUP_SIZE, GROUP_SIZE))
+    amax = tl.max(tl.abs(groups), axis=2, keep_dims=True)
+    # Match the CUDA TensorQuantizer's scale direction, ties-to-even, and tiny-group handling.
+    tiny = amax < 2.0**-24
+    scale = tl.div_rn(127.0, tl.where(tiny, 1.0, amax))
+    codes = tl.clamp(libdevice.nearbyint(groups * scale), -127.0, 127.0)
+    rounded = tl.reshape(tl.where(tiny, 0.0, tl.div_rn(codes, scale)), value.shape)
+    if STATE_V_FIRST:
+        rounded = tl.trans(rounded)
+    return rounded

@@ -17,12 +17,10 @@
 
 from ..config import QuantizerAttributeConfig
 from ..linear_attention.config import LinearAttentionConfig
-from ..linear_attention.utils import validate_gdn_quantizer
+from ..linear_attention.utils import state_quantizer_config, validate_gdn_quantizer
 from ..nn import QuantModule, TensorQuantizer
 
 __all__ = []
-
-_STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", 8: "int8"}
 
 
 class _LinearAttentionQuantMixin(QuantModule):
@@ -45,7 +43,7 @@ class _LinearAttentionQuantMixin(QuantModule):
         # Disabled quantizers impose no format requirement on the numerical backend.
         if not self._linear_attn_state.is_enabled:
             return "fp8_e4m3"
-        return _STATE_FORMATS[self._linear_attn_state.num_bits]
+        return state_quantizer_config(self._linear_attn_state)[0]
 
     @property
     def _linear_attn_w(self):
@@ -63,20 +61,16 @@ class _LinearAttentionQuantMixin(QuantModule):
     def validate_linear_attention(self):
         """Validate quantizer contracts shared by GDN and KDA."""
         if self._linear_attn_state.is_enabled:
-            validate_gdn_quantizer(
+            state_format, group_size = state_quantizer_config(
                 self._linear_attn_state,
                 name=self.linear_attention_quantizer_names[0],
-                num_bits=tuple(_STATE_FORMATS),
             )
-            if self._linear_attn_state.axis != (0, 1):
-                raise ValueError(
-                    f"{self.linear_attention_quantizer_names[0]} supports only axis=(0, 1) "
-                    "with state.block_v tiling"
-                )
             decode = self.linear_attention_config.decode
             if decode is not None and decode.state_codec == "int8_hadamard32":
-                if self._linear_attn_state_format != "int8":
+                if state_format != "int8":
                     raise ValueError("int8_hadamard32 requires INT8 state quantization")
+                if group_size:
+                    raise ValueError("TensorQuantizer block_sizes requires state_codec='tile'")
         if self._linear_attn_w.is_enabled:
             validate_gdn_quantizer(
                 self._linear_attn_w, name=self.linear_attention_quantizer_names[1]

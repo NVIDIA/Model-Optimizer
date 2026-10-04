@@ -161,6 +161,7 @@ def chunk_gdn_reference(
     state_qdq_block_v: int = 64,
     state_format: str = "fp8_e4m3",
     w_quantizer: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    state_quantizer=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Exact GDN chunk algebra with optional state/W fake quantization.
 
@@ -168,6 +169,15 @@ def chunk_gdn_reference(
     materialized ``[B,T,Hv,Dk]`` WY operand once, with its own autograd semantics.
     State QDQ occurs on the initial state and each chunk's final state, after readout.
     """
+    if state_quantizer is not None:
+        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
+        state_format = "int8" if state_quantizer.num_bits == 8 else "fp8_e4m3"
+
+    def quantize_state(state):
+        if state_quantizer is not None and state_quantizer.block_sizes is not None:
+            return state_quantizer(state)
+        return state_qdq_reference(state, state_qdq_block_v, state_format)
+
     if g.ndim != 3 or chunk_size <= 0:
         raise ValueError("chunk_gdn_reference requires scalar GDN gates and positive chunk_size")
     q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
@@ -199,7 +209,7 @@ def chunk_gdn_reference(
         if n != previous_n:
             state = states[n]
             if state_qdq:
-                state = state_qdq_reference(state, state_qdq_block_v, state_format)
+                state = quantize_state(state)
             previous_n = n
         length = qc.shape[1]
         wc = w[offset : offset + length].transpose(0, 1)
@@ -213,7 +223,7 @@ def chunk_gdn_reference(
         state = state * gc[..., -1].exp()[:, None, None]
         state = state + weighted_keys.transpose(-1, -2) @ updated_values  # state_update
         if state_qdq:
-            state = state_qdq_reference(state, state_qdq_block_v, state_format)
+            state = quantize_state(state)
         if len(finals) <= n:
             finals.append(state)
         else:

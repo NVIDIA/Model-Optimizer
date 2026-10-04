@@ -43,7 +43,7 @@ from fla.utils import (
 from modelopt.torch.kernels.quantization import linear_attention as state_formats
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
 
-from .int8 import int8_scalar_qdq
+from .int8 import int8_block_qdq, int8_scalar_qdq
 
 STATE_QDQ_MAX_BLOCK_V = 128
 
@@ -69,10 +69,15 @@ def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.cons
 
 
 @triton.jit
-def _state_scalar_qdq(value, scale, STATE_QDQ: tl.constexpr):
+def _state_scalar_qdq(
+    value, scale, STATE_QDQ: tl.constexpr, GROUP_SIZE: tl.constexpr, STATE_V_FIRST: tl.constexpr
+):
     if STATE_QDQ == state_formats.STATE_QDQ_INT8:
+        if GROUP_SIZE:
+            return int8_block_qdq(value, GROUP_SIZE, STATE_V_FIRST)
         return int8_scalar_qdq(value, scale)
     elif STATE_QDQ == state_formats.STATE_QDQ_FP8_E4M3:
+        tl.static_assert(GROUP_SIZE == 0, "Blockwise state QDQ currently supports only INT8")
         return fp8_scalar_qdq(value, scale)
     else:
         tl.static_assert(False, "Unsupported state QDQ format")
@@ -111,7 +116,7 @@ else:
         for num_warps in GATED_DELTA_RULE_FWD_H_NUM_WARPS
         for num_stages in ([2, 3, 4] if check_shared_mem("ampere") else [2, 1])
     ],
-    key=["H", "HV", "K", "V", "BT", "BV", "STATE_V_FIRST", "STATE_QDQ"],
+    key=["H", "HV", "K", "V", "BT", "BV", "STATE_V_FIRST", "STATE_QDQ", "STATE_QDQ_GROUP_SIZE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
@@ -141,6 +146,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     STATE_QDQ: tl.constexpr,
+    STATE_QDQ_GROUP_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     NV = tl.cdiv(V, BV)
@@ -234,7 +240,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_h4 += tl.load(p_h0_4, mask=m_h0_4, other=0.0).to(tl.float32)
         # [ModelOpt] A state read from a quantized cache is quantized before the first chunk uses it.
         if STATE_QDQ != state_formats.STATE_QDQ_OFF:
-            if K > 192:
+            if STATE_QDQ_GROUP_SIZE:
+                b_scale = 1.0
+            elif K > 192:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
@@ -242,13 +250,19 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
             else:
                 b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
-            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ)
+            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
             if K > 64:
-                b_h2 = _state_scalar_qdq(b_h2, b_scale, STATE_QDQ)
+                b_h2 = _state_scalar_qdq(
+                    b_h2, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
             if K > 128:
-                b_h3 = _state_scalar_qdq(b_h3, b_scale, STATE_QDQ)
+                b_h3 = _state_scalar_qdq(
+                    b_h3, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
             if K > 192:
-                b_h4 = _state_scalar_qdq(b_h4, b_scale, STATE_QDQ)
+                b_h4 = _state_scalar_qdq(
+                    b_h4, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
 
     # main recurrence
     for i_t in range(NT):
@@ -403,9 +417,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # [ModelOpt] Dynamic per-tile FP8/INT8 QDQ of the next-chunk or stored final state.
-        # Recompute amax over [K, BV]; _state_scalar_qdq applies that tile's scalar scale.
+        # Legacy quantizers share a [K, BV] scale; block quantizers scale per key/value group.
         if STATE_QDQ != state_formats.STATE_QDQ_OFF:
-            if K > 192:
+            if STATE_QDQ_GROUP_SIZE:
+                b_scale = 1.0
+            elif K > 192:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
@@ -413,13 +429,19 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
             else:
                 b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
-            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ)
+            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
             if K > 64:
-                b_h2 = _state_scalar_qdq(b_h2, b_scale, STATE_QDQ)
+                b_h2 = _state_scalar_qdq(
+                    b_h2, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
             if K > 128:
-                b_h3 = _state_scalar_qdq(b_h3, b_scale, STATE_QDQ)
+                b_h3 = _state_scalar_qdq(
+                    b_h3, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
             if K > 192:
-                b_h4 = _state_scalar_qdq(b_h4, b_scale, STATE_QDQ)
+                b_h4 = _state_scalar_qdq(
+                    b_h4, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                )
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
@@ -840,10 +862,11 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_offsets: torch.LongTensor | None = None,
     state_qdq: int = state_formats.STATE_QDQ_OFF,
     state_qdq_block_v: int | None = None,
+    state_qdq_group_size: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
-    BV = state_qdq_tile_v(V, state_qdq, state_qdq_block_v)
+    BV = max(state_qdq_tile_v(V, state_qdq, state_qdq_block_v), state_qdq_group_size)
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
@@ -887,6 +910,7 @@ def chunk_gated_delta_rule_fwd_h(
         BV=BV,
         STATE_V_FIRST=state_v_first,
         STATE_QDQ=state_qdq,
+        STATE_QDQ_GROUP_SIZE=state_qdq_group_size,
     )
     return h, v_new, final_state
 
@@ -894,8 +918,8 @@ def chunk_gated_delta_rule_fwd_h(
 def state_qdq_tile_v(V: int, state_qdq: int, state_qdq_block_v: int | None) -> int:
     """Return the V tile width ``BV`` of the forward state kernel.
 
-    Without state quantization this is fla's largest tile. With it, the tile is also the
-    quantization granularity: one dynamic scale per ``[K, BV]`` block of a head's state. The
+    Without state quantization this is fla's largest tile. For legacy quantizers the tile is
+    also the quantization granularity: one scale per ``[K, BV]`` block of a head's state. The
     default is fla's 64-column tile, i.e. one scale per sequence and head for ``V <= 64`` and two
     for the usual ``V == 128``. ``state_qdq_block_v=128`` gives one scale per 128-wide head but
     exceeds the register budget where the kernel is limited to two warps (Blackwell) and spills.

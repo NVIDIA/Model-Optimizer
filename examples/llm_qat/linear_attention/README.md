@@ -299,6 +299,40 @@ context and leaves W/projection quantizers
 disabled. KDA uses the materialized backend and can use the all-prefix context
 shown above.
 
+### Per-row blockwise INT8 through TensorQuantizer
+
+Use the standard quantizer settings to select one dynamic scale per key row and
+16, 32, or 64 consecutive value channels. For example, replace the state quantizer
+configuration in `gdn_recipe` above with:
+
+```python
+gdn_recipe["quant_cfg"][1]["cfg"] = {
+    "num_bits": 8,
+    "type": "dynamic",
+    "block_sizes": {-1: 32},
+    "unsigned": False,
+    "narrow_range": True,
+    "pass_through_bwd": True,
+}
+```
+
+The logical state is `[N, H, K, V]`; `-1` denotes V even when a kernel stores the
+state transposed. Omit `axis` when using `block_sizes`. The outer `type="dynamic"`
+uses ordinary INT8 with dynamic amax; a nested `block_sizes["type"]="dynamic"`
+selects a different specialized ModelOpt path and is not supported here.
+
+The GDN fused kernel applies the quantizer's grouping inside each execution tile.
+It can enlarge `state.block_v` to fit a complete quantization group; changing the
+execution tile does not change the scale groups. The Torch GDN/KDA path calls the
+registered `TensorQuantizer` at the same configured state-write boundaries.
+For KDA, use `*kda_state_quantizer` and the materialized backend. For token decode
+or replay, explicitly select `state_codec="tile"`; the existing Hadamard recipe
+keeps its fixed codec and cannot be combined with this `block_sizes` setting.
+
+Configurations without `block_sizes` retain their existing `[K, block_v]` scale
+grouping, or their fixed Hadamard codec. The default INT8 + Hadamard recipe is
+unchanged. This remains floating-storage fake QDQ for QAT/QAD.
+
 ## Integrate with a training loop
 
 Apply the configured `recipe` above with `mtq.quantize`, then supply one prefix length per sequence.
