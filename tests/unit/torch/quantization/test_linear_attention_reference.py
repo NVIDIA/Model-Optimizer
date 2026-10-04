@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from _test_utils.torch.quantization.linear_attention_reference import (
     chunk_gdn_reference,
     recurrent_delta_rule_reference,
-    state_fp8_qdq_reference,
+    state_qdq_reference,
 )
 
 
@@ -98,11 +98,11 @@ def test_state_qdq_granularity_zero_tail_and_identity_ste():
     with torch.no_grad():
         state[0].zero_()
         state[1, ..., :16] *= 10
-    quantized = state_fp8_qdq_reference(state, block_v=16)
+    quantized = state_qdq_reference(state, block_v=16)
     assert torch.isfinite(quantized).all()
     assert torch.equal(quantized[0], state[0])
     assert not torch.equal(quantized, state)
-    assert not torch.equal(quantized, state_fp8_qdq_reference(state, block_v=64))
+    assert not torch.equal(quantized, state_qdq_reference(state, block_v=64))
     probe = torch.randn_like(state)
     (grad,) = torch.autograd.grad((quantized * probe).sum(), state)
     torch.testing.assert_close(grad, probe, rtol=0, atol=0)

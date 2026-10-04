@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from .config import LinearAttentionDecodeConfig
-from .utils import _fp8_quantize, state_quantizer_config
+from .utils import _tile_qdq, state_quantizer_config
 
 __all__ = [
     "EncodedLinearAttentionTensor",
@@ -129,31 +129,15 @@ def _encode(
         return EncodedLinearAttentionTensor(
             _IdentityGradient.apply(value, decoded.to(value.dtype)), metadata, "int8", 32
         )
-    rounded, scales = [], []
-    for part in value.split(block_v, dim=-1):
-        if state_format == "fp8_e4m3":
-            tensor = part.flatten(-2) if state else part
-            axis = tuple(range(tensor.ndim - 1)) or None
-            decoded, scale = _fp8_quantize(tensor, axis)
-            rounded.append(decoded.reshape_as(part))
-            scales.append(scale.squeeze(-1))
-        else:
-            with torch.no_grad():
-                axes = (-2, -1) if state else (-1,)
-                part = part.float()
-                amax = part.abs().amax(dim=axes, keepdim=True)
-                scale = torch.where(amax > 0, amax / 127.0, torch.ones_like(amax))
-                rounded.append((part / scale).round().clamp(-127, 127) * scale)
-                scales.append(scale[..., 0, 0] if state else scale[..., 0])
-    decoded = torch.cat(rounded, dim=-1).to(value.dtype)
+    decoded, scales = _tile_qdq(value, block_v, state_format, state=state)
     if state_format == "int8":
         decoded = _IdentityGradient.apply(value, decoded)
-    return EncodedLinearAttentionTensor(decoded, torch.stack(scales, dim=-1), state_format, block_v)
+    return EncodedLinearAttentionTensor(decoded, scales, state_format, block_v)
 
 
 def _signature(config, state_qdq, block_v, state_format, state_quantizer):
     signature = (
-        config.model_dump_json(exclude={"implementation", "prefill_state_qdq"})
+        config.model_dump_json(exclude={"prefill_state_qdq"})
         + f"/{state_qdq}/{block_v}/{state_format}"
     )
     if state_quantizer is not None and state_quantizer.block_sizes is not None:

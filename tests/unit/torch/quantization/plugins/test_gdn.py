@@ -240,6 +240,13 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
         model[0].gdn_w_quantizer.axis = None
     path = tmp_path / "gdn.pth"
     mto.save(model, path)
+    # Load policies saved before fixed, non-configurable fields were removed.
+    checkpoint = torch.load(path)
+    for _, mode_state in checkpoint["modelopt_state"]["modelopt_state_dict"]:
+        for policy in mode_state["metadata"]["linear_attention"].values():
+            policy["state"].update(mode="chunk", quantize_initial=True)
+            policy["solve"] = {"method": "exact"}
+    torch.save(checkpoint, path)
     restored = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
     mto.restore(restored, path)
     assert restored[0].linear_attention_config == model[0].linear_attention_config

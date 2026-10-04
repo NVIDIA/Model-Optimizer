@@ -34,6 +34,7 @@ from typing import Any
 import torch
 
 from ..linear_attention.prefill import matmul_gdn
+from ..linear_attention.utils import validate_gdn_quantizer
 from .linear_attention import _LinearAttentionQuantMixin
 
 __all__ = ["GatedDeltaNetStateQuantMixin"]
@@ -74,6 +75,16 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
     narrow-range INT8; W supports dynamic E4M3.
     Both sites require identity STE. The execution policy is saved in ModelOpt metadata.
     """
+
+    linear_attention_quantizer_names = ("gdn_state_quantizer", "gdn_w_quantizer")
+
+    def validate_linear_attention(self):
+        """Validate state and GDN WY operand quantization."""
+        super().validate_linear_attention()
+        if self.gdn_w_quantizer.is_enabled:
+            validate_gdn_quantizer(self.gdn_w_quantizer, name="gdn_w_quantizer")
+            if self.linear_attention_config.decode is not None:
+                raise ValueError("Decode's exact prefix does not support WY operand QDQ")
 
     @property
     def gdn_state_qdq_block_v(self) -> int:

@@ -30,12 +30,21 @@ __all__ = [
 
 
 class _StateConfig(ModeloptBaseConfig):
-    mode: Literal["chunk"] = ModeloptField(default="chunk")
     block_v: Literal[16, 32, 64, 128] = ModeloptField(default=64)
-    quantize_initial: Literal[True] = ModeloptField(default=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_defaults(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            for key, default in (("mode", "chunk"), ("quantize_initial", True)):
+                if values.get(key) == default:
+                    values.pop(key)
+        return values
 
 
 class _SolveConfig(ModeloptBaseConfig):
+    # Retained solely to deserialize old pickled policies and validate their fixed setting.
     method: Literal["exact"] = ModeloptField(default="exact")
 
 
@@ -51,13 +60,19 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
     """Explicit suffix recurrence; workload supplies per-sequence prefix lengths."""
 
     mode: Literal["token", "replay"] = ModeloptField(default="token")
-    implementation: Literal["torch"] = ModeloptField(default="torch")
     readout: Literal["working", "stored"] = ModeloptField(default="stored")
     quantize_initial: bool = ModeloptField(default=True)
     prefill_state_qdq: bool = ModeloptField(default=False)
     state_codec: Literal["tile", "int8_hadamard32"] = ModeloptField(default="tile")
     decay_log_step: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     replay: LinearAttentionReplayConfig | None = ModeloptField(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_defaults(cls, values):
+        if isinstance(values, dict) and values.get("implementation") == "torch":
+            values = {key: value for key, value in values.items() if key != "implementation"}
+        return values
 
     @model_validator(mode="after")
     def _validate_replay(self):
@@ -86,8 +101,15 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     backend: Literal["fla", "matmul"] = ModeloptField(default="fla")
     chunk_size: Literal[64] = ModeloptField(default=64)
     state: _StateConfig = ModeloptField(default=_StateConfig())
-    solve: _SolveConfig = ModeloptField(default=_SolveConfig())
     decode: LinearAttentionDecodeConfig | None = ModeloptField(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_legacy_defaults(cls, values):
+        if isinstance(values, dict) and "solve" in values:
+            _SolveConfig.model_validate(values["solve"])
+            values = {key: value for key, value in values.items() if key != "solve"}
+        return values
 
     @model_validator(mode="after")
     def _validate_decode_backend(self):
