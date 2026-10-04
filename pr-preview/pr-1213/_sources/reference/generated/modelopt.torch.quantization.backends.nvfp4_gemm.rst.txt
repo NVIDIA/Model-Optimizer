@@ -1,0 +1,6 @@
+modelopt.torch.quantization.backends.nvfp4\_gemm
+================================================
+
+.. currentmodule:: modelopt.torch.quantization.backends
+
+.. autofunction:: nvfp4_gemm

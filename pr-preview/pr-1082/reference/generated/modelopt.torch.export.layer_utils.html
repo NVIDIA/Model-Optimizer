@@ -1,0 +1,864 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>layer_utils &mdash; Model Optimizer 0.0.1.dev1+g653913e21</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="mcore_config_map" href="modelopt.torch.export.mcore_config_map.html" />
+    <link rel="prev" title="hf_config_map" href="modelopt.torch.export.hf_config_map.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.export.html">export</a></li>
+      <li class="breadcrumb-item active">layer_utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.export.layer_utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="layer-utils">
+<h1>layer_utils<a class="headerlink" href="#layer-utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.export.layer_utils">Utils for model_config export.</p>
+<p>Some of the logics in this file are empirical and needs constant update if exceptions occur.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_attention_config" title="modelopt.torch.export.layer_utils.build_attention_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_attention_config</span></code></a></p></td>
+<td><p>Builds the attention config from the module.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_conv_config" title="modelopt.torch.export.layer_utils.build_conv_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_conv_config</span></code></a></p></td>
+<td><p>Builds the conv config for this module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_decoder_config" title="modelopt.torch.export.layer_utils.build_decoder_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_decoder_config</span></code></a></p></td>
+<td><p>Builds the full decoder config from the module.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_embedding_config" title="modelopt.torch.export.layer_utils.build_embedding_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_embedding_config</span></code></a></p></td>
+<td><p>Builds the embedding config from the module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_fused_linear_config" title="modelopt.torch.export.layer_utils.build_fused_linear_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_fused_linear_config</span></code></a></p></td>
+<td><p>Returns a fused linear config from a list of modules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_layernorm_config" title="modelopt.torch.export.layer_utils.build_layernorm_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_layernorm_config</span></code></a></p></td>
+<td><p>Builds the layernorm config from the module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_linear_config" title="modelopt.torch.export.layer_utils.build_linear_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_linear_config</span></code></a></p></td>
+<td><p>Builds the linear config for the module.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_medusa_heads_config" title="modelopt.torch.export.layer_utils.build_medusa_heads_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_medusa_heads_config</span></code></a></p></td>
+<td><p>Build a list of MedusaHeadConfig if exists.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_mlp_config" title="modelopt.torch.export.layer_utils.build_mlp_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_mlp_config</span></code></a></p></td>
+<td><p>Builds the MLP config for the module.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_moe_config" title="modelopt.torch.export.layer_utils.build_moe_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_moe_config</span></code></a></p></td>
+<td><p>Builds the MOE config for the module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_qkv" title="modelopt.torch.export.layer_utils.build_qkv"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_qkv</span></code></a></p></td>
+<td><p>Converts the qkv modules to the config.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_recurrent_config" title="modelopt.torch.export.layer_utils.build_recurrent_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_recurrent_config</span></code></a></p></td>
+<td><p>Builds the recurrent config for this module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.build_stacked_experts" title="modelopt.torch.export.layer_utils.build_stacked_experts"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_stacked_experts</span></code></a></p></td>
+<td><p>Builds the experts_weight_1 and experts_weight_2 configs for the experts.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.check_model_compatibility" title="modelopt.torch.export.layer_utils.check_model_compatibility"><code class="xref py py-obj docutils literal notranslate"><span class="pre">check_model_compatibility</span></code></a></p></td>
+<td><p>Returns whether the list of modules is compatible with the export logic.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.dup_kv_weight" title="modelopt.torch.export.layer_utils.dup_kv_weight"><code class="xref py py-obj docutils literal notranslate"><span class="pre">dup_kv_weight</span></code></a></p></td>
+<td><p>Repeat kv heads if tp_size &gt; num_kv_heads.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_dtype" title="modelopt.torch.export.layer_utils.get_dtype"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_dtype</span></code></a></p></td>
+<td><p>Returns the default dtype of the model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_enc_dec_models" title="modelopt.torch.export.layer_utils.get_enc_dec_models"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_enc_dec_models</span></code></a></p></td>
+<td><p>Get the correct encoder, decoder from hf model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_enc_dec_token_ids" title="modelopt.torch.export.layer_utils.get_enc_dec_token_ids"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_enc_dec_token_ids</span></code></a></p></td>
+<td><p>Parse decoder model token info.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_encoder_config" title="modelopt.torch.export.layer_utils.get_encoder_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_encoder_config</span></code></a></p></td>
+<td><p>Get the encoder information for decoder model in enc-dec model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_expert_linear_names" title="modelopt.torch.export.layer_utils.get_expert_linear_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_expert_linear_names</span></code></a></p></td>
+<td><p>Get the list of linear names for the experts.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_experts_linear_names" title="modelopt.torch.export.layer_utils.get_experts_linear_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_experts_linear_names</span></code></a></p></td>
+<td><p>Returns linear layer names based on decoder type for MoE models.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_experts_list" title="modelopt.torch.export.layer_utils.get_experts_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_experts_list</span></code></a></p></td>
+<td><p>Returns list of grouped experts by linear name for given module.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.get_transformer_layers" title="modelopt.torch.export.layer_utils.get_transformer_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_transformer_layers</span></code></a></p></td>
+<td><p>Returns the root module of the transformer model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_attention" title="modelopt.torch.export.layer_utils.is_attention"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_attention</span></code></a></p></td>
+<td><p>Returns whether the module is an attention layer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_conv" title="modelopt.torch.export.layer_utils.is_conv"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_conv</span></code></a></p></td>
+<td><p>Returns whether the module is a convolutional layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_decoder_list" title="modelopt.torch.export.layer_utils.is_decoder_list"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_decoder_list</span></code></a></p></td>
+<td><p>Returns whether the module is a decoder list.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_embedding" title="modelopt.torch.export.layer_utils.is_embedding"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_embedding</span></code></a></p></td>
+<td><p>Returns whether the module is an embedding layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_layernorm" title="modelopt.torch.export.layer_utils.is_layernorm"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_layernorm</span></code></a></p></td>
+<td><p>Returns whether the module is a layernorm layer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_linear" title="modelopt.torch.export.layer_utils.is_linear"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_linear</span></code></a></p></td>
+<td><p>Returns whether the module is a linear layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_mlp" title="modelopt.torch.export.layer_utils.is_mlp"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_mlp</span></code></a></p></td>
+<td><p>Returns whether the module is an MLP layer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_moe" title="modelopt.torch.export.layer_utils.is_moe"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_moe</span></code></a></p></td>
+<td><p>Returns whether the module is an MOE layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_quantlinear" title="modelopt.torch.export.layer_utils.is_quantlinear"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_quantlinear</span></code></a></p></td>
+<td><p>Returns whether the module is a quantized linear layer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.is_recurrent" title="modelopt.torch.export.layer_utils.is_recurrent"><code class="xref py py-obj docutils literal notranslate"><span class="pre">is_recurrent</span></code></a></p></td>
+<td><p>Returns whether the module is a recurrent layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.model_type_is_enc_dec" title="modelopt.torch.export.layer_utils.model_type_is_enc_dec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">model_type_is_enc_dec</span></code></a></p></td>
+<td><p>Check if model_type is a enc-dec model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.set_expert_quantizer_amax" title="modelopt.torch.export.layer_utils.set_expert_quantizer_amax"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_expert_quantizer_amax</span></code></a></p></td>
+<td><p>Set amax values for expert quantizers using smart fallback logic.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.sync_moe_gate_up_amax" title="modelopt.torch.export.layer_utils.sync_moe_gate_up_amax"><code class="xref py py-obj docutils literal notranslate"><span class="pre">sync_moe_gate_up_amax</span></code></a></p></td>
+<td><p>Take element-wise max of gate and up weight quantizer amaxes per expert.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layer_utils.update_experts_avg_prequant_scale" title="modelopt.torch.export.layer_utils.update_experts_avg_prequant_scale"><code class="xref py py-obj docutils literal notranslate"><span class="pre">update_experts_avg_prequant_scale</span></code></a></p></td>
+<td><p>Registers experts_pre_quant_scale attribute of each expert with average pre_quant_scale amongst experts.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_attention_config">
+<span class="sig-name descname"><span class="pre">build_attention_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_metadata_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ext_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tp_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_attention_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the attention config from the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>ext_config</strong> (<a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.DecoderLayerConfig" title="modelopt.torch.export.model_config.DecoderLayerConfig"><em>DecoderLayerConfig</em></a>)</p></li>
+<li><p><strong>tp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.AttentionConfig" title="modelopt.torch.export.model_config.AttentionConfig"><em>AttentionConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_conv_config">
+<span class="sig-name descname"><span class="pre">build_conv_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_conv_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the conv config for this module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.ConvConfig" title="modelopt.torch.export.model_config.ConvConfig"><em>ConvConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_decoder_config">
+<span class="sig-name descname"><span class="pre">build_decoder_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_metadata_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decoder_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tp_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_decoder_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the full decoder config from the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>decoder_type</strong> (<em>str</em>)</p></li>
+<li><p><strong>tp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.DecoderLayerConfig" title="modelopt.torch.export.model_config.DecoderLayerConfig"><em>DecoderLayerConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_embedding_config">
+<span class="sig-name descname"><span class="pre">build_embedding_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normalization_constant</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_embedding_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the embedding config from the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>normalization_constant</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.EmbeddingConfig" title="modelopt.torch.export.model_config.EmbeddingConfig"><em>EmbeddingConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_fused_linear_config">
+<span class="sig-name descname"><span class="pre">build_fused_linear_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">linear_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_fused_linear_config" title="Link to this definition"></a></dt>
+<dd><p>Returns a fused linear config from a list of modules.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>modules</strong> (<em>list</em><em>[</em><em>Module</em><em>]</em>)</p></li>
+<li><p><strong>linear_type</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.LinearConfig" title="modelopt.torch.export.model_config.LinearConfig"><em>LinearConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_layernorm_config">
+<span class="sig-name descname"><span class="pre">build_layernorm_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_layernorm_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the layernorm config from the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.LayernormConfig" title="modelopt.torch.export.model_config.LayernormConfig"><em>LayernormConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_linear_config">
+<span class="sig-name descname"><span class="pre">build_linear_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">linear_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_linear_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the linear config for the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>linear_type</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.LinearConfig" title="modelopt.torch.export.model_config.LinearConfig"><em>LinearConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_medusa_heads_config">
+<span class="sig-name descname"><span class="pre">build_medusa_heads_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_medusa_heads_config" title="Link to this definition"></a></dt>
+<dd><p>Build a list of MedusaHeadConfig if exists.</p>
+<p>Following TensorRT-LLM’s Medusa implementation, all Medusa heads (num_medusa_heads) should be
+placed inside a ‘torch.nn.ModuleList’ with attribute name ‘medsua_heads’. A Medusa head composes
+an additional ‘lm_head’ (vocab_size, hidden_size) and a list (num_medusa_layers) of Medusa layer
+(LinearActConfig). The only supported hidden_act for the layer is ‘silu’. All Linear layers are
+column-parallel.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em><em> | </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.MedusaHeadConfig" title="modelopt.torch.export.model_config.MedusaHeadConfig"><em>MedusaHeadConfig</em></a>] | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_mlp_config">
+<span class="sig-name descname"><span class="pre">build_mlp_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decoder_type</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_act</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">merge_gate_fc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_mlp_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the MLP config for the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>hidden_act</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>merge_gate_fc</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.MLPConfig" title="modelopt.torch.export.model_config.MLPConfig"><em>MLPConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_moe_config">
+<span class="sig-name descname"><span class="pre">build_moe_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decoder_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_moe_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the MOE config for the module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.MOEConfig" title="modelopt.torch.export.model_config.MOEConfig"><em>MOEConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_qkv">
+<span class="sig-name descname"><span class="pre">build_qkv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">qkv_modules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_metadata_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ext_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tp_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_qkv" title="Link to this definition"></a></dt>
+<dd><p>Converts the qkv modules to the config.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>qkv_modules</strong> (<em>list</em><em>[</em><em>Module</em><em>]</em>)</p></li>
+<li><p><strong>ext_config</strong> (<a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.DecoderLayerConfig" title="modelopt.torch.export.model_config.DecoderLayerConfig"><em>DecoderLayerConfig</em></a>)</p></li>
+<li><p><strong>tp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.export.model_config.html#modelopt.torch.export.model_config.QKVConfig" title="modelopt.torch.export.model_config.QKVConfig"><em>QKVConfig</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_recurrent_config">
+<span class="sig-name descname"><span class="pre">build_recurrent_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_recurrent_config" title="Link to this definition"></a></dt>
+<dd><p>Builds the recurrent config for this module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.build_stacked_experts">
+<span class="sig-name descname"><span class="pre">build_stacked_experts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">linear_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_experts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expert_getter</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.build_stacked_experts" title="Link to this definition"></a></dt>
+<dd><p>Builds the experts_weight_1 and experts_weight_2 configs for the experts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>experts</strong> (<em>Module</em>)</p></li>
+<li><p><strong>linear_names</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.check_model_compatibility">
+<span class="sig-name descname"><span class="pre">check_model_compatibility</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_list</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.check_model_compatibility" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the list of modules is compatible with the export logic.</p>
+<p>And if positional embedding and embedding layernorm exists.</p>
+<p>We assumes the model to be assembled with one or two embedding layers,
+a ModuleList of transformer decoders,
+and a final layernorm with optional embedding layernorm.
+Otherwise it will not be supported.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module_list</strong> (<em>list</em><em>[</em><em>Module</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>bool</em>, <em>bool</em>, <em>bool</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.dup_kv_weight">
+<span class="sig-name descname"><span class="pre">dup_kv_weight</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_head</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tp_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.dup_kv_weight" title="Link to this definition"></a></dt>
+<dd><p>Repeat kv heads if tp_size &gt; num_kv_heads.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>v</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>head_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>num_head</strong> (<em>int</em>)</p></li>
+<li><p><strong>tp_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_dtype">
+<span class="sig-name descname"><span class="pre">get_dtype</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_dtype" title="Link to this definition"></a></dt>
+<dd><p>Returns the default dtype of the model.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_enc_dec_models">
+<span class="sig-name descname"><span class="pre">get_enc_dec_models</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">hf_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_enc_dec_models" title="Link to this definition"></a></dt>
+<dd><p>Get the correct encoder, decoder from hf model.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_enc_dec_token_ids">
+<span class="sig-name descname"><span class="pre">get_enc_dec_token_ids</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_enc_dec_token_ids" title="Link to this definition"></a></dt>
+<dd><p>Parse decoder model token info.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_encoder_config">
+<span class="sig-name descname"><span class="pre">get_encoder_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">encoder_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_encoder_config" title="Link to this definition"></a></dt>
+<dd><p>Get the encoder information for decoder model in enc-dec model.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_expert_linear_names">
+<span class="sig-name descname"><span class="pre">get_expert_linear_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_expert_linear_names" title="Link to this definition"></a></dt>
+<dd><p>Get the list of linear names for the experts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_experts_linear_names">
+<span class="sig-name descname"><span class="pre">get_experts_linear_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_experts_linear_names" title="Link to this definition"></a></dt>
+<dd><p>Returns linear layer names based on decoder type for MoE models.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_experts_list">
+<span class="sig-name descname"><span class="pre">get_experts_list</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_experts_list" title="Link to this definition"></a></dt>
+<dd><p>Returns list of grouped experts by linear name for given module.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>model_type</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.get_transformer_layers">
+<span class="sig-name descname"><span class="pre">get_transformer_layers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.get_transformer_layers" title="Link to this definition"></a></dt>
+<dd><p>Returns the root module of the transformer model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<em>Module</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_attention">
+<span class="sig-name descname"><span class="pre">is_attention</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_attention" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is an attention layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_conv">
+<span class="sig-name descname"><span class="pre">is_conv</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_conv" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a convolutional layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_decoder_list">
+<span class="sig-name descname"><span class="pre">is_decoder_list</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_decoder_list" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a decoder list.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_embedding">
+<span class="sig-name descname"><span class="pre">is_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_embedding" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is an embedding layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_layernorm">
+<span class="sig-name descname"><span class="pre">is_layernorm</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_layernorm" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a layernorm layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_linear">
+<span class="sig-name descname"><span class="pre">is_linear</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_linear" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a linear layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_mlp">
+<span class="sig-name descname"><span class="pre">is_mlp</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_mlp" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is an MLP layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_moe">
+<span class="sig-name descname"><span class="pre">is_moe</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_moe" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is an MOE layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_quantlinear">
+<span class="sig-name descname"><span class="pre">is_quantlinear</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_quantlinear" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a quantized linear layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.is_recurrent">
+<span class="sig-name descname"><span class="pre">is_recurrent</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.is_recurrent" title="Link to this definition"></a></dt>
+<dd><p>Returns whether the module is a recurrent layer.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.model_type_is_enc_dec">
+<span class="sig-name descname"><span class="pre">model_type_is_enc_dec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model_type</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.model_type_is_enc_dec" title="Link to this definition"></a></dt>
+<dd><p>Check if model_type is a enc-dec model.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.set_expert_quantizer_amax">
+<span class="sig-name descname"><span class="pre">set_expert_quantizer_amax</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">modules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantizer_attrs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fallback_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.set_expert_quantizer_amax" title="Link to this definition"></a></dt>
+<dd><p>Set amax values for expert quantizers using smart fallback logic.</p>
+<p>Uses smart fallback logic:</p>
+<ol class="arabic simple">
+<li><p>Use max from existing quantizers in current batch (best - direct from calibration)</p></li>
+<li><p>If no existing values found, then:
+- For weight quantizers: calculate from weight statistics
+- For input quantizers: use max from other experts, fallback if none found</p></li>
+<li><p>Use fallback value as last resort</p></li>
+</ol>
+<p>This ensures we always have semantically appropriate amax values for export.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>modules</strong> (<em>Module</em><em> | </em><em>list</em><em>[</em><em>Module</em><em>]</em>) – Single module or list of modules containing quantizers</p></li>
+<li><p><strong>quantizer_attrs</strong> (<em>str</em><em> | </em><em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – Specific quantizer attributes to handle.
+If None, defaults to [“input_quantizer”] for backward compatibility.</p></li>
+<li><p><strong>fallback_value</strong> (<em>float</em>) – Final fallback value when other methods fail (default: 0.5)</p></li>
+<li><p><strong>device</strong> (<em>device</em><em> | </em><em>None</em>) – Target device for tensors (auto-detected if None)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>a list of uncalibrated experts</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>uncalibrated_modules</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.sync_moe_gate_up_amax">
+<span class="sig-name descname"><span class="pre">sync_moe_gate_up_amax</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.sync_moe_gate_up_amax" title="Link to this definition"></a></dt>
+<dd><p>Take element-wise max of gate and up weight quantizer amaxes per expert.</p>
+<p>Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
+require a single weight_scale_2. Since weight_scale_2 = amax / (6 * 448),
+syncing amaxes before quantization ensures the per-block weight_scale values
+are computed against a consistent global scale.</p>
+<p>Only affects standard MoE models with separate gate/up linear layers
+(e.g. Qwen MoE, DeepSeek). Models with already-fused gate_up_proj
+(e.g. Llama4, GptOss) are unaffected.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Number of expert gate/up pairs whose amaxes were synced.</p>
+</dd>
+<dt class="field-even">Parameters<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layer_utils.update_experts_avg_prequant_scale">
+<span class="sig-name descname"><span class="pre">update_experts_avg_prequant_scale</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experts</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layer_utils.update_experts_avg_prequant_scale" title="Link to this definition"></a></dt>
+<dd><p>Registers experts_pre_quant_scale attribute of each expert with average pre_quant_scale amongst experts.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>experts</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.export.hf_config_map.html" class="btn btn-neutral float-left" title="hf_config_map" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.export.mcore_config_map.html" class="btn btn-neutral float-right" title="mcore_config_map" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
