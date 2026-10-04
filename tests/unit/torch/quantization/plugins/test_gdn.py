@@ -84,6 +84,7 @@ def quant_cfg(state=True, w=False):
         {"num_bits": (4, 3), "axis": (0, 1)},  # static
         {"num_bits": (4, 3), "type": "dynamic"},  # per tensor
         {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},  # int8
+        {"num_bits": 4, "axis": (0, 1), "type": "dynamic"},  # unsupported format
         {"num_bits": (4, 3), "type": "dynamic", "block_sizes": {-1: 16}},  # blockwise
     ],
 )
@@ -128,8 +129,13 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-@pytest.mark.parametrize("partial_kernel", [False, True])
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel):
+@pytest.mark.parametrize(
+    ("partial_kernel", "num_bits", "state_qdq"),
+    [(False, (4, 3), 1), (True, (4, 3), 1), (False, 8, 2)],
+)
+def test_enabled_state_quantizer_uses_state_qdq_kernel(
+    monkeypatch, partial_kernel, num_bits, state_qdq
+):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -141,12 +147,14 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kern
     if partial_kernel:
         model.gated_delta_rule = partial(chunk_gated_delta_rule, output_final_state=True)
     x = torch.randn(2, 8, 3, 4)
-    mtq.quantize(model, quant_cfg(), lambda m: m(x))
+    cfg = deepcopy(quant_cfg())
+    cfg["quant_cfg"][-1]["cfg"].update(num_bits=num_bits, unsigned=False, narrow_range=True)
+    mtq.quantize(model, cfg, lambda m: m(x))
 
     model(x)
     assert calls and calls[-1] == {
         "chunk_size": 64,
-        "state_qdq": 1,
+        "state_qdq": state_qdq,
         "state_qdq_block_v": 64,
         "w_quantizer": None,
         **({"output_final_state": True} if partial_kernel else {}),

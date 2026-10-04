@@ -18,7 +18,13 @@
 ``fla_chunk_delta_h.py`` and ``fla_chunk_gated_delta_rule.py`` are adapted copies of the chunked
 GatedDeltaNet kernels of `flash-linear-attention <https://github.com/fla-org/flash-linear-attention>`_
 (``fla.ops.common.chunk_delta_h`` and ``fla.ops.gated_delta_rule.chunk``) that can fake-quantize the
-recurrent state carried between chunks to FP8 (``state_qdq``). They still import the surrounding
+recurrent state carried between chunks to FP8 or INT8 (``state_qdq``). They still import the surrounding
 fla operators, so ``fla-core==0.5.1`` and Triton must be installed to use
 them. This package initializer does not import the kernels, so importing it needs neither.
 """
+
+# Kernel format IDs, independent of scale grouping. The current kernels use dynamic scales.
+STATE_QDQ_OFF = 0
+STATE_QDQ_FP8_E4M3 = 1
+STATE_QDQ_INT8 = 2
+STATE_QDQ_FORMATS = {"fp8_e4m3": STATE_QDQ_FP8_E4M3, "int8": STATE_QDQ_INT8}

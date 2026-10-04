@@ -33,6 +33,8 @@ from typing import Any
 
 import torch
 
+from modelopt.torch.kernels.quantization.linear_attention import STATE_QDQ_FORMATS, STATE_QDQ_OFF
+
 from ..linear_attention.prefill import matmul_gdn
 from .linear_attention import _LinearAttentionQuantMixin
 
@@ -114,9 +116,9 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         return _state_qdq_chunk_gated_delta_rule()(
             *args,
             chunk_size=chunk_size,
-            state_qdq=(2 if self._linear_attn_state_format == "int8" else 1)
+            state_qdq=STATE_QDQ_FORMATS[self._linear_attn_state_format]
             if quantize_state
-            else 0,
+            else STATE_QDQ_OFF,
             state_qdq_block_v=self.gdn_state_qdq_block_v,
             w_quantizer=self.gdn_w_quantizer if quantize_w else None,
             **kwargs,
