@@ -78,6 +78,26 @@ struct Format {
       payload[kScaleWordOffset + 2 * tid + 1] = static_cast<uint8_t>(word >> 8);
     }
   }
+
+  // Vector v is low byte v plus nibble v % 2 of qh byte v / 2: three high index bits and the delta
+  // sign. Its 3-bit local scale is slot 2 * (sub-block % 2) + half of scale word sub-block / 2, and
+  // d is reassembled from the four words' top nibbles.
+  __device__ static void decode(const uint8_t *block, int vector, const float *grid,
+                                float (&values)[kVectorSize]) {
+    uint32_t words[kScaleWords];
+#pragma unroll
+    for (int word = 0; word < kScaleWords; ++word)
+      words[word] = load_u16(block + kScaleWordOffset + 2 * word);
+    const uint32_t d_bits = (words[0] >> 12) | ((words[1] >> 8) & 0x00F0) |
+                            ((words[2] >> 4) & 0x0F00) | (words[3] & 0xF000);
+    const uint32_t nibble = (block[kHighOffset + vector / 2] >> (4 * (vector % 2))) & 0xF;
+    const uint32_t entry = block[kLowOffset + vector] | ((nibble & 0x7) << 8);
+    const int sub = vector / 4;
+    const uint32_t local = (words[sub / 2] >> (3 * (2 * (sub % 2) + (vector % 4) / 2))) & 0x7;
+    const float scale = __fmul_rn(half_bits_to_float(d_bits), static_cast<float>(2 * local + 1));
+    shifted_scaled(grid + entry * kVectorSize, (nibble & 0x8) ? -kIq1Delta : kIq1Delta, scale,
+                   values);
+  }
 };
 
 static_assert(Format::kPayloadBytes == 56, "IQ1_M blocks are 56 bytes");
@@ -87,4 +107,8 @@ static_assert(Format::kPayloadBytes == 56, "IQ1_M blocks are 56 bytes");
 at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales) {
   check_scaled_pack_inputs("IQ1_M", input, grid, Format::kEntries, scales);
   return iq1_encode_blocks<Format>(input, grid, scales);
+}
+
+at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {
+  return decode_blocks<Format>("IQ1_M", packed, grid, dtype);
 }

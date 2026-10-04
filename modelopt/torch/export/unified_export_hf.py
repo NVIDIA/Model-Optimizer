@@ -641,8 +641,9 @@ def _export_quantized_weight(
                 "IQ unified export currently supports modules with a standard 'weight' "
                 f"attribute, got {weight_name!r} on {type(sub_module).__name__}"
             )
-        quantize_iq = IQ_FORMAT_REGISTRY[quantization_format].quantize
-        packed_weight, _ = quantize_iq(weight.to(dtype))
+        packed_weight = IQ_FORMAT_REGISTRY[quantization_format].pack(
+            weight.to(dtype), getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+        )
         setattr(sub_module, weight_name, nn.Parameter(packed_weight, requires_grad=False))
         maybe_clear_cuda_cache()
         return

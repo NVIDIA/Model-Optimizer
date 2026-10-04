@@ -40,6 +40,7 @@ from torch.nn.modules.loss import _Loss
 import modelopt.torch.distill as mtd
 from modelopt.torch.distill.config import Criterion
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils import warn_rank_0
 
 if TYPE_CHECKING:
     from megatron.core.dist_checkpointing.mapping import ShardedStateDict
@@ -120,7 +121,7 @@ def setup_distillation_config(
     elif isinstance(config_or_path, DistillationConfig):
         cfg = config_or_path
     else:
-        with open(config_or_path) as f:
+        with open(config_or_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         cfg = DistillationConfig(**cfg)
 
@@ -590,6 +591,13 @@ def adjust_distillation_model_for_mcore(
     # An MTP head left out of quantization is exempt from that: there is no quantization
     # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_mtp_loss = _mtp_excluded_from_quantization(model)
+    if distill_cfg.skip_lm_loss and skip_mtp_loss:
+        # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
+        warn_rank_0("MTP head is outside quantization and its loss is skipped: freezing it.")
+        with model.hide_teacher_model():
+            for name, param in model.named_parameters():
+                if "mtp" in name.split("."):
+                    param.requires_grad_(False)
 
     def _compute_student_lm_loss(self, labels, logits) -> Tensor:
         self._lm_loss_call_count += 1
