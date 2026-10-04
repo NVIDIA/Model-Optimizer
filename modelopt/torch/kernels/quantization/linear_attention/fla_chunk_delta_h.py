@@ -40,14 +40,11 @@ from fla.utils import (
     check_shared_mem,
 )
 
+from modelopt.torch.kernels.quantization import linear_attention as state_formats
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
 
 from .int8 import int8_scalar_qdq
 
-# ``STATE_QDQ`` modes of the forward state kernel.
-STATE_QDQ_OFF = 0
-STATE_QDQ_FP8_DYNAMIC = 1  # FP8 E4M3, one dynamic scale per program tile ([K, BV] of one head)
-STATE_QDQ_INT8_DYNAMIC = 2
 STATE_QDQ_MAX_BLOCK_V = 128
 
 
@@ -62,20 +59,23 @@ def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.cons
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h3)))
     if K > 192:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h4)))
-    # STATE_QDQ=2 uses symmetric INT8 (max 127); STATE_QDQ=1 uses FP8 E4M3 (max 448).
     # Use scale=1 for zero tiles to avoid division by zero during QDQ.
-    if STATE_QDQ == 2:
+    if STATE_QDQ == state_formats.STATE_QDQ_INT8:
         return tl.where(b_amax > 0, b_amax * (1.0 / 127.0), 1.0)
-    else:
+    elif STATE_QDQ == state_formats.STATE_QDQ_FP8_E4M3:
         return tl.where(b_amax > 0, b_amax / 448.0, 1.0)
+    else:
+        tl.static_assert(False, "Unsupported state QDQ format")
 
 
 @triton.jit
 def _state_scalar_qdq(value, scale, STATE_QDQ: tl.constexpr):
-    if STATE_QDQ == 2:
+    if STATE_QDQ == state_formats.STATE_QDQ_INT8:
         return int8_scalar_qdq(value, scale)
-    else:
+    elif STATE_QDQ == state_formats.STATE_QDQ_FP8_E4M3:
         return fp8_scalar_qdq(value, scale)
+    else:
+        tl.static_assert(False, "Unsupported state QDQ format")
 
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
@@ -233,7 +233,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 m_h0_4 = m_k4[:, None] & m_v[None, :]
             b_h4 += tl.load(p_h0_4, mask=m_h0_4, other=0.0).to(tl.float32)
         # [ModelOpt] A state read from a quantized cache is quantized before the first chunk uses it.
-        if STATE_QDQ != 0:
+        if STATE_QDQ != state_formats.STATE_QDQ_OFF:
             if K > 192:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
@@ -404,7 +404,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         # [ModelOpt] Dynamic per-tile FP8/INT8 QDQ of the next-chunk or stored final state.
         # Recompute amax over [K, BV]; _state_scalar_qdq applies that tile's scalar scale.
-        if STATE_QDQ != 0:
+        if STATE_QDQ != state_formats.STATE_QDQ_OFF:
             if K > 192:
                 b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
             elif K > 128:
@@ -838,7 +838,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
-    state_qdq: int = STATE_QDQ_OFF,
+    state_qdq: int = state_formats.STATE_QDQ_OFF,
     state_qdq_block_v: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
@@ -900,10 +900,10 @@ def state_qdq_tile_v(V: int, state_qdq: int, state_qdq_block_v: int | None) -> i
     for the usual ``V == 128``. ``state_qdq_block_v=128`` gives one scale per 128-wide head but
     exceeds the register budget where the kernel is limited to two warps (Blackwell) and spills.
     """
-    if state_qdq == STATE_QDQ_OFF:
+    if state_qdq == state_formats.STATE_QDQ_OFF:
         return 64 if check_shared_mem("ada") else 32
-    if state_qdq not in (STATE_QDQ_FP8_DYNAMIC, STATE_QDQ_INT8_DYNAMIC):
-        raise ValueError(f"Unsupported state_qdq mode {state_qdq}; expected 0, 1, or 2.")
+    if state_qdq not in state_formats.STATE_QDQ_FORMATS.values():
+        raise ValueError(f"Unsupported state_qdq format {state_qdq}.")
     BV = min(triton.next_power_of_2(V), 64) if state_qdq_block_v is None else state_qdq_block_v
     if BV < 16 or BV > STATE_QDQ_MAX_BLOCK_V or BV & (BV - 1):
         raise ValueError(

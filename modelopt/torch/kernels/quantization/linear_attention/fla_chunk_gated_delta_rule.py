@@ -57,13 +57,8 @@ from fla.utils import (
 from modelopt.torch.quantization.linear_attention.utils import validate_gdn_quantizer
 from modelopt.torch.quantization.nn import TensorQuantizer
 
-from .fla_chunk_delta_h import (
-    STATE_QDQ_FP8_DYNAMIC,
-    STATE_QDQ_INT8_DYNAMIC,
-    STATE_QDQ_OFF,
-    chunk_gated_delta_rule_bwd_dhu,
-    chunk_gated_delta_rule_fwd_h,
-)
+from . import STATE_QDQ_FORMATS, STATE_QDQ_FP8_E4M3, STATE_QDQ_OFF
+from .fla_chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 
 
 def chunk_gated_delta_rule_fwd(
@@ -649,11 +644,11 @@ def chunk_gated_delta_rule(
     dt_bias = kwargs.pop("dt_bias", None)
     if kwargs:
         raise TypeError(f"Unexpected keyword arguments: {', '.join(sorted(kwargs))}")
-    if state_qdq not in (STATE_QDQ_OFF, STATE_QDQ_FP8_DYNAMIC, STATE_QDQ_INT8_DYNAMIC):
-        raise ValueError(f"`state_qdq` must be 0, 1, or 2, got {state_qdq}.")
+    if state_qdq != STATE_QDQ_OFF and state_qdq not in STATE_QDQ_FORMATS.values():
+        raise ValueError(f"Unsupported state_qdq format {state_qdq}.")
     if w_quantizer is not None:
         validate_gdn_quantizer(w_quantizer, name="gdn_w_quantizer")
-    if state_qdq == STATE_QDQ_FP8_DYNAMIC and (
+    if state_qdq == STATE_QDQ_FP8_E4M3 and (
         not q.is_cuda or torch.cuda.get_device_capability(q.device) < (8, 9)
     ):
         raise RuntimeError("GDN state QDQ requires native E4M3 conversion on CUDA SM89 or newer.")

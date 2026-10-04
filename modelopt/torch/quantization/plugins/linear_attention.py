@@ -22,6 +22,8 @@ from ..nn import QuantModule, TensorQuantizer
 
 __all__ = []
 
+_STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", 8: "int8"}
+
 
 class _LinearAttentionQuantMixin(QuantModule):
     linear_attention_quantizer_names = ("gdn_state_quantizer", "gdn_w_quantizer")
@@ -40,7 +42,10 @@ class _LinearAttentionQuantMixin(QuantModule):
 
     @property
     def _linear_attn_state_format(self):
-        return "int8" if self._linear_attn_state.num_bits == 8 else "fp8_e4m3"
+        # Disabled quantizers impose no format requirement on the numerical backend.
+        if not self._linear_attn_state.is_enabled:
+            return "fp8_e4m3"
+        return _STATE_FORMATS[self._linear_attn_state.num_bits]
 
     @property
     def _linear_attn_w(self):
@@ -61,7 +66,7 @@ class _LinearAttentionQuantMixin(QuantModule):
             validate_gdn_quantizer(
                 self._linear_attn_state,
                 name=self.linear_attention_quantizer_names[0],
-                num_bits=((4, 3), 8),
+                num_bits=tuple(_STATE_FORMATS),
             )
             if self._linear_attn_state.axis != (0, 1):
                 raise ValueError(
