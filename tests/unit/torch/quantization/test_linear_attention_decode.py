@@ -24,7 +24,7 @@ from modelopt.torch.quantization.linear_attention import (
     LinearAttentionDecodeConfig,
     matmul_gdn,
     matmul_kda,
-    recurrent_decode_reference,
+    recurrent_decode,
 )
 from modelopt.torch.quantization.linear_attention.decode import _encode
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -150,9 +150,9 @@ def test_quantized_replay_carry_continuation_and_gradients():
     args, state = _inputs()
     cfg = LinearAttentionDecodeConfig(mode="replay", replay={"window": 3})
     kwargs = {"config": cfg, "state_qdq": True, "block_v": 16}
-    expected, final = recurrent_decode_reference(*args, initial_state=state, **kwargs)
-    first, carry = recurrent_decode_reference(*(x[:5] for x in args), initial_state=state, **kwargs)
-    second, carry = recurrent_decode_reference(*(x[5:] for x in args), carry=carry, **kwargs)
+    expected, final = recurrent_decode(*args, initial_state=state, **kwargs)
+    first, carry = recurrent_decode(*(x[:5] for x in args), initial_state=state, **kwargs)
+    second, carry = recurrent_decode(*(x[5:] for x in args), carry=carry, **kwargs)
     for actual, expected in zip(
         _values_and_grads(torch.cat((first, second)), carry.reconstruct(), args, state),
         _values_and_grads(expected, final.reconstruct(), args, state),
@@ -165,14 +165,12 @@ def test_quantized_replay_carry_continuation_and_gradients():
 
 def test_grid_gate_ste_keeps_gate_gradients_and_changes_trajectory():
     args, state = _inputs()
-    output, carry = recurrent_decode_reference(
+    output, carry = recurrent_decode(
         *args, config=LinearAttentionDecodeConfig(decay_log_step=0.02), initial_state=state
     )
     grad = torch.autograd.grad(output.square().sum() + carry.reconstruct().square().sum(), args[3])[
         0
     ]
     assert torch.isfinite(grad).all() and torch.count_nonzero(grad) > 0
-    exact, _ = recurrent_decode_reference(
-        *args, config=LinearAttentionDecodeConfig(), initial_state=state
-    )
+    exact, _ = recurrent_decode(*args, config=LinearAttentionDecodeConfig(), initial_state=state)
     assert not torch.equal(output, exact)

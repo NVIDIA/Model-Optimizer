@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Explicit token-state and encoded-update replay references for QAT."""
+"""Differentiable token-state and encoded-update replay for QAT."""
 
 from dataclasses import dataclass
 
@@ -27,7 +27,6 @@ __all__ = [
     "LinearAttentionCarry",
     "ReplayEntry",
     "recurrent_decode",
-    "recurrent_decode_reference",
 ]
 
 
@@ -247,7 +246,7 @@ def _prepare_carry(
     return carry, signature
 
 
-def recurrent_decode_reference(
+def recurrent_decode(
     q,
     k,
     v,
@@ -355,39 +354,3 @@ def recurrent_decode_reference(
     if config.state_codec == "int8_hadamard32":
         output = _hadamard32(output)
     return output, carry
-
-
-def recurrent_decode(
-    q,
-    k,
-    v,
-    g,
-    beta,
-    *,
-    config: LinearAttentionDecodeConfig,
-    state_qdq=False,
-    state_format="fp8_e4m3",
-    state_quantizer=None,
-    block_v=64,
-    initial_state=None,
-    carry=None,
-    position=0,
-    scale=None,
-):
-    """Run the Torch training implementation with explicit differentiable carry."""
-    return recurrent_decode_reference(
-        q,
-        k,
-        v,
-        g,
-        beta,
-        config=config,
-        state_qdq=state_qdq,
-        state_format=state_format,
-        state_quantizer=state_quantizer,
-        block_v=block_v,
-        initial_state=initial_state,
-        carry=carry,
-        position=position,
-        scale=scale,
-    )

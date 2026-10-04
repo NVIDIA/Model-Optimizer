@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionDecodeConfig,
-    recurrent_decode_reference,
+    recurrent_decode,
 )
 
 
@@ -84,16 +84,12 @@ def test_hadamard_replay_matches_dense_oracle_and_split_carry():
         replay={"window": 3, "factor_qdq": False},
     )
     kwargs = {"config": cfg, "state_format": "int8", "state_qdq": True}
-    output, carry = recurrent_decode_reference(*args, initial_state=initial, **kwargs)
+    output, carry = recurrent_decode(*args, initial_state=initial, **kwargs)
     _check_with_grads((output, carry.reconstruct()), _oracle(args, initial), args, initial)
     assert carry.value_basis == "hadamard32" and carry.anchor.block_v == 32
     assert carry.anchor.scales.shape == (2, 4, 2)
-    first, split_carry = recurrent_decode_reference(
-        *(x[:2] for x in args), initial_state=initial, **kwargs
-    )
-    second, split_carry = recurrent_decode_reference(
-        *(x[2:] for x in args), carry=split_carry, **kwargs
-    )
+    first, split_carry = recurrent_decode(*(x[:2] for x in args), initial_state=initial, **kwargs)
+    second, split_carry = recurrent_decode(*(x[2:] for x in args), carry=split_carry, **kwargs)
     _check_with_grads(
         (torch.cat((first, second)), split_carry.reconstruct()),
         (output, carry.reconstruct()),
