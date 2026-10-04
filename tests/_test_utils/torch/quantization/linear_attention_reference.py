@@ -28,18 +28,8 @@ import torch
 __all__ = [
     "chunk_gdn_reference",
     "recurrent_delta_rule_reference",
-    "state_fp8_qdq_reference",
     "state_qdq_reference",
 ]
-
-
-def state_fp8_qdq_reference(state: torch.Tensor, block_v: int = 64) -> torch.Tensor:
-    """Dynamic E4M3 QDQ with identity STE and one scale per ``[Dk, block_v]`` tile.
-
-    ``state`` is in key-first layout ``[..., Dk, Dv]``. Scales and rounding do not
-    contribute derivatives. FP8 uses TensorQuantizer small-range handling; partial tiles are valid.
-    """
-    return state_qdq_reference(state, block_v)
 
 
 def state_qdq_reference(state: torch.Tensor, block_v: int = 64, state_format: str = "fp8_e4m3"):

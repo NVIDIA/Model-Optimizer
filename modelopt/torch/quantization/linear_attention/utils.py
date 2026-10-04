@@ -114,23 +114,26 @@ def _state_qdq(
         raise ValueError("State format must be fp8_e4m3 or int8")
     if block_v not in (16, 32, 64, 128):
         raise ValueError("block_v must be 16, 32, 64, or 128")
+    quantized, _ = _tile_qdq(state, block_v, state_format, state=True)
     if state_format == "fp8_e4m3":
-        axis = tuple(range(state.ndim - 2)) or None
-        return torch.cat(
-            [
-                _fp8_quantize(tile.flatten(-2), axis)[0].reshape_as(tile)
-                for tile in state.split(block_v, dim=-1)
-            ],
-            dim=-1,
-        )
-    with torch.no_grad():
-        rounded = []
-        for tile in state.float().split(block_v, dim=-1):
-            amax = tile.abs().amax(dim=(-2, -1), keepdim=True)
-            limit = 127.0
-            scale = torch.where(amax > 0, amax / limit, torch.ones_like(amax))
-            normalized = (tile / scale).clamp(-limit, limit)
-            codes = normalized.round()
-            rounded.append(codes * scale)
-        quantized = torch.cat(rounded, dim=-1).to(state.dtype)
+        return quantized
     return state + (quantized - state).detach()
+
+
+def _tile_qdq(value, block_v, state_format, *, state=False):
+    """Return tile-rounded values and detached scales; INT8 callers supply their STE."""
+    rounded, scales = [], []
+    for part in value.split(block_v, dim=-1):
+        tensor = part.flatten(-2) if state else part
+        if state_format == "fp8_e4m3":
+            axis = tuple(range(tensor.ndim - 1)) or None
+            decoded, scale = _fp8_quantize(tensor, axis)
+        else:
+            with torch.no_grad():
+                tensor = tensor.float()
+                amax = tensor.abs().amax(dim=-1, keepdim=True)
+                scale = torch.where(amax > 0, amax / 127.0, torch.ones_like(amax))
+                decoded = (tensor / scale).round().clamp(-127, 127) * scale
+        rounded.append(decoded.reshape_as(part))
+        scales.append(scale.squeeze(-1))
+    return torch.cat(rounded, dim=-1).to(value.dtype), torch.stack(scales, dim=-1)

@@ -17,14 +17,14 @@
 
 from ..config import QuantizerAttributeConfig
 from ..linear_attention.config import LinearAttentionConfig
-from ..linear_attention.utils import state_quantizer_config, validate_gdn_quantizer
+from ..linear_attention.utils import state_quantizer_config
 from ..nn import QuantModule, TensorQuantizer
 
 __all__ = []
 
 
 class _LinearAttentionQuantMixin(QuantModule):
-    linear_attention_quantizer_names = ("gdn_state_quantizer", "gdn_w_quantizer")
+    linear_attention_quantizer_names: tuple[str, ...] = ()
 
     def _setup(self):
         for name in self.linear_attention_quantizer_names:
@@ -39,22 +39,10 @@ class _LinearAttentionQuantMixin(QuantModule):
         return getattr(self, self.linear_attention_quantizer_names[0])
 
     @property
-    def _linear_attn_state_format(self):
-        # Disabled quantizers impose no format requirement on the numerical backend.
-        if not self._linear_attn_state.is_enabled:
-            return "fp8_e4m3"
-        return state_quantizer_config(self._linear_attn_state)[0]
-
-    @property
-    def _linear_attn_w(self):
-        return getattr(self, self.linear_attention_quantizer_names[1])
-
-    @property
     def linear_attention_is_enabled(self):
         """Whether an operand, state, or arithmetic policy changes the computation."""
         return (
-            self._linear_attn_state.is_enabled
-            or self._linear_attn_w.is_enabled
+            any(getattr(self, name).is_enabled for name in self.linear_attention_quantizer_names)
             or self.linear_attention_config.decode is not None
         )
 
@@ -71,12 +59,6 @@ class _LinearAttentionQuantMixin(QuantModule):
                     raise ValueError("int8_hadamard32 requires INT8 state quantization")
                 if group_size:
                     raise ValueError("TensorQuantizer block_sizes requires state_codec='tile'")
-        if self._linear_attn_w.is_enabled:
-            validate_gdn_quantizer(
-                self._linear_attn_w, name=self.linear_attention_quantizer_names[1]
-            )
-            if self.linear_attention_config.decode is not None:
-                raise ValueError("Decode's exact prefix does not support WY operand QDQ")
 
     def modelopt_post_restore(self, prefix=""):
         """Validate the restored numerical policy and quantizers."""

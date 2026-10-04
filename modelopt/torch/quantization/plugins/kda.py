@@ -23,10 +23,19 @@ from .linear_attention import _LinearAttentionQuantMixin
 __all__ = ["KimiDeltaAttentionStateQuantMixin"]
 
 
+def _discard_legacy_w_quantizer_state(quantizer_state):
+    # Early KDA checkpoints included a disabled placeholder; WY QDQ was never supported.
+    for name in list(quantizer_state):
+        if name.rsplit(".", 1)[-1] == "kda_w_quantizer":
+            if not quantizer_state[name].get("_disabled", False):
+                raise ValueError("KDA checkpoints with enabled kda_w_quantizer are unsupported")
+            del quantizer_state[name]
+
+
 class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
     """Adds state quantizers and decode-aware kernel routing to Kimi Delta Attention."""
 
-    linear_attention_quantizer_names = ("kda_state_quantizer", "kda_w_quantizer")
+    linear_attention_quantizer_names = ("kda_state_quantizer",)
 
     def validate_linear_attention(self):
         """Require the materialized backend for KDA numerical emulation."""

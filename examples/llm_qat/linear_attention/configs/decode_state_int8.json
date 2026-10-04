@@ -38,7 +38,6 @@
       "cfg": {
         "backend": "matmul",
         "decode": {
-          "implementation": "torch",
           "state_codec": "int8_hadamard32",
           "prefill_state_qdq": false
         }

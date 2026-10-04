@@ -191,7 +191,7 @@ def _test_gdn_qat_helper(rank, size, mode, checkpoint_path):
         assert module.linear_attention_config == original.linear_attention_config
         assert module.gdn_state_quantizer.is_enabled == ("state" in sites)
         assert module.gdn_w_quantizer.is_enabled == ("w" in sites)
-        assert module._linear_attn_state_format == original._linear_attn_state_format
+        assert module.gdn_state_quantizer.num_bits == original.gdn_state_quantizer.num_bits
         assert module.gdn_state_qdq_block_v == 32
         assert module.in_proj.weight.grad is not None
         assert torch.isfinite(module.in_proj.weight.grad).all()
