@@ -128,41 +128,23 @@ def _decode_prefill(
         states = states.to(q.dtype)
         if states.shape != (len(sequences), heads, keys, values):
             raise ValueError("Initial state shape does not match sequence/head dimensions")
-    active = [n for n, prefix in enumerate(prefixes) if prefix]
-    prefix_outputs, prefix_states = {}, {}
-    if active:
-        packed = [
-            torch.cat(
-                [
-                    tensor[sequences[n][0], sequences[n][1] : sequences[n][1] + prefixes[n]]
-                    for n in active
-                ]
-            ).unsqueeze(0)
-            for tensor in (q, k, v, g, beta)
-        ]
-        offsets = [0]
-        for n in active:
-            offsets.append(offsets[-1] + prefixes[n])
-        prefix_fn = chunk_kda if g.ndim == 4 else chunk_gdn
-        with torch.autocast(device_type=q.device.type, enabled=False):
-            output, final = prefix_fn(
-                *packed,
-                state_qdq=state_qdq and policy.decode.prefill_state_qdq,
-                state_format=state_format,
-                state_quantizer=state_quantizer,
-                scale=scale,
-                initial_state=states[active],
-                cu_seqlens=torch.tensor(offsets),
-                state_v_first=False,
-                chunk_size=policy.chunk_size,
-                state_qdq_block_v=policy.state.block_v,
-            )
-        for index, n in enumerate(active):
-            prefix_outputs[n] = output[0, offsets[index] : offsets[index + 1]]
-            prefix_states[n] = final[index]
+    prefix_fn = chunk_kda if g.ndim == 4 else chunk_gdn
     outputs, finals = [], []
     for n, (b, start, end) in enumerate(sequences):
         split = start + prefixes[n]
+        prefix, state = q.new_empty(0, heads, values), states[n]
+        if prefixes[n]:
+            with torch.autocast(device_type=q.device.type, enabled=False):
+                prefix, state = prefix_fn(
+                    *(x[b, start:split] for x in (q, k, v, g, beta)),
+                    state_qdq=state_qdq and policy.decode.prefill_state_qdq,
+                    state_format=state_format,
+                    state_quantizer=state_quantizer,
+                    scale=scale,
+                    initial_state=state,
+                    chunk_size=policy.chunk_size,
+                    state_qdq_block_v=policy.state.block_v,
+                )
         suffix, carry = recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy.decode,
@@ -170,11 +152,10 @@ def _decode_prefill(
             state_format=state_format,
             state_quantizer=state_quantizer,
             block_v=policy.state.block_v,
-            initial_state=prefix_states.get(n, states[n]),
+            initial_state=state,
             position=prefixes[n],
             scale=scale,
         )
-        prefix = prefix_outputs.get(n, q.new_empty(0, heads, values))
         outputs.append(torch.cat((prefix, suffix)))
         finals.append(carry.reconstruct())
     output = torch.stack(outputs) if boundaries is None else torch.cat(outputs).unsqueeze(0)

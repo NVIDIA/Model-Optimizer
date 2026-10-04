@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import torch
@@ -85,45 +84,6 @@ def state_quantizer_config(
     if quantizer.axis != (0, 1):
         raise ValueError(f"{name} supports only axis=(0, 1) with state.block_v tiling")
     return _STATE_FORMATS[quantizer.num_bits], 0
-
-
-def _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first):
-    if q.ndim != 4 or k.shape != q.shape or v.shape[:2] != q.shape[:2]:
-        raise ValueError("q/k must have shape [B,T,Hk,Dk] and v shape [B,T,Hv,Dv]")
-    batch, length, heads, keys = q.shape
-    value_heads, values = v.shape[2:]
-    if length == 0 or value_heads % heads:
-        raise ValueError("nonempty sequences and Hv divisible by Hk are required")
-    if beta.shape != (batch, length, value_heads) or g.shape not in (
-        beta.shape,
-        (*beta.shape, keys),
-    ):
-        raise ValueError("beta must be [B,T,Hv]; g must be [B,T,Hv] or [B,T,Hv,Dk]")
-    if cu_seqlens is None:
-        sequences = [(b, 0, length) for b in range(batch)]
-    else:
-        boundaries = cu_seqlens.tolist()
-        if (
-            batch != 1
-            or len(boundaries) < 2
-            or boundaries[0] != 0
-            or boundaries[-1] != length
-            or any(a >= b for a, b in pairwise(boundaries))
-        ):
-            raise ValueError("cu_seqlens must partition a packed batch of size one")
-        sequences = [(0, a, b) for a, b in pairwise(boundaries)]
-    if initial_state is None:
-        state = q.new_zeros(len(sequences), value_heads, keys, values)
-    else:
-        state = initial_state.transpose(-1, -2) if state_v_first else initial_state
-        if state.shape != (len(sequences), value_heads, keys, values):
-            raise ValueError("initial_state shape does not match sequence/head dimensions")
-    return (
-        q.repeat_interleave(value_heads // heads, dim=2),
-        k.repeat_interleave(value_heads // heads, dim=2),
-        state,
-        sequences,
-    )
 
 
 def _fp8_quantize(value: torch.Tensor, axis):
