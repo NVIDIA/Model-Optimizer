@@ -27,12 +27,15 @@ if TYPE_CHECKING:
 
 __all__ = []
 
+_STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", 8: "int8"}
+
 
 def validate_gdn_quantizer(
     quantizer: TensorQuantizer,
     *,
     name: str,
     num_bits: tuple[int | tuple[int, int], ...] = ((4, 3),),
+    block_sizes: tuple[int, ...] = (),
 ) -> None:
     """Check supported formats and the custom backward's identity STE."""
     # Numerical helpers load while QuantizeConfig initializes; defer the quantizer import.
@@ -44,7 +47,13 @@ def validate_gdn_quantizer(
         quantizer._dynamic
         and quantizer.num_bits in num_bits
         and (quantizer.num_bits != 8 or (not quantizer.unsigned and quantizer.narrow_range))
-        and quantizer.block_sizes is None
+        and (
+            quantizer.block_sizes is None
+            or (
+                quantizer.num_bits == 8
+                and quantizer.block_sizes in ({-1: size} for size in block_sizes)
+            )
+        )
         and quantizer.fake_quant
         and quantizer._pass_through_bwd
         and not quantizer.rotate_is_enabled
@@ -55,9 +64,27 @@ def validate_gdn_quantizer(
     ):
         raise ValueError(
             f"{name} supports only dynamic fake quantization with num_bits in {num_bits}, "
-            "pass_through_bwd=True, no block_sizes, rotation, pre-scaling, bias, constant "
+            f"INT8 block_sizes in {block_sizes} (or no blocks), "
+            "pass_through_bwd=True, no rotation, pre-scaling, bias, constant "
             "amax, or custom backend. Other gradient rules and formats are not implemented."
         )
+
+
+def state_quantizer_config(
+    quantizer: TensorQuantizer, *, name="state_quantizer"
+) -> tuple[str, int]:
+    """Validate the state quantizer and derive its format and last-axis group size.
+
+    A zero group size retains the legacy policy's full-key state tiles.
+    """
+    validate_gdn_quantizer(
+        quantizer, name=name, num_bits=tuple(_STATE_FORMATS), block_sizes=(16, 32, 64)
+    )
+    if quantizer.block_sizes is not None:
+        return _STATE_FORMATS[quantizer.num_bits], quantizer.block_sizes[-1]
+    if quantizer.axis != (0, 1):
+        raise ValueError(f"{name} supports only axis=(0, 1) with state.block_v tiling")
+    return _STATE_FORMATS[quantizer.num_bits], 0
 
 
 def _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first):
@@ -114,8 +141,15 @@ def _fp8_quantize(value: torch.Tensor, axis):
     return quantized, torch.div(448.0, safe_amax).reciprocal()
 
 
-def _state_qdq(state: torch.Tensor, block_v: int = 64, state_format: str = "fp8_e4m3"):
+def _state_qdq(
+    state: torch.Tensor,
+    block_v: int = 64,
+    state_format: str = "fp8_e4m3",
+    state_quantizer: TensorQuantizer | None = None,
+):
     """Dynamic state-tile QDQ with detached scales and identity STE."""
+    if state_quantizer is not None and state_quantizer.block_sizes is not None:
+        return state_quantizer(state)
     if state_format not in ("fp8_e4m3", "int8"):
         raise ValueError("State format must be fp8_e4m3 or int8")
     if block_v not in (16, 32, 64, 128):

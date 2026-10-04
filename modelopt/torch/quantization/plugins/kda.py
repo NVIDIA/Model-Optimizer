@@ -50,8 +50,7 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
         return matmul_kda(
             *args,
             policy=self.linear_attention_config,
-            state_qdq=self.kda_state_quantizer.is_enabled and self.kda_state_quantizer._if_quant,
-            state_format=self._linear_attn_state_format,
+            state_quantizer=self.kda_state_quantizer,
             prefill_lengths=self._linear_attention_prefill_lengths,
             **kwargs,
         )

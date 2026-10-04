@@ -74,6 +74,50 @@ def _values_and_grads(output, state, args, initial):
     return output, state, *torch.autograd.grad(loss, (*args, initial), retain_graph=True)
 
 
+@pytest.mark.parametrize(("kda", "block_size"), [(False, 32), (True, 64)])
+def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
+    args, initial = _inputs(kda, length=5)
+    # Partial value groups exercise TensorQuantizer padding as well as per-key scales.
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=8, type="dynamic", block_sizes={-1: block_size}, narrow_range=True
+        )
+    )
+    policy = LinearAttentionConfig(
+        backend="matmul", decode={"prefill_state_qdq": True}, state={"block_v": 16}
+    )
+    function = matmul_kda if kda else matmul_gdn
+    output, final = function(
+        *(x.unsqueeze(0) for x in args),
+        policy=policy,
+        state_quantizer=quantizer,
+        prefill_lengths=[3],
+        initial_state=initial.unsqueeze(0),
+        output_final_state=True,
+    )
+    # Sequential oracle: the prefix reads unrounded working states; decode reads stored states.
+    state = quantizer(initial)
+    expected = []
+    q, k, v, g, beta = args
+    for t in range(len(q)):
+        if t == 3:
+            state = quantizer(state)
+        decay = g[t].exp().unsqueeze(-1) if kda else g[t].exp()[:, None, None]
+        decayed = state * decay
+        residual = v[t] - (k[t].unsqueeze(-1) * decayed).sum(-2)
+        state = decayed + k[t].unsqueeze(-1) * (beta[t].unsqueeze(-1) * residual).unsqueeze(-2)
+        if t >= 3:
+            state = quantizer(state)
+        expected.append((q[t].unsqueeze(-1) * state).sum(-2) / q.shape[-1] ** 0.5)
+        if t == 2:
+            state = quantizer(state)
+    for actual, expected in zip(
+        _values_and_grads(output[0], final[0], args, initial),
+        _values_and_grads(torch.stack(expected), state, args, initial),
+    ):
+        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+
+
 @pytest.mark.parametrize(("kda", "mode"), [(False, "token"), (True, "replay")])
 def test_prefill_decode_matches_recurrence_and_gradients(kda, mode):
     args, state = _inputs(kda)

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from .config import LinearAttentionDecodeConfig
-from .utils import _fp8_quantize
+from .utils import _fp8_quantize, state_quantizer_config
 
 __all__ = [
     "EncodedLinearAttentionTensor",
@@ -33,7 +33,7 @@ __all__ = [
 
 @dataclass
 class EncodedLinearAttentionTensor:
-    """Fake decoded values plus detached scale metadata; no compressed storage claim."""
+    """Fake decoded values plus optional scale metadata; no compressed storage claim."""
 
     values: torch.Tensor
     scales: torch.Tensor | None
@@ -102,9 +102,23 @@ class _IdentityGradient(torch.autograd.Function):
         return gradient, None
 
 
-def _encode(value, enabled, block_v, *, state=False, state_format="fp8_e4m3", state_codec="tile"):
+def _encode(
+    value,
+    enabled,
+    block_v,
+    *,
+    state=False,
+    state_format="fp8_e4m3",
+    state_codec="tile",
+    state_quantizer=None,
+):
     if not enabled:
         return EncodedLinearAttentionTensor(value, None, "identity", None)
+    if state and state_quantizer is not None and state_quantizer.block_sizes is not None:
+        # TensorQuantizer owns dynamic scales; the floating carry needs only its QDQ output.
+        return EncodedLinearAttentionTensor(
+            state_quantizer(value), None, state_format, state_quantizer.block_sizes[-1]
+        )
     if state and state_codec == "int8_hadamard32":
         with torch.no_grad():
             groups = value.float().reshape(*value.shape[:-1], -1, 32)
@@ -138,11 +152,14 @@ def _encode(value, enabled, block_v, *, state=False, state_format="fp8_e4m3", st
     return EncodedLinearAttentionTensor(decoded, torch.stack(scales, dim=-1), state_format, block_v)
 
 
-def _signature(config, state_qdq, block_v, state_format):
-    return (
+def _signature(config, state_qdq, block_v, state_format, state_quantizer):
+    signature = (
         config.model_dump_json(exclude={"implementation", "prefill_state_qdq"})
         + f"/{state_qdq}/{block_v}/{state_format}"
     )
+    if state_quantizer is not None and state_quantizer.block_sizes is not None:
+        signature += f"/group={state_quantizer.block_sizes[-1]}"
+    return signature
 
 
 def _sum_keys(value):
@@ -164,7 +181,19 @@ def _round_log_gate(gate, step):
 
 
 def _prepare_carry(
-    q, k, v, g, beta, config, state_qdq, block_v, initial_state, carry, position, state_format
+    q,
+    k,
+    v,
+    g,
+    beta,
+    config,
+    state_qdq,
+    block_v,
+    initial_state,
+    carry,
+    position,
+    state_format,
+    state_quantizer,
 ):
     if q.ndim != 3 or k.shape != q.shape or v.shape[:2] != q.shape[:2]:
         raise ValueError("q/k/v must have aligned [T,H,D] shapes")
@@ -176,11 +205,13 @@ def _prepare_carry(
         raise ValueError("State format must be fp8_e4m3 or int8")
     hadamard = config.state_codec == "int8_hadamard32"
     if hadamard:
+        if state_quantizer is not None and state_quantizer.block_sizes is not None:
+            raise ValueError("TensorQuantizer block_sizes requires state_codec='tile'")
         if state_qdq and state_format != "int8":
             raise ValueError("int8_hadamard32 requires INT8 state quantization")
         if v.shape[-1] % 32 or block_v < 32:
             raise ValueError("int8_hadamard32 requires Dv divisible by 32 and block_v >= 32")
-    signature = _signature(config, state_qdq, block_v, state_format)
+    signature = _signature(config, state_qdq, block_v, state_format, state_quantizer)
     if carry is not None and initial_state is not None:
         raise ValueError("Supply either carry or initial_state")
     shape = (q.shape[1], q.shape[2], v.shape[2])
@@ -208,6 +239,7 @@ def _prepare_carry(
             state=True,
             state_format=state_format,
             state_codec=config.state_codec,
+            state_quantizer=state_quantizer,
         )
         carry = LinearAttentionCarry(
             anchor, (), carry.position, True, signature, "hadamard32" if hadamard else "identity"
@@ -225,6 +257,7 @@ def recurrent_decode_reference(
     config: LinearAttentionDecodeConfig,
     state_qdq=False,
     state_format="fp8_e4m3",
+    state_quantizer=None,
     block_v=64,
     initial_state=None,
     carry=None,
@@ -237,8 +270,24 @@ def recurrent_decode_reference(
     KDA log gates are accepted. Outputs and all returned carry values retain their
     graphs. An empty call performs no write or initial-state quantization.
     """
+    if state_quantizer is not None:
+        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
+        if state_quantizer.is_enabled:
+            state_format, _ = state_quantizer_config(state_quantizer)
     carry, signature = _prepare_carry(
-        q, k, v, g, beta, config, state_qdq, block_v, initial_state, carry, position, state_format
+        q,
+        k,
+        v,
+        g,
+        beta,
+        config,
+        state_qdq,
+        block_v,
+        initial_state,
+        carry,
+        position,
+        state_format,
+        state_quantizer,
     )
     if len(q) == 0:
         # Keep empty input gradients defined without introducing a state write.
@@ -289,6 +338,7 @@ def recurrent_decode_reference(
                     state=True,
                     state_format=state_format,
                     state_codec=config.state_codec,
+                    state_quantizer=state_quantizer,
                 )
                 entries = ()
                 stored = anchor.values
@@ -317,6 +367,7 @@ def recurrent_decode(
     config: LinearAttentionDecodeConfig,
     state_qdq=False,
     state_format="fp8_e4m3",
+    state_quantizer=None,
     block_v=64,
     initial_state=None,
     carry=None,
@@ -333,6 +384,7 @@ def recurrent_decode(
         config=config,
         state_qdq=state_qdq,
         state_format=state_format,
+        state_quantizer=state_quantizer,
         block_v=block_v,
         initial_state=initial_state,
         carry=carry,

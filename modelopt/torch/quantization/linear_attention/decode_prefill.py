@@ -22,6 +22,7 @@ import torch
 
 from ._chunk_prefill import chunk_gdn, chunk_kda
 from .decode import recurrent_decode
+from .utils import state_quantizer_config
 
 __all__ = ["linear_attention_training_phase"]
 
@@ -74,6 +75,7 @@ def _decode_prefill(
     policy,
     state_qdq,
     state_format,
+    state_quantizer,
     scale,
     initial_state,
     output_final_state,
@@ -83,6 +85,10 @@ def _decode_prefill(
     output_dtype,
     prefill_lengths,
 ):
+    if state_quantizer is not None:
+        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
+        if state_quantizer.is_enabled:
+            state_format, _ = state_quantizer_config(state_quantizer)
     if prefill_lengths is None:
         raise ValueError("Decode-aware training requires explicit per-sequence prefill lengths")
     if q.ndim != 4 or k.shape != q.shape or v.ndim != 4 or v.shape[:2] != q.shape[:2]:
@@ -143,6 +149,7 @@ def _decode_prefill(
                 *packed,
                 state_qdq=state_qdq and policy.decode.prefill_state_qdq,
                 state_format=state_format,
+                state_quantizer=state_quantizer,
                 scale=scale,
                 initial_state=states[active],
                 cu_seqlens=torch.tensor(offsets),
@@ -161,6 +168,7 @@ def _decode_prefill(
             config=policy.decode,
             state_qdq=state_qdq,
             state_format=state_format,
+            state_quantizer=state_quantizer,
             block_v=policy.state.block_v,
             initial_state=prefix_states.get(n, states[n]),
             position=prefixes[n],

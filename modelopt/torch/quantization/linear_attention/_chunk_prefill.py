@@ -37,6 +37,7 @@ def chunk_gdn(
     state_qdq: bool = False,
     state_qdq_block_v: int = 64,
     state_format: str = "fp8_e4m3",
+    state_quantizer=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute a GDN prefix with optional QDQ on the initial state and chunk writes."""
     if g.ndim != 3 or chunk_size <= 0:
@@ -47,7 +48,7 @@ def chunk_gdn(
     for n, (b, start, end) in enumerate(sequences):
         state = states[n]
         if state_qdq:
-            state = _state_qdq(state, state_qdq_block_v, state_format)
+            state = _state_qdq(state, state_qdq_block_v, state_format, state_quantizer)
         pieces = []
         for lo in range(start, end, chunk_size):
             hi = min(lo + chunk_size, end)
@@ -71,7 +72,7 @@ def chunk_gdn(
             state = state * gc[..., -1].exp()[:, None, None]
             state = state + weighted_keys.transpose(-1, -2) @ updated_values
             if state_qdq:
-                state = _state_qdq(state, state_qdq_block_v, state_format)
+                state = _state_qdq(state, state_qdq_block_v, state_format, state_quantizer)
         outputs.append(torch.cat(pieces))
         finals.append(state)
     output = torch.stack(outputs) if cu_seqlens is None else torch.cat(outputs).unsqueeze(0)
@@ -94,6 +95,7 @@ def chunk_kda(
     state_qdq=False,
     state_qdq_block_v=64,
     state_format="fp8_e4m3",
+    state_quantizer=None,
 ):
     """Compute a KDA prefix with optional QDQ on the initial state and chunk writes."""
     if g.ndim != 4 or chunk_size <= 0:
@@ -104,7 +106,7 @@ def chunk_kda(
     for n, (b, start, end) in enumerate(sequences):
         state = states[n]
         if state_qdq:
-            state = _state_qdq(state, state_qdq_block_v, state_format)
+            state = _state_qdq(state, state_qdq_block_v, state_format, state_quantizer)
         pieces = []
         for lo in range(start, end, chunk_size):
             hi = min(lo + chunk_size, end)
@@ -138,7 +140,7 @@ def chunk_kda(
             weighted_keys = kc * (prefix[..., -1:, :] - prefix).exp()
             state = state * gate[..., -1, :, None] + weighted_keys.transpose(-1, -2) @ updated
             if state_qdq:
-                state = _state_qdq(state, state_qdq_block_v, state_format)
+                state = _state_qdq(state, state_qdq_block_v, state_format, state_quantizer)
         outputs.append(torch.cat(pieces))
         finals.append(state)
     output = torch.stack(outputs) if cu_seqlens is None else torch.cat(outputs).unsqueeze(0)

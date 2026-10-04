@@ -85,6 +85,7 @@ def quant_cfg(state=True, w=False):
         {"num_bits": (4, 3), "type": "dynamic"},  # per tensor
         {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},  # int8
         {"num_bits": 4, "axis": (0, 1), "type": "dynamic"},  # unsupported format
+        {"num_bits": 8, "narrow_range": True, "type": "dynamic", "block_sizes": {-1: 8}},
         {"num_bits": (4, 3), "type": "dynamic", "block_sizes": {-1: 16}},  # blockwise
     ],
 )
@@ -130,12 +131,10 @@ def test_disabled_state_quantizer_calls_original_kernel():
 
 
 @pytest.mark.parametrize(
-    ("partial_kernel", "num_bits", "state_qdq"),
-    [(False, (4, 3), 1), (True, (4, 3), 1), (False, 8, 2)],
+    ("partial_kernel", "num_bits"),
+    [(False, (4, 3)), (True, (4, 3)), (False, 8)],
 )
-def test_enabled_state_quantizer_uses_state_qdq_kernel(
-    monkeypatch, partial_kernel, num_bits, state_qdq
-):
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel, num_bits):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -154,7 +153,7 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(
     model(x)
     assert calls and calls[-1] == {
         "chunk_size": 64,
-        "state_qdq": state_qdq,
+        "state_quantizer": model.gdn_state_quantizer,
         "state_qdq_block_v": 64,
         "w_quantizer": None,
         **({"output_final_state": True} if partial_kernel else {}),
@@ -184,7 +183,7 @@ def test_w_quantizer_is_passed_to_the_kernel(monkeypatch, state):
     assert model.gdn_w_quantizer.is_enabled and model.gdn_state_quantizer.is_enabled == state
 
     model(x)
-    assert calls[-1]["state_qdq"] == int(state)
+    assert calls[-1]["state_quantizer"] is model.gdn_state_quantizer
     assert calls[-1]["w_quantizer"] is model.gdn_w_quantizer
 
     # The w quantizer really quantizes: 256 random values per token collapse onto the E4M3 grid,
@@ -220,8 +219,12 @@ def test_w_grouping_is_preserved_during_conversion(axis):
 @pytest.mark.parametrize(("state", "w"), [(True, False), (False, True), (True, True)])
 def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
     model = nn.Sequential(TinyGatedDeltaNet(), nn.Linear(4, 4))
-    cfg = quant_cfg(state=state, w=w)
+    cfg = deepcopy(quant_cfg(state=state, w=w))
     cfg["algorithm"] = None
+    if state and not w:
+        cfg["quant_cfg"][-1]["cfg"].update(
+            num_bits=8, axis=None, block_sizes={-1: 32}, unsigned=False, narrow_range=True
+        )
     cfg["linear_attention"] = [
         {"module_name": "*", "cfg": {"state": {"block_v": 128}}},
         {"module_name": "0", "cfg": {"state": {"block_v": 32}}},
@@ -229,6 +232,9 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
     mtq.quantize(model, cfg)
     assert model[0].gdn_state_qdq_block_v == 32
     model[0].linear_attention_config.state.block_v = 16
+    if state and not w:
+        sample = torch.randn(2, 4, 19)
+        expected = model[0].gdn_state_quantizer(sample)
     if w:
         # Save the actual quantizer settings, including edits after conversion.
         model[0].gdn_w_quantizer.axis = None
@@ -244,8 +250,11 @@ def test_quantizer_roundtrip_and_hybrid_selection(tmp_path, state, w):
         assert quantizer.is_enabled == enabled
         assert quantizer.axis == original.axis
         assert quantizer.num_bits == original.num_bits
+        assert quantizer.block_sizes == original.block_sizes
         assert quantizer._dynamic == original._dynamic
         assert not hasattr(restored[1], name)
+    if state and not w:
+        torch.testing.assert_close(restored[0].gdn_state_quantizer(sample), expected)
 
 
 def test_quant_cfg_refinement_updates_and_validates_existing_quantized_module():

@@ -33,8 +33,6 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.kernels.quantization.linear_attention import STATE_QDQ_FORMATS, STATE_QDQ_OFF
-
 from ..linear_attention.prefill import matmul_gdn
 from .linear_attention import _LinearAttentionQuantMixin
 
@@ -79,7 +77,7 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
 
     @property
     def gdn_state_qdq_block_v(self) -> int:
-        """Value-column scale grouping from the saved execution policy."""
+        """Execution tile width; also sets grouping for legacy tile quantizers."""
         return self.linear_attention_config.state.block_v
 
     def _state_quantized_chunk_gated_delta_rule(
@@ -87,7 +85,6 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Call ``gated_delta_rule`` or, if a quantizer is on, the vendored quantizing copy."""
         self.validate_linear_attention()
-        quantize_state = self.gdn_state_quantizer.is_enabled and self.gdn_state_quantizer._if_quant
         quantize_w = self.gdn_w_quantizer.is_enabled
         if not self.linear_attention_is_enabled:
             return gated_delta_rule(*args, **kwargs)
@@ -107,8 +104,7 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
             return matmul_gdn(
                 *args,
                 policy=self.linear_attention_config,
-                state_qdq=quantize_state,
-                state_format=self._linear_attn_state_format,
+                state_quantizer=self.gdn_state_quantizer,
                 chunk_size=chunk_size,
                 prefill_lengths=self._linear_attention_prefill_lengths,
                 **kwargs,
@@ -116,9 +112,7 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         return _state_qdq_chunk_gated_delta_rule()(
             *args,
             chunk_size=chunk_size,
-            state_qdq=STATE_QDQ_FORMATS[self._linear_attn_state_format]
-            if quantize_state
-            else STATE_QDQ_OFF,
+            state_quantizer=self.gdn_state_quantizer,
             state_qdq_block_v=self.gdn_state_qdq_block_v,
             w_quantizer=self.gdn_w_quantizer if quantize_w else None,
             **kwargs,

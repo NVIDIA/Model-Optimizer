@@ -61,7 +61,9 @@ def compare(actual, expected, tolerance):
         )
 
 
-@pytest.fixture(scope="module", params=["disabled", "w", "state-w", "state-int8"])
+@pytest.fixture(
+    scope="module", params=["disabled", "w", "state-w", "state-int8", "state-int8-block"]
+)
 def compiled_gdn_case(request):
     """Compile only the selected BF16 forward/backward path, outside the test-call timer."""
     state_qdq = {"state-w": 1, "state-int8": 2}.get(request.param, 0)
@@ -74,6 +76,14 @@ def compiled_gdn_case(request):
     )
     args, state = make_inputs()
     kwargs = {"state_qdq": state_qdq, "w_quantizer": quantizer}
+    if request.param == "state-int8-block":
+        kwargs["state_quantizer"] = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=8, type="dynamic", block_sizes={-1: 16}, narrow_range=True
+            )
+        )
+        # Compile the reference quantizer's CUDA extension outside the test-call timer too.
+        kwargs["state_quantizer"](state[0])
     values_and_grads(chunk_gated_delta_rule, args, state, output_final_state=True, **kwargs)
     torch.cuda.synchronize()
     return args, state, kwargs
