@@ -656,8 +656,10 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
-    # vLLM >= 0.26 requires DeepSeek's 128/64/128 MLA dimensions; >= 0.30 also
-    # requires its 512-wide latent cache during engine warmup.
+    # vLLM 0.26's MLA prefill selector rejects the helper's 16/16/16 dimensions,
+    # so use DeepSeek's 128/64/128. With the helper's kv_lora_rank=16 that
+    # leaves an 80-wide cache row (16 + 64), rejected during vLLM 0.30 warmup.
+    # Set kv_lora_rank=512 for a supported 576-wide row (512 + 64).
     model_dir = create_tiny_deepseek_v3_dir(
         tmp, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
@@ -922,7 +924,7 @@ def _quantize_kv_preset_and_summarize(self):
 @pytest.fixture
 def tiny_deepseek_fp8_llm(tmp_path):
     # vLLM's online FP8 quantization turns the linears and experts into real-quant FP8 layers.
-    # kv_lora_rank=512 keeps DeepSeek's 576-wide cache row, which every vLLM MLA backend accepts.
+    # kv_lora_rank=512 gives a 576-wide cache row, accepted by the tested vLLM versions.
     model_dir = create_tiny_deepseek_v3_dir(
         tmp_path, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
