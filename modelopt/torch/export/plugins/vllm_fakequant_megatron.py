@@ -16,7 +16,7 @@
 
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +70,23 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
     return configs
 
 
+def _save_quantizer_sidecar(path: Path, save: Callable[[Path], None]) -> None:
+    """Publish a sidecar and share write completion or failure across ranks."""
+    failure = ""
+    if is_master():
+        try:
+            save(path)
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+    failure = DistributedProcessGroup.get_dist_syncd_obj(
+        failure,
+        DistributedProcessGroup(None),
+        lambda failures: next((message for message in failures if message), ""),
+    )
+    if failure:
+        raise RuntimeError(f"Failed to save {path.name}: {failure}")
+
+
 def gather_mcore_vllm_fq_quantizer_recipe(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
@@ -101,9 +118,12 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
-    if is_master():
-        with open(Path(save_directory) / "quant_recipe.yaml", "w") as f:
+
+    def save_recipe(path: Path) -> None:
+        with open(path, "w") as f:
             yaml.safe_dump(merged, f, sort_keys=False)
+
+    _save_quantizer_sidecar(Path(save_directory) / "quant_recipe.yaml", save_recipe)
 
 
 def gather_mcore_vllm_fq_quantized_state_dict(
@@ -153,8 +173,10 @@ def gather_mcore_vllm_fq_quantized_state_dict(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
-    if is_master():
-        torch.save(merged_quantizer_state_dict, Path(save_directory) / "quantizer_state.pth")
+    _save_quantizer_sidecar(
+        Path(save_directory) / "quantizer_state.pth",
+        lambda path: torch.save(merged_quantizer_state_dict, path),
+    )
 
 
 class VllmFqGPTModelExporter(GPTModelExporter):
@@ -270,7 +292,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._extract_quantizer_recipe_markers(quantizer_state_dicts)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, quantizer_state_dicts, save_directory)
         gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_directory)
-        torch.distributed.barrier()
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
