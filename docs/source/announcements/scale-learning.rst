@@ -42,10 +42,10 @@ instead of a weight :math:`x` we use a fake-quantized weight
    \operatorname{round}\!\left(\frac{x}{s}\right), q_{\min}, q_{\max}\right).
 
 Here :math:`x` is a single weight and :math:`s` its corresponding scale
-(omitting the global scale for simplicity). In NVFP4, every block of sixteen
-weights shares a single scale, :math:`q_{\min}` and :math:`q_{\max}` are
-:math:`-6` and :math:`6` respectively, and :math:`\operatorname{round}` rounds
-to the nearest E2M1 value.
+(omitting the global scale for simplicity). In NVFP4 [1]_, every block of
+sixteen weights shares a single scale, :math:`q_{\min}` and :math:`q_{\max}`
+are :math:`-6` and :math:`6` respectively, and :math:`\operatorname{round}`
+rounds to the nearest E2M1 value.
 
 To train the scale we need :math:`\partial L/\partial s`, which we can compute
 via the chain rule:
@@ -113,7 +113,7 @@ During export, the post-scale is baked into the checkpoint and the pre-scale is
 discarded.
 
 ModelOpt implements both forms via the
-:func:`lsq <modelopt.torch.quantization.model_calib.lsq>` API. In the
+:func:`lsq <modelopt.torch.quantization.model_calib.lsq>` API [2]_. In the
 implementation we reparameterize the trained quantity as ``amax`` rather than
 the scale itself.
 The field ``tied_amax`` controls whether we have dual scales or a single "tied"
