@@ -13,10 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Quantizer-only INT8 unit; general/ptq/gdn_state_int8_dynamic pairs it with Hadamard.
-# The execution policy selects state scale groups and chunk/token/replay boundaries.
+# Quantizer-only INT8 unit for GDN and KDA recurrent states.
+# The complete general/ptq/linear_attention_state_int8_dynamic recipe enables Hadamard.
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*gdn_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      axis: [0, 1]
+      type: dynamic
+      pass_through_bwd: true
+  - quantizer_name: '*kda_state_quantizer'
     cfg:
       num_bits: 8
       unsigned: false

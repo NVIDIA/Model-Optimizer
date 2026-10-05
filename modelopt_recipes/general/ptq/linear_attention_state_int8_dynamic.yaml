@@ -13,21 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
   base_disable_all: configs/ptq/units/base_disable_all
-  gdn_state_int8_dynamic: configs/ptq/units/gdn_state_int8_dynamic
+  state_int8: configs/ptq/units/linear_attention_state_int8_dynamic
 
 metadata:
-  recipe_type: ptq
   description: >-
-    Dynamic INT8 GDN state QDQ with 32-value Hadamard rotation during decode.
+    Dynamic INT8 GDN/KDA state QDQ with 32-value Hadamard rotation during decode.
     Prefill state remains unquantized; supply per-sequence prefix lengths through
     linear_attention_training_phase. No calibration is required.
 quantize:
   algorithm:
   quant_cfg:
     - $import: base_disable_all
-    - $import: gdn_state_int8_dynamic
+    - $import: state_int8
   linear_attention:
     - module_name: '*'
       cfg:

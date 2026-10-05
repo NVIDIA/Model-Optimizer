@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from contextlib import nullcontext
 
 import pytest
@@ -29,6 +28,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer import TransformerConfig
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
@@ -157,10 +157,9 @@ def _test_kda(rank, size, cfg, checkpoint_path):
 
 
 @pytest.fixture(scope="module")
-def compiled_kda_workers(dist_workers_size_1, project_root_path):
+def compiled_kda_workers(dist_workers_size_1):
     """Warm one KDA shape outside the functional test timer."""
-    path = project_root_path / "examples/llm_qat/linear_attention/configs/decode_state_int8.json"
-    cfg = json.loads(path.read_text())
+    cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
     cfg["linear_attention"][0]["cfg"]["decode"].update(
         mode="replay", replay={"window": 5}, decay_log_step=1 / 256
     )
