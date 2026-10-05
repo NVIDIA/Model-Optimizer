@@ -656,10 +656,10 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
-    # vLLM >= 0.26 only accepts a fixed set of MLA dimension triples (its MLA prefill backend
-    # selector rejects the helper's 16/16/16 default); use the real DeepSeek 128/64/128 one.
+    # vLLM >= 0.26 requires DeepSeek's 128/64/128 MLA dimensions; >= 0.30 also
+    # requires its 512-wide latent cache during engine warmup.
     model_dir = create_tiny_deepseek_v3_dir(
-        tmp, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+        tmp, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
     )
     llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
     try:

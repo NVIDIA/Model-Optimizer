@@ -291,8 +291,11 @@ def _paged_cache_for(seqs_kv, num_kv_heads, head_dim, page_size, device, dtype):
     blocks_per_seq = [(kv.shape[0] + page_size - 1) // page_size for kv, _ in seqs_kv]
     num_blocks = sum(blocks_per_seq)
     max_blocks = max(blocks_per_seq)
-    cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-        num_blocks, page_size, num_kv_heads, head_dim
+    get_cache_shape = getattr(FlashAttentionBackend, "get_kv_cache_shape", None)
+    cache_shape = (
+        get_cache_shape(num_blocks, page_size, num_kv_heads, head_dim)
+        if get_cache_shape is not None
+        else (num_blocks, num_kv_heads, page_size, 2 * head_dim)
     )
     kv_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
     k_cache, v_cache = attention_plugin._flash_attention_kv_cache_views(kv_cache, head_dim)

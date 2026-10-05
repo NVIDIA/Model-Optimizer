@@ -236,6 +236,8 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         attention_config=SimpleNamespace(use_trtllm_attention=True),
         has_sinks=False,
         use_trtllm_decode_attention=True,
+        use_xqa=False,
+        use_trtllm_gen_varlen_decode=False,
         use_dcp=False,
     )
     common = CommonAttentionMetadata(
@@ -604,7 +606,10 @@ def test_flash_attention_forward_follows_backend_kv_cache_layout(
         shape = [3, 16, impl.num_kv_heads, impl.head_size]
         shape.insert(0 if layout == "kv-first" else 1, 2)
     monkeypatch.setattr(
-        FlashAttentionBackend, "get_kv_cache_shape", staticmethod(lambda *_args: backend_shape)
+        FlashAttentionBackend,
+        "get_kv_cache_shape",
+        staticmethod(lambda *_args: backend_shape),
+        raising=False,
     )
     vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
     kv_cache = torch.zeros(shape, dtype=torch.float16)
@@ -666,7 +671,10 @@ def test_flash_attention_calibration_follows_backend_kv_cache_layout(
         shape = [3, 16, impl.num_kv_heads, impl.head_size]
         shape.insert(0 if layout == "kv-first" else 1, 2)
     monkeypatch.setattr(
-        FlashAttentionBackend, "get_kv_cache_shape", staticmethod(lambda *_args: backend_shape)
+        FlashAttentionBackend,
+        "get_kv_cache_shape",
+        staticmethod(lambda *_args: backend_shape),
+        raising=False,
     )
     vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
     kv_cache = torch.zeros(shape, dtype=torch.float16)
