@@ -31,6 +31,7 @@ from modelopt.torch.distill.plugins.megatron import (
     LogitsAndIntermediatesLossBalancer,
     LogitsKLLoss,
     TopKLogitsKLLoss,
+    TopLogitsKLLoss,
     _mtp_excluded_from_quantization,
     adjust_distillation_model_for_mcore,
     setup_distillation_config,
@@ -134,7 +135,7 @@ def _test_logits_kl_loss(rank, size):
 
 
 def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
-    """Test TopKLogitsKLLoss with simple forward/backward pass."""
+    """Test TopLogitsKLLoss with simple forward/backward pass."""
     set_seed(SEED)
 
     num_layers = 2
@@ -176,7 +177,7 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
         activation_func="squared_relu",
     ).cuda()
 
-    # Setup distillation config with TopKLogitsKLLoss via logit_kl_topk argument
+    # Setup distillation config with TopLogitsKLLoss via logit_kl_topk argument
     distill_cfg = setup_distillation_config(
         config_or_path=DistillationConfig(**kd_kwargs),
         student_cfg=student_model.config,
@@ -335,7 +336,7 @@ def test_logits_kl_loss(dist_workers):
     [(None, 1), (0.9, 1), (0.9, 3)],
 )
 def test_topk_logits_kl_loss(dist_workers, top_p, top_p_min_k, top_k: int = 5):
-    """Test TopKLogitsKLLoss with TP parallelism."""
+    """Test TopLogitsKLLoss with TP parallelism."""
     kd_kwargs = {
         "logit_kl_topk": top_k,
         "logit_kl_top_p": top_p,
@@ -356,7 +357,7 @@ def test_topk_logits_kl_loss_numerics_full_vocab_matches_dense():
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
     student, teacher = _make_loss_inputs()
     dense = LogitsKLLoss(cfg)(student, teacher)[0]
-    topk = TopKLogitsKLLoss(cfg, top_k=student.size(-1))(student, teacher)[0]
+    topk = TopLogitsKLLoss(cfg, top_k=student.size(-1))(student, teacher)[0]
     assert torch.allclose(dense, topk, atol=1e-6)
 
 
@@ -365,7 +366,7 @@ def test_topk_logits_kl_loss_numerics_ghost_token_reference():
     cfg = SimpleNamespace(tensor_model_parallel_size=1)
     student, teacher = _make_loss_inputs()
     k = 4
-    loss = TopKLogitsKLLoss(cfg, top_k=k)(student, teacher)[0]
+    loss = TopLogitsKLLoss(cfg, top_k=k)(student, teacher)[0]
 
     q_full = F.log_softmax(teacher, dim=-1)
     p_full = F.log_softmax(student, dim=-1)
@@ -395,7 +396,7 @@ def test_logits_kl_losses_temperature_scaling(temperature):
     assert torch.allclose(dense, ref_dense, atol=1e-5)
 
     k = 4
-    topk = TopKLogitsKLLoss(cfg, temperature=temperature, top_k=k)(student, teacher)[0]
+    topk = TopLogitsKLLoss(cfg, temperature=temperature, top_k=k)(student, teacher)[0]
     _, idx = torch.topk(teacher, k, dim=-1)
     q_k, p_k = q.gather(-1, idx), p.gather(-1, idx)
     q_rest = torch.log1p(-q_k.exp().sum(-1, keepdim=True))
@@ -424,13 +425,13 @@ def test_topk_logits_kl_loss_top_p_masks_tail():
     probs = q_k.exp()
     keep = (probs.cumsum(-1) - probs) < 0.5
     assert not keep.all(), "test inputs should produce some truncation"
-    loss = TopKLogitsKLLoss(cfg, top_k=k, top_p=0.5)(student, teacher)[0]
+    loss = TopLogitsKLLoss(cfg, top_k=k, top_p=0.5)(student, teacher)[0]
     assert torch.allclose(loss, reference(keep), atol=1e-6)
     assert loss.shape == (student.size(1), student.size(0))
 
     # min_k floor forces at least min_k entries even when the nucleus is tiny.
     min_k = 3
-    loss_min = TopKLogitsKLLoss(cfg, top_k=k, top_p=1e-6, top_p_min_k=min_k)(student, teacher)[0]
+    loss_min = TopLogitsKLLoss(cfg, top_k=k, top_p=1e-6, top_p_min_k=min_k)(student, teacher)[0]
     assert torch.allclose(loss_min, reference(torch.arange(k) < min_k), atol=1e-6)
 
     loss.sum().backward()
@@ -533,3 +534,11 @@ def test_distillation_config_removed_fields():
     cfg = dataclasses.replace(DistillationConfig(kd_loss_alpha=0.9), logit_kl_topk=4)
     assert cfg.kd_loss_alpha == 0.9 and cfg.logit_kl_topk == 4
     assert DistillationConfig(**dataclasses.asdict(cfg)).kd_loss_alpha == 0.9
+
+
+def test_topk_logits_kl_loss_deprecated_alias():
+    """The old class name still works and warns."""
+    cfg = SimpleNamespace(tensor_model_parallel_size=1)
+    with pytest.warns(FutureWarning, match="use TopLogitsKLLoss instead"):
+        loss_fn = TopKLogitsKLLoss(cfg, top_k=4)
+    assert isinstance(loss_fn, TopLogitsKLLoss)

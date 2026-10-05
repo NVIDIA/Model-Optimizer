@@ -19,6 +19,7 @@
 
 import logging
 import re
+import warnings
 from abc import ABCMeta
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,7 +63,7 @@ class DistillationConfig:
         skip_lm_loss: REMOVED; passing it raises. The LM loss is skipped iff ``kd_loss_alpha == 1.0``.
         kd_loss_scale: REMOVED; passing it raises. Use ``kd_loss_alpha`` instead.
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
-        logit_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
+        logit_kl_topk: If not None, use TopLogitsKLLoss instead of LogitsKLLoss with this top-k value.
         logit_kl_top_p: Optional nucleus (top-P) threshold applied on top of the teacher's Top-K.
             Only the smallest prefix of the (sorted) Top-K whose cumulative teacher probability
             reaches this value contributes to the loss. Requires ``logit_kl_topk``. Must be in (0, 1].
@@ -148,9 +149,9 @@ def setup_distillation_config(
     if cfg.criterion is None:
         criterion = {}
         if parallel_state.is_pipeline_last_stage():
-            # Use TopKLogitsKLLoss if logit_kl_topk is specified, otherwise use LogitsKLLoss
+            # Use TopLogitsKLLoss if logit_kl_topk is specified, otherwise use LogitsKLLoss
             if cfg.logit_kl_topk is not None:
-                criterion[tuple(cfg.logit_layers)] = TopKLogitsKLLoss(
+                criterion[tuple(cfg.logit_layers)] = TopLogitsKLLoss(
                     student_cfg,
                     temperature=cfg.logit_kl_temperature,
                     top_k=cfg.logit_kl_topk,
@@ -384,8 +385,8 @@ class LogitsKLLoss(BaseLoss):
         return logits_max + torch.log(denom)
 
 
-class TopKLogitsKLLoss(LogitsKLLoss):
-    """Calculates KL-Divergence loss restricted to the Teacher's Top-K vocabulary entries.
+class TopLogitsKLLoss(LogitsKLLoss):
+    """Calculates KL-Divergence loss restricted to the Teacher's Top-K (and optionally Top-P) entries.
 
     Calculates using the global Top-K entries without gathering full logits.
     NOTE: Will gather Top-K logits per rank, so mind the value of K for communication. The full-vocab
@@ -532,6 +533,20 @@ class TopKLogitsKLLoss(LogitsKLLoss):
 
         # No need to reduce since all ranks compute same global Top-K
         return self.post_forward(loss, tp_reduce=False)
+
+
+class TopKLogitsKLLoss(TopLogitsKLLoss):
+    """Deprecated alias of :class:`TopLogitsKLLoss`."""
+
+    def __init__(self, *args, **kwargs):
+        """Constructor. Emits a ``FutureWarning`` and forwards to :class:`TopLogitsKLLoss`."""
+        warnings.warn(
+            "TopKLogitsKLLoss is deprecated and will be removed in a future release; "
+            "use TopLogitsKLLoss instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
 
 
 class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):

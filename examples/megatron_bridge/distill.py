@@ -220,7 +220,7 @@ def get_args():
         "CUDA context, which fails when the training process already fills the GPU.",
     )
     parser.add_argument(
-        "--logit_kl_topk",
+        "--logit_kl_top_k",
         type=int,
         default=None,
         help="Restrict the logit KL loss to the teacher's top-k vocabulary entries plus a residual "
@@ -230,7 +230,7 @@ def get_args():
         "--logit_kl_top_p",
         type=float,
         default=None,
-        help="Nucleus threshold in (0, 1] applied on top of --logit_kl_topk: only the smallest prefix "
+        help="Nucleus threshold in (0, 1] applied on top of --logit_kl_top_k: only the smallest prefix "
         "of the sorted top-k whose cumulative teacher probability reaches this value is distilled.",
     )
     parser.add_argument(
@@ -490,7 +490,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
     kd_config = ModelOptDistillConfig(
         kd_loss_alpha=args.kd_loss_alpha,
-        logit_kl_topk=args.logit_kl_topk,
+        logit_kl_topk=args.logit_kl_top_k,
         logit_kl_top_p=args.logit_kl_top_p,
         logit_kl_top_p_min_k=args.logit_kl_top_p_min_k,
     )
