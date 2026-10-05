@@ -344,45 +344,53 @@ def test_mcore_vllm_export_unsupported_setting(request, tmp_path, attribute_cfg,
     workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfg))
 
 
-def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
+def _test_cross_rank_recipe_merge(tmp_path, error, rank, size):
     assert size == 2
     name = "model.layers.0.self_attn.q_proj.input_quantizer"
-    recipe = {"_num_bits": 8 if rank == 0 or not conflicting else 4}
-    with (
-        pytest.raises(ValueError, match="Conflicting quantizer recipes")
-        if conflicting
-        else nullcontext()
-    ):
+    recipe = {"_num_bits": 4 if rank == 1 and error is ValueError else 8}
+    if rank == 0 and error is RuntimeError:
+        (tmp_path / "quant_recipe.yaml").mkdir()
+    match = (
+        "Conflicting quantizer recipes"
+        if error is ValueError
+        else "Failed to save quant_recipe.yaml"
+    )
+    with pytest.raises(error, match=match) if error else nullcontext():
         gather_mcore_vllm_fq_quantizer_recipe({name: recipe}, tmp_path)
-    if not conflicting:
-        torch.distributed.barrier()
+    if error is None:
         with open(tmp_path / "quant_recipe.yaml") as f:
             assert yaml.safe_load(f) == {name: recipe}
 
 
-@pytest.mark.parametrize("conflicting", [False, True])
-def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path, conflicting):
-    """Matching TP/EP recipes merge, while conflicting ranks fail together."""
-    dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, tmp_path, conflicting))
+@pytest.mark.parametrize(
+    "error", [None, ValueError, RuntimeError], ids=["matching", "conflicting", "write_failure"]
+)
+def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path, error):
+    """Recipe writes complete before return; conflicts and write errors reach every rank."""
+    dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, tmp_path, error))
 
 
-def _test_cross_rank_tensor_merge(tmp_path, conflicting, rank, size):
+def _test_cross_rank_tensor_merge(tmp_path, error, rank, size):
     assert size == 2
     name = "model.layers.0.self_attn.q_proj.input_quantizer._amax"
-    tensor = torch.tensor([1.0 + rank if conflicting else 1.0])
-    with (
-        pytest.raises(ValueError, match="Conflicting quantizer tensors")
-        if conflicting
-        else nullcontext()
-    ):
+    tensor = torch.tensor([1.0 + rank if error is ValueError else 1.0])
+    if rank == 0 and error is RuntimeError:
+        (tmp_path / "quantizer_state.pth").mkdir()
+    match = (
+        "Conflicting quantizer tensors"
+        if error is ValueError
+        else "Failed to save quantizer_state.pth"
+    )
+    with pytest.raises(error, match=match) if error else nullcontext():
         gather_mcore_vllm_fq_quantized_state_dict(None, {1: {name: tensor}}, tmp_path)
-    if not conflicting:
-        torch.distributed.barrier()
+    if error is None:
         state = torch.load(tmp_path / "quantizer_state.pth", weights_only=True)
         torch.testing.assert_close(state[name], tensor, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("conflicting", [False, True])
-def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path, conflicting):
-    """Equal duplicate tensors merge, while conflicting ranks fail together."""
-    dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, tmp_path, conflicting))
+@pytest.mark.parametrize(
+    "error", [None, ValueError, RuntimeError], ids=["matching", "conflicting", "write_failure"]
+)
+def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path, error):
+    """Tensor writes complete before return; conflicts and write errors reach every rank."""
+    dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, tmp_path, error))
