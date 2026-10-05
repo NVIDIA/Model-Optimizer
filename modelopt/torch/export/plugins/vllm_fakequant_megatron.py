@@ -167,6 +167,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         super().__init__(*args, **kwargs)
         self._quantizer_state_for_recipe: dict[str, dict] = {}
         self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        self._quantizer_tensor_states: list[dict[str, torch.Tensor]] = []
         failure = ""
         try:
             _quantizer_configs(self.model)
@@ -215,11 +216,21 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             if marker_id not in routed_marker_ids:
                 self._store_quantizer_recipe(source_name, recipe)
 
-    @staticmethod
-    def _pop_quantizer_keys(state_dict: dict) -> None:
-        """Remove quantizer tensors from an export shard (OrderedDict-safe)."""
-        for k in [k for k in state_dict if "quantizer" in k]:
-            state_dict.pop(k, None)
+    def _capture_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> None:
+        """Move routed quantizer tensors and recipe markers out of a weight shard."""
+        quantizer_state = {
+            key: state_dict.pop(key)
+            for key in list(state_dict)
+            if "quantizer" in key or key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX)
+        }
+        if quantizer_state:
+            self._quantizer_tensor_states.append(quantizer_state)
+
+    def _get_mtp_state_dict(self, copy_from_pretrained: bool = True) -> dict[str, torch.Tensor]:
+        """Capture MTP sidecars before the base exporter merges its weights."""
+        state_dict = super()._get_mtp_state_dict(copy_from_pretrained=copy_from_pretrained)
+        self._capture_quantizer_state(state_dict)
+        return state_dict
 
     def save_pretrained(
         self,
@@ -248,21 +259,18 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         # Cached shards still reference markers collected when they were built.
         if not self._layer_state_dicts:
             self._quantizer_recipe_markers = []
+        self._quantizer_tensor_states = []
+        for state_dict in self.layer_state_dicts.values():
+            self._capture_quantizer_state(state_dict)
+        self._capture_quantizer_state(self._state_dict)
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
-    def _finalize_layer_state_dicts(
-        self,
-        layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]],
-        save_directory: str | os.PathLike,
-    ) -> None:
-        """Save all quantizer sidecars and remove their tensors from weight shards."""
-        # The base exporter has collected the live MTP head and copied source files.
-        self._extract_quantizer_recipe_markers(layer_state_dicts)
-        gather_mcore_vllm_fq_quantized_state_dict(self.model, layer_state_dicts, save_directory)
+        # Publish after the base exporter has collected MTP and copied source sidecars.
+        quantizer_state_dicts = dict(enumerate(self._quantizer_tensor_states))
+        self._extract_quantizer_recipe_markers(quantizer_state_dicts)
+        gather_mcore_vllm_fq_quantized_state_dict(self.model, quantizer_state_dicts, save_directory)
         gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_directory)
-        for layer_state_dict in layer_state_dicts.values():
-            self._pop_quantizer_keys(layer_state_dict)
-        self._pop_quantizer_keys(self._state_dict)
+        torch.distributed.barrier()
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
