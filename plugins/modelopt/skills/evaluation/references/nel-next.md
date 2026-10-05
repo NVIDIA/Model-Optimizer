@@ -225,7 +225,7 @@ with its own `run_id`, copying the shared `services:` block.
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)
-"$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
+"$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2 -O benchmarks.0.sandbox.concurrency=2   # canary
 "$NEL" eval run <cfg>.yaml --submit                                 # full
 "$NEL" eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
 "$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
@@ -243,7 +243,7 @@ kwargs after `--` (e.g. `-- -o copy_artifacts=true`).
 ## Non-fatal noise
 
 - AWS `RegisterTaskDefinition: ThrottlingException` at high concurrency — SDK
-  retries (≤8); lower `max_concurrent` if frequent.
+  retries (≤8); lower matched `max_concurrent`/`sandbox.concurrency` only with capacity evidence.
 - `solver failed — grading 0.0` agent crashes are rare but real (e.g. terminus-2
   tmux `send-keys`) — distinguish from genuine misses + task timeouts; the final
   report breaks them out.
