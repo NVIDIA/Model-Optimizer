@@ -121,8 +121,9 @@ activations are quantized too** (W4A4/W8A8 vs weight-only W4A16).
 #### Weight-only schemes (activations stay BF16)
 
 Quantize weights only; activations run in BF16. This shrinks the model
-(memory-bound decode win) with much lower accuracy risk than W4A4, and **needs no
-calibration forward pass**.
+(memory-bound decode win) with much lower accuracy risk than W4A4. Most of these
+**need no calibration forward pass**; the IQ recipes are the exception, since they
+calibrate with GPTQ.
 
 These are usually recommended for **low-concurrency deployments** — edge and
 on-device/client use cases — where the workload is memory-bandwidth-bound and
