@@ -26,7 +26,6 @@ import yaml
 from modelopt.torch.export.quant_format import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
@@ -34,7 +33,7 @@ __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
-    """Return quantizer recipes, rejecting forward settings absent from the recipe."""
+    """Return quantizer recipes, rejecting settings that cannot be restored."""
     configs = {}
     for name, quantizer in module.named_modules():
         if not isinstance(quantizer, TensorQuantizer):
@@ -44,15 +43,12 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
             setting
             for setting, active in {
                 "rotate": quantizer.rotate_is_enabled,
-                "unsigned": quantizer.unsigned,
-                "narrow_range": quantizer.narrow_range,
+                "unsigned": isinstance(quantizer.num_bits, int) and quantizer.unsigned,
+                "narrow_range": isinstance(quantizer.num_bits, int) and quantizer.narrow_range,
                 "fake_quant": not quantizer.fake_quant,
                 "type": quantizer._dynamic,
                 "bias": quantizer.bias is not None,
                 "backend": quantizer.backend is not None,
-                "use_constant_amax": quantizer._use_constant_amax,
-                "if_quant": not quantizer._if_quant,
-                "enable_pre_quant_scale": not quantizer._enable_pre_quant_scale,
             }.items()
             if active
         ]
@@ -65,7 +61,7 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
             "_num_bits": quantizer.num_bits,
             "_axis": quantizer.axis,
             "_block_sizes": quantizer.block_sizes,
-            "_disabled": not quantizer.is_enabled,
+            "_disabled": not quantizer.is_enabled or not quantizer._if_quant,
         }
     return configs
 
@@ -370,9 +366,16 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
         # Only save input/output quantizer state; weight_quantizer amax is not exported
         # since it has been folded into the weight above.
-        for name, param in get_quantizer_state_dict(module).items():
-            if "weight_quantizer" in name:
+        for name, quantizer in module.named_modules():
+            if not isinstance(quantizer, TensorQuantizer) or "weight_quantizer" in name:
                 continue
+            param = quantizer.state_dict()
+            # The constant amax takes precedence over any stored calibration buffer.
+            if quantizer._use_constant_amax and not quantizer.is_mx_format:
+                param["_amax"] = quantizer._get_amax(module.weight)
+            if quantizer.pre_quant_scale is None:
+                param.pop("_pre_quant_scale", None)
+            name = get_unwrapped_name(name, module)
             for key, value in param.items():
                 name_to_value[name + "." + key] = value.detach().cpu().clone()
         return name_to_value, qformat, block_size
@@ -404,7 +407,7 @@ def export_mcore_gpt_to_hf_vllm_fq(
         export_dir: The target export path.
 
     Raises:
-        ValueError: If a quantizer uses forward settings absent from the recipe.
+        ValueError: If a quantizer uses settings that cannot be restored.
     """
     exporter = VllmFqGPTModelExporter(
         model,

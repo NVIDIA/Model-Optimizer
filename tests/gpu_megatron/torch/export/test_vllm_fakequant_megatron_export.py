@@ -63,16 +63,16 @@ def _assert_weight_qdq_once(model, prefix=""):
     assert all(calls[quantizer] == 1 for quantizer in quantizers), calls
 
 
-def _assert_exported_quantizers(export_dir, expected_names):
+def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled_names=()):
     state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
     recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
     assert expected_names <= recipe.keys()
     assert {name + "._amax" for name in expected_names} <= state.keys()
     for name in expected_names:
-        assert not recipe[name]["_disabled"]
-        amax = state[name + "._amax"]
-        assert amax.dtype == torch.float32
-        torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
+        assert recipe[name]["_disabled"] == (name in disabled_names)
+        tensor = state[name + "._amax"]
+        assert tensor.dtype == torch.float32
+        torch.testing.assert_close(tensor, torch.full_like(tensor, amax), rtol=0, atol=0)
     assert {key.rsplit(".", 1)[0] for key in state} <= recipe.keys()
     assert not any(key.endswith("._quant_recipe_marker") for key in state)
     assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
@@ -87,7 +87,7 @@ def _assert_exported_quantizers(export_dir, expected_names):
     return state, recipe, weight_map
 
 
-def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
+def _test_mcore_vllm_export(tmp_path, quant_cfg, attribute_cfg, rank, size, prebuild=False):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -130,6 +130,16 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
             if getattr(quantizer, "_amax", None) is not None:
                 quantizer.float()
                 quantizer.amax = torch.full_like(quantizer.amax, 1.001)
+            if attribute_cfg:
+                quantizer.set_from_attribute_config(attribute_cfg)
+                if name.endswith("linear_qkv.input_quantizer"):
+                    quantizer.reset_amax()
+                elif name.endswith("linear_fc1.input_quantizer"):
+                    quantizer.pre_quant_scale = torch.full((hidden_size,), 2.0, device="cuda")
+                    quantizer.disable_quant()
+                elif name.endswith("linear_fc2.input_quantizer"):
+                    quantizer.pre_quant_scale = torch.full((ffn_hidden_size,), 2.0, device="cuda")
+                    quantizer._enable_pre_quant_scale = False
     # Create HF config for export
     pretrained_config = {
         "architectures": ["LlamaForCausalLM"],
@@ -183,7 +193,54 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
             for proj in ("gate", "up", "down")
         ),
     }
-    state, recipe, weight_map = _assert_exported_quantizers(export_dir, expected_names)
+    disabled_names = (
+        {name for name in expected_names if ".mlp.gate_proj." in name or ".mlp.up_proj." in name}
+        if attribute_cfg
+        else set()
+    )
+    state, recipe, weight_map = _assert_exported_quantizers(
+        export_dir,
+        expected_names,
+        amax=448.0 if attribute_cfg else 1.001,
+        disabled_names=disabled_names,
+    )
+    if attribute_cfg:
+        inputs = torch.linspace(-1000, 1000, 64, device="cuda").reshape(1, -1)
+        layer = model.decoder.layers[0]
+        for projection, module in (
+            ("self_attn.q_proj", layer.self_attention.linear_qkv),
+            ("self_attn.o_proj", layer.self_attention.linear_proj),
+            ("mlp.gate_proj", layer.mlp.linear_fc1),
+            ("mlp.down_proj", layer.mlp.linear_fc2),
+        ):
+            name = f"model.layers.{layer.layer_number - 1}.{projection}.input_quantizer"
+            config = recipe[name]
+            restored = TensorQuantizer(
+                mtq.QuantizerAttributeConfig(
+                    num_bits=config["_num_bits"],
+                    axis=config["_axis"],
+                    block_sizes=config["_block_sizes"],
+                    enable=not config["_disabled"],
+                )
+            ).cuda()
+            restored.amax = state[name + "._amax"].cuda()
+            scale = state.get(name + "._pre_quant_scale")
+            if scale is not None:
+                restored.pre_quant_scale = scale.cuda()
+            torch.testing.assert_close(
+                restored(inputs), module.input_quantizer(inputs), rtol=0, atol=0
+            )
+            if projection == "self_attn.q_proj":
+                assert not hasattr(module.input_quantizer, "_amax")
+            else:
+                torch.testing.assert_close(
+                    module.input_quantizer.amax, torch.tensor(1.001, device="cuda"), rtol=0, atol=0
+                )
+            if projection == "mlp.gate_proj":
+                assert scale is not None
+            elif projection == "mlp.down_proj":
+                assert scale is None
+                assert hasattr(module.input_quantizer, "_pre_quant_scale")
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {
@@ -195,12 +252,19 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
+@pytest.mark.parametrize(
+    "attribute_cfg",
+    [{}, {"use_constant_amax": True, "unsigned": True, "narrow_range": True}],
+    ids=["defaults", "supported_settings"],
+)
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("prebuild", [False, True], ids=["direct", "cached"])
-def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size, prebuild):
-    """Preserve fresh quantizer files and weights across PP stages, including cached access."""
+def test_mcore_vllm_export(request, tmp_path, quant_cfg, attribute_cfg, pp_size, prebuild):
+    """Preserve fresh quantizer files and effective settings across PP stages and cached access."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg, prebuild=prebuild))
+    workers.run(
+        partial(_test_mcore_vllm_export, tmp_path, quant_cfg, attribute_cfg, prebuild=prebuild)
+    )
 
 
 def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
@@ -302,12 +366,7 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, s
             for name, quantizer in model.named_modules()
             if name.endswith("input_quantizer") and quantizer.is_enabled
         )
-        if "if_quant" in attribute_cfg:
-            quantizer.disable_quant()
-        elif "enable_pre_quant_scale" in attribute_cfg:
-            quantizer._enable_pre_quant_scale = False
-        else:
-            quantizer.set_from_attribute_config(attribute_cfg)
+        quantizer.set_from_attribute_config(attribute_cfg)
 
     source = tmp_path / "tiny_llama"
     if rank == 0:
@@ -324,8 +383,8 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, s
 @pytest.mark.parametrize(
     "attribute_cfg",
     [
-        pytest.param({"unsigned": True}, id="unsigned"),
-        pytest.param({"narrow_range": True}, id="narrow_range"),
+        pytest.param({"unsigned": True, "num_bits": 8}, id="unsigned"),
+        pytest.param({"narrow_range": True, "num_bits": 8}, id="narrow_range"),
         pytest.param({"rotate": True}, id="rotate"),
         pytest.param({"rotate": {"enable": True, "rotate_fp32": True}}, id="rotate_config"),
         pytest.param({"enable": False, "rotate": True}, id="disabled_rotation"),
@@ -333,9 +392,6 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, s
         pytest.param({"type": "dynamic"}, id="dynamic"),
         pytest.param({"bias": {-1: None}}, id="bias"),
         pytest.param({"backend": "custom"}, id="backend"),
-        pytest.param({"use_constant_amax": True}, id="use_constant_amax"),
-        pytest.param({"if_quant": False}, id="quant_disabled"),
-        pytest.param({"enable_pre_quant_scale": False}, id="pre_quant_scale_disabled"),
     ],
 )
 def test_mcore_vllm_export_unsupported_setting(request, tmp_path, attribute_cfg, pp_size):
