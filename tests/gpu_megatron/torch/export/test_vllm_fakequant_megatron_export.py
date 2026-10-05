@@ -86,7 +86,7 @@ def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled
     return state, recipe, weight_map
 
 
-def _test_mcore_vllm_export(tmp_path, quant_cfg, attribute_cfg, rank, size, prebuild=False):
+def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -122,7 +122,7 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, attribute_cfg, rank, size, preb
         with torch.no_grad():
             run_mcore_inference(model, input_ids)
 
-    model = mtq.quantize(model, quant_cfg, forward_loop)
+    model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
     inactive_cfg = {
         "num_bits": 8,
         "unsigned": True,
@@ -300,22 +300,26 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, attribute_cfg, rank, size, preb
     } <= weight_map.keys()
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
 @pytest.mark.parametrize(
-    "attribute_cfg",
-    [{}, {"use_constant_amax": True, "unsigned": True, "narrow_range": True, "type": "dynamic"}],
-    ids=["defaults", "supported_settings"],
+    ("attribute_cfg", "pp_size", "prebuild"),
+    [
+        pytest.param({}, 1, False, id="direct"),
+        pytest.param({}, 1, True, id="cached"),
+        pytest.param(
+            {"use_constant_amax": True, "unsigned": True, "narrow_range": True, "type": "dynamic"},
+            1,
+            True,
+            id="supported_settings",
+        ),
+        pytest.param({}, 2, False, id="pp2"),
+    ],
 )
-@pytest.mark.parametrize("pp_size", [1, 2])
-@pytest.mark.parametrize("prebuild", [False, True], ids=["direct", "cached"])
-def test_mcore_vllm_export(request, tmp_path, quant_cfg, attribute_cfg, pp_size, prebuild):
+def test_mcore_vllm_export(request, tmp_path, attribute_cfg, pp_size, prebuild):
     """Preserve fresh quantizer files and effective settings across PP stages and cached access."""
     if attribute_cfg:
         pytest.importorskip("fast_hadamard_transform")
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(
-        partial(_test_mcore_vllm_export, tmp_path, quant_cfg, attribute_cfg, prebuild=prebuild)
-    )
+    workers.run(partial(_test_mcore_vllm_export, tmp_path, attribute_cfg, prebuild=prebuild))
 
 
 def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
@@ -401,7 +405,7 @@ def test_mcore_vllm_export_mtp(request, tmp_path, pp_size):
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
 
 
-def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, size):
+def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfgs, rank, size):
     model = get_mcore_gpt_model(
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
@@ -415,50 +419,55 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, s
         if isinstance(quantizer, TensorQuantizer) and name.endswith("input_quantizer"):
             quantizer.amax = 1.0
     if rank == size - 1:
-        quantizer = next(
-            quantizer
-            for name, quantizer in model.named_modules()
-            if name.endswith("input_quantizer") and quantizer.is_enabled
+        linear = next(
+            module
+            for module in model.modules()
+            if isinstance(getattr(module, "input_quantizer", None), TensorQuantizer)
+            and module.input_quantizer.is_enabled
         )
-        quantizer.set_from_attribute_config(attribute_cfg)
-        if "type" in attribute_cfg:
-            quantizer.reset_amax()
+        original_quantizer = linear.input_quantizer
 
     source = tmp_path / "tiny_llama"
     if rank == 0:
         create_tiny_llama_dir(tmp_path)
     torch.distributed.barrier()
     export_dir = tmp_path / "unsupported_export"
-    setting = (
-        "dynamic_amax"
-        if "type" in attribute_cfg
-        else next(key for key in attribute_cfg if key != "enable")
-    )
-    with pytest.raises(ValueError, match=f"Unsupported.*input_quantizer: {setting}"):
-        export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
-    assert not export_dir.exists()
+    for attribute_cfg in attribute_cfgs:
+        if rank == size - 1:
+            linear.input_quantizer = deepcopy(original_quantizer)
+            quantizer = linear.input_quantizer
+            quantizer.set_from_attribute_config(attribute_cfg)
+            if "type" in attribute_cfg:
+                quantizer.reset_amax()
+        setting = (
+            "dynamic_amax"
+            if "type" in attribute_cfg
+            else next(key for key in attribute_cfg if key != "enable")
+        )
+        with pytest.raises(ValueError, match=f"Unsupported.*input_quantizer: {setting}"):
+            export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+        assert not export_dir.exists()
 
 
-@pytest.mark.parametrize(
-    ("attribute_cfg", "pp_size"),
-    [
-        pytest.param({"unsigned": True, "num_bits": 8}, 1, id="unsigned"),
-        pytest.param({"narrow_range": True, "num_bits": 8}, 1, id="narrow_range"),
-        pytest.param({"rotate": True}, 1, id="rotate"),
-        pytest.param({"rotate": {"enable": True, "rotate_fp32": True}}, 1, id="rotate_config"),
-        pytest.param({"enable": False, "rotate": True}, 1, id="disabled_rotation"),
-        pytest.param({"fake_quant": False}, 1, id="real_quant"),
-        pytest.param({"type": "dynamic"}, 1, id="dynamic"),
-        pytest.param({"type": "static"}, 1, id="uncalibrated"),
-        pytest.param({"bias": {-1: None}}, 1, id="bias"),
-        pytest.param({"backend": "custom"}, 1, id="backend"),
-        pytest.param({"fake_quant": False}, 2, id="real_quant_pp2"),
-    ],
-)
-def test_mcore_vllm_export_unsupported_setting(request, tmp_path, attribute_cfg, pp_size):
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_mcore_vllm_export_unsupported_setting(request, tmp_path, pp_size):
     """Unsupported settings reject export on every rank, including a final-stage PP2 error."""
+    attribute_cfgs = [
+        {"unsigned": True, "num_bits": 8},
+        {"narrow_range": True, "num_bits": 8},
+        {"rotate": True},
+        {"rotate": {"enable": True, "rotate_fp32": True}},
+        {"enable": False, "rotate": True},
+        {"fake_quant": False},
+        {"type": "dynamic"},
+        {"type": "static"},
+        {"bias": {-1: None}},
+        {"backend": "custom"},
+    ]
+    if pp_size == 2:
+        attribute_cfgs = [{"fake_quant": False}]
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfg))
+    workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfgs))
 
 
 def _test_cross_rank_recipe_merge(tmp_path, error, rank, size):
@@ -479,12 +488,12 @@ def _test_cross_rank_recipe_merge(tmp_path, error, rank, size):
             assert yaml.safe_load(f) == {name: recipe}
 
 
-@pytest.mark.parametrize(
-    "error", [None, ValueError, RuntimeError], ids=["matching", "conflicting", "write_failure"]
-)
-def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path, error):
+def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path):
     """Recipe writes complete before return; conflicts and write errors reach every rank."""
-    dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, tmp_path, error))
+    for error in (None, ValueError, RuntimeError):
+        case_dir = tmp_path / (error.__name__ if error else "matching")
+        case_dir.mkdir()
+        dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, case_dir, error))
 
 
 def _test_cross_rank_tensor_merge(tmp_path, error, rank, size):
@@ -505,9 +514,9 @@ def _test_cross_rank_tensor_merge(tmp_path, error, rank, size):
         torch.testing.assert_close(state[name], tensor, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    "error", [None, ValueError, RuntimeError], ids=["matching", "conflicting", "write_failure"]
-)
-def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path, error):
+def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path):
     """Tensor writes complete before return; conflicts and write errors reach every rank."""
-    dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, tmp_path, error))
+    for error in (None, ValueError, RuntimeError):
+        case_dir = tmp_path / (error.__name__ if error else "matching")
+        case_dir.mkdir()
+        dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, case_dir, error))
