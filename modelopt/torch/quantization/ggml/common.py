@@ -243,11 +243,6 @@ class GGMLFormat:
         )
 
 
-# Compatibility alias for callers that imported the record type before the registry was
-# generalized from the IQ family to every supported GGML block format.
-IQFormat = GGMLFormat
-
-
 def narrow_to_float32(blocks: torch.Tensor) -> torch.Tensor:
     """Narrow ``blocks`` to float32 the way the CUDA ``load_float`` helper does.
 
