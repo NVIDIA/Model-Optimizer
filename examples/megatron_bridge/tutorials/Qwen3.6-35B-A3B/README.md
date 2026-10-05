@@ -176,7 +176,7 @@ srun ... python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
     --gbs 512 \
     --train_iters 500 \
     --lr 1e-5 --min_lr 1e-6 --lr_warmup_iters 50 \
-    --logit_kl_topk 4096 \
+    --logit_kl_top_k 4096 \
     --recompute_granularity full --recompute_method uniform --recompute_num_layers 1 \
     --no_async_save \
     --eval_iters 0 \
@@ -190,7 +190,7 @@ Non-default arguments:
 - `--tp_size 1 --pp_size 1` — **required, not chosen** (see below). `--ep_size 8` must match the PTQ checkpoint. You may increase `--cp_size` to enable context parallelism for longer sequence lengths (`nemo:26.10` container onwards).
 - `--seq_length 32768 --gbs 512` — 16.8M tokens/iteration, 1.7B per 100 iterations.
 - `--lr 1e-5 --min_lr 1e-6` — an order of magnitude below typical distillation LRs: the job is to adapt weights to quantization, not to learn the task.
-- `--logit_kl_topk 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.
+- `--logit_kl_top_k 4096` — restricts the KD loss to the teacher's top-4096 vocab entries. With a 248,320-token vocabulary the dense `[seq, vocab]` fp32 logits are **30.31 GiB per tensor** at 32K, which OOMs on its own.
 - `--recompute_*` / `--no_async_save` / `--eval_iters 0` — all needed to fit. Async save spawns a worker needing its own CUDA context; the validation path computes full-vocab LM and MTP cross-entropy (top-k applies to training only), so eval OOMs at 32K even though training fits.
 
 </details>
@@ -322,7 +322,7 @@ It is not verbosity. It is a **failure to terminate on a small fraction of sub-s
 - The **median** also roughly doubles (+91.6%), so the whole distribution shifted right — this is not *only* a tail effect.
 - Capped rate peaks at **iteration 50** (4.3%) and settles at 3.1% / 3.6% by 300 / 500; it is not gradual drift.
 
-The obvious suspect — that `--logit_kl_topk 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
+The obvious suspect — that `--logit_kl_top_k 4096` leaves the stop tokens outside the loss — **did not hold up**. Probing the BF16 teacher over one runaway trace: `</think>` does fall outside top-4096 at 35% of positions overall, but *in the looping region* the teacher gives `<|im_end|>` a median rank of **5** and `</think>` ~570, both well inside top-k. The teacher is signalling "stop here" at positions the loss did cover, and the student still does not stop. More likely: the blend has few "the answer is written, now stop" positions in this style, and a teacher-forced loss never exercises free-running generation 10K+ tokens deep.
 
 **It is fixable at decode time.** Adding `presence_penalty: 1.5` (Qwen's own thinking-mode recommendation for this model) removes nearly all of it, with no retraining. Every cell is SciCode **without → with** the penalty, 8 runs per side. *Capped* = hit the 131,072-token limit with no stop token; almost all such sub-steps return nothing and score zero. Counts are pooled over all 8 runs, so the denominator is 338 × 8 = 2,704 sub-steps:
 
