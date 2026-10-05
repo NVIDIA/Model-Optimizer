@@ -34,7 +34,6 @@ import gc
 import importlib.util
 import os
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -87,8 +86,9 @@ def _load_fakequant_launcher(monkeypatch):
     return _load_example_module("vllm_serve_fakequant")
 
 
-@contextmanager
-def _isolated_launcher_env():
+@pytest.fixture
+def clean_launcher_env():
+    """Keep launch settings from affecting other CLI cases."""
     with patch.dict(os.environ):
         for key in (
             "QUANT_CFG",
@@ -108,13 +108,6 @@ def _isolated_launcher_env():
             "MODELOPT_MLFLOW_RUN_NAME",
         ):
             os.environ.pop(key, None)
-        yield
-
-
-@pytest.fixture
-def clean_launcher_env():
-    """Keep launch settings from affecting other CLI cases."""
-    with _isolated_launcher_env():
         yield
 
 
@@ -146,15 +139,9 @@ def _stub_launcher_runtime(monkeypatch, launcher):
         ),
     ],
 )
-def test_fakequant_launcher_rejects_unusable_quant_file(monkeypatch, extra_args, error):
-    for key in (
-        "QUANT_CFG",
-        "KV_QUANT_CFG",
-        "RECIPE_PATH",
-        "MODELOPT_STATE_PATH",
-        "QUANT_FILE_PATH",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_fakequant_launcher_rejects_unusable_quant_file(
+    monkeypatch, clean_launcher_env, extra_args, error
+):
     launcher = _load_fakequant_launcher(monkeypatch)
     monkeypatch.setattr(
         sys, "argv", ["vllm_serve_fakequant.py", "serve", "/models/qwen", *extra_args]
