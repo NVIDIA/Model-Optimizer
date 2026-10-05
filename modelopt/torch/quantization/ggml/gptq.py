@@ -20,7 +20,7 @@ from collections.abc import Callable
 import torch
 
 from ..utils.calib_utils import GPTQHelper, register_gptq_helper
-from .common import cache_packed_weight
+from .common import pin_packed_weight
 from .registry import GGML_FORMAT_REGISTRY
 
 __all__ = ["GGMLGPTQHelper", "gptq_group_update"]
@@ -69,26 +69,22 @@ def gptq_group_update(
 class GGMLGPTQHelper(GPTQHelper):
     """GPTQ for ``ggml``-backend weight quantizers, one GGML block of columns at a time.
 
-    The payload GPTQ chose is kept as the weight's packed form, so later forwards and export use
-    those exact codes rather than packing the GPTQ'd weight again.
+    The payload GPTQ chose is pinned to the weight quantizer, so later forwards and export use
+    those exact codes rather than encoding the GPTQ'd weight again, which would not return them.
     """
 
     def update_weights(self, block_size, perc_damp):
-        """Run the GPTQ update, then pin the chosen payload to the updated weight."""
+        """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
         super().update_weights(block_size, perc_damp)
-        quantizer = self.module.weight_quantizer
-        cache_packed_weight(
-            quantizer,
-            self.module.weight,
-            quantizer.num_bits,
-            self._chunk_sizes()[0],
-            self._packed,
-        )
+        pin_packed_weight(self.module.weight_quantizer, self._packed)
         self._packed = None
 
     def _blockwise_update(self, block_size):
-        ggml_format = GGML_FORMAT_REGISTRY[self.module.weight_quantizer.num_bits]
-        block_chunk_size, decode_chunk_size = self._chunk_sizes()
+        quantizer = self.module.weight_quantizer
+        ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
+        extra_args = quantizer.backend_extra_args or {}
+        block_chunk_size = extra_args.get("block_chunk_size", ggml_format.block_chunk_size)
+        decode_chunk_size = extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size)
         payloads = []
 
         def quantize_group(group):
@@ -104,15 +100,6 @@ class GGMLGPTQHelper(GPTQHelper):
             self.weight, self.h_inv, block_size, ggml_format.block_size, quantize_group
         )
         self._packed = torch.cat(payloads, dim=-2)
-
-    def _chunk_sizes(self):
-        quantizer = self.module.weight_quantizer
-        ggml_format = GGML_FORMAT_REGISTRY[quantizer.num_bits]
-        extra_args = quantizer.backend_extra_args or {}
-        return (
-            extra_args.get("block_chunk_size", ggml_format.block_chunk_size),
-            extra_args.get("decode_chunk_size", ggml_format.decode_chunk_size),
-        )
 
 
 register_gptq_helper("ggml", GGMLGPTQHelper)

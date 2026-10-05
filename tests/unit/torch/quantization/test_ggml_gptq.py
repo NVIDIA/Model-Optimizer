@@ -12,14 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPTQ for GGML block formats: the group update, and pinning a payload GPTQ chose."""
+"""GPTQ for GGML block formats: the group update, the helper, and the payload pin."""
+
+import copy
+import io
 
 import pytest
 import torch
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import cache_packed_weight
+from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
 from modelopt.torch.quantization.utils.calib_utils import (
     compute_hessian_inverse,
@@ -78,6 +82,10 @@ def test_group_update_rejects_blocks_that_split_a_group():
         gptq_group_update(weight, h_inv, 6, 4, _round_in_groups_of_4)
 
 
+IQ1_S = GGML_FORMAT_REGISTRY["iq1_s"]
+GPTQ = {"method": "gptq", "block_size": 256, "perc_damp": 0.3}
+
+
 def _iq1_s_config(algorithm):
     return {
         "quant_cfg": [
@@ -92,15 +100,72 @@ def _iq1_s_config(algorithm):
     }
 
 
-def test_fake_quant_uses_a_payload_cached_for_the_whole_weight():
+def _inputs():
+    generator = torch.Generator().manual_seed(0)
+    return torch.randn(128, 512, generator=generator) @ torch.randn(512, 512, generator=generator)
+
+
+def _gptq_model():
+    torch.manual_seed(0)
     model = torch.nn.Linear(512, 4, bias=False)
-    inputs = torch.randn(3, 512)
-    mtq.quantize(model, _iq1_s_config("max"), forward_loop=lambda m: m(inputs))
-    iq1_s = GGML_FORMAT_REGISTRY["iq1_s"]
-    other_packed, shape = iq1_s.quantize(torch.randn(4, 512))
-    quantizer = model.weight_quantizer
+    inputs = _inputs()
+    mtq.quantize(model, _iq1_s_config(GPTQ), forward_loop=lambda m: m(inputs))
+    return model, inputs
 
-    cache_packed_weight(quantizer, model.weight, "iq1_s", iq1_s.block_chunk_size, other_packed)
 
-    other = iq1_s.dequantize(other_packed, shape, dtype=torch.float32)
-    torch.testing.assert_close(quantizer(model.weight), other)
+def _decoded(packed, weight):
+    return IQ1_S.dequantize(packed, torch.tensor(weight.shape), dtype=torch.float32)
+
+
+def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
+    torch.manual_seed(0)
+    original = torch.nn.Linear(512, 4, bias=False)
+    plain = copy.deepcopy(original)
+    inputs = _inputs()
+    mtq.quantize(plain, _iq1_s_config("max"), forward_loop=lambda m: m(inputs))
+    model, _ = _gptq_model()
+
+    pinned = getattr(model.weight_quantizer, PINNED_PAYLOAD)
+    assert pinned.shape == (4, 2, IQ1_S.block_bytes)
+    torch.testing.assert_close(model.weight.detach(), _decoded(pinned, model.weight))
+    torch.testing.assert_close(model(inputs), inputs @ _decoded(pinned, model.weight).T)
+    assert torch.equal(IQ1_S.pack(model.weight, model.weight_quantizer), pinned)
+
+    def weighted_error(weight):
+        return ((weight - original.weight) @ inputs.T).square().sum()
+
+    assert weighted_error(model.weight) < weighted_error(plain.weight_quantizer(plain.weight))
+
+
+def test_pin_outlives_the_weight_tensor():
+    model, _ = _gptq_model()
+    pinned = getattr(model.weight_quantizer, PINNED_PAYLOAD)
+    # What an offload round trip or a layerwise resume does: same values, a new tensor.
+    model.weight.data = model.weight.data.clone()
+
+    assert torch.equal(IQ1_S.pack(model.weight, model.weight_quantizer), pinned)
+    # Encoding the GPTQ'd weight again would not have returned GPTQ's codes.
+    assert not torch.equal(IQ1_S.quantize(model.weight.detach())[0], pinned)
+
+
+def test_pin_survives_save_and_restore():
+    model, inputs = _gptq_model()
+    buffer = io.BytesIO()
+    mto.save(model, buffer)
+    buffer.seek(0)
+
+    restored = mto.restore(torch.nn.Linear(512, 4, bias=False), buffer)
+
+    pinned = getattr(model.weight_quantizer, PINNED_PAYLOAD)
+    assert torch.equal(IQ1_S.pack(restored.weight, restored.weight_quantizer), pinned)
+    torch.testing.assert_close(restored(inputs), model(inputs))
+
+
+def test_pin_is_dropped_once_the_weight_changes():
+    model, _ = _gptq_model()
+    with torch.no_grad():
+        model.weight.add_(0.01)
+
+    assert torch.equal(
+        IQ1_S.pack(model.weight, model.weight_quantizer), IQ1_S.quantize(model.weight.detach())[0]
+    )

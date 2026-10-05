@@ -21,6 +21,7 @@ import torch
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD
 
 
 def _iq1_s_config(algorithm):
@@ -49,7 +50,7 @@ def _weighted_error(quantized, weight, inputs):
     return ((quantized - weight) @ inputs.T).square().sum()
 
 
-def test_gptq_on_a_ggml_format_keeps_the_payload_it_chose():
+def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
     torch.manual_seed(0)
     model = torch.nn.Linear(512, 8, bias=False).cuda()
     original = model.weight.detach().clone()
@@ -64,7 +65,7 @@ def test_gptq_on_a_ggml_format_keeps_the_payload_it_chose():
     )
 
     iq1_s = GGML_FORMAT_REGISTRY["iq1_s"]
-    packed = model.weight_quantizer._quantizer_cache.packed_weights
+    packed = getattr(model.weight_quantizer, PINNED_PAYLOAD)
     decoded = iq1_s.dequantize(packed, torch.tensor(model.weight.shape), dtype=torch.float32)
     torch.testing.assert_close(model.weight.detach(), decoded)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
