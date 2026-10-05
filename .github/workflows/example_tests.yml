@@ -131,7 +131,7 @@ jobs:
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
 
   ##### vLLM Example Tests #####
-  vllm:
+  vllm_serve:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.vllm == 'true'
     uses: ./.github/workflows/_example_tests_runner.yml
@@ -210,7 +210,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, torch, vllm, trtllm, megatron, onnx]
+    needs: [pr-gate, torch, vllm_serve, trtllm, megatron, onnx]
     runs-on: ubuntu-latest
     steps:
       - name: Required example tests did not succeed
@@ -218,7 +218,7 @@ jobs:
           needs.pr-gate.result != 'success' ||
           (needs.pr-gate.outputs.any_changed == 'true' && (
             !contains(fromJSON('["success", "skipped"]'), needs.torch.result) ||
-            !contains(fromJSON('["success", "skipped"]'), needs.vllm.result) ||
+            !contains(fromJSON('["success", "skipped"]'), needs.vllm_serve.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.trtllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.megatron.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.onnx.result)
