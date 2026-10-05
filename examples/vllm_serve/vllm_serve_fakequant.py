@@ -50,15 +50,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Thin ``vllm`` CLI shim: translates ``--modelopt-*`` flags to env vars, then delegates
-to vLLM's real CLI (``vllm.entrypoints.cli.main.main``) unmodified.
+"""Translate ModelOpt CLI flags to environment variables, then delegate to vLLM.
 
-Without fakequant settings, the wrapper delegates to
-stock vLLM without installing the fakequant worker. Install this as the ``vllm``
-console script (see pyproject.toml) so ``vllm serve <model> ...`` works directly.
-Add ``--modelopt-*`` flags (or set the env vars) to opt into fakequant.
-The wrapper then defaults to ``--worker-cls fakequant_worker.FakeQuantWorker``;
-an explicit ``--worker-cls`` still overrides it.
+Run this example directly with python3. When fakequant settings are present, the
+launcher selects FakeQuantWorker unless --worker-cls explicitly overrides it.
+Without fakequant settings, the launcher delegates to stock vLLM.
 """
 
 import os

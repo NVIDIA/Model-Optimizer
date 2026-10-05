@@ -7,7 +7,7 @@ Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated
 The general fakequant example is tested with vLLM 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
 compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
-The `vllm` CLI shim does not support vLLM 0.9.0. Use one of the tested releases above.
+The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
 
 ## Prepare environment
 
@@ -50,32 +50,34 @@ corresponding environment variable when omitted:
 | `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
 | `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
 
-Install the shim to expose these options through the ordinary `vllm` command:
-
-```bash
-python3 -m pip install -e examples/vllm_serve
-```
+Run the launcher directly from the repository checkout; the example does not
+need a separate package installation.
 
 Step 2: Serve with any stock vLLM options plus the ModelOpt flags:
 
 ```bash
-vllm serve <model_path> -tp 8 --host 0.0.0.0 --port 8000 \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --host 0.0.0.0 --port 8000 \
   --modelopt-quant-cfg NVFP4_DEFAULT_CFG \
   --modelopt-quant-dataset cnn_dailymail \
   --modelopt-quant-calib-size 512
 ```
 
-When fakequant is requested, the shim selects `fakequant_worker.FakeQuantWorker`
+The launcher assumes the vLLM `serve` subcommand when given a model path; spelling out
+`serve` is optional.
+
+When fakequant is requested, the launcher selects `fakequant_worker.FakeQuantWorker`
 unless `--worker-cls` is supplied. Without ModelOpt quantization settings,
-the shim delegates to the stock vLLM CLI. Existing direct-script workflows can still invoke
-`python3 examples/vllm_serve/vllm_serve_fakequant.py` from the repository root.
+it delegates to stock vLLM. ModelOpt flags belong to this launcher; stock
+`vllm serve` does not recognize them.
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
 0.30.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
 
 ```bash
-vllm serve <nemotron3_nano_model_path> -tp 8 \
-  --modelopt-kv-quant-cfg NVFP4_KV_CFG --modelopt-quant-calib-size 512 \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <nemotron3_nano_model_path> \
+  -tp 8 --modelopt-kv-quant-cfg NVFP4_KV_CFG \
+  --modelopt-quant-calib-size 512 \
   --max-model-len 8192 --enforce-eager --host 0.0.0.0 --port 8000
 ```
 
@@ -160,7 +162,8 @@ this server actually quantized, so the numbers an evaluation produces can be tra
 a recipe:
 
 ```bash
-vllm serve <model_path> -tp 8 --modelopt-recipe-path <PATH_TO_RECIPE> \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-recipe-path <PATH_TO_RECIPE> \
   --host 0.0.0.0 --port 8000 \
   --mlflow https://<your-mlflow-server>/
 ```
@@ -169,7 +172,7 @@ This is the *quantization* tracking server. It is unrelated to any tracking serv
 evaluation harness exports its scores to — NeMo Evaluator Launcher, for instance, has its
 own `export.mlflow.tracking_uri`. Keep the two separate.
 
-Quantization runs in the vLLM **worker**, not in the CLI shim, so that is where
+Quantization runs in the vLLM **worker**, not in the launcher, so that is where
 the run is recorded: the launcher validates the URI and hands the settings to the workers
 through the environment, and global rank 0 opens the run. It opens *before the weights
 load*, so a bad URI or a missing token fails within seconds rather than after a load and a
@@ -242,7 +245,8 @@ Step 2: use the exported artifacts when serving:
 
 ```bash
 # HF
-vllm serve <model_path> -tp 8 --modelopt-state-path <vllm_fq_modelopt_state.pth> \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-state-path <vllm_fq_modelopt_state.pth> \
   --host 0.0.0.0 --port 8000
 ```
 
@@ -250,7 +254,8 @@ vllm serve <model_path> -tp 8 --modelopt-state-path <vllm_fq_modelopt_state.pth>
 
 ```bash
 # MCore
-vllm serve <model_path> -tp 8 --modelopt-quant-cfg <quant_cfg> \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-quant-cfg <quant_cfg> \
   --modelopt-quant-file-path <quantizer_state.pth> --host 0.0.0.0 --port 8000
 ```
 
@@ -284,7 +289,8 @@ quantize:
 Save the recipe above as `indexer_nvfp4_only.yaml` in the repository root, then serve:
 
 ```bash
-vllm serve <model_path> -tp 8 --modelopt-recipe-path indexer_nvfp4_only.yaml \
+python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
+  -tp 8 --modelopt-recipe-path indexer_nvfp4_only.yaml \
   --host 0.0.0.0 --port 8000
 ```
 
@@ -318,7 +324,9 @@ Workflow:
    python3 examples/vllm_serve/vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through and vLLM runs unchanged. Whole-model fakequant flows use `vllm serve` with ModelOpt flags; the compact attention-only path is below.
+If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through
+and vLLM runs unchanged. Whole-model fakequant flows use the fakequant launcher with ModelOpt
+flags; the compact attention-only path is below.
 
 ### Calibrate skip-softmax thresholds through vLLM
 

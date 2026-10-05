@@ -19,11 +19,10 @@ COPY . Model-Optimizer
 # Remove .git directory to reduce image size
 RUN rm -rf Model-Optimizer/.git
 
-# Install ModelOpt and the fakequant CLI shim. The shim is a separate nested project whose
-# console script intentionally shadows the stock `vllm` entrypoint.
+# Install modelopt from local source with all dependencies. `mlflow` is the optional
+# tracking client used by --mlflow; it is not part of `all`.
 RUN cd Model-Optimizer && \
-    pip install -e ".[all,dev-test,mlflow]" && \
-    pip install -e examples/vllm_serve
+    pip install -e ".[all,dev-test,mlflow]"
 
 # Llama4 requires this
 RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
