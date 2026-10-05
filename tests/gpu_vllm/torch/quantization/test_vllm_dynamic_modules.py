@@ -197,8 +197,10 @@ def _patch_vllm_imports(monkeypatch, modules):
 
 def _launcher_import_modules():
     """Build isolated vLLM module stubs for launcher parser compatibility tests."""
-    legacy_parser = Mock(name="legacy_parser")
-    current_parser = Mock(name="current_parser")
+    entrypoints = SimpleNamespace(
+        current_arg_parser=Mock(name="current_arg_parser"),
+        legacy_arg_parser=Mock(name="legacy_arg_parser"),
+    )
     modules = {
         "vllm": SimpleNamespace(__version__="0.30.0"),
         "vllm_mlflow_utils": SimpleNamespace(
@@ -206,34 +208,57 @@ def _launcher_import_modules():
             add_mlflow_args=Mock(),
             resolve_mlflow_args=Mock(),
         ),
-        "vllm.entrypoints.openai.cli_args": SimpleNamespace(make_arg_parser=legacy_parser),
-        "vllm.entrypoints.cli.serve": SimpleNamespace(make_arg_parser=current_parser),
+        "vllm.entrypoints.openai.cli_args": SimpleNamespace(
+            make_arg_parser=entrypoints.legacy_arg_parser
+        ),
+        "vllm.entrypoints.cli.serve": SimpleNamespace(
+            make_arg_parser=entrypoints.current_arg_parser
+        ),
         "vllm.entrypoints.cli.main": SimpleNamespace(main=Mock()),
         "vllm.utils.argparse_utils": SimpleNamespace(FlexibleArgumentParser=Mock()),
     }
-    return modules, legacy_parser, current_parser
+    return modules, entrypoints
 
 
 @pytest.mark.parametrize(
-    ("missing_module", "use_current"),
+    ("arg_parser_missing", "uses_current"),
     [(None, False), ("vllm.entrypoints.openai.cli_args", True)],
     ids=("legacy", "current"),
 )
-def test_vllm_serve_parser_layouts(monkeypatch, missing_module, use_current):
-    modules, legacy_parser, current_parser = _launcher_import_modules()
-    if missing_module is not None:
-        modules["vllm.entrypoints.openai.cli_args"] = ModuleNotFoundError(name=missing_module)
+def test_vllm_serve_entrypoint_layouts(monkeypatch, arg_parser_missing, uses_current):
+    """Resolve the serve parser in both supported vLLM module layouts."""
+    modules, entrypoints = _launcher_import_modules()
+    if arg_parser_missing is not None:
+        modules["vllm.entrypoints.openai.cli_args"] = ModuleNotFoundError(name=arg_parser_missing)
     _patch_vllm_imports(monkeypatch, modules)
 
     launcher = _load_example_module("vllm_serve_fakequant")
     parser = launcher._make_vllm_serve_parser()
 
-    expected = current_parser if use_current else legacy_parser
-    expected.assert_called_once_with(parser)
+    expected_arg_parser = (
+        entrypoints.current_arg_parser if uses_current else entrypoints.legacy_arg_parser
+    )
+    expected_arg_parser.assert_called_once_with(parser)
 
 
-def test_vllm_serve_parser_dependency_error_propagates(monkeypatch):
-    modules, _, _ = _launcher_import_modules()
+def test_vllm_serve_main_disables_compile_cache(monkeypatch, clean_launcher_env):
+    """A cached torch.compile graph of the same model without the fake quant must not be reused."""
+    os.environ["MODELOPT_STATE_PATH"] = "/tmp/modelopt_state.pth"
+    launcher = _load_fakequant_launcher(monkeypatch)
+    monkeypatch.setattr(launcher, "resolve_mlflow_args", Mock())
+    vllm_main, _, _ = _stub_launcher_runtime(monkeypatch, launcher)
+    monkeypatch.setattr(sys, "argv", ["vllm_serve_fakequant.py", "serve", "/models/qwen"])
+
+    launcher.main()
+
+    assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == "1"
+    assert os.environ["MODELOPT_STATE_PATH"] == "/tmp/modelopt_state.pth"
+    vllm_main.assert_called_once_with()
+
+
+def test_vllm_serve_entrypoint_dependency_error_propagates(monkeypatch):
+    """Do not replace a missing parser dependency with a fallback import error."""
+    modules, _ = _launcher_import_modules()
     dependency_error = ModuleNotFoundError(name="vllm_dependency")
     modules["vllm.entrypoints.openai.cli_args"] = dependency_error
     modules["vllm.entrypoints.cli.serve"] = AssertionError("fallback must not be imported")
@@ -296,13 +321,6 @@ def test_fakequant_launcher_passes_through_non_serve_commands(monkeypatch, clean
             {"QUANT_CFG": "NVFP4_DEFAULT_CFG"},
             id="environment-fallback",
         ),
-        pytest.param(
-            ["vllm_serve_fakequant.py", "serve", "/models/qwen"],
-            {"MODELOPT_STATE_PATH": "/tmp/modelopt_state.pth"},
-            ["serve", "/models/qwen"],
-            {"MODELOPT_STATE_PATH": "/tmp/modelopt_state.pth"},
-            id="state-restore",
-        ),
     ],
 )
 def test_fakequant_launcher_serving_paths(
@@ -325,9 +343,11 @@ def test_fakequant_launcher_serving_paths(
             expected_argv.extend(["--moe-backend", "triton"])
         for key, value in expected_env.items():
             assert os.environ[key] == value
-        assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == initial_env.get(
-            "VLLM_DISABLE_COMPILE_CACHE", "1"
-        )
+        if "VLLM_DISABLE_COMPILE_CACHE" in initial_env:
+            assert (
+                os.environ["VLLM_DISABLE_COMPILE_CACHE"]
+                == initial_env["VLLM_DISABLE_COMPILE_CACHE"]
+            )
     else:
         assert "QUANT_CFG" not in os.environ
         assert "MODELOPT_STATE_PATH" not in os.environ
