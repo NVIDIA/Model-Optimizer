@@ -238,7 +238,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             if marker_id not in routed_marker_ids:
                 self._store_quantizer_recipe(source_name, recipe)
 
-    def _capture_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> None:
+    def _get_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> None:
         """Move routed quantizer tensors and recipe markers out of a weight shard."""
         quantizer_state = {
             key: state_dict.pop(key)
@@ -251,7 +251,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     def _get_mtp_state_dict(self, copy_from_pretrained: bool = True) -> dict[str, torch.Tensor]:
         """Capture MTP sidecars before the base exporter merges its weights."""
         state_dict = super()._get_mtp_state_dict(copy_from_pretrained=copy_from_pretrained)
-        self._capture_quantizer_state(state_dict)
+        self._get_quantizer_state(state_dict)
         return state_dict
 
     def save_pretrained(
@@ -283,8 +283,8 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             self._quantizer_recipe_markers = []
         self._quantizer_tensor_states = []
         for state_dict in self.layer_state_dicts.values():
-            self._capture_quantizer_state(state_dict)
-        self._capture_quantizer_state(self._state_dict)
+            self._get_quantizer_state(state_dict)
+        self._get_quantizer_state(self._state_dict)
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
         # Publish after the base exporter has collected MTP and copied source sidecars.
