@@ -144,6 +144,7 @@ def _same_storage(left: object, right: object) -> bool:
         return False
     return (
         left.device == right.device
+        and left.numel() == right.numel()
         and left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
         and left.storage_offset() == right.storage_offset()
     )
@@ -162,8 +163,17 @@ def _resolve_weight_quantizer(
     quantizer = representative_weight_quantizer(module, weight_name)
     if quantizer is None and weight_name.startswith("weight"):
         quantizer = representative_weight_quantizer(module)
+        if quantizer is not None and weight_name.removeprefix("weight").isdigit():
+            raise NotImplementedError(
+                f"Unable to resolve quantizer for numbered weight {weight_name!r}"
+            )
     if quantizer is None:
         return None
+    # A representative quantizer cannot supply another expert's calibrated state.
+    if iter_weights is not None:
+        raise NotImplementedError(
+            f"Calibration iterator does not expose a matching full weight view for {weight_name!r}"
+        )
     return weight, quantizer
 
 
@@ -824,5 +834,4 @@ def build_hf_quantization_config(
         "producer": {"name": "modelopt", "version": __version__},
         "quantization": process_layer_quant_config(layer_config),
     }
-    config["quantization"].setdefault("kv_cache_quant_algo", QUANTIZATION_NONE)
     return convert_hf_quant_config_format(config)

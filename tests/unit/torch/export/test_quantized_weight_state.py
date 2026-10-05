@@ -34,7 +34,7 @@ from modelopt.torch.export.quantized_weight_export import (
     split_quantized_weight_export_state,
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import GroupedQuantizer, NVFP4StaticQuantizer, TensorQuantizer
 
 
 def _fp8_linear() -> nn.Linear:
@@ -174,6 +174,39 @@ def test_capture_resolves_numbered_grouped_weights_by_storage():
     assert state0 is not None and state1 is not None
     assert state0.quantization_format == state1.quantization_format == "fp8"
     assert state0.tensors[0].value.item() != state1.tensors[0].value.item()
+
+
+@pytest.mark.parametrize("has_iterator", [True, False])
+def test_capture_rejects_unresolved_numbered_weight(has_iterator):
+    module = _GroupedWeights()
+    module.weight_quantizer = GroupedQuantizer(*module.quantizers)
+    module.iter_weights_for_calibration = (
+        (lambda: iter(((module.weight0, module.quantizers[0]),))) if has_iterator else None
+    )
+
+    with pytest.raises(NotImplementedError, match="weight1"):
+        capture_quantized_weight_export_state(module, "weight1")
+
+
+def test_capture_rejects_full_fused_weight_with_per_expert_quantizers():
+    module = _GroupedWeights()
+    module.weight = nn.Parameter(torch.stack((module.weight0, module.weight1)))
+    module.weight_quantizer = GroupedQuantizer(*module.quantizers)
+    module.iter_weights_for_calibration = lambda: (
+        (module.weight[index], quantizer) for index, quantizer in enumerate(module.quantizers)
+    )
+
+    with pytest.raises(NotImplementedError, match="matching full weight view"):
+        capture_quantized_weight_export_state(module)
+
+
+@pytest.mark.parametrize("parameter_name", ["bias", "layer_norm_weight"])
+def test_unquantized_sibling_has_no_export_state_or_spec(parameter_name):
+    module = _fp8_linear()
+    module.register_parameter(parameter_name, nn.Parameter(torch.ones(4)))
+
+    assert capture_quantized_weight_export_state(module, parameter_name) is None
+    assert get_quantized_weight_export_spec(module, parameter_name) is None
 
 
 def test_unquantized_weight_has_no_export_state_or_spec():
