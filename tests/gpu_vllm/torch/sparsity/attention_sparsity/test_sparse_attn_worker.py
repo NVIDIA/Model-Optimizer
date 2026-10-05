@@ -237,6 +237,7 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         has_sinks=False,
         use_trtllm_decode_attention=True,
         use_xqa=False,
+        use_dedicated_xqa=False,
         use_trtllm_gen_varlen_decode=False,
         use_dcp=False,
     )
