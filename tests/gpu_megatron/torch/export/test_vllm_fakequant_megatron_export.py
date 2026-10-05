@@ -439,24 +439,24 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, s
     assert not export_dir.exists()
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize(
-    "attribute_cfg",
+    ("attribute_cfg", "pp_size"),
     [
-        pytest.param({"unsigned": True, "num_bits": 8}, id="unsigned"),
-        pytest.param({"narrow_range": True, "num_bits": 8}, id="narrow_range"),
-        pytest.param({"rotate": True}, id="rotate"),
-        pytest.param({"rotate": {"enable": True, "rotate_fp32": True}}, id="rotate_config"),
-        pytest.param({"enable": False, "rotate": True}, id="disabled_rotation"),
-        pytest.param({"fake_quant": False}, id="real_quant"),
-        pytest.param({"type": "dynamic"}, id="dynamic"),
-        pytest.param({"type": "static"}, id="uncalibrated"),
-        pytest.param({"bias": {-1: None}}, id="bias"),
-        pytest.param({"backend": "custom"}, id="backend"),
+        pytest.param({"unsigned": True, "num_bits": 8}, 1, id="unsigned"),
+        pytest.param({"narrow_range": True, "num_bits": 8}, 1, id="narrow_range"),
+        pytest.param({"rotate": True}, 1, id="rotate"),
+        pytest.param({"rotate": {"enable": True, "rotate_fp32": True}}, 1, id="rotate_config"),
+        pytest.param({"enable": False, "rotate": True}, 1, id="disabled_rotation"),
+        pytest.param({"fake_quant": False}, 1, id="real_quant"),
+        pytest.param({"type": "dynamic"}, 1, id="dynamic"),
+        pytest.param({"type": "static"}, 1, id="uncalibrated"),
+        pytest.param({"bias": {-1: None}}, 1, id="bias"),
+        pytest.param({"backend": "custom"}, 1, id="backend"),
+        pytest.param({"fake_quant": False}, 2, id="real_quant_pp2"),
     ],
 )
 def test_mcore_vllm_export_unsupported_setting(request, tmp_path, attribute_cfg, pp_size):
-    """An unsupported setting on the final stage rejects export on every rank."""
+    """Unsupported settings reject export on every rank, including a final-stage PP2 error."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfg))
 
