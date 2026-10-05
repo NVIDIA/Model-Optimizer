@@ -194,15 +194,27 @@ jobs:
         run: |
           pip install pytest
           python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
+  fold-gate:
+    # Pre-quant fold/consumer safety gate: CPU-only, seconds long, and runs on
+    # every PR regardless of changed paths (no path gate), so a quantization
+    # recipe change can never merge with a norm whose output feeds a module
+    # outside its fused group. The GPU lane also runs it via `pytest tests/gpu`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Run fold/consumer safety gate
+        run: pip install nox uv && nox -s fold_gate
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, launcher, mcp, skills]
+    needs: [check-file-changes, linux, fold-gate, windows, multi-version, partial-install, launcher, mcp, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
         if: >-
-          ${{ needs.linux.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
+          ${{ needs.linux.result != 'success' || needs.fold-gate.result != 'success' || (needs.check-file-changes.outputs.any_changed == 'true' && (
             needs.windows.result != 'success' ||
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
