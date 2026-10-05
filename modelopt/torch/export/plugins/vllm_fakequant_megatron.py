@@ -34,25 +34,40 @@ __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
-    """Return a dictionary of quantizer configs, keyed by name relative to *module*.
-
-    Args:
-        module: The module to save the quantizer configs.
-
-    Returns:
-        A dictionary of quantizer configs, keyed by name relative to *module*, with each value
-        containing the quantizer's num_bits, axis, block_sizes, and is_enabled state.
-    """
-    return {
-        get_unwrapped_name(name, module): {
-            "_num_bits": m.num_bits,
-            "_axis": m.axis,
-            "_block_sizes": m.block_sizes,
-            "_disabled": not m.is_enabled,
+    """Return quantizer recipes, rejecting forward settings absent from the sidecar."""
+    configs = {}
+    for name, quantizer in module.named_modules():
+        if not isinstance(quantizer, TensorQuantizer):
+            continue
+        # Rotation still affects forward when quantization is disabled.
+        unsupported = [
+            setting
+            for setting, active in {
+                "rotate": quantizer.rotate_is_enabled,
+                "unsigned": quantizer.unsigned,
+                "narrow_range": quantizer.narrow_range,
+                "fake_quant": not quantizer.fake_quant,
+                "type": quantizer._dynamic,
+                "bias": quantizer.bias is not None,
+                "backend": quantizer.backend is not None,
+                "use_constant_amax": quantizer._use_constant_amax,
+                "if_quant": not quantizer._if_quant,
+                "enable_pre_quant_scale": not quantizer._enable_pre_quant_scale,
+            }.items()
+            if active
+        ]
+        if unsupported:
+            raise ValueError(
+                f"Unsupported vLLM fakequant quantizer settings for {name or '<root>'}: "
+                f"{', '.join(unsupported)}. These settings are not preserved by quant_recipe.yaml."
+            )
+        configs[get_unwrapped_name(name, module)] = {
+            "_num_bits": quantizer.num_bits,
+            "_axis": quantizer.axis,
+            "_block_sizes": quantizer.block_sizes,
+            "_disabled": not quantizer.is_enabled,
         }
-        for name, m in module.named_modules()
-        if isinstance(m, TensorQuantizer)
-    }
+    return configs
 
 
 def gather_mcore_vllm_fq_quantizer_recipe(
@@ -152,6 +167,19 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         super().__init__(*args, **kwargs)
         self._quantizer_state_for_recipe: dict[str, dict] = {}
         self._quantizer_recipe_markers: list[tuple[str, dict]] = []
+        failure = ""
+        try:
+            _quantizer_configs(self.model)
+        except ValueError as exc:
+            failure = str(exc)
+        # Reject on every rank before any stage starts the export collectives.
+        failure = DistributedProcessGroup.get_dist_syncd_obj(
+            failure,
+            DistributedProcessGroup(None),
+            lambda failures: next((message for message in failures if message), ""),
+        )
+        if failure:
+            raise ValueError(failure)
 
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
         """Store one resolved recipe, requiring repeated routes to agree."""
@@ -345,6 +373,9 @@ def export_mcore_gpt_to_hf_vllm_fq(
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
         export_dir: The target export path.
+
+    Raises:
+        ValueError: If a quantizer uses forward settings absent from the recipe.
     """
     exporter = VllmFqGPTModelExporter(
         model,

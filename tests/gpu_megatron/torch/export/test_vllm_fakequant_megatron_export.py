@@ -24,7 +24,7 @@ import torch
 import yaml
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron, run_mcore_inference
-from _test_utils.torch.transformers_models import create_tiny_nemotron_h_dir
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_nemotron_h_dir
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.post_training.modelopt.hybrid.model_specs import get_hybrid_stack_modelopt_spec
@@ -369,6 +369,64 @@ def test_mcore_vllm_export_mtp(request, tmp_path, pp_size):
     """Live Nemotron MTP quantizers reach sidecars and never leak into weight shards."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
+
+
+def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfg, rank, size):
+    model = get_mcore_gpt_model(
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+    ).cuda()
+    quant_cfg = deepcopy(mtq.FP8_DEFAULT_CFG)
+    quant_cfg["algorithm"] = None
+    model = mtq.quantize(model, quant_cfg)
+    if rank == size - 1:
+        quantizer = next(
+            quantizer
+            for name, quantizer in model.named_modules()
+            if name.endswith("input_quantizer") and quantizer.is_enabled
+        )
+        if "if_quant" in attribute_cfg:
+            quantizer.disable_quant()
+        elif "enable_pre_quant_scale" in attribute_cfg:
+            quantizer._enable_pre_quant_scale = False
+        else:
+            quantizer.set_from_attribute_config(attribute_cfg)
+
+    source = tmp_path / "tiny_llama"
+    if rank == 0:
+        create_tiny_llama_dir(tmp_path)
+    torch.distributed.barrier()
+    export_dir = tmp_path / "unsupported_export"
+    setting = next(key for key in attribute_cfg if key != "enable")
+    with pytest.raises(ValueError, match=f"Unsupported.*input_quantizer: {setting}"):
+        export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+    assert not export_dir.exists()
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize(
+    "attribute_cfg",
+    [
+        pytest.param({"unsigned": True}, id="unsigned"),
+        pytest.param({"narrow_range": True}, id="narrow_range"),
+        pytest.param({"rotate": True}, id="rotate"),
+        pytest.param({"rotate": {"enable": True, "rotate_fp32": True}}, id="rotate_config"),
+        pytest.param({"enable": False, "rotate": True}, id="disabled_rotation"),
+        pytest.param({"fake_quant": False}, id="real_quant"),
+        pytest.param({"type": "dynamic"}, id="dynamic"),
+        pytest.param({"bias": {-1: None}}, id="bias"),
+        pytest.param({"backend": "custom"}, id="backend"),
+        pytest.param({"use_constant_amax": True}, id="use_constant_amax"),
+        pytest.param({"if_quant": False}, id="quant_disabled"),
+        pytest.param({"enable_pre_quant_scale": False}, id="pre_quant_scale_disabled"),
+    ],
+)
+def test_mcore_vllm_export_unsupported_setting(request, tmp_path, attribute_cfg, pp_size):
+    """An unsupported setting on the final stage rejects export on every rank."""
+    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
+    workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfg))
 
 
 def _test_cross_rank_recipe_merge(tmp_path, conflicting, rank, size):
