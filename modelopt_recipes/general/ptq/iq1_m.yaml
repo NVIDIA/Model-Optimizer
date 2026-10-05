@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# IQ1_M weight-only PTQ.
+# IQ1_M weight-only PTQ of MLP/MoE layers with GPTQ.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
 imports:
@@ -21,7 +21,7 @@ imports:
 
 metadata:
   description: >-
-    Applies uniform GGML-compatible IQ1_M weight-only quantization to eligible linear layers.
-    This is not a mixed per-tensor precision preset. No calibration data is required.
+    Applies GGML-compatible IQ1_M weight-only quantization to MLP/MoE layers, calibrated with GPTQ.
+    Attention and the other linears stay in BF16. Requires calibration data.
 quantize:
   $import: preset
