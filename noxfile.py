@@ -77,6 +77,20 @@ def unit(session, torch_ver, tf_ver):
 
 
 @nox.session(python="3.12")
+def fold_gate(session):
+    """Pre-quant fold/consumer safety gate (CPU-only; required on every PR)."""
+    session.install("-e", ".[all,dev-test]")
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "tests/gpu/torch/export/test_awq_fold_consumer_safety.py",
+        *_cov_args(),
+        env=_CPU_ONLY_ENV,
+    )
+
+
+@nox.session(python="3.12")
 @nox.parametrize("subset", ["onnx", "torch", "torch_deploy"])
 def partial_unit(session, subset):
     """Unit tests with partial installs."""
