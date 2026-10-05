@@ -41,14 +41,20 @@ corresponding environment variable when omitted:
 
 | CLI flag | Environment fallback | Description |
 | --- | --- | --- |
-| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config |
-| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config (planned deprecation) |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config (planned deprecation) |
 | `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Path to `quantizer_state.pth` in a Megatron (MCore) vLLM fakequant export; requires a quantization config or recipe |
 | `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Path to `vllm_fq_modelopt_state.pth` in an HF vLLM fakequant export (full ModelOpt state) |
 | `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML |
 | `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
 | `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
 | `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
+
+`QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
+release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or
+`--modelopt-recipe-path`; the recipe can include both model and KV-cache quantization.
+Unset `QUANT_CFG` and `KV_QUANT_CFG` when switching to a recipe, since the launcher
+rejects mixing them.
 
 Run the launcher directly from the repository checkout; the example does not
 need a separate package installation.

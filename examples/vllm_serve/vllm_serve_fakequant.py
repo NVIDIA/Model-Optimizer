@@ -151,12 +151,18 @@ def _add_fakequant_args(parser) -> None:
     g.add_argument(
         "--modelopt-quant-cfg",
         default=os.environ.get("QUANT_CFG"),
-        help="ModelOpt quantization config name (e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG) [env: QUANT_CFG]",
+        help=(
+            "ModelOpt quantization config name (e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG) "
+            "[env: QUANT_CFG]. Planned deprecation; prefer --modelopt-recipe-path / RECIPE_PATH."
+        ),
     )
     g.add_argument(
         "--modelopt-kv-quant-cfg",
         default=os.environ.get("KV_QUANT_CFG"),
-        help="KV cache quantization config name [env: KV_QUANT_CFG]",
+        help=(
+            "KV cache quantization config name [env: KV_QUANT_CFG]. "
+            "Planned deprecation; prefer --modelopt-recipe-path / RECIPE_PATH."
+        ),
     )
     g.add_argument(
         "--modelopt-quant-file-path",

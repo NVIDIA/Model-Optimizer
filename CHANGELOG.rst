@@ -97,6 +97,10 @@ Changelog
 
 **Deprecations**
 
+- The ``examples/vllm_serve`` ``QUANT_CFG`` / ``KV_QUANT_CFG`` environment variables and their
+  ``--modelopt-quant-cfg`` / ``--modelopt-kv-quant-cfg`` flags will be deprecated in a future release.
+  For new runs, use a PTQ recipe via ``RECIPE_PATH`` or ``--modelopt-recipe-path``; unset the old
+  variables when switching because the launcher rejects mixing them with a recipe.
 - KV-domain searches in ``examples/hf_ptq`` now use ``--kv_auto_quantize_checkpoint``;
   ``--auto_quantize_checkpoint`` remains a deprecated fallback for a KV-primary recipe for one
   release.
