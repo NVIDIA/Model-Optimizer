@@ -41,7 +41,9 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
+def _test_mcore_vllm_export(
+    tmp_path, quant_cfg, rank, size, prebuild=False, stale_source_sidecars=False
+):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -99,9 +101,16 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
         "vocab_size": vocab_size,
     }
 
+    stale_quantizer = "stale_source.input_quantizer"
     if rank == 0:
         with open(tmp_path / "config.json", "w") as f:
             json.dump(pretrained_config, f)
+        if stale_source_sidecars:
+            torch.save(
+                {stale_quantizer + "._amax": torch.tensor(42.0)}, tmp_path / "quantizer_state.pth"
+            )
+            with open(tmp_path / "quant_recipe.yaml", "w") as f:
+                yaml.safe_dump({stale_quantizer: {"_disabled": True}}, f)
     torch.distributed.barrier()
 
     # Export directory
@@ -163,6 +172,10 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
     with open(quantizer_recipe_file) as f:
         quantizer_recipe = yaml.safe_load(f)
 
+    if stale_source_sidecars:
+        assert stale_quantizer + "._amax" not in quantizer_state
+        assert stale_quantizer not in quantizer_recipe
+
     marker_suffix = "._quant_recipe_marker"
     assert not any(key.endswith(marker_suffix) for key in quantizer_state)
     assert not any(key.endswith(marker_suffix) for key in quantizer_recipe)
@@ -200,6 +213,15 @@ def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size):
     """Export each PP stage once and retain weights and sidecars from every stage."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg))
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_mcore_vllm_export_with_stale_source_sidecars(request, tmp_path, pp_size):
+    """Fresh sidecars replace stale source files after checkpoint metadata is copied."""
+    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
+    workers.run(
+        partial(_test_mcore_vllm_export, tmp_path, mtq.FP8_DEFAULT_CFG, stale_source_sidecars=True)
+    )
 
 
 def test_mcore_vllm_export_after_state_dict_access(dist_workers_size_1, tmp_path):
