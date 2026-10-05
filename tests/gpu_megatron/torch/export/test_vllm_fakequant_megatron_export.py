@@ -15,20 +15,17 @@
 
 import json
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import partial
 
 import pytest
 import torch
 import yaml
-from _test_utils.torch.megatron.models import get_mcore_gpt_model
-from _test_utils.torch.megatron.utils import initialize_for_megatron, run_mcore_inference
+from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
+from _test_utils.torch.megatron.utils import run_mcore_inference
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_nemotron_h_dir
-from megatron.core.models.hybrid.hybrid_model import HybridModel
-from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
-from megatron.core.post_training.modelopt.hybrid.model_specs import get_hybrid_stack_modelopt_spec
-from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.parallel_state import is_pipeline_last_stage
 from safetensors import safe_open
 
 import modelopt.torch.quantization as mtq
@@ -41,9 +38,56 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-def _test_mcore_vllm_export(
-    tmp_path, quant_cfg, rank, size, prebuild=False, stale_source_sidecars=False
-):
+@contextmanager
+def _assert_weight_qdq_once(model, prefix=""):
+    quantizers = [
+        module
+        for name, module in model.named_modules()
+        if name.startswith(prefix)
+        and name.endswith("weight_quantizer")
+        and isinstance(module, TensorQuantizer)
+        and module.is_enabled
+    ]
+    assert quantizers or (prefix and not is_pipeline_last_stage())
+    calls = Counter()
+
+    def count_qdq(module, args, output):
+        calls[module] += 1
+
+    handles = [quantizer.register_forward_hook(count_qdq) for quantizer in quantizers]
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert all(calls[quantizer] == 1 for quantizer in quantizers), calls
+
+
+def _assert_exported_quantizers(export_dir, expected_names):
+    state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
+    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
+    assert expected_names <= recipe.keys()
+    assert {name + "._amax" for name in expected_names} <= state.keys()
+    for name in expected_names:
+        assert not recipe[name]["_disabled"]
+        amax = state[name + "._amax"]
+        assert amax.dtype == torch.float32
+        torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
+    assert {key.rsplit(".", 1)[0] for key in state} <= recipe.keys()
+    assert not any(key.endswith("._quant_recipe_marker") for key in state)
+    assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
+    assert not (export_dir / "hf_quant_config.json").exists()
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    for shard in set(weight_map.values()):
+        with safe_open(export_dir / shard, framework="pt") as f:
+            shard_keys = f.keys()
+            assert not any(
+                "quantizer" in key or "._quant_recipe_marker" in key for key in shard_keys
+            )
+    return state, recipe, weight_map
+
+
+def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -105,36 +149,18 @@ def _test_mcore_vllm_export(
     if rank == 0:
         with open(tmp_path / "config.json", "w") as f:
             json.dump(pretrained_config, f)
-        if stale_source_sidecars:
-            torch.save(
-                {stale_quantizer + "._amax": torch.tensor(42.0)}, tmp_path / "quantizer_state.pth"
-            )
-            with open(tmp_path / "quant_recipe.yaml", "w") as f:
-                yaml.safe_dump({stale_quantizer: {"_disabled": True}}, f)
+        torch.save(
+            {stale_quantizer + "._amax": torch.tensor(42.0)}, tmp_path / "quantizer_state.pth"
+        )
+        with open(tmp_path / "quant_recipe.yaml", "w") as f:
+            yaml.safe_dump({stale_quantizer: {"_disabled": True}}, f)
     torch.distributed.barrier()
 
-    # Export directory
     export_dir = tmp_path / "vllm_export"
-    export_dir.mkdir(exist_ok=True)
-
-    quantizers = [
-        module
-        for name, module in model.named_modules()
-        if name.endswith("weight_quantizer")
-        and isinstance(module, TensorQuantizer)
-        and module.is_enabled
-    ]
-    assert quantizers
-    calls = Counter()
-
-    def count_qdq(module, args, output):
-        calls[module] += 1
-
-    handles = [quantizer.register_forward_hook(count_qdq) for quantizer in quantizers]
-    try:
+    with _assert_weight_qdq_once(model):
         if prebuild:
             exporter = VllmFqGPTModelExporter(model, tmp_path, dtype=torch.bfloat16)
-            assert exporter.state_dict
+            _ = exporter.state_dict
             assert exporter.layer_state_dicts
             exporter.save_pretrained(str(export_dir), tmp_path)
         else:
@@ -144,129 +170,53 @@ def _test_mcore_vllm_export(
                 dtype=torch.bfloat16,
                 export_dir=str(export_dir),
             )
-    finally:
-        for handle in handles:
-            handle.remove()
 
-    assert all(calls[quantizer] == 1 for quantizer in quantizers), calls
-
-    # check if quant_amax.pth file exists
-    quant_amax_file = export_dir / "quantizer_state.pth"
-    assert quant_amax_file.exists(), f"quantizer_state.pth file should be created in {export_dir}"
-
-    # Recipes take the same export mapping path as quantizer tensors. Every tensor-side
-    # quantizer must therefore have a recipe at its final exported module path, and the
-    # temporary routing markers must not leak into either sidecar.
-    quantizer_state = torch.load(quant_amax_file, weights_only=True, map_location="cpu")
-    input_amaxes = [
-        value
-        for key, value in quantizer_state.items()
-        if "input_quantizer" in key and key.endswith("._amax")
-    ]
-    assert input_amaxes
-    for amax in input_amaxes:
-        assert amax.dtype == torch.float32
-        torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
-    quantizer_recipe_file = export_dir / "quant_recipe.yaml"
-    assert quantizer_recipe_file.exists()
-    with open(quantizer_recipe_file) as f:
-        quantizer_recipe = yaml.safe_load(f)
-
-    if stale_source_sidecars:
-        assert stale_quantizer + "._amax" not in quantizer_state
-        assert stale_quantizer not in quantizer_recipe
-
-    marker_suffix = "._quant_recipe_marker"
-    assert not any(key.endswith(marker_suffix) for key in quantizer_state)
-    assert not any(key.endswith(marker_suffix) for key in quantizer_recipe)
-
-    state_quantizer_names = {key.rsplit(".", 1)[0] for key in quantizer_state if "quantizer" in key}
-    missing_recipe_names = state_quantizer_names - quantizer_recipe.keys()
-    assert not missing_recipe_names, (
-        "Exported quantizer tensors are missing matching recipe entries: "
-        f"{sorted(missing_recipe_names)}"
-    )
-
-    # make sure hf_quant_config.json file does not exist
-    hf_quant_config_file = export_dir / "hf_quant_config.json"
-    assert not hf_quant_config_file.exists(), (
-        f"hf_quant_config.json file should not be created in {export_dir}"
-    )
-
-    with open(export_dir / "model.safetensors.index.json") as f:
-        weight_map = json.load(f)["weight_map"]
+    expected_names = {
+        *(
+            f"model.layers.{i}.self_attn.{proj}_proj.input_quantizer"
+            for i in range(num_layers)
+            for proj in ("q", "k", "v", "o")
+        ),
+        *(
+            f"model.layers.{i}.mlp.{proj}_proj.input_quantizer"
+            for i in range(num_layers)
+            for proj in ("gate", "up", "down")
+        ),
+    }
+    state, recipe, weight_map = _assert_exported_quantizers(export_dir, expected_names)
+    assert stale_quantizer + "._amax" not in state
+    assert stale_quantizer not in recipe
     assert {
         "model.embed_tokens.weight",
         "model.norm.weight",
         "lm_head.weight",
         *(f"model.layers.{i}.self_attn.q_proj.weight" for i in range(num_layers)),
     } <= weight_map.keys()
-    for shard in set(weight_map.values()):
-        with safe_open(export_dir / shard, framework="pt") as f:
-            shard_keys = f.keys()
-            assert not any("quantizer" in key or marker_suffix in key for key in shard_keys)
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
 @pytest.mark.parametrize("pp_size", [1, 2])
-def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size):
-    """Export each PP stage once and retain weights and sidecars from every stage."""
+@pytest.mark.parametrize("prebuild", [False, True], ids=["direct", "cached"])
+def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size, prebuild):
+    """Preserve fresh sidecars and weights across PP stages, including cached shard access."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg))
-
-
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_mcore_vllm_export_with_stale_source_sidecars(request, tmp_path, pp_size):
-    """Fresh sidecars replace stale source files after checkpoint metadata is copied."""
-    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(
-        partial(_test_mcore_vllm_export, tmp_path, mtq.FP8_DEFAULT_CFG, stale_source_sidecars=True)
-    )
-
-
-def test_mcore_vllm_export_after_state_dict_access(dist_workers_size_1, tmp_path):
-    """Cached shards retain recipe markers when export begins after state inspection."""
-    dist_workers_size_1.run(
-        partial(_test_mcore_vllm_export, tmp_path, mtq.FP8_DEFAULT_CFG, prebuild=True)
-    )
+    workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg, prebuild=prebuild))
 
 
 def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
-    initialize_for_megatron(pipeline_model_parallel_size=size)
-    config = TransformerConfig(
+    model = get_mcore_hybrid_model(
         pipeline_model_parallel_size=size,
+        initialize_megatron=True,
         num_layers=4,
-        hidden_size=64,
-        num_attention_heads=8,
-        num_query_groups=4,
-        ffn_hidden_size=128,
-        normalization="RMSNorm",
-        add_bias_linear=False,
-        pipeline_dtype=torch.bfloat16,
-        bf16=True,
-        mamba_state_dim=32,
-        mamba_num_heads=8,
-        mamba_head_dim=16,
-        mamba_num_groups=2,
-        num_moe_experts=4,
-        moe_grouped_gemm=False,
-        moe_ffn_hidden_size=64,
-        moe_shared_expert_intermediate_size=32,
-        moe_router_enable_expert_bias=True,
-        moe_router_score_function="sigmoid",
-        mtp_num_layers=1,
-    )
-    model = HybridModel(
-        config=config,
-        hybrid_stack_spec=get_hybrid_stack_modelopt_spec(remap_te_layernorm=True),
         hybrid_layer_pattern="M*EE/*E",
-        vocab_size=32,
+        num_query_groups=4,
         max_sequence_length=32,
-        pre_process=is_pipeline_first_stage(),
-        post_process=is_pipeline_last_stage(),
-        share_embeddings_and_output_weights=False,
-        position_embedding_type="none",
-    ).to(dtype=torch.bfloat16, device="cuda")
+        vocab_size=32,
+        mamba_num_heads=8,
+        num_moe_experts=4,
+        normalization="RMSNorm",
+        mtp_num_layers=1,
+    ).cuda()
     model.eval()
 
     def forward_loop(model):
@@ -304,35 +254,14 @@ def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
         )
     torch.distributed.barrier()
 
-    weight_quantizers = [
-        quantizer
-        for name, quantizer in model.named_modules()
-        if name.startswith("mtp.")
-        and name.endswith("weight_quantizer")
-        and isinstance(quantizer, TensorQuantizer)
-        and quantizer.is_enabled
-    ]
-    calls = Counter()
-
-    def count_qdq(module, args, output):
-        calls[module] += 1
-
-    handles = [quantizer.register_forward_hook(count_qdq) for quantizer in weight_quantizers]
     export_dir = tmp_path / "mtp_export"
-    try:
+    with _assert_weight_qdq_once(model, prefix="mtp."):
         export_mcore_gpt_to_hf_vllm_fq(
             model,
             pretrained_model_name_or_path=str(source),
             dtype=torch.bfloat16,
             export_dir=str(export_dir),
         )
-    finally:
-        for handle in handles:
-            handle.remove()
-    assert all(calls[quantizer] == 1 for quantizer in weight_quantizers), calls
-
-    state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
-    recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
     expected_names = {
         "mtp.layers.0.eh_proj.input_quantizer",
         *(f"mtp.layers.0.mixer.{proj}_proj.input_quantizer" for proj in ("q", "k", "v", "o")),
@@ -346,22 +275,8 @@ def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
             for proj in ("up", "down")
         ),
     }
-    assert expected_names <= recipe.keys()
-    assert {name + "._amax" for name in expected_names} <= state.keys()
-    for name in expected_names:
-        assert not recipe[name]["_disabled"]
-        amax = state[name + "._amax"]
-        assert amax.dtype == torch.float32
-        torch.testing.assert_close(amax, torch.full_like(amax, 1.001), rtol=0, atol=0)
-    assert not any(key.endswith("._quant_recipe_marker") for key in state)
-    assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
-    with open(export_dir / "model.safetensors.index.json") as f:
-        weight_map = json.load(f)["weight_map"]
+    _, _, weight_map = _assert_exported_quantizers(export_dir, expected_names)
     assert "mtp.layers.0.eh_proj.weight" in weight_map
-    for shard in set(weight_map.values()):
-        with safe_open(export_dir / shard, framework="pt") as f:
-            shard_keys = f.keys()
-            assert not any("quantizer" in key for key in shard_keys)
 
 
 @pytest.mark.parametrize("pp_size", [1, 2])
