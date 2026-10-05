@@ -30,6 +30,7 @@ from _test_utils.torch.export.unified_checkpoint import (
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
+    create_tiny_deepseek_v3_dir,
     create_tiny_llama_dir,
     create_tiny_nemotron_dir,
     create_tiny_nemotron_h_dir,
@@ -46,6 +47,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.ggml as ggml
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
+from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.export.quant_format import IQ_FORMATS
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -340,6 +342,51 @@ def test_megatron_iq_export_rejects_tensor_parallelism(qformat):
         exporter.save_pretrained("unused", "unused")
 
 
+def test_megatron_export_rejects_sequential_experts_at_ep():
+    """SequentialMLP experts are numbered by local position, so EP>1 export must refuse them."""
+    experts = torch.nn.Module()
+    experts.local_experts = torch.nn.ModuleList()
+    exporter = object.__new__(GPTModelExporter)
+    exporter.model = torch.nn.Sequential(experts)
+
+    with (
+        patch.object(exporter, "_is_sidecar_writer_rank", return_value=False),
+        patch.object(GPTModelExporter, "_any_rank", staticmethod(lambda local: local)),
+        patch.object(uem.torch.distributed, "is_initialized", return_value=True),
+        patch.object(uem, "get_expert_model_parallel_world_size", return_value=2),
+        patch.object(uem, "get_pipeline_model_parallel_rank", return_value=0),
+        patch.object(uem, "get_pipeline_model_parallel_world_size", return_value=1),
+        patch.object(uem, "get_tensor_model_parallel_rank", return_value=0),
+        pytest.raises(NotImplementedError, match="grouped-GEMM experts"),
+    ):
+        exporter.save_pretrained("unused", "unused")
+
+
+def _test_mla_export_keeps_hf_head_dim(model_dir, rank, size):
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        pipeline_model_parallel_size=1,
+        initialize_megatron=True,
+        num_layers=2,
+        hidden_size=128,
+        num_attention_heads=2,
+        vocab_size=128,
+        max_sequence_length=128,
+        transformer_impl="transformer_engine",
+        multi_latent_attention=True,
+    ).cuda()
+    hf_head_dim = transformers.AutoConfig.from_pretrained(model_dir).head_dim
+    # kv_channels is MLA's V head dim, which the exporter used to write as HF's head_dim.
+    assert model.config.kv_channels != hf_head_dim
+    exporter = GPTModelExporter(model, str(model_dir))
+    assert exporter._hf_text_config.head_dim == hf_head_dim
+
+
+def test_mla_export_keeps_hf_head_dim(dist_workers_size_1, tmp_path):
+    model_dir = create_tiny_deepseek_v3_dir(tmp_path)
+    dist_workers_size_1.run(partial(_test_mla_export_keeps_hf_head_dim, model_dir))
+
+
 @pytest.mark.parametrize("qformat", IQ_FORMAT_NAMES)
 def test_megatron_iq_export_rejects_pipeline_parallelism(qformat):
     """IQ packing requires PP=1 so the fused-MoE rejection reaches every rank.
@@ -368,6 +415,27 @@ def test_megatron_iq_export_rejects_pipeline_parallelism(qformat):
         pytest.raises(NotImplementedError, match="pipeline model parallel size 1"),
     ):
         exporter.save_pretrained("unused", "unused")
+
+
+def _verify_exported_metadata(export_dir: Path, model_type, quant_config, extra_module):
+    # The router bias decides expert routing: FP32 like Megatron's buffer and HF's checkpoints.
+    bias_dtypes = set()
+    for shard in export_dir.glob("*.safetensors"):
+        with safe_open(str(shard), framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if key.endswith(("expert_bias", "e_score_correction_bias")):
+                    bias_dtypes.add(f.get_slice(key).get_dtype())
+    assert bias_dtypes <= {"F32"}, bias_dtypes
+    if model_type == "qwen3_moe":
+        assert bias_dtypes
+    if model_type == "qwen3vl" and quant_config:
+        # The vision tower is copied through unquantized.
+        quant = json.loads((export_dir / "hf_quant_config.json").read_text())["quantization"]
+        assert "model.visual*" in quant["exclude_modules"]
+    if model_type == "llama" and quant_config is None and extra_module is None:
+        # The source generation config (top_p without do_sample) is copied through as-is.
+        generation_config = json.loads((export_dir / "generation_config.json").read_text())
+        assert generation_config["top_p"] == 0.5
 
 
 def _test_unified_export_megatron(
@@ -531,6 +599,9 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
+    if rank == 0:
+        _verify_exported_metadata(tmp_export_dir, model_type, quant_config, extra_module)
+
     if rank == 0 and extra_module is None:
         # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
         allow_missing = ()
@@ -596,6 +667,10 @@ def test_unified_export_megatron(
 ):
     if model_type == "llama":
         model_dir = create_tiny_llama_dir(tmp_path)
+        # Valid to load, but rejected by GenerationConfig.save_pretrained's validation.
+        (model_dir / "generation_config.json").write_text(
+            json.dumps({"top_p": 0.5, "do_sample": False})
+        )
     elif model_type == "qwen3vl":
         model_dir = create_tiny_qwen3vl_dir(tmp_path)
     elif model_type == "nemotron":
@@ -767,7 +842,7 @@ def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size
     original_get_mtp_state_dict = GPTModelExporter._get_mtp_state_dict
 
     # Simulate stage-local MTP tensors (only on the last PP rank).
-    def _fake_get_mtp_state_dict(self):
+    def _fake_get_mtp_state_dict(self, copy_from_pretrained=True):
         if rank != size - 1:
             return {}
         return {f"mtp.injected.rank{rank}.weight": torch.ones(8, dtype=torch.bfloat16).cpu()}
@@ -902,6 +977,7 @@ def _make_exporter_for_mtp(model_dir: Path) -> GPTModelExporter:
     exporter._hf_pretrained_model_name = str(model_dir)
     exporter._state_dict = {}  # MTP keys are absent — they should be picked up
     exporter.exclude_modules = []
+    exporter.rules = {}  # a Qwen-style ``mtp.*`` checkpoint, not MTP stored as decoder layers
     return exporter
 
 
@@ -918,6 +994,9 @@ def test_mtp_state_dict_single_safetensors(tmp_path):
     save_file(tensors, str(model_dir / "model.safetensors"))
 
     exporter = _make_exporter_for_mtp(model_dir)
+    # Non-writer ranks skip the copy.
+    assert exporter._get_mtp_state_dict(copy_from_pretrained=False) == {}
+    assert exporter.exclude_modules == []
     mtp_state_dict = exporter._get_mtp_state_dict()
 
     assert "mtp.0.enorm.weight" in mtp_state_dict
@@ -973,6 +1052,104 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
+
+
+def _test_live_decoder_mtp_export_rejected(model_dir, rank, size):
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=size,
+        pipeline_model_parallel_size=1,
+        initialize_megatron=True,
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        vocab_size=128,
+        max_sequence_length=32,
+        mtp_num_layers=1,
+    ).cuda()
+    with pytest.raises(NotImplementedError, match="Megatron-built MTP"):
+        GPTModelExporter(model, str(model_dir))
+
+
+def test_live_decoder_mtp_export_rejected(dist_workers_size_1, tmp_path):
+    """GLM-5 MTP is only copied from the source; a Megatron-built one must not export misnamed."""
+    transformers.GlmMoeDsaConfig(
+        num_hidden_layers=2, architectures=["GlmMoeDsaForCausalLM"]
+    ).save_pretrained(tmp_path)
+    dist_workers_size_1.run(partial(_test_live_decoder_mtp_export_rejected, tmp_path))
+
+
+def test_mtp_state_dict_copies_decoder_mtp_layers(tmp_path):
+    """GLM-5 keeps MTP as an extra decoder layer; copy it dequantized when Megatron did not build it."""
+    model_dir = tmp_path / "fake_glm5"
+    model_dir.mkdir()
+    fp8 = torch.full((128, 128), 2.0).to(torch.float8_e4m3fn)
+    save_file(
+        {
+            "model.layers.1.input_layernorm.weight": torch.ones(8),  # pruned decoder layer
+            "model.layers.2.enorm.weight": torch.full((8,), 3.0),  # MTP layer of the source
+            "model.layers.2.eh_proj.weight": fp8,
+            "model.layers.2.eh_proj.weight_scale_inv": torch.full((1, 1), 0.5),
+        },
+        str(model_dir / "model.safetensors"),
+    )
+    exporter = _make_exporter_for_mtp(model_dir)
+    exporter.rules = {"mtp_in_decoder_layers": True}
+    exporter.all_mcore_mappings = all_mcore_hf_export_mapping["GlmMoeDsaForCausalLM"]
+    # Depth-pruned from 2 to 1 decoder layers: the source MTP (layer 2) lands at layer 1.
+    exporter._src_num_hidden_layers = 2
+    exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
+
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert sorted(mtp_state_dict) == [
+        "model.layers.1.eh_proj.weight",
+        "model.layers.1.enorm.weight",
+    ]
+    assert mtp_state_dict["model.layers.1.eh_proj.weight"].dtype == torch.bfloat16
+    torch.testing.assert_close(
+        mtp_state_dict["model.layers.1.eh_proj.weight"].float(), torch.ones(128, 128)
+    )
+    assert exporter.exclude_modules == ["model.layers.1.*"]
+
+
+def test_mtp_state_dict_copies_decoder_mtp_layers_from_hub(tmp_path, monkeypatch):
+    """A Hub-ID source downloads only the shards holding the MTP layer, then copies it."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    shards = {
+        "model.layers.0.input_layernorm.weight": "model-00001-of-00002.safetensors",
+        "model.layers.1.enorm.weight": "model-00002-of-00002.safetensors",
+    }
+    save_file(
+        {"model.layers.0.input_layernorm.weight": torch.ones(8)},
+        str(hub / shards["model.layers.0.input_layernorm.weight"]),
+    )
+    save_file(
+        {"model.layers.1.enorm.weight": torch.full((8,), 3.0)},
+        str(hub / shards["model.layers.1.enorm.weight"]),
+    )
+    (hub / "model.safetensors.index.json").write_text(json.dumps({"weight_map": shards}))
+    requested = {}
+
+    def fake_snapshot_download(repo_id, allow_patterns):
+        requested[repo_id] = allow_patterns
+        return str(hub)
+
+    monkeypatch.setattr(uem, "hf_hub_download", lambda repo_id, filename: str(hub / filename))
+    monkeypatch.setattr(uem, "snapshot_download", fake_snapshot_download)
+    exporter = _make_exporter_for_mtp(Path("zai-org/GLM-5.2"))
+    exporter.rules = {"mtp_in_decoder_layers": True}
+    exporter.all_mcore_mappings = all_mcore_hf_export_mapping["GlmMoeDsaForCausalLM"]
+    exporter._src_num_hidden_layers = 1
+    exporter._hf_text_config = SimpleNamespace(num_hidden_layers=1, num_nextn_predict_layers=1)
+
+    mtp_state_dict = exporter._get_mtp_state_dict()
+
+    assert requested == {
+        "zai-org/GLM-5.2": ["model.safetensors.index.json", "model-00002-of-00002.safetensors"]
+    }
+    assert list(mtp_state_dict) == ["model.layers.1.enorm.weight"]
+    assert exporter.exclude_modules == ["model.layers.1.*"]
 
 
 class _FakeTEGroupedMLP:
@@ -1183,10 +1360,37 @@ def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
     assert GPTModelExporter._is_sidecar_writer_rank(True) is False
 
 
-def _make_exporter_for_key_check(num_layers: int) -> GPTModelExporter:
+def _make_exporter_for_key_check(
+    num_layers: int, src_num_layers: int | None = None, num_mtp: int = 0
+) -> GPTModelExporter:
+    """``num_layers`` is the exported HF decoder depth; ``num_mtp`` MTP layers follow it."""
     exporter = object.__new__(GPTModelExporter)
-    exporter.model = SimpleNamespace(config=SimpleNamespace(num_layers=num_layers))
+    exporter._hf_text_config = SimpleNamespace(
+        num_hidden_layers=num_layers, num_nextn_predict_layers=num_mtp
+    )
+    exporter._src_num_hidden_layers = num_layers if src_num_layers is None else src_num_layers
+    exporter.rules = {"mtp_in_decoder_layers": num_mtp > 0}
     return exporter
+
+
+@pytest.mark.parametrize(("export_mtp", "raises"), [(True, False), (False, True)])
+def test_verify_exported_keys_depth_pruned_with_decoder_mtp(tmp_path, export_mtp, raises):
+    """Pruned 3 -> 2 layers: source layer 2 is not required, and its MTP (layer 3) must land at 2."""
+    source, export = tmp_path / "src", tmp_path / "exp"
+    _write_index(
+        source,
+        [f"model.layers.{i}.input_layernorm.weight" for i in range(3)]
+        + ["model.layers.3.eh_proj.weight"],
+    )
+    exported = [f"model.layers.{i}.input_layernorm.weight" for i in range(2)]
+    _write_index(export, exported + (["model.layers.2.eh_proj.weight"] if export_mtp else []))
+    exporter = _make_exporter_for_key_check(num_layers=2, src_num_layers=3, num_mtp=1)
+
+    if raises:
+        with pytest.raises(RuntimeError, match=r"model\.layers\.2\.eh_proj\.weight"):
+            exporter._verify_exported_keys(str(export), str(source))
+    else:
+        exporter._verify_exported_keys(str(export), str(source))
 
 
 def _write_index(dir_path: Path, keys) -> None:

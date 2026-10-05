@@ -205,6 +205,11 @@ def dequantize_iq2_s(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ2_S_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq2_s_grid(blocks.device)
+            return extension.iq2_s_unpack(blocks, grid, dtype).reshape(shape)
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
     high_shifts = torch.tensor([0, 2, 4, 6], dtype=torch.int64, device=blocks.device)
     grid = iq2_s_grid(blocks.device)

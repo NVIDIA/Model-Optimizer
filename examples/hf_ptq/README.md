@@ -715,7 +715,7 @@ from modelopt.torch.export.trtllm import export_tensorrt_llm_checkpoint
 with torch.inference_mode():
     export_tensorrt_llm_checkpoint(
         model,  # The quantized model.
-        decoder_type,  # The type of the model, e.g gpt, gptj, or llama.
+        decoder_type,  # The TensorRT-LLM model type, e.g gpt, gptj, or llama. Detected from the model class if None.
         dtype,  # The exported weights data type.
         export_dir,  # The directory where the exported files will be stored.
         inference_tensor_parallel,  # The number of GPUs used in the inference time tensor parallel.

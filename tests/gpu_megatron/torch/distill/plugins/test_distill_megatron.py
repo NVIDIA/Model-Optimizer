@@ -233,8 +233,8 @@ def _test_topk_logits_kl_loss(kd_kwargs, rank, size):
     loss["kd_loss"].backward()
 
 
-def _test_skip_lm_loss_with_mtp(rank, size):
-    """Test that skipping the LM loss (kd_loss_alpha=1.0) only zeroes the main LM head and not MTP heads."""
+def _test_skip_lm_loss_with_mtp(quantized, skip_lm_loss, rank, size):
+    """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
     set_seed(SEED)
 
     num_layers = 2
@@ -276,9 +276,13 @@ def _test_skip_lm_loss_with_mtp(rank, size):
         activation_func="squared_relu",
         mtp_num_layers=mtp_num_layers,
     ).cuda()
+    if quantized:
+        # A quantized body with the MTP head left out of quantization.
+        student_model.decoder.weight_quantizer = TensorQuantizer()
 
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(kd_loss_alpha=1.0),  # skips LM loss
+        # kd_loss_alpha == 1.0 skips the LM loss; any alpha < 1 keeps it.
+        config_or_path=DistillationConfig(kd_loss_alpha=1.0 if skip_lm_loss else 0.5),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
@@ -289,6 +293,13 @@ def _test_skip_lm_loss_with_mtp(rank, size):
     }
     distillation_model = mtd.convert(student_model, mode=[("kd_loss", kd_config)])
     adjust_distillation_model_for_mcore(distillation_model, distill_cfg)
+
+    # An untrained MTP head is frozen so DDP doesn't wait for its grads.
+    mtp_skipped = quantized and skip_lm_loss
+    with distillation_model.hide_teacher_model():
+        mtp_params = [p for n, p in distillation_model.named_parameters() if "mtp" in n.split(".")]
+    assert mtp_params
+    assert all(p.requires_grad != mtp_skipped for p in mtp_params)
 
     # Intercept each call to compute_language_model_loss and record return values.
     recorded_losses = []
@@ -322,8 +333,8 @@ def _test_skip_lm_loss_with_mtp(rank, size):
         f"Expected {mtp_num_layers + 1} loss calls, got {len(recorded_losses)}"
     )
     for i, loss in enumerate(recorded_losses[:-1]):
-        assert loss.any(), f"MTP head {i} loss should be non-zero with kd_loss_alpha=1.0"
-    assert not recorded_losses[-1].any(), "Main LM head loss should be zero with kd_loss_alpha=1.0"
+        assert loss.any() != mtp_skipped, f"MTP head {i} loss should be zero iff MTP is skipped"
+    assert recorded_losses[-1].any() != skip_lm_loss, "Main LM head loss is zero iff skip_lm_loss"
 
 
 def test_logits_kl_loss(dist_workers):
@@ -448,9 +459,12 @@ def test_distillation_config_top_p_validation():
     DistillationConfig(logit_kl_topk=8, logit_kl_top_p=1.0, logit_kl_top_p_min_k=2)
 
 
-def test_skip_lm_loss_with_mtp(dist_workers):
-    """Test that skipping the LM loss (kd_loss_alpha=1.0) only zeroes the main LM head, not MTP heads."""
-    dist_workers.run(_test_skip_lm_loss_with_mtp)
+@pytest.mark.parametrize(
+    ("quantized", "skip_lm_loss"), [(False, True), (True, True), (True, False)]
+)
+def test_skip_lm_loss_with_mtp(dist_workers, quantized, skip_lm_loss):
+    """Test that skip_lm_loss only zeroes the main LM head, unless MTP is left out of quantization."""
+    dist_workers.run(partial(_test_skip_lm_loss_with_mtp, quantized, skip_lm_loss))
 
 
 def test_mtp_excluded_from_quantization():

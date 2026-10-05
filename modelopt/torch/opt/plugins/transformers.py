@@ -344,7 +344,7 @@ class ModelOptArgParser(HfArgumentParser):
             args = args[:idx] + args[idx + 2 :]  # strip --config <path> from argv
             import yaml
 
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             if config:
                 known_by_parser = {a.dest for a in self._actions}
@@ -676,7 +676,7 @@ class ModelOptHFTrainer(Trainer):
         """
         import yaml
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
             raise ValueError(f"lr_config must be a YAML mapping, got {type(cfg).__name__}")

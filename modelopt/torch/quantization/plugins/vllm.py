@@ -310,17 +310,20 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
         if dt_resolved is not None:
             return dev, dt_resolved
 
-    # KV-cache tensors are available after allocation; respect kv_cache_dtype when set.
-    # kv_cache is a list of tensors (v0) or a single tensor (v1).
+    # The KV cache, once allocated, sits on the layer's device; kv_cache is a list of tensors (v0)
+    # or a single tensor (v1). Its dtype is the --kv-cache-dtype storage format, not the compute
+    # dtype, which comes from vLLM's ``dtype`` attr or, for MLAAttention (no such attr), from the
+    # ``params_dtype`` its linear children keep even when their weights are pre-quantized (FP8).
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
         t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
-            spec = getattr(module, "kv_cache_dtype", t0.dtype)
-            out_dtype = (
-                t0.dtype if spec == "auto" else (_vllm_attr_dtype_to_torch(spec) or t0.dtype)
+            params_dtypes = (getattr(m, "params_dtype", None) for m in module.children())
+            compute_dtype = _vllm_attr_dtype_to_torch(dt) or next(
+                (d for d in params_dtypes if isinstance(d, torch.dtype)), None
             )
-            return t0.device, out_dtype
+            if compute_dtype is not None:
+                return t0.device, compute_dtype
 
     # Shallow scan: weights often live on child modules rather than the attention module itself.
     for mod in (module, *module.children()):
@@ -491,17 +494,47 @@ def create_parallel_state():
     return ParallelState(dp_group, tp_group, ep_group)
 
 
+def _check_prequantized_quantizers_disabled(module: torch.nn.Module, names) -> None:
+    """Raise if a quantizer is enabled on a layer that is only supported as pass-through.
+
+    Such a layer runs a vLLM method other than the plain unquantized one, typically because the
+    checkpoint is pre-quantized (e.g. FP8), so there is no high-precision weight to fake-quantize.
+    """
+    enabled = [name for name in names if getattr(module, name).is_enabled]
+    if enabled:
+        layer = (
+            getattr(module, "prefix", "")
+            or getattr(module, "layer_name", "")
+            or type(module).__name__
+        )
+        raise RuntimeError(
+            f"{layer} uses vLLM's {type(module.quant_method).__name__} (e.g. a pre-quantized"
+            f" checkpoint), which cannot be fake-quantized ({', '.join(enabled)} enabled). Use a"
+            " recipe that leaves this layer unquantized (e.g. KV cache only) or an unquantized"
+            " checkpoint."
+        )
+
+
 class _VLLMParallelLinear(QuantModule):
+    _QUANTIZER_NAMES = ("input_quantizer", "weight_quantizer", "output_quantizer")
+
     def _setup(self):
         self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
         self.weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
         self.output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.output_quantizer.disable()
-        assert type(self.quant_method) is vllm_linear.UnquantizedLinearMethod, (
-            f"quant_method is {type(self.quant_method)}"
-        )
+        # Layers vLLM runs with another method (e.g. a pre-quantized FP8 checkpoint) pass through.
+        self._prequantized = type(self.quant_method) is not vllm_linear.UnquantizedLinearMethod
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
         self.parallel_state = create_parallel_state()
+
+    def iter_weights_for_calibration(self):
+        if not self._prequantized:
+            yield from super().iter_weights_for_calibration()
+
+    def fold_weight(self, keep_attrs: bool = False):
+        if not self._prequantized:
+            super().fold_weight(keep_attrs)
 
     def _sync_input_pre_quant_scale_to_weight(self) -> None:
         """Align pre_quant_scale to weight (vLLM CUTLASS expects matching device/dtype)."""
@@ -519,6 +552,9 @@ class _VLLMParallelLinear(QuantModule):
         self._sync_input_pre_quant_scale_to_weight()
 
     def forward(self, input_):
+        if self._prequantized:
+            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+            return super().forward(input_)
         # This context manager will conflict with torch.compile
         # with replace_function(self, "quant_method", self.fake_quant_method):
         # Manually replace quant_method instead
@@ -566,6 +602,10 @@ class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
 
 
 class _QuantFusedMoEBase(QuantModule):
+    _QUANTIZER_NAMES = tuple(
+        f"{w}_{kind}_quantizer" for w in ("w13", "w2") for kind in ("input", "weight", "output")
+    )
+
     def _setup(self):
         self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
         self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
@@ -575,13 +615,14 @@ class _QuantFusedMoEBase(QuantModule):
         self.w2_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.w13_output_quantizer.disable()
         self.w2_output_quantizer.disable()
-        assert type(self.quant_method) is UnquantizedFusedMoEMethod, (
-            f"quant_method is {type(self.quant_method)}"
-        )
+        # Experts vLLM runs with another method (e.g. a pre-quantized FP8 checkpoint) pass through.
+        self._prequantized = type(self.quant_method) is not UnquantizedFusedMoEMethod
         self.parallel_state = create_parallel_state()
 
     def iter_weights_for_calibration(self):
         """Yield the fused MoE weights with their corresponding quantizers."""
+        if self._prequantized:
+            return
         yield self.w13_weight, self.w13_weight_quantizer
         yield self.w2_weight, self.w2_weight_quantizer
 
@@ -669,6 +710,10 @@ class _QuantFusedMoEBase(QuantModule):
         They are module-level functions, so fakequant is installed by name for this forward.
         Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
         """
+        if self._prequantized:
+            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+            yield
+            return
         assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
         # Patch by hand rather than with ``replace_function``: that context manager conflicts
         # with torch.compile (same reason ``_VLLMParallelLinear.forward`` swaps quant_method).
@@ -694,6 +739,8 @@ class _QuantFusedMoEBase(QuantModule):
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
+        if self._prequantized:
+            return
         # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
         for weight, quantizer in (
             (self.w13_weight, self.w13_weight_quantizer),

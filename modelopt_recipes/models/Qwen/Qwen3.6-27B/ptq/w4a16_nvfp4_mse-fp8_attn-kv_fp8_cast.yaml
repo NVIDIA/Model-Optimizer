@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Alias recipe for nvidia/Qwen3.6-27B-NVFP4 (source Qwen/Qwen3.6-27B). Same recipe as `model_type/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast`: NVFP4
+# W4A16 weights chosen by MSE, FP8 attention, and an FP8 KV cache in cast mode. The
+# qwen3_5 architecture recipe applies unchanged to this 27B Qwen3.6 model, and the MSE
+# variant was chosen over the `max` one for being slightly more accurate here.
+#
+# One deviation to be aware of: the published checkpoint also carries `input_scale`
+# parameters on its W4A16 layers, added by a separate calibration pass so the checkpoint
+# stays usable if those layers are ever run with quantized activations. Running this
+# recipe reproduces the W4A16 scheme that was evaluated, but not those extra scales.
+
+imports:
+  base: model_type/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast
+
+$import: base
+metadata:
+  description: >-
+    Qwen/Qwen3.6-27B quantized with the qwen3_5 W4A16 NVFP4 scheme (MSE weight scales),
+    FP8 attention and an FP8 KV cache in cast mode, as published in
+    nvidia/Qwen3.6-27B-NVFP4.

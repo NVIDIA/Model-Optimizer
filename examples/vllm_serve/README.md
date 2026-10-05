@@ -73,6 +73,12 @@ For vLLM versions that expose `--moe-backend`, this launcher defaults to `--moe-
 ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are visible during
 calibration.
 
+A pre-quantized checkpoint (for example FP8) can be served with a recipe that leaves its quantized
+layers alone, such as a KV-cache-only recipe: those layers run unchanged, and a recipe that
+fake-quantizes their weights or activations raises an error instead. Pass `--moe-backend auto` for
+such MoE checkpoints: the `triton` default is only needed to fake-quantize experts, and vLLM
+rejects it for NVFP4 experts.
+
 Step 3: test the API server with curl:
 
 ```bash
@@ -91,6 +97,48 @@ Step 4 (Optional): using lm_eval to run evaluation
 ```bash
 lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,base_url=http://127.0.0.1:8000/v1/completions,num_concurrent=1,max_retries=3,tokenized_requests=False,batch_size=128,tokenizer_backend=None
 ```
+
+## Fake-quantize the MLA KV cache
+
+MLA models such as DeepSeek-V3 and GLM-5.3-Flash cache one latent vector per token instead of
+separate keys and values; RoPE models such as DeepSeek-V3 also cache a small RoPE key. Their fake
+quantizers are `kv_c_bmm_quantizer` and `k_pe_bmm_quantizer` on vLLM's `MLAAttention`.
+`KV_QUANT_CFG` presets (e.g. `NVFP4_KV_CFG`) are extended to both automatically, with the same
+format for both. The KV-cache units in a recipe (`*[kv]_bmm_quantizer`) do not match them, so a
+recipe imports the `configs/ptq/units/kv_nvfp4_mla` unit instead, which uses NVFP4 for the latent
+and FP8 for the RoPE key. For example, `kv_nvfp4_mla_only.yaml` quantizes the MLA KV cache alone
+(weights and activations stay unquantized):
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  kv_nvfp4_mla: configs/ptq/units/kv_nvfp4_mla
+
+metadata:
+  description: Fake quantization of the MLA KV cache only (NVFP4 latent, FP8 RoPE key).
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: kv_nvfp4_mla
+```
+
+```bash
+RECIPE_PATH=kv_nvfp4_mla_only.yaml python vllm_serve_fakequant.py <model_path> -tp 8 \
+  --host 0.0.0.0 --port 8000
+```
+
+This recipe also runs on the FP8 GLM-5.3-Flash release, since it leaves the FP8 layers alone (add
+`--moe-backend auto`, see above).
+
+Notes:
+
+- The latent and RoPE key are fake-quantized before vLLM writes them to the cache, so attention
+  over the tokens of the current step sees the quantized values too.
+- Serve with a BF16 KV cache: an FP8 cache would quantize the fake-quantized latent a second time.
+  `--kv-cache-dtype auto` is BF16 unless the checkpoint declares a quantized KV cache (e.g. a
+  ModelOpt export with an FP8 KV cache); then pass `--kv-cache-dtype bfloat16`.
 
 ## Tracking a serve with MLflow
 
@@ -191,6 +239,53 @@ MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py 
 QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
+## Fake-quantize the sparse-attention indexer query and K cache
+
+The sparse-attention models DeepSeek-V4 and GLM-5.3-Flash keep a separate indexer key cache next
+to the attention KV cache and score it against an indexer query. Their fake quantizers are
+`indexer_k_quantizer` and `indexer_q_quantizer` on the indexer module; the KV-cache presets
+(`*[kv]_bmm_quantizer`) leave them disabled, so enable them by importing the
+`configs/ptq/units/indexer_k_nvfp4` and `configs/ptq/units/indexer_q_nvfp4` units into a recipe.
+For example, `indexer_nvfp4_only.yaml` quantizes the indexer key cache and query alone (weights,
+activations and the attention KV cache stay unquantized):
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  indexer_k_nvfp4: configs/ptq/units/indexer_k_nvfp4
+  indexer_q_nvfp4: configs/ptq/units/indexer_q_nvfp4
+
+metadata:
+  description: NVFP4 fake quantization of the sparse-attention indexer key cache and query only.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: indexer_k_nvfp4
+    - $import: indexer_q_nvfp4
+```
+
+```bash
+RECIPE_PATH=indexer_nvfp4_only.yaml python vllm_serve_fakequant.py <model_path> -tp 8 \
+  --host 0.0.0.0 --port 8000
+```
+
+Drop one of the two units to quantize only the key cache or only the query. To add them to an
+existing recipe, append the imports and their `$import` entries to that recipe's `quant_cfg`.
+
+Notes:
+
+- vLLM computes the indexer key and query inside fused kernels that quantize them to FP8, so the
+  FP8 results (the cache entries each step wrote, and the query) are dequantized, fake-quantized
+  and quantized to FP8 again. The QDQ input therefore carries the FP8 rounding (at most 2^-4
+  relative).
+- This requires vLLM's FP8 indexer cache, the default (`indexer_kv_dtype` in the attention
+  config); enabling the quantizers with DeepSeek-V4's MXFP4 indexer cache
+  (`indexer_kv_dtype="mxfp4"`) is rejected.
+- vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
+  GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.
@@ -283,4 +378,4 @@ Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cr
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
 2. KV cache quantization export and reload is not supported in MCore yet.
-3. **`NVFP4_KV_CFG` and `NVFP4_AFFINE_KV_CFG` require `--enforce-eager`**; these configs use a dynamic-block Triton kernel for KV-cache quantization that is incompatible with CUDA graph capture (the kernel grid is computed from Python-level tensor shapes, which get baked in at capture time). Without `--enforce-eager`, the captured grid will be wrong for different batch sizes, producing incorrect outputs.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which this launcher sets by default). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.

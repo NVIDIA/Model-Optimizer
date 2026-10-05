@@ -124,6 +124,9 @@ def _parser_has_argument(parser, dest: str) -> bool:
 
 
 def main():
+    # vLLM's torch.compile cache is not keyed on the fake quant applied at serve time, so a graph
+    # compiled earlier for the same model without it would be reused and silently skip it.
+    os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
     # Create parser that handles both quant and serve arguments
     parser = FlexibleArgumentParser(description="vLLM model server with quantization support")
     parser.add_argument("model", type=str, help="The path or name of the model to serve")

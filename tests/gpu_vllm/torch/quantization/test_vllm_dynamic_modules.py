@@ -29,8 +29,11 @@ TinyDeepseekV3 (+ MLAAttention).
 from __future__ import annotations
 
 import builtins
+import copy
 import gc
 import importlib.util
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -39,14 +42,20 @@ import pytest
 import torch
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
+    create_tiny_deepseek_v4_config_dir,
+    create_tiny_glm5_next_config_dir,
     create_tiny_llama_dir,
     create_tiny_qwen3_moe_dir,
 )
-from vllm import LLM
+from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.inputs import TokensPrompt
+from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import (
@@ -59,6 +68,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
+from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBase
 
 
 def _load_example_module(name: str):
@@ -174,6 +184,20 @@ def test_vllm_serve_entrypoint_layouts(
     )
     assert launcher.run_server is expected_run_server
     assert launcher.make_arg_parser is expected_arg_parser
+
+
+def test_vllm_serve_main_disables_compile_cache(monkeypatch):
+    """A cached torch.compile graph of the same model without the fake quant must not be reused."""
+    modules, entrypoints = _launcher_import_modules()
+    entrypoints.current_arg_parser.return_value._actions = []
+    _patch_vllm_imports(monkeypatch, modules)
+    monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    _load_example_module("vllm_serve_fakequant").main()
+
+    assert os.environ["VLLM_DISABLE_COMPILE_CACHE"] == "1"
 
 
 @pytest.mark.parametrize(
@@ -646,6 +670,259 @@ def test_attention_kv_defaults_ignore_unsupported_quantizers():
         assert not hasattr(quantizer, "_amax")
 
 
+def test_get_device_dtype_ignores_kv_cache_dtype():
+    """The dtype is the layer's compute dtype, whatever the KV-cache format (--kv-cache-dtype)."""
+
+    def attention_like(**attrs):
+        module = torch.nn.Module()
+        module.register_buffer("_k_scale", torch.tensor(1.0))  # vLLM's float32 KV scales
+        module.kv_cache = torch.zeros(2, 16, 8, dtype=torch.uint8)
+        for name, value in attrs.items():
+            setattr(module, name, value)
+        return module
+
+    def linear_like(weight_dtype):
+        # vLLM linears keep the model dtype in ``params_dtype``, also with pre-quantized weights.
+        linear = torch.nn.Linear(4, 4).to(weight_dtype)
+        linear.params_dtype = torch.bfloat16
+        return linear
+
+    attention = attention_like(dtype=torch.bfloat16)  # vLLM Attention: dtype but no device attr
+    mla = attention_like(kv_b_proj=linear_like(torch.bfloat16))  # MLAAttention: neither
+    mla_fp8 = attention_like(kv_b_proj=linear_like(torch.float8_e4m3fn))  # FP8 checkpoint
+    for cache_dtype in ("auto", "bfloat16", "float16", "fp8", "fp8_e4m3", "fp8_ds_mla"):
+        for module in (attention, mla, mla_fp8):
+            module.kv_cache_dtype = cache_dtype
+            assert vllm_plugin._get_device_dtype(module) == (torch.device("cpu"), torch.bfloat16)
+
+
+class _PrequantizedMethod:
+    """Stands in for a vLLM real-quant method such as ``Fp8LinearMethod``."""
+
+    def apply(self, layer, x, bias=None):
+        return x + 1
+
+
+class _NativeLinear(torch.nn.Module):
+    def forward(self, input_):
+        return self.quant_method.apply(self, input_)
+
+
+class _TestQuantVLLMLinear(_VLLMParallelLinear, _NativeLinear):
+    pass
+
+
+class _TestQuantFusedMoE(_QuantFusedMoEBase):
+    pass
+
+
+def _packed_weight(*shape):
+    # An int32 packed weight: any float round trip (e.g. a disabled-quantizer fold) corrupts it.
+    return torch.nn.Parameter(
+        torch.randint(-(2**31), 2**31 - 1, shape, dtype=torch.int32), requires_grad=False
+    )
+
+
+def _prequantized_module(monkeypatch, cls, prefix, **weights):
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    module = _new_attention(cls)
+    module.prefix = prefix
+    module.quant_method = _PrequantizedMethod()
+    for name, weight in weights.items():
+        setattr(module, name, weight)
+    module._setup()
+    return module
+
+
+def test_prequantized_linear_passes_through(monkeypatch):
+    """A layer of a pre-quantized (e.g. FP8) checkpoint runs untouched under a KV-only config."""
+    linear = _prequantized_module(
+        monkeypatch,
+        _TestQuantVLLMLinear,
+        "model.layers.0.mlp.down_proj",
+        weight=_packed_weight(4, 4),
+    )
+    for name in _VLLMParallelLinear._QUANTIZER_NAMES:
+        getattr(linear, name).disable()
+    weight = linear.weight.detach().clone()
+
+    assert linear._prequantized
+    assert torch.equal(linear(torch.zeros(2, 4)), torch.ones(2, 4))
+    assert isinstance(linear.quant_method, _PrequantizedMethod)
+    assert list(linear.iter_weights_for_calibration()) == []
+    linear.fold_weight()
+    assert torch.equal(linear.weight, weight)
+
+
+def test_prequantized_linear_rejects_enabled_quantizers(monkeypatch):
+    linear = _prequantized_module(
+        monkeypatch,
+        _TestQuantVLLMLinear,
+        "model.layers.0.mlp.down_proj",
+        weight=_packed_weight(4, 4),
+    )
+    linear.input_quantizer.disable()
+    with pytest.raises(
+        RuntimeError,
+        match=r"model\.layers\.0\.mlp\.down_proj uses vLLM's _PrequantizedMethod.*weight_quantizer",
+    ):
+        linear(torch.zeros(2, 4))
+
+    unquantized = _new_attention(_TestQuantVLLMLinear)
+    unquantized.quant_method = vllm_plugin.vllm_linear.UnquantizedLinearMethod()
+    unquantized._setup()
+    assert not unquantized._prequantized
+
+
+def test_prequantized_fused_moe_passes_through(monkeypatch):
+    moe = _prequantized_module(
+        monkeypatch,
+        _TestQuantFusedMoE,
+        "model.layers.1.mlp.experts",
+        w13_weight=_packed_weight(2, 8, 4),
+        w2_weight=_packed_weight(2, 4, 4),
+    )
+    for name in _QuantFusedMoEBase._QUANTIZER_NAMES:
+        getattr(moe, name).disable()
+    kernels = [getattr(module, name) for module, name in vllm_plugin._FUSED_MOE_KERNEL_TARGETS]
+    w13, w2 = moe.w13_weight.detach().clone(), moe.w2_weight.detach().clone()
+
+    assert moe._prequantized
+    with moe._fakequant_moe_kernels():
+        # The real-quant experts keep vLLM's own kernels.
+        assert [getattr(m, n) for m, n in vllm_plugin._FUSED_MOE_KERNEL_TARGETS] == kernels
+    assert list(moe.iter_weights_for_calibration()) == []
+    moe.fold_weight()
+    assert torch.equal(moe.w13_weight, w13)
+    assert torch.equal(moe.w2_weight, w2)
+
+    moe.w13_input_quantizer.enable()
+    with pytest.raises(RuntimeError, match="w13_input_quantizer"), moe._fakequant_moe_kernels():
+        pass
+
+
+@pytest.mark.skipif(VllmMLAAttention is None, reason="this vLLM has no MLAAttention")
+@pytest.mark.parametrize(
+    ("rope_dim", "expected"),
+    [(64, ["*kv_c_bmm_quantizer", "*k_pe_bmm_quantizer"]), (0, ["*kv_c_bmm_quantizer"])],
+    ids=("rope", "nope"),
+)
+def test_update_kv_cfg_for_mla_extends_kv_presets(rope_dim, expected):
+    """KV_QUANT_CFG presets reach the MLA quantizers; NoPE models (GLM-5.3-Flash) have no RoPE key."""
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    mla = _new_attention(VllmMLAAttention)
+    mla.qk_rope_head_dim = rope_dim
+    kv_cfg = copy.deepcopy(mtq.NVFP4_KV_CFG["quant_cfg"])
+    base_cfg = kv_cfg[0]["cfg"]
+
+    updated = ptq_utils.update_kv_cfg_for_mla(torch.nn.Sequential(mla), kv_cfg)
+
+    assert [entry["quantizer_name"] for entry in updated[1:]] == expected
+    assert all(entry["cfg"] == base_cfg and entry["enable"] for entry in updated[1:])
+
+
+@pytest.mark.skipif(VllmMLAAttention is None, reason="this vLLM has no MLAAttention")
+def test_update_kv_cfg_for_mla_skips_non_mla_and_warns_on_affine():
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    kv_cfg = copy.deepcopy(mtq.NVFP4_AFFINE_KV_CFG["quant_cfg"])
+    assert ptq_utils.update_kv_cfg_for_mla(torch.nn.Linear(2, 2), copy.deepcopy(kv_cfg)) == kv_cfg
+
+    mla = _new_attention(VllmMLAAttention)
+    mla.qk_rope_head_dim = 0
+    with pytest.warns(UserWarning, match="affine"):
+        updated = ptq_utils.update_kv_cfg_for_mla(torch.nn.Sequential(mla), copy.deepcopy(kv_cfg))
+    # The MLA latent gets the base (non-affine) format.
+    assert updated[-1] == {
+        "quantizer_name": "*kv_c_bmm_quantizer",
+        "cfg": kv_cfg[0]["cfg"],
+        "enable": True,
+    }
+
+
+class _NativeMLAAttention(torch.nn.Module):
+    def forward(self, query, kv_c, k_pe, *args, **kwargs):
+        return query, kv_c, k_pe
+
+
+@pytest.mark.skipif(VllmMLAAttention is None, reason="this vLLM has no MLAAttention")
+@pytest.mark.parametrize("rope_dim", [0, 64], ids=("nope", "rope"))  # GLM-5.3-Flash, DeepSeek-V3
+def test_kv_nvfp4_mla_unit_quantizes_the_mla_kv_cache(monkeypatch, rope_dim):
+    """Like vLLM's ``nvfp4_ds_mla`` cache: an NVFP4 latent and an unscaled FP8 RoPE key ``k_pe``.
+    An empty NoPE ``k_pe`` passes through."""
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+
+    class _TestQuantVLLMMLAAttention(vllm_plugin._QuantVLLMMLAAttention, _NativeMLAAttention):
+        pass
+
+    mla = _new_attention(_TestQuantVLLMMLAAttention)
+    mla._setup()
+    set_quantizer_by_cfg(
+        mla,
+        [{"quantizer_name": "*", "enable": False}, *load_config("configs/ptq/units/kv_nvfp4_mla")],
+    )
+
+    assert mla.kv_c_bmm_quantizer.is_enabled
+    assert mla.kv_c_bmm_quantizer.amax == 6.0 * 448.0
+    assert mla.k_pe_bmm_quantizer.is_enabled
+    assert not mla.q_bmm_quantizer.is_enabled
+
+    mla.to("cuda")
+    query = torch.randn(5, 4, 512, device="cuda", dtype=torch.bfloat16)
+    kv_c = torch.randn(5, 512, device="cuda", dtype=torch.bfloat16)
+    k_pe = torch.randn(5, 1, rope_dim, device="cuda", dtype=torch.bfloat16)
+    out_query, out_kv_c, out_k_pe = mla(query, kv_c, k_pe)
+    assert out_query is query
+    assert not torch.equal(out_kv_c, kv_c)
+    # NVFP4 with a fixed global scale is idempotent: the output is already on the grid.
+    assert torch.equal(mla.kv_c_bmm_quantizer(out_kv_c), out_kv_c)
+    if rope_dim:
+        assert not torch.equal(out_k_pe, k_pe)
+        assert torch.equal(out_k_pe, k_pe.to(torch.float8_e4m3fn).to(torch.bfloat16))
+    else:
+        assert out_k_pe is k_pe
+
+
+@pytest.mark.parametrize(
+    ("name", "shape"),
+    [("kv_c_bmm_quantizer", (8, 512)), ("k_pe_bmm_quantizer", (8, 1, 64))],
+    ids=("kv_c", "k_pe"),
+)
+def test_kv_nvfp4_mla_quantizer_replays_in_cuda_graph(name, shape):
+    """The latent's constant amax is created on the CPU; on the GPU (FakeQuantWorker moves every
+    quantizer there before CUDA graph capture) each fake quant of the unit captures and replays
+    like eager."""
+    layer = torch.nn.Module()
+    setattr(layer, name, TensorQuantizer())
+    set_quantizer_by_cfg(layer, load_config("configs/ptq/units/kv_nvfp4_mla"))
+    quantizer = getattr(layer, name)
+    if name == "kv_c_bmm_quantizer":
+        assert quantizer._amax.device.type == "cpu"
+    quantizer.to("cuda")
+
+    static_in = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        quantizer(static_in)  # compile the kernel before capture
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = quantizer(static_in)
+
+    new_in = torch.randn_like(static_in)
+    static_in.copy_(new_in)
+    graph.replay()
+    assert torch.equal(static_out, quantizer(new_in))
+
+
 def _quantize_and_summarize(self):
     """Run on the worker via ``LLM.collective_rpc``.
 
@@ -733,7 +1010,7 @@ def _quantize_and_summarize(self):
     }
 
 
-def _boot_llm(model_dir, **extra):
+def _boot_llm(model_dir, max_model_len=64, **extra):
     """Construct a vLLM engine on a tiny model.
 
     MoE fixtures override with ``moe_backend="triton"`` (pins the Triton
@@ -745,7 +1022,7 @@ def _boot_llm(model_dir, **extra):
         model=str(model_dir),
         enforce_eager=True,
         gpu_memory_utilization=0.2,
-        max_model_len=64,
+        max_model_len=max_model_len,
         max_num_seqs=1,
         dtype="bfloat16",
         skip_tokenizer_init=True,
@@ -819,6 +1096,127 @@ def tiny_deepseek_llm(tmp_path_factory):
         yield llm
     finally:
         _shutdown_llm(llm)
+
+
+_INDEXER_FP8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+    ],
+    "algorithm": "max",
+}
+
+# model -> (architecture vLLM must know, tiny checkpoint builder, extra LLM kwargs)
+_SPARSE_ATTN_MODELS = {
+    "glm5_next": (
+        "Glm5NextForCausalLM",
+        create_tiny_glm5_next_config_dir,
+        {"load_format": "dummy"},
+    ),
+    # DeepSeek-V4 computes the indexer query only when top-k selection is needed, i.e. beyond
+    # compress_ratio * index_topk = 4 * 1024 tokens.
+    "deepseek_v4": (
+        "DeepseekV4ForCausalLM",
+        create_tiny_deepseek_v4_config_dir,
+        {"load_format": "dummy", "max_model_len": 4608, "max_num_batched_tokens": 4608},
+    ),
+}
+
+
+@pytest.fixture(scope="module", params=list(_SPARSE_ATTN_MODELS))
+def tiny_sparse_attn_llm(request, tmp_path_factory):
+    """Tiny sparse-attention models with an indexer K cache: GLM-5.3-Flash and DeepSeek-V4-Pro."""
+    arch, build, extra = _SPARSE_ATTN_MODELS[request.param]
+    if arch not in ModelRegistry.get_supported_archs():
+        pytest.skip(f"this vLLM release has no {arch}")
+    if not has_deep_gemm():
+        pytest.skip("vLLM's sparse-attention indexer needs DeepGEMM")
+    if torch.cuda.get_device_capability()[0] not in (9, 10):
+        pytest.skip("vLLM's sparse-attention indexer backends need Hopper or Blackwell")
+    llm = _boot_llm(build(tmp_path_factory.mktemp(request.param)), **extra)
+    try:
+        yield llm
+    finally:
+        _shutdown_llm(llm)
+
+
+def _cache_row_signature(kv_cache, chunk=2048):
+    """Per-row checksum of the uint8 indexer cache, chunked to avoid copying the KV pool."""
+    weights = torch.arange(1, kv_cache.shape[-1] + 1, device=kv_cache.device) * 1000003 % 998244353
+    return torch.cat(
+        [
+            (kv_cache[i : i + chunk].to(torch.int64) * weights).sum(-1)
+            for i in range(0, kv_cache.shape[0], chunk)
+        ]
+    )
+
+
+def _indexer_cache_rows(kv_cache, mask):
+    """Dequantized values and raw fp32 scale bits of the cache rows selected by ``mask``."""
+    num_blocks, block_size, row_bytes = kv_cache.shape
+    head_dim = row_bytes - 4
+    block, pos = mask.nonzero(as_tuple=True)
+    flat = kv_cache.view(num_blocks, block_size * row_bytes)
+    values = flat[block[:, None], pos[:, None] * head_dim + torch.arange(head_dim).cuda()]
+    scales = flat[block[:, None], block_size * head_dim + pos[:, None] * 4 + torch.arange(4).cuda()]
+    values = values.contiguous().view(torch.float8_e4m3fn).float()
+    return values, scales.contiguous().view(torch.int32).squeeze(-1)
+
+
+def _calibrate_and_clip_indexer_k(self):
+    """Run on the worker: calibrate FP8 indexer q and K quantizers, then clip K to 1/8 of its amax.
+
+    Calibration goes through real scheduled prefills: the fused indexers write their cache only
+    when ``attn_metadata`` is set, which a dummy run does not do. The second prompt fills the
+    context, so that DeepSeek-V4 selects top-k and computes its query.
+    """
+    model = self.get_model()
+    lengths = (40, self.model_config.max_model_len - 8)
+    batches = [{"input_ids": torch.randint(1, 100, (1, n))} for n in lengths]
+    forward_loop = _load_example_module("vllm_ptq_utils").calibrate_fun(batches, self)
+    with disable_compilation(model):
+        mtq.quantize(model, _INDEXER_FP8_CFG, forward_loop=forward_loop)
+
+    amaxes, self.indexer_k_snapshots = {"k": {}, "q": {}}, {}
+    for name, module in model.named_modules():
+        if isinstance(module, _QuantVLLMIndexerBase):
+            for kind in amaxes:
+                amax = getattr(module, f"indexer_{kind}_quantizer").amax
+                amaxes[kind][name] = None if amax is None else amax.item()
+            if amaxes["k"][name]:
+                module.indexer_k_quantizer.amax = module.indexer_k_quantizer.amax / 8
+            self.indexer_k_snapshots[name] = _cache_row_signature(module.k_cache.kv_cache)
+    return amaxes
+
+
+def _indexer_k_rows_written(self):
+    """Run on the worker: rows the indexer kernels wrote since the snapshot, max over the clip."""
+    torch.cuda.synchronize()
+    result = {}
+    for name, module in self.get_model().named_modules():
+        if name not in self.indexer_k_snapshots:
+            continue
+        cache = module.k_cache.kv_cache
+        changed = (_cache_row_signature(cache) != self.indexer_k_snapshots[name]).view(
+            cache.shape[:2]
+        )
+        changed[0] = False  # vLLM's null block, where other layers write scratch data
+        values, scale_bits = _indexer_cache_rows(cache, changed)
+        # Hybrid models alias one KV pool across cache groups; the indexer kernels' own rows have a
+        # power-of-two scale and use the FP8 range (or the fixed scale of the 1e-4 amax floor).
+        fp8_max = values.abs().amax(-1)
+        power_of_two = (scale_bits > 0) & ((scale_bits & 0x7FFFFF) == 0)
+        floor_scale = scale_bits == torch.tensor(2.0**-22).view(torch.int32).item()
+        kernel_rows = power_of_two & (((fp8_max > 224) & (fp8_max <= 448)) | floor_scale)
+        scale = torch.ldexp(torch.ones_like(fp8_max), ((scale_bits >> 23) & 0xFF) - 127)
+        row_max = (fp8_max * scale)[kernel_rows]
+        clip = module.indexer_k_quantizer.amax.item()
+        result[name] = (
+            int(kernel_rows.sum()),
+            row_max.max().item() / clip if row_max.numel() else 0,
+        )
+    return result
 
 
 def _assert_quantizer_amax_is_static(summary):
@@ -905,6 +1303,77 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     )
     assert action == "group", (action, vllm_key)
     assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
+
+
+@pytest.mark.timeout(600)  # engine boot and the DeepGEMM JIT dominate
+def test_tiny_sparse_attn_indexer_quantize(tiny_sparse_attn_llm):
+    """The indexer query is fake-quantized and the K cache the kernels read holds QDQ keys."""
+    amaxes = tiny_sparse_attn_llm.collective_rpc(_calibrate_and_clip_indexer_k)[0]
+    assert amaxes["k"], "no indexer was converted"
+    for kind_amaxes in amaxes.values():  # calibrated: the quantizer saw the kernels' tensors
+        assert all(a is not None and 0 < a < float("inf") for a in kind_amaxes.values()), amaxes
+
+    # Prefill plus decode steps that complete further pools / compression groups.
+    prompts = [TokensPrompt(prompt_token_ids=list(range(1 + i, 41 + i))) for i in range(2)]
+    params = SamplingParams(max_tokens=12, ignore_eos=True, temperature=0.0, detokenize=False)
+    tiny_sparse_attn_llm.generate(prompts, params)
+
+    for name, (rows, max_over_clip) in tiny_sparse_attn_llm.collective_rpc(_indexer_k_rows_written)[
+        0
+    ].items():
+        assert rows > 0, f"{name}: the serving step wrote no indexer cache rows"
+        # Re-storing a clipped key in the FP8 cache rounds it up by at most 2**-4.
+        assert max_over_clip <= 1.07, (name, rows, max_over_clip)
+
+
+def _quantize_kv_preset_and_summarize(self):
+    """Worker RPC: ``KV_QUANT_CFG=NVFP4_KV_CFG`` as FakeQuantWorker resolves it, fold, one more
+    forward; JSON-able summary."""
+    model = self.get_model()
+    config = _load_example_module("vllm_ptq_utils").get_quant_config(
+        {"recipe_path": None, "quant_cfg": None, "kv_quant_cfg": "NVFP4_KV_CFG"}, model
+    )
+    with disable_compilation(model):
+        mtq.quantize(model, config, forward_loop=lambda _: self.model_runner._dummy_run(1))
+    mtq.fold_weight(model)
+    self.model_runner._dummy_run(1)
+
+    methods: dict[str, list[str]] = {"passthrough": [], "fake_quant": []}
+    enabled = []
+    for name, module in model.named_modules():
+        if isinstance(module, (_VLLMParallelLinear, _QuantFusedMoEBase)):
+            kind = "passthrough" if module._prequantized else "fake_quant"
+            methods[kind].append(type(module.quant_method).__name__)
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
+            enabled.append((name, float(module.amax)))
+    return {**methods, "enabled": enabled}
+
+
+@pytest.fixture
+def tiny_deepseek_fp8_llm(tmp_path):
+    # vLLM's online FP8 quantization turns the linears and experts into real-quant FP8 layers.
+    # kv_lora_rank=512 keeps DeepSeek's 576-wide cache row, which every vLLM MLA backend accepts.
+    model_dir = create_tiny_deepseek_v3_dir(
+        tmp_path, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+    )
+    llm = _boot_llm(
+        model_dir, quantization="fp8", moe_backend="triton", enable_expert_parallel=True
+    )
+    try:
+        yield llm
+    finally:
+        _shutdown_llm(llm)
+
+
+def test_tiny_deepseek_fp8_kv_quant_cfg(tiny_deepseek_fp8_llm):
+    """FP8 layers pass through while the KV_QUANT_CFG preset fake-quantizes the MLA KV cache."""
+    summary = tiny_deepseek_fp8_llm.collective_rpc(_quantize_kv_preset_and_summarize)[0]
+
+    assert summary["passthrough"], summary
+    assert any("MoE" in method for method in summary["passthrough"]), summary
+    enabled = {name.rsplit(".", 1)[-1] for name, _ in summary["enabled"]}
+    assert enabled == {"kv_c_bmm_quantizer", "k_pe_bmm_quantizer"}, summary
+    assert all(amax > 0 for _, amax in summary["enabled"]), summary
 
 
 def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
