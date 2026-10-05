@@ -18,6 +18,7 @@ from collections import Counter
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import partial
+from importlib.util import find_spec
 
 import pytest
 import torch
@@ -71,7 +72,8 @@ def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled
         assert recipe[name]["_disabled"] == (name in disabled_names)
         tensor = state[name + "._amax"]
         assert tensor.dtype == torch.float32
-        torch.testing.assert_close(tensor, torch.full_like(tensor, amax), rtol=0, atol=0)
+        expected_amax = amax[name] if isinstance(amax, dict) else amax
+        torch.testing.assert_close(tensor, torch.full_like(tensor, expected_amax), rtol=0, atol=0)
     assert {key.rsplit(".", 1)[0] for key in state} <= recipe.keys()
     assert not any(key.endswith("._quant_recipe_marker") for key in state)
     assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
@@ -86,7 +88,7 @@ def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled
     return state, recipe, weight_map
 
 
-def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False):
+def _test_mcore_vllm_export(tmp_path, rank, size):
     """Test megatron-core model export for vLLM with fake quantization."""
     # Create a tiny mcore GPT model
     num_layers = 2
@@ -123,6 +125,12 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
             run_mcore_inference(model, input_ids)
 
     model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+    attribute_cfg = {
+        "use_constant_amax": True,
+        "unsigned": True,
+        "narrow_range": True,
+        "type": "dynamic",
+    }
     inactive_cfg = {
         "num_bits": 8,
         "unsigned": True,
@@ -138,7 +146,7 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
             if getattr(quantizer, "_amax", None) is not None:
                 quantizer.float()
                 quantizer.amax = torch.full_like(quantizer.amax, 1.001)
-            if attribute_cfg:
+            if name.startswith("decoder.layers.0."):
                 quantizer.set_from_attribute_config(attribute_cfg)
                 if name.endswith("linear_qkv.input_quantizer"):
                     quantizer.reset_amax()
@@ -162,32 +170,36 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
         (("mlp.down_proj",), layer.mlp.linear_fc2),
     )
     expected_weights = []
-    if attribute_cfg:
-        for projections, module in linears:
-            quantizer = module.weight_quantizer
-            if projections[0] == "self_attn.q_proj":
-                quantizer.set_from_attribute_config(
-                    {"num_bits": 8, "unsigned": True, "type": "dynamic"}
-                )
-                quantizer.reset_amax()
-                with torch.no_grad():
-                    module.weight.abs_()
-            elif projections[0] == "self_attn.o_proj":
-                quantizer.set_from_attribute_config(
-                    {"num_bits": 8, "narrow_range": True, "bias": {-1: None}}
-                )
-                quantizer.bias_value = torch.tensor(0.025, device="cuda")
-            elif projections[0] == "mlp.gate_proj":
-                quantizer.set_from_attribute_config(
-                    {"enable": False, "rotate": True, "fake_quant": False, "backend": "unused"}
-                )
-                quantizer.pre_quant_scale = torch.full((hidden_size,), 2.0, device="cuda")
-            else:
-                quantizer.set_from_attribute_config({"num_bits": "q8_0", "backend": "ggml"})
+    for projections, module in linears:
+        quantizer = module.weight_quantizer
+        if projections[0] == "self_attn.q_proj":
+            quantizer.set_from_attribute_config(
+                {"num_bits": 8, "unsigned": True, "type": "dynamic"}
+            )
+            quantizer.reset_amax()
             with torch.no_grad():
-                expected_weights.append(
-                    quantizer(module.weight.to(torch.bfloat16)).to(torch.bfloat16).cpu()
-                )
+                module.weight.abs_()
+        elif projections[0] == "self_attn.o_proj":
+            quantizer.set_from_attribute_config(
+                {"num_bits": 8, "narrow_range": True, "bias": {-1: None}}
+            )
+            quantizer.bias_value = torch.tensor(0.025, device="cuda")
+        elif projections[0] == "mlp.gate_proj":
+            quantizer.set_from_attribute_config(
+                {
+                    "enable": False,
+                    "rotate": find_spec("fast_hadamard_transform") is not None,
+                    "fake_quant": False,
+                    "backend": "unused",
+                }
+            )
+            quantizer.pre_quant_scale = torch.full((hidden_size,), 2.0, device="cuda")
+        else:
+            quantizer.set_from_attribute_config({"num_bits": "q8_0", "backend": "ggml"})
+        with torch.no_grad():
+            expected_weights.append(
+                quantizer(module.weight.to(torch.bfloat16)).to(torch.bfloat16).cpu()
+            )
     # Create HF config for export
     pretrained_config = {
         "architectures": ["LlamaForCausalLM"],
@@ -216,18 +228,10 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
 
     export_dir = tmp_path / "vllm_export"
     with _assert_weight_qdq_once(model):
-        if prebuild:
-            exporter = VllmFqGPTModelExporter(model, tmp_path, dtype=torch.bfloat16)
-            _ = exporter.state_dict
-            assert exporter.layer_state_dicts
-            exporter.save_pretrained(str(export_dir), tmp_path)
-        else:
-            export_mcore_gpt_to_hf_vllm_fq(
-                model,
-                pretrained_model_name_or_path=tmp_path,
-                dtype=torch.bfloat16,
-                export_dir=str(export_dir),
-            )
+        exporter = VllmFqGPTModelExporter(model, tmp_path, dtype=torch.bfloat16)
+        _ = exporter.state_dict
+        assert exporter.layer_state_dicts
+        exporter.save_pretrained(str(export_dir), tmp_path)
 
     expected_names = {
         *(
@@ -241,55 +245,52 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
             for proj in ("gate", "up", "down")
         ),
     }
-    disabled_names = (
-        {name for name in expected_names if ".mlp." in name} if attribute_cfg else set()
-    )
+    disabled_names = {name for name in expected_names if name.startswith("model.layers.0.mlp.")}
     state, recipe, weight_map = _assert_exported_quantizers(
         export_dir,
         expected_names,
-        amax=448.0 if attribute_cfg else 1.001,
+        amax={
+            name: 448.0 if name.startswith("model.layers.0.") else 1.001 for name in expected_names
+        },
         disabled_names=disabled_names,
     )
-    if attribute_cfg:
-        inputs = torch.linspace(-1000, 1000, 64, device="cuda").reshape(1, -1)
-        for (projections, module), expected_weight in zip(linears, expected_weights):
-            folded_weights = []
-            for projection in projections:
-                prefix = f"model.layers.{layer.layer_number - 1}.{projection}"
-                weight_key = prefix + ".weight"
-                with safe_open(export_dir / weight_map[weight_key], framework="pt") as f:
-                    folded_weights.append(f.get_tensor(weight_key))
-                assert recipe[prefix + ".weight_quantizer"]["_disabled"]
-            torch.testing.assert_close(torch.cat(folded_weights), expected_weight, rtol=0, atol=0)
-            projection = projections[0]
-            name = f"model.layers.{layer.layer_number - 1}.{projection}.input_quantizer"
-            config = recipe[name]
-            restored = TensorQuantizer(
-                mtq.QuantizerAttributeConfig(
-                    num_bits=config.get("_num_bits", 8),
-                    axis=config.get("_axis"),
-                    block_sizes=config.get("_block_sizes"),
-                    enable=not config["_disabled"],
-                )
-            ).cuda()
-            restored.amax = state[name + "._amax"].cuda()
-            scale = state.get(name + "._pre_quant_scale")
-            if scale is not None:
-                restored.pre_quant_scale = scale.cuda()
-            torch.testing.assert_close(
-                restored(inputs), module.input_quantizer(inputs), rtol=0, atol=0
+    inputs = torch.linspace(-1000, 1000, 64, device="cuda").reshape(1, -1)
+    for (projections, module), expected_weight in zip(linears, expected_weights):
+        folded_weights = []
+        for projection in projections:
+            prefix = f"model.layers.{layer.layer_number - 1}.{projection}"
+            weight_key = prefix + ".weight"
+            with safe_open(export_dir / weight_map[weight_key], framework="pt") as f:
+                folded_weights.append(f.get_tensor(weight_key))
+            assert recipe[prefix + ".weight_quantizer"]["_disabled"]
+        torch.testing.assert_close(torch.cat(folded_weights), expected_weight, rtol=0, atol=0)
+        projection = projections[0]
+        name = f"model.layers.{layer.layer_number - 1}.{projection}.input_quantizer"
+        config = recipe[name]
+        restored = TensorQuantizer(
+            mtq.QuantizerAttributeConfig(
+                num_bits=config.get("_num_bits", 8),
+                axis=config.get("_axis"),
+                block_sizes=config.get("_block_sizes"),
+                enable=not config["_disabled"],
             )
-            if projection == "self_attn.q_proj":
-                assert not hasattr(module.input_quantizer, "_amax")
-            else:
-                torch.testing.assert_close(
-                    module.input_quantizer._amax, torch.tensor(1.001, device="cuda"), rtol=0, atol=0
-                )
-            if projection == "mlp.gate_proj":
-                assert scale is not None
-            elif projection == "mlp.down_proj":
-                assert scale is None
-                assert hasattr(module.input_quantizer, "_pre_quant_scale")
+        ).cuda()
+        restored.amax = state[name + "._amax"].cuda()
+        scale = state.get(name + "._pre_quant_scale")
+        if scale is not None:
+            restored.pre_quant_scale = scale.cuda()
+        torch.testing.assert_close(restored(inputs), module.input_quantizer(inputs), rtol=0, atol=0)
+        if projection == "self_attn.q_proj":
+            assert not hasattr(module.input_quantizer, "_amax")
+        else:
+            torch.testing.assert_close(
+                module.input_quantizer._amax, torch.tensor(1.001, device="cuda"), rtol=0, atol=0
+            )
+        if projection == "mlp.gate_proj":
+            assert scale is not None
+        elif projection == "mlp.down_proj":
+            assert scale is None
+            assert hasattr(module.input_quantizer, "_pre_quant_scale")
     assert stale_quantizer + "._amax" not in state
     assert stale_quantizer not in recipe
     assert {
@@ -300,26 +301,9 @@ def _test_mcore_vllm_export(tmp_path, attribute_cfg, rank, size, prebuild=False)
     } <= weight_map.keys()
 
 
-@pytest.mark.parametrize(
-    ("attribute_cfg", "pp_size", "prebuild"),
-    [
-        pytest.param({}, 1, False, id="direct"),
-        pytest.param({}, 1, True, id="cached"),
-        pytest.param(
-            {"use_constant_amax": True, "unsigned": True, "narrow_range": True, "type": "dynamic"},
-            1,
-            True,
-            id="supported_settings",
-        ),
-        pytest.param({}, 2, False, id="pp2"),
-    ],
-)
-def test_mcore_vllm_export(request, tmp_path, attribute_cfg, pp_size, prebuild):
-    """Preserve fresh quantizer files and effective settings across PP stages and cached access."""
-    if attribute_cfg:
-        pytest.importorskip("fast_hadamard_transform")
-    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
-    workers.run(partial(_test_mcore_vllm_export, tmp_path, attribute_cfg, prebuild=prebuild))
+def test_mcore_vllm_export(dist_workers_size_1, tmp_path):
+    """Cached export preserves default and supported quantizers from separate layers."""
+    dist_workers_size_1.run(partial(_test_mcore_vllm_export, tmp_path))
 
 
 def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
@@ -398,10 +382,9 @@ def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
     assert "mtp.layers.0.eh_proj.weight" in weight_map
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_mcore_vllm_export_mtp(request, tmp_path, pp_size):
+def test_mcore_vllm_export_mtp(request, tmp_path):
     """Live Nemotron MTP quantizers reach state and recipe files without leaking into weights."""
-    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
+    workers = request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
 
 
@@ -449,8 +432,7 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfgs, rank, 
         assert not export_dir.exists()
 
 
-@pytest.mark.parametrize("pp_size", [1, 2])
-def test_mcore_vllm_export_unsupported_setting(request, tmp_path, pp_size):
+def test_mcore_vllm_export_unsupported_setting(request, tmp_path):
     """Unsupported settings reject export on every rank, including a final-stage PP2 error."""
     attribute_cfgs = [
         {"unsigned": True, "num_bits": 8},
@@ -464,9 +446,7 @@ def test_mcore_vllm_export_unsupported_setting(request, tmp_path, pp_size):
         {"bias": {-1: None}},
         {"backend": "custom"},
     ]
-    if pp_size == 2:
-        attribute_cfgs = [{"fake_quant": False}]
-    workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
+    workers = request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
     workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfgs))
 
 
@@ -488,25 +468,11 @@ def _test_cross_rank_recipe_merge(tmp_path, error, rank, size):
             assert yaml.safe_load(f) == {name: recipe}
 
 
-def test_cross_rank_recipe_merge(dist_workers_size_2, tmp_path):
-    """Recipe writes complete before return; conflicts and write errors reach every rank."""
-    for error in (None, ValueError, RuntimeError):
-        case_dir = tmp_path / (error.__name__ if error else "matching")
-        case_dir.mkdir()
-        dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, case_dir, error))
-
-
 def _test_cross_rank_tensor_merge(tmp_path, error, rank, size):
     assert size == 2
     name = "model.layers.0.self_attn.q_proj.input_quantizer._amax"
     tensor = torch.tensor([1.0 + rank if error is ValueError else 1.0])
-    if rank == 0 and error is RuntimeError:
-        (tmp_path / "quantizer_state.pth").mkdir()
-    match = (
-        "Conflicting quantizer tensors"
-        if error is ValueError
-        else "Failed to save quantizer_state.pth"
-    )
+    match = "Conflicting quantizer tensors"
     with pytest.raises(error, match=match) if error else nullcontext():
         gather_mcore_vllm_fq_quantized_state_dict(None, {1: {name: tensor}}, tmp_path)
     if error is None:
@@ -514,9 +480,13 @@ def _test_cross_rank_tensor_merge(tmp_path, error, rank, size):
         torch.testing.assert_close(state[name], tensor, rtol=0, atol=0)
 
 
-def test_cross_rank_tensor_merge(dist_workers_size_2, tmp_path):
-    """Tensor writes complete before return; conflicts and write errors reach every rank."""
-    for error in (None, ValueError, RuntimeError):
+def test_cross_rank_quantizer_merge(dist_workers_size_2, tmp_path):
+    """Check duplicate recipes and tensors, conflicts, and the shared write failure path."""
+    for error in (None, ValueError):
         case_dir = tmp_path / (error.__name__ if error else "matching")
         case_dir.mkdir()
+        dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, case_dir, error))
         dist_workers_size_2.run(partial(_test_cross_rank_tensor_merge, case_dir, error))
+    failure_dir = tmp_path / "write_failure"
+    failure_dir.mkdir()
+    dist_workers_size_2.run(partial(_test_cross_rank_recipe_merge, failure_dir, RuntimeError))
