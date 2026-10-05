@@ -28,6 +28,7 @@ jobs:
     outputs:
       any_changed: ${{ steps.lanes.outputs.any_changed }}
       torch: ${{ steps.lanes.outputs.torch }}
+      vllm: ${{ steps.lanes.outputs.vllm }}
       trtllm: ${{ steps.lanes.outputs.trtllm }}
       megatron: ${{ steps.lanes.outputs.megatron }}
       onnx: ${{ steps.lanes.outputs.onnx }}
@@ -61,9 +62,12 @@ jobs:
               - tests/examples/conftest.py
               - "!**/*.{md,rst,png,ipynb}"
             torch:
-              - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding,vllm_serve}/**"
+              - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding}/**"
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
+              - "!**/*.{md,rst,png,ipynb}"
+            vllm:
+              - "{examples,tests/examples}/vllm_serve/**"
               - "!**/*.{md,rst,png,ipynb}"
             trtllm:
               - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"
@@ -82,12 +86,13 @@ jobs:
           NON_PR: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
           TORCH: ${{ steps.changed.outputs.torch_any_modified }}
+          VLLM: ${{ steps.changed.outputs.vllm_any_modified }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
           MEGATRON: ${{ steps.changed.outputs.megatron_any_modified }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
         run: |
           any=false
-          for lane in TORCH TRTLLM MEGATRON ONNX; do
+          for lane in TORCH VLLM TRTLLM MEGATRON ONNX; do
             if [[ "$NON_PR" == "true" || "$COMMON" == "true" || "${!lane}" == "true" ]]; then
               run=true
               any=true
@@ -112,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding, vllm_serve]
+        example: [llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
@@ -124,6 +129,23 @@ jobs:
       pip_install_extras: "[hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
+
+  ##### vLLM Example Tests #####
+  vllm:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.vllm == 'true'
+    uses: ./.github/workflows/_example_tests_runner.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      docker_image: "vllm/vllm-openai:v0.30.0"
+      container_options: "--shm-size=2gb --user 0"
+      example: vllm_serve
+      timeout_minutes: 30
+      pip_install_extras: "[hf,dev-test]"
+      runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+      allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',vllm_serve,') }}
 
   ##### TensorRT-LLM Example Tests #####
   trtllm:
@@ -188,7 +210,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [pr-gate, torch, trtllm, megatron, onnx]
+    needs: [pr-gate, torch, vllm, trtllm, megatron, onnx]
     runs-on: ubuntu-latest
     steps:
       - name: Required example tests did not succeed
@@ -196,6 +218,7 @@ jobs:
           needs.pr-gate.result != 'success' ||
           (needs.pr-gate.outputs.any_changed == 'true' && (
             !contains(fromJSON('["success", "skipped"]'), needs.torch.result) ||
+            !contains(fromJSON('["success", "skipped"]'), needs.vllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.trtllm.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.megatron.result) ||
             !contains(fromJSON('["success", "skipped"]'), needs.onnx.result)

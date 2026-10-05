@@ -8,6 +8,11 @@ on:
         description: "Docker image to use for tests"
         required: true
         type: string
+      container_options:
+        description: "Docker options for the test container"
+        required: false
+        type: string
+        default: "--shm-size=2gb"
       example:
         description: "Example name to test (e.g. 'hf_ptq')"
         required: true
@@ -41,7 +46,7 @@ jobs:
       contents: read
     container:
       image: ${{ inputs.docker_image }}
-      options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory
+      options: ${{ inputs.container_options }} # TRT-LLM tests on 2-GPU runner need more shared memory
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -50,6 +55,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
+      - name: Install git for vLLM image
+        if: inputs.example == 'vllm_serve'
+        run: apt-get update && apt-get install -y git
       - uses: ./.github/actions/cache-extensions
         with:
           cache-key: rtxpro6000-${{ inputs.docker_image }}
