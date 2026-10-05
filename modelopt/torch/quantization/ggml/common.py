@@ -105,16 +105,14 @@ def _same_elements(key: _CacheKey, other: _CacheKey) -> bool:
     )
 
 
-def _matching_cache(
-    quantizer, inputs: torch.Tensor, format_name: str, *, any_contiguous_view: bool = False
-) -> _PackedWeightCache | None:
+def _matching_cache(quantizer, inputs: torch.Tensor, format_name: str) -> _PackedWeightCache | None:
     """The quantizer's cached payload if it was packed from ``inputs``, else None.
 
     It matches only while the weight is unchanged since it was packed: the key carries the
-    tensor's version counter, so an in-place update misses. With ``any_contiguous_view`` it also
-    matches another contiguous view of the same values: TensorQuantizer hands fake quant the
-    weight reshaped into 256-value blocks, so export, which holds the weight itself, sees a
-    different shape over the same elements in the same order, and so the same GGML blocks.
+    tensor's version counter, so an in-place update misses. It also matches another contiguous
+    view of the same values: TensorQuantizer hands fake quant the weight reshaped into 256-value
+    blocks, while export and GPTQ hold the weight itself, a different shape over the same
+    elements in the same order, and so the same GGML blocks.
     """
     cache = getattr(quantizer, "_quantizer_cache", None)
     input_key = _input_cache_key(inputs)
@@ -125,11 +123,37 @@ def _matching_cache(
         and cache.format_name == format_name
     ):
         return None
-    if cache.input_key == input_key or (
-        any_contiguous_view and _same_elements(cache.input_key, input_key)
-    ):
+    if cache.input_key == input_key or _same_elements(cache.input_key, input_key):
         return cache
     return None
+
+
+def cache_packed_weight(
+    quantizer,
+    weight: torch.Tensor,
+    format_name: str,
+    block_chunk_size: int,
+    packed_weights: torch.Tensor,
+) -> None:
+    """Make ``packed_weights`` the payload fake quant and export use for ``weight``.
+
+    For callers that chose the payload themselves, such as GPTQ, whose weight is then its
+    decoding: packing that again need not return the same codes. The entry lasts while the
+    weight is unchanged, like one fake quant made.
+    """
+    input_key = _input_cache_key(weight)
+    quantizer._quantizer_cache = (
+        None
+        if input_key is None
+        else _PackedWeightCache(
+            base_ref=weakref.ref(_cache_base(weight)),
+            input_key=input_key,
+            format_name=format_name,
+            block_chunk_size=block_chunk_size,
+            packed_weights=packed_weights,
+            weight_shape=torch.tensor(weight.shape, dtype=torch.int64),
+        )
+    )
 
 
 def fake_quantize_with_cache(
@@ -148,18 +172,7 @@ def fake_quantize_with_cache(
         packed_weights, weight_shape = cache.packed_weights, cache.weight_shape
     else:
         packed_weights, weight_shape = quantize(inputs, block_chunk_size=block_chunk_size)
-        input_key = _input_cache_key(inputs)
-        if input_key is not None:
-            quantizer._quantizer_cache = _PackedWeightCache(
-                base_ref=weakref.ref(_cache_base(inputs)),
-                input_key=input_key,
-                format_name=format_name,
-                block_chunk_size=block_chunk_size,
-                packed_weights=packed_weights,
-                weight_shape=weight_shape,
-            )
-        else:
-            quantizer._quantizer_cache = None
+        cache_packed_weight(quantizer, inputs, format_name, block_chunk_size, packed_weights)
 
     # Sized separately from the encode chunk: packing happens once per weight and is bounded
     # by its search temporaries, while this runs on every forward and is bounded by launches.
@@ -168,7 +181,7 @@ def fake_quantize_with_cache(
         weight_shape,
         dtype=inputs.dtype,
         block_chunk_size=decode_chunk_size,
-    )
+    ).reshape(inputs.shape)
     return inputs + (reconstructed - inputs).detach()
 
 
@@ -231,11 +244,7 @@ class GGMLFormat:
         weight's payload, and reusing it both skips a second search and exports exactly the
         bytes the evaluated model decoded. Any other tensor is packed afresh.
         """
-        cache = (
-            _matching_cache(quantizer, weight, self.name, any_contiguous_view=True)
-            if quantizer is not None
-            else None
-        )
+        cache = _matching_cache(quantizer, weight, self.name) if quantizer is not None else None
         if cache is None:
             return self.quantize(weight)[0]
         return cache.packed_weights.reshape(
