@@ -18,6 +18,7 @@
 import logging
 from collections import defaultdict
 from collections.abc import Generator
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from warnings import warn
@@ -1298,23 +1299,37 @@ def all_items_same(item_list):
 
 
 def _update_pre_quant_scale(module, new_pre_quant_scale):
-    old_pre_quant_scale = module.input_quantizer._pre_quant_scale
-    # do the processing in fp32 for numerical stability
-    dtype = module.weight.dtype
-    module.weight = nn.Parameter(
-        (
-            module.weight.to(torch.float32)
-            * old_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
-            / new_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
-        ).to(dtype)
-    )
-    module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+    # CPU/disk-offloaded modules keep their weights on meta between forwards (accelerate
+    # hooks). Materialize the weight for the rescale below and write the new value back to
+    # the offload holder; otherwise both the rescale and the amax recollection that follows
+    # run on a meta weight, which silently destroys the weight quantizer amax (the export
+    # then fails later while reading it: "Tensor.item() cannot be called on meta tensors").
+    ctx = nullcontext()
+    if hasattr(module, "_hf_hook"):
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context,
+        )
 
-    # Redo weights collection
-    module.weight_quantizer.reset_amax()
-    enable_stats_collection(module.weight_quantizer)
-    module.weight_quantizer(module.weight)
-    finish_stats_collection(module.weight_quantizer)
+        ctx = weight_access_and_writeback_context(module, writeback=True)
+
+    with ctx:
+        old_pre_quant_scale = module.input_quantizer._pre_quant_scale
+        # do the processing in fp32 for numerical stability
+        dtype = module.weight.dtype
+        module.weight = nn.Parameter(
+            (
+                module.weight.to(torch.float32)
+                * old_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
+                / new_pre_quant_scale.to(dtype=torch.float32, device=module.weight.device)
+            ).to(dtype)
+        )
+        module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+
+        # Redo weights collection
+        module.weight_quantizer.reset_amax()
+        enable_stats_collection(module.weight_quantizer)
+        module.weight_quantizer(module.weight)
+        finish_stats_collection(module.weight_quantizer)
 
 
 def _update_svdquant(modules, new_pre_quant_scale):
@@ -1524,15 +1539,32 @@ def fuse_prequant_layernorm(
     if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
         return
 
-    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
-    if _layernorm_uses_weight_plus_one(layernorm_module):
-        # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
-        fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
-    else:
-        fused_weight = layernorm_module.weight * pre_quant_scale
-    layernorm_module.weight = torch.nn.Parameter(fused_weight.to(layernorm_module.weight.dtype))
-    if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
-        layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
+    # CPU/disk-offloaded norms hold their weight on meta between forwards (accelerate hooks).
+    # Materialize it and write the folded value back to the offload holder; otherwise the
+    # fold is computed on a meta tensor (and ``.to(weight.device)`` below moves the scale to
+    # meta too), so the rewritten norm silently reverts to the unfolded weight on export.
+    ctx = nullcontext()
+    if hasattr(layernorm_module, "_hf_hook"):
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context,
+        )
+
+        ctx = weight_access_and_writeback_context(layernorm_module, writeback=True)
+
+    with ctx:
+        pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(
+            layernorm_module.weight.device
+        )
+        if _layernorm_uses_weight_plus_one(layernorm_module):
+            # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
+            fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
+        else:
+            fused_weight = layernorm_module.weight * pre_quant_scale
+        layernorm_module.weight = torch.nn.Parameter(
+            fused_weight.to(layernorm_module.weight.dtype)
+        )
+        if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
+            layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
     # Pre_quant_scales of modules must not be exported, since they have been fused with layernorm
     for module in modules:
         delattr(module.input_quantizer, "_pre_quant_scale")
