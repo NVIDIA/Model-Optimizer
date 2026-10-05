@@ -198,7 +198,7 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size, prebuild=False):
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("prebuild", [False, True], ids=["direct", "cached"])
 def test_mcore_vllm_export(request, tmp_path, quant_cfg, pp_size, prebuild):
-    """Preserve fresh sidecars and weights across PP stages, including cached shard access."""
+    """Preserve fresh quantizer files and weights across PP stages, including cached access."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg, prebuild=prebuild))
 
@@ -281,7 +281,7 @@ def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
 
 @pytest.mark.parametrize("pp_size", [1, 2])
 def test_mcore_vllm_export_mtp(request, tmp_path, pp_size):
-    """Live Nemotron MTP quantizers reach sidecars and never leak into weight shards."""
+    """Live Nemotron MTP quantizers reach state and recipe files without leaking into weights."""
     workers = request.getfixturevalue(f"dist_workers_size_{pp_size}")
     workers.run(partial(_test_mcore_vllm_export_mtp, tmp_path))
 

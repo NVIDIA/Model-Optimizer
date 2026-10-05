@@ -34,7 +34,7 @@ __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
 def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
-    """Return quantizer recipes, rejecting forward settings absent from the sidecar."""
+    """Return quantizer recipes, rejecting forward settings absent from the recipe."""
     configs = {}
     for name, quantizer in module.named_modules():
         if not isinstance(quantizer, TensorQuantizer):
@@ -70,8 +70,8 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
     return configs
 
 
-def _save_quantizer_sidecar(path: Path, save: Callable[[Path], None]) -> None:
-    """Publish a sidecar and share write completion or failure across ranks."""
+def _save_quantizer_state(path: Path, save: Callable[[Path], None]) -> None:
+    """Save quantizer state or recipes and share write completion or failure across ranks."""
     failure = ""
     if is_master():
         try:
@@ -123,7 +123,7 @@ def gather_mcore_vllm_fq_quantizer_recipe(
         with open(path, "w") as f:
             yaml.safe_dump(merged, f, sort_keys=False)
 
-    _save_quantizer_sidecar(Path(save_directory) / "quant_recipe.yaml", save_recipe)
+    _save_quantizer_state(Path(save_directory) / "quant_recipe.yaml", save_recipe)
 
 
 def gather_mcore_vllm_fq_quantized_state_dict(
@@ -135,7 +135,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 
     Megatron export stores one ``OrderedDict`` per decoder layer in ``layer_state_dicts``; the
     ``GPTModelExporter.state_dict`` property only references the last shard after build, so
-    quantizer sidecars must be collected from all shards.
+    quantizer state must be collected from all shards.
 
     Args:
         _model: Unused; kept for a stable call signature with export entry points.
@@ -173,7 +173,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
         DistributedProcessGroup(None),
         _merge_quantizer_states,
     )
-    _save_quantizer_sidecar(
+    _save_quantizer_state(
         Path(save_directory) / "quantizer_state.pth",
         lambda path: torch.save(merged_quantizer_state_dict, path),
     )
@@ -249,7 +249,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             self._quantizer_tensor_states.append(quantizer_state)
 
     def _get_mtp_state_dict(self, copy_from_pretrained: bool = True) -> dict[str, torch.Tensor]:
-        """Capture MTP sidecars before the base exporter merges its weights."""
+        """Collect MTP quantizer state before the base exporter merges its weights."""
         state_dict = super()._get_mtp_state_dict(copy_from_pretrained=copy_from_pretrained)
         self._get_quantizer_state(state_dict)
         return state_dict
@@ -259,7 +259,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save folded weights and quantizer sidecars, including the live MTP head.
+        """Save folded weights, quantizer state, and recipes, including the live MTP head.
 
         Args:
             save_directory: The directory to save the exported model.
@@ -287,7 +287,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._get_quantizer_state(self._state_dict)
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
-        # Publish after the base exporter has collected MTP and copied source sidecars.
+        # Save quantizer files after the base exporter collects MTP and copies source files.
         quantizer_state_dicts = dict(enumerate(self._quantizer_tensor_states))
         self._extract_quantizer_recipe_markers(quantizer_state_dicts)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, quantizer_state_dicts, save_directory)
@@ -389,7 +389,7 @@ def export_mcore_gpt_to_hf_vllm_fq(
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
-    Also saves ``quantizer_state.pth`` and ``quant_recipe.yaml`` sidecars,
+    Also saves ``quantizer_state.pth`` and ``quant_recipe.yaml`` files,
     for later fakequant reload.
 
     Args:
