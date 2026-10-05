@@ -86,25 +86,67 @@ def test_general_ptq_recipe_count_in_ptq_md():
     )
 
 
+def test_documented_recipe_paths_resolve():
+    """Every ``general/ptq/<name>`` a doc names must exist on disk.
+
+    The existing checks run doc-from-disk: they catch a recipe that no doc mentions.
+    This is the other direction -- a doc naming a recipe that was never landed, or was
+    moved to another branch after the doc row was written. A recipe path is the
+    user-facing ``--recipe`` interface, so a phantom row sends users to
+    ``Recipe path '...' is not a valid YAML file or directory``.
+    """
+    docs = {
+        "modelopt_recipes/ptq.md": PTQ_MD,
+        "docs/source/guides/10_recipes.rst": Path(__file__).resolve().parents[3]
+        / "docs"
+        / "source"
+        / "guides"
+        / "10_recipes.rst",
+    }
+    missing = []
+    for label, path in docs.items():
+        if not path.is_file():
+            continue
+        # encoding= is required, not decorative: these docs contain non-ASCII (em dashes
+        # among others) and a bare read_text() decodes with the locale codepage, which is
+        # cp1252 on the Windows runners -- UnicodeDecodeError on the first such byte.
+        for name in sorted(
+            set(re.findall(r"general/ptq/([A-Za-z0-9._-]+)", path.read_text(encoding="utf-8")))
+        ):
+            stem = name.removesuffix(".yaml").removesuffix(".yml")
+            if (GENERAL_PTQ_DIR / f"{stem}.yaml").is_file():
+                continue
+            # Prose also names a recipe *family* -- e.g. ``general/ptq/nvfp4_mlp_only``
+            # standing for its -kv_* variants -- which is not a phantom path.
+            if any(GENERAL_PTQ_DIR.glob(f"{stem}-*.yaml")):
+                continue
+            missing.append(f"{label} -> general/ptq/{name}")
+    assert not missing, (
+        "Docs name general/ptq recipes that do not exist on disk:\n  "
+        + "\n  ".join(missing)
+        + "\nAdd the recipe, or remove the row if it belongs to a different change."
+    )
+
+
 def test_every_model_specific_ptq_dir_is_mentioned():
     """Every model-specific PTQ recipe must be identifiable in ptq.md.
 
-    ``huggingface/<model_type>/ptq/`` recipes are checked by their ``model_type``
+    ``model_type/<model_type>/ptq/`` recipes are checked by their ``model_type``
     (e.g. ``gemma4``); ``models/<org>/<model_id>/ptq/`` recipes are checked by their
     full ``<org>/<model_id>`` hub path (e.g. ``nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16``), so
     the org — the whole point of the top-level tier — is verified too and an org
     re-key (e.g. ``step3p5`` → ``stepfun-ai``) can't silently drift from the doc.
     """
     doc = _ptq_md_text()
-    # model_type recipes: huggingface/<model_type>/ptq/<recipe>.yaml -> <model_type>
-    hf_ids = {p.parent.parent.name for p in (RECIPES_DIR / "huggingface").glob("**/ptq/*.yaml")}
+    # model_type recipes: model_type/<model_type>/ptq/<recipe>.yaml -> <model_type>
+    hf_ids = {p.parent.parent.name for p in (RECIPES_DIR / "model_type").glob("**/ptq/*.yaml")}
     # checkpoint recipes: models/<org>/<model_id>/ptq/<recipe>.yaml -> <org>/<model_id>
     model_ids = {
         f"{p.parent.parent.parent.name}/{p.parent.parent.name}"
         for p in (RECIPES_DIR / "models").glob("**/ptq/*.yaml")
     }
     identifiers = sorted(hf_ids | model_ids)
-    assert identifiers, "No model-specific PTQ recipes found under huggingface/ or models/"
+    assert identifiers, "No model-specific PTQ recipes found under model_type/ or models/"
     missing = [name for name in identifiers if name not in doc]
     assert not missing, (
         f"Model-specific PTQ recipe folders are missing from "
@@ -114,40 +156,54 @@ def test_every_model_specific_ptq_dir_is_mentioned():
 
 
 def test_checkpoint_recipes_live_in_the_top_level_models_tier():
-    """Lock in the model_type-vs-checkpoint split.
+    """Lock in the model_type-vs-checkpoint split and the backward-compat symlinks.
 
-    Checkpoint-mirror recipes belong at ``models/<org>/<model_id>/``; ``huggingface/``
-    holds only per-``model_type`` recipes. ``huggingface/models`` is kept as a
-    backward-compatibility **symlink** to the top-level ``models/`` tier, so the old
-    ``--recipe huggingface/models/<org>/<model_id>/...`` paths still resolve; it must
-    stay a symlink that points at ``../models`` and never become a real directory that
-    holds recipes. A checkpoint recipe nested under a ``model_type`` (e.g.
-    ``huggingface/<model_type>/<checkpoint>/<task>/``) still fails loudly here instead
-    of silently shipping both tiers — e.g. on a bad merge that re-adds the old layout.
+    Checkpoint-mirror recipes belong at ``models/<org>/<model_id>/``; ``model_type/``
+    (formerly ``huggingface/``) holds only per-``model_type`` recipes. Two
+    backward-compatibility **symlinks** are kept so old ``--recipe`` paths still
+    resolve: the top-level ``huggingface`` -> ``model_type`` rename alias, and the
+    nested ``model_type/models`` -> ``../models`` alias for the old
+    ``huggingface/models/<org>/<model_id>/...`` checkpoint paths. Both must stay
+    symlinks and never become real directories that hold recipes. A checkpoint recipe
+    nested under a ``model_type`` (e.g. ``model_type/<model_type>/<checkpoint>/<task>/``)
+    still fails loudly here instead of silently shipping both tiers — e.g. on a bad
+    merge that re-adds the old layout.
     """
-    hf = RECIPES_DIR / "huggingface"
+    model_type = RECIPES_DIR / "model_type"
     models = RECIPES_DIR / "models"
-    hf_models = hf / "models"
-    assert hf_models.is_symlink(), (
-        "huggingface/models must be a symlink to the top-level modelopt_recipes/models/ "
-        "tier (a backward-compat alias for the old --recipe paths), not a real directory."
+    hf_alias = RECIPES_DIR / "huggingface"
+    mt_models = model_type / "models"
+    # Top-level huggingface -> model_type rename alias.
+    assert hf_alias.is_symlink(), (
+        "modelopt_recipes/huggingface must be a backward-compat symlink to model_type/ "
+        "(the rename alias), not a real directory."
     )
-    assert hf_models.resolve() == models.resolve(), (
-        f"huggingface/models must resolve to the top-level models/ tier; resolves to "
-        f"{hf_models.resolve()} instead of {models.resolve()}."
+    assert hf_alias.resolve() == model_type.resolve(), (
+        f"huggingface must resolve to the model_type/ tier; resolves to "
+        f"{hf_alias.resolve()} instead of {model_type.resolve()}."
     )
-    # Every recipe under huggingface/ must be <model_type>/<task>/<file> (3 parts);
+    # Nested model_type/models -> ../models alias for the old huggingface/models/... paths.
+    assert mt_models.is_symlink(), (
+        "model_type/models must be a symlink to the top-level modelopt_recipes/models/ "
+        "tier (a backward-compat alias for the old --recipe huggingface/models/... paths), "
+        "not a real directory."
+    )
+    assert mt_models.resolve() == models.resolve(), (
+        f"model_type/models must resolve to the top-level models/ tier; resolves to "
+        f"{mt_models.resolve()} instead of {models.resolve()}."
+    )
+    # Every recipe under model_type/ must be <model_type>/<task>/<file> (3 parts);
     # anything deeper is a checkpoint nested under a model_type and belongs in models/.
-    # Skip the huggingface/models symlink so the models/ recipes it aliases (4 parts)
+    # Skip the model_type/models symlink so the models/ recipes it aliases (4 parts)
     # aren't miscounted as nested here.
     nested = sorted(
         str(p.relative_to(RECIPES_DIR))
         for ext in ("*.yaml", "*.yml")
-        for p in hf.glob(f"**/{ext}")
-        if hf_models not in p.parents and len(p.relative_to(hf).parts) != 3
+        for p in model_type.glob(f"**/{ext}")
+        if mt_models not in p.parents and len(p.relative_to(model_type).parts) != 3
     )
     assert not nested, (
-        f"Recipes under huggingface/ must be <model_type>/<task>/<file>; found nested "
+        f"Recipes under model_type/ must be <model_type>/<task>/<file>; found nested "
         f"paths (a checkpoint recipe belongs under models/<org>/<model_id>/): {nested}"
     )
     # Every recipe under models/ must be <org>/<model_id>/<task>/<file> (4 parts) so the
@@ -181,7 +237,7 @@ def test_launcher_yaml_recipe_paths_resolve():
     # ``--recipe <p>`` / ``QUANT_CFG: <p>`` are modelopt_recipes-relative — only tier-prefixed
     # values are recipe paths; bare names like ``auto`` or ``FP8_DEFAULT_CFG`` are not. The
     # ``modelopt_recipes/<p>.yaml`` form (e.g. ``--config``) embeds the path directly.
-    tier = r"(?:general|huggingface|models|configs)/[A-Za-z0-9._/-]+"
+    tier = r"(?:general|model_type|models|configs)/[A-Za-z0-9._/-]+"
     rel_re = re.compile(rf"(?:--recipe\s+|QUANT_CFG:\s*)({tier})")
     abs_re = re.compile(rf"modelopt_recipes/({tier}\.ya?ml)")
 

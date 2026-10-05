@@ -35,7 +35,7 @@ from _test_utils.torch.export.utils import (
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import (
+from modelopt.torch.export.quant_format import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
     QUANTIZATION_FP8,
@@ -52,7 +52,6 @@ from modelopt.torch.export.quant_utils import (
     get_quant_config,
     get_quantization_format,
     get_scaling_factor,
-    get_scaling_factor_from_weight,
     get_weight_block_size,
     postprocess_state_dict,
     process_layer_quant_config,
@@ -166,42 +165,6 @@ def test_process_layer_quant_config(layer_config_dict, expected_processed_dict):
 def test_all_items_same(item_list, expected):
     generated = all_items_same(item_list)
     assert generated == expected
-
-
-@pytest.mark.parametrize(
-    ("weight", "group_size", "expected"),
-    [
-        (
-            torch.tensor([[0.0, 0.35, 0.28, 7.0], [0.49, 0.84, -0.77, 0.07]]),
-            2,
-            torch.tensor([[0.05, 1.0], [0.12, 0.11]]),
-        ),  # group_size != 0 and divides weight.shape[1]
-        (
-            torch.tensor([[0.127, 0.0, 1.27, -12.7], [0.0, 127.0, 0.254, 2.54]]),
-            0,
-            torch.tensor([0.1, 1.0]),
-        ),  # group_size = 0
-        (
-            torch.tensor([[0.0, 0.0, 0.0, 0.0], [0.0, -0.127, 0.254, 2.54]]),
-            0,
-            torch.tensor([1.0, 0.02]),
-        ),  # zero replaced with 1.0
-        (
-            torch.tensor([[0.0, 0.84, -0.77, 0.07], [0.0, 0.0, 0.0, 0.0]]),
-            2,
-            torch.tensor([[0.12, 0.11], [1.0, 1.0]]),
-        ),  # zero replaced with 1.0
-    ],
-)
-def test_get_scaling_factor_from_weight(weight, group_size, expected):
-    scaling_factor = get_scaling_factor_from_weight(weight, group_size)
-    # Check if shapes match
-    if group_size != 0:
-        assert list(scaling_factor.shape) == [weight.shape[0], weight.shape[1] // group_size]
-    else:
-        assert list(scaling_factor.shape) == [weight.shape[0]]
-
-    assert torch.allclose(scaling_factor, expected, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.parametrize(
@@ -526,7 +489,7 @@ def test_get_scaling_factor(
             {
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
-                "kv_cache_quant_algo": "FP8",
+                "kv_cache_quant_algo": None,
             },
         ),
         (
@@ -534,7 +497,7 @@ def test_get_scaling_factor(
             {
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
-                "kv_cache_quant_algo": "INT8",
+                "kv_cache_quant_algo": None,
             },
         ),
     ],

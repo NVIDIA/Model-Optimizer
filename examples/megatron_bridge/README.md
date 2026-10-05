@@ -17,6 +17,8 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 
 > [!TIP]
 > Checkout the [Nemotron-3-Nano-30B-A3B pruning + distillation (with data blend prep) + quantization tutorial](tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md) for a complete end-to-end workflow using Megatron-Bridge!
+>
+> Or the [Qwen3.6-35B-A3B W4A4 NVFP4 + QAD tutorial](tutorials/Qwen3.6-35B-A3B/README.md) for an end-to-end quantization-aware distillation workflow.
 
 ## Pre-Requisites
 
@@ -121,6 +123,28 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 
 > [!NOTE]
 > HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** and **Qwen3.5-VL**. Other VLMs such as Gemma3-VL are saved in Megatron checkpoint format only.
+
+### Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a run on an MLflow server. Every script here that writes a checkpoint takes the flag — [`prune_minitron.py`](#pruning), `quantize.py`, [`distill.py`](#distillation), `export_quantized_megatron_to_hf.py` and `export_distilled_megatron_to_hf.py` — and they share one experiment-name convention, so a pruning, a quantization, the distillation that refines its checkpoint and the export that deploys it can be found together. (One gap remains: `distill.py --hf_export_path` writes its HuggingFace checkpoint from rank 0, which is not the rank that owns that run, so it carries no pointer.)
+
+```bash
+torchrun --nproc_per_node 2 quantize.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --recipe general/ptq/nvfp4_default-kv_fp8 \
+    --tp_size 2 \
+    --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron \
+    --mlflow https://<your-mlflow-server>/
+```
+
+The run opens *before* the model loads, so a bad URI fails in seconds rather than after a full calibration. Only the master rank uploads: the invocation, every argument as a searchable param, the resolved recipe, that rank's log and the quantizer summary — plus `.experiment.json` written into `--export_megatron_path` once the checkpoint is saved, so a checkpoint on disk names the run that produced it. A failed run is still recorded, with its traceback.
+
+`--mlflow_experiment` defaults to `$USER/<script>/<model basename>-<variant>` — the variant being the pruning target for `prune_minitron.py`, the recipe name for `quantize.py`, the student checkpoint for `distill.py`, and the Megatron checkpoint for the export — and `--mlflow_run_name` to the UTC start time. Authentication uses MLflow's own environment variables. See the [`hf_ptq` README](../hf_ptq/README.md#tracking-runs-with-mlflow) for the full artifact list and the `$MLFLOW_TRACKING_URI` semantics.
+
+`distill.py` — whether it is distilling a pruned BF16 student or running [QAD](#quantization-aware-distillation-qad) from a quantized one — works differently under the hood. It is a training loop, and Megatron-Bridge logs to MLflow from inside it, so the run is opened here and Megatron-Bridge joins it: you get the invocation, every argument and a run log, plus the per-iteration training metrics and the full resolved config that only Megatron-Bridge can see, alongside the existing `--wandb_project` and TensorBoard logging. Two differences worth knowing:
+
+- Uploading checkpoints as MLflow artifacts is **off** by default here, where Megatron-Bridge turns it on: a distilled checkpoint is tens to hundreds of GB and would be pushed over HTTP on every save. Pass `--mlflow_log_checkpoints` to opt in.
+- The run is opened on the last rank, because that is the rank Megatron-Bridge looks at for one to join. The uploaded `logs/distill.log` is therefore that rank's output; `print_rank_0` lines, which is most of what the script itself prints, stay on rank 0 and do not reach it.
 
 ## Distillation
 

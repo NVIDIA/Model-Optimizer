@@ -15,14 +15,22 @@
 
 import warnings
 
+import ml_dtypes
 import numpy as np
+import onnx
 import onnx_graphsurgeon as gs
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
+from modelopt.onnx.export import (
+    FP8QuantExporter,
+    INT4QuantExporter,
+    MXFP8QuantExporter,
+    NVFP4QuantExporter,
+)
 from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
+from modelopt.onnx.quantization.gs_patching import _export_value_info_proto
 from modelopt.onnx.quantization.qdq_utils import (
     _cast_fp8,
     apply_column_major_transformation,
@@ -34,6 +42,7 @@ from modelopt.onnx.quantization.qdq_utils import (
     replace_zero_scale_with_smallest_nonzero,
 )
 from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+from modelopt.onnx.utils import get_opset_version
 
 
 def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool = False):
@@ -335,8 +344,7 @@ def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
         value_info=value_info,
     )
 
-    model = helper.make_model(graph)
-    return model
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
 
 
 class TestQuantizeWeightsToInt4:
@@ -484,6 +492,57 @@ class TestCastFunctions:
         assert np.all(result == expected_array)
 
 
+class TestFP8QuantExporter:
+    """Test suite for FP8QuantExporter."""
+
+    def test_bf16_weights_and_scale_are_compressed(self):
+        weight_data = np.array([0.001312255859375], dtype=ml_dtypes.bfloat16)
+        scale_data = np.array(0.00099945068359375, dtype=ml_dtypes.bfloat16)
+        weight = gs.Constant("weight", weight_data)
+        scale = gs.Constant("linear/weight_quantizer/scale", scale_data)
+        quantized = gs.Variable("quantized", dtype=np.uint8, shape=weight_data.shape)
+        dequantized = gs.Variable(
+            "dequantized", dtype=TensorProto.BFLOAT16, shape=weight_data.shape
+        )
+        value_info = _export_value_info_proto(dequantized, do_type_check=True)
+        assert value_info.type.tensor_type.elem_type == TensorProto.BFLOAT16
+        graph = gs.Graph(
+            nodes=[
+                gs.Node(
+                    op="TRT_FP8QuantizeLinear",
+                    inputs=[weight, scale],
+                    outputs=[quantized],
+                ),
+                gs.Node(
+                    op="TRT_FP8DequantizeLinear",
+                    inputs=[quantized, scale],
+                    outputs=[dequantized],
+                ),
+            ],
+            outputs=[dequantized],
+            opset=23,
+        )
+
+        converted_model = FP8QuantExporter.compress_weights(gs.export_onnx(graph))
+
+        onnx.checker.check_model(converted_model)
+        assert [node.op_type for node in converted_model.graph.node] == ["DequantizeLinear"]
+        assert converted_model.graph.output[0].type.tensor_type.elem_type == TensorProto.BFLOAT16
+        fp8_weight = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == "linear/weight_quantizer/fp8_weights"
+        )
+        assert fp8_weight.data_type == TensorProto.FLOAT8E4M3FN
+        assert fp8_weight.raw_data == b"\x3b"
+        output_scale = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == scale.name
+        )
+        assert output_scale.data_type == TensorProto.BFLOAT16
+
+
 class TestMXFP8QuantExporter:
     """Test suite for MXFP8QuantExporter."""
 
@@ -606,6 +665,8 @@ class TestFP4QDQTo2DQ:
 
         # Run FP4QDQ to 2DQ conversion
         converted_model = NVFP4QuantExporter.process_model(model)
+
+        assert get_opset_version(converted_model) == 23
 
         # Verify TRT_FP4QDQ node is removed
         fp4qdq_nodes = [node for node in converted_model.graph.node if node.op_type == "TRT_FP4QDQ"]

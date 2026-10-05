@@ -56,10 +56,12 @@ from modelopt.recipe.config import (
     ModelOptMedusaRecipe,
     ModelOptSpeculativeRecipeBase,
 )
+from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
 )
+from modelopt.torch.speculative.plugins.master_weight_adamw import VerifyMasterWeightsCallback
 from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master, local_rank
@@ -217,7 +219,10 @@ def train():
         assert checkpoint is not None  # guaranteed by checkpoint_is_hf
         with patch_transformers5_params_loading():
             model = load_vlm_or_llm(
-                checkpoint, dtype="auto", trust_remote_code=recipe.model.trust_remote_code
+                checkpoint,
+                dtype="auto",
+                trust_remote_code=recipe.model.trust_remote_code,
+                config_overrides=recipe.model.config_overrides,
             )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
@@ -242,6 +247,7 @@ def train():
             dtype="auto",
             device_map="cpu",
             trust_remote_code=recipe.model.trust_remote_code,
+            config_overrides=recipe.model.config_overrides,
         )
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_name_or_path,
@@ -269,6 +275,14 @@ def train():
             mtsp.convert(model, [("dflash", dflash_cfg)])
         else:
             raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
+
+    # On the HF-format restore path above, DFlash's modify() ran with the base model still on
+    # meta, so the draft has no device, dtype or rotary buffer yet. Re-apply them here, before
+    # the Trainer is built: DDP's broadcast_buffers hangs on a draft whose rotary buffer is
+    # missing, and the forward only avoids reconciling dtypes because the draft matches the
+    # base. A no-op on a fresh convert.
+    if isinstance(model, HFDFlashModel):
+        model.restore_draft_precision()
 
     if dry_run:
         # is_master() is unreliable here: we return before the HF Trainer inits torch.distributed,
@@ -308,6 +322,11 @@ def train():
         and recipe.dflash.dflash_architecture_config.get("projector_type") == "domino"
     ):
         callbacks.append(DominoLambdaCallback())
+    # fp32 master weights are the optimizer's job, and wiring the optimizer is the training
+    # loop's. This fails the run if that wiring is ever missed, rather than letting the flag
+    # be silently inert for a whole job.
+    if getattr(model, "dflash_fp32_master_weights", False):
+        callbacks.append(VerifyMasterWeightsCallback())
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the

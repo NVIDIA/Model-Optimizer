@@ -80,7 +80,11 @@ def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     worker_module = _load_worker_module("sparse_attn_worker_import_test")
 
-    assert worker_module.__all__ == ["SparseAttnWorker", "QuantSparseAttnWorker"]
+    assert worker_module.__all__ == [
+        "SparseAttnWorker",
+        "QuantSparseAttnWorker",
+        "SkipSoftmaxCalibWorker",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -257,6 +261,37 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
             assert actual is expected
         else:
             assert actual == expected
+
+
+def test_flashinfer_metadata_builder_uses_public_host_seq_lens(
+    monkeypatch, isolated_flashinfer_builder_patch
+):
+    """Mixed metadata must not copy device sequence lengths back to the host."""
+
+    class DeviceSeqLens:
+        def cpu(self):
+            raise AssertionError("unexpected device-to-host sequence-length copy")
+
+    def build(_self, common_attn_metadata):
+        return SimpleNamespace(num_decodes=1, num_prefills=1)
+
+    monkeypatch.setattr(FlashInferMetadataBuilder, "build", build)
+    assert patch_flashinfer_metadata_builder() is True
+    common = SimpleNamespace(
+        block_table_tensor=torch.zeros(2, 1, dtype=torch.int32),
+        seq_lens=DeviceSeqLens(),
+        seq_lens_cpu=torch.tensor([16, 64], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=64,
+        causal=True,
+    )
+
+    metadata = FlashInferMetadataBuilder.build(object(), common)
+
+    assert metadata._modelopt_max_seq_len_decode == 16
+    assert metadata._modelopt_max_seq_len_prefill == 64
 
 
 def test_select_and_clone_flashinfer_impl_preserves_runtime_state(
@@ -609,6 +644,62 @@ def test_flash_attention_forward_follows_backend_kv_cache_layout(
     assert captured["k_cache"].data_ptr() == expected_key_cache.data_ptr()
     assert captured["v_cache"].data_ptr() == expected_value_cache.data_ptr()
     assert captured["page_size"] == 16
+
+
+@pytest.mark.parametrize(
+    ("layout", "backend_shape"),
+    [
+        ("kv-first", (2, 3, 16, 1, 16)),
+        ("blocks-first", (3, 2, 16, 1, 16)),
+        ("packed", (3, 1, 16, 32)),
+    ],
+)
+def test_flash_attention_calibration_follows_backend_kv_cache_layout(
+    monkeypatch, layout, backend_shape
+):
+    impl = _make_flash_attention_impl()
+    impl._calibrate = True
+    impl._calib_threshold_trials = [1e-3]
+    if layout == "packed":
+        shape = [3, impl.num_kv_heads, 16, 2 * impl.head_size]
+    else:
+        shape = [3, 16, impl.num_kv_heads, impl.head_size]
+        shape.insert(0 if layout == "kv-first" else 1, 2)
+    monkeypatch.setattr(
+        FlashAttentionBackend, "get_kv_cache_shape", staticmethod(lambda *_args: backend_shape)
+    )
+    vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
+    kv_cache = torch.zeros(shape, dtype=torch.float16)
+    query = torch.zeros(4, impl.num_heads, impl.head_size, dtype=torch.float16)
+    metadata = _flash_attention_metadata(query.shape[0], 16)
+    captured = {}
+
+    def fake_calibrate(_impl, **kwargs):
+        captured.update(kwargs)
+        return kwargs["output"]
+
+    monkeypatch.setattr(vllm_plugin, "_forward_calibrate", fake_calibrate)
+
+    try:
+        output = torch.empty_like(query)
+        assert impl.forward(None, query, query, query, kv_cache, metadata, output=output) is output
+    finally:
+        vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
+
+    if layout == "packed":
+        expected_key_cache, expected_value_cache = kv_cache.transpose(1, 2).split(
+            impl.head_size, dim=-1
+        )
+    else:
+        expected_key_cache, expected_value_cache = kv_cache.unbind(0 if layout == "kv-first" else 1)
+    for name, expected in (
+        ("key_cache", expected_key_cache),
+        ("value_cache", expected_value_cache),
+    ):
+        actual = captured[name]
+        assert actual.shape == expected.shape
+        assert actual.stride() == expected.stride()
+        assert actual.data_ptr() == expected.data_ptr()
 
 
 def _flash_attention_mixed_metadata(decode_len=1, prefill_len=17):
@@ -1110,40 +1201,6 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     torch.testing.assert_close(q_inputs[0][:2], q[:2].float())
     assert torch.all(q_inputs[0][2:] == 0)
     assert calls["query"].dtype == torch.float32
-
-
-def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
-    """Split-local maxima must not change calibrated skip-softmax semantics."""
-    impl = _clone_sparse_impl(_make_old_impl())
-    impl.quant_kw = {
-        "p_qdq": "nvfp4",
-        "p_qdq_amax": 1.0,
-        "v_qdq": "nvfp4",
-        "v_qdq_amax": 6.0 * 448.0,
-    }
-    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
-    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = _flash_attention_kv_cache(1, 16, impl.num_kv_heads, impl.head_size)
-    metadata = _flash_attention_metadata(1, 16)
-    captured = {}
-
-    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        vllm_plugin,
-        "triton_decode_attention",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("split-K kernel")),
-    )
-
-    def fake_attention(query, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros_like(query)
-
-    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
-    output = torch.empty_like(q)
-    assert impl.forward(None, q, q, q, kv_cache, metadata, output=output) is output
-    assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
-    assert captured["p_qdq"] == "nvfp4"
-    assert captured["v_qdq"] == "nvfp4"
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():

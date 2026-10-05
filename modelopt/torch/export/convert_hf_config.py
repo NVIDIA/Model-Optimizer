@@ -19,6 +19,10 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
+from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+
+from .quant_format import IQ_FORMATS
+
 
 def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
     """Map a per-layer quant_algo string to compressed-tensors config group details.
@@ -29,7 +33,8 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
 
     Returns:
         Dictionary with ``input_activations`` and ``weights`` entries suitable for
-        a compressed-tensors ``config_groups`` entry.
+        a compressed-tensors ``config_groups`` entry, or ModelOpt-owned metadata for
+        self-contained IQ payloads.
     """
     if quant_algo == "FP8":
         return {
@@ -116,6 +121,21 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
                 "group_size": gs,
             },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
+        }
+    elif quant_algo.lower() in IQ_FORMATS:
+        iq_format = IQ_FORMAT_REGISTRY[quant_algo.lower()]
+        block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
+        effective_bits = iq_format.effective_bits
+        if group_size not in (None, block_size):
+            raise ValueError(f"{quant_algo} requires group size {block_size}, got {group_size}")
+        # IQ payloads are self-contained blocks, not compressed-tensors integer groups.
+        # Keep their format marker outside a ``weights`` quantization scheme.
+        return {
+            "quant_algo": quant_algo,
+            "effective_bits": effective_bits,
+            "group_size": block_size,
+            "packing": "ggml",
+            "block_payload_bytes": payload_bytes,
         }
     else:
         warnings.warn(
@@ -209,6 +229,13 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "targets": ["Linear"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
+    elif str(quant_algo_value).lower() in IQ_FORMATS:
+        # Forward the caller's group size so a mismatched one is rejected rather than rewritten
+        # to the format's block size.
+        iq_metadata = _quant_algo_to_group_config(
+            quant_algo_value, original_quantization_details.get("group_size")
+        )
+        new_config.update(iq_metadata)
     elif quant_algo_value == "NVFP4_SVD":
         # NVFP4 + SVDQuant: NVFP4 weights/activations plus an AWQ-style
         # pre_quant_scale and a low-rank residual (svdquant_lora_a/b) stored as
@@ -269,9 +296,22 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     if kv_cache_quant_algo:
         if kv_cache_quant_algo == "FP8":
             new_config["kv_cache_scheme"] = {"dynamic": False, "num_bits": 8, "type": "float"}
+        elif kv_cache_quant_algo in ("MIXED_PRECISION", "FP8_K_NVFP4_V"):
+            new_config["kv_cache_quant_algo"] = kv_cache_quant_algo
         else:
             # TODO: Handle other kv cache quantization algorithms
             new_config["kv_cache_scheme"] = kv_cache_quant_algo
+        if "kv_cache_quantized_layers" in original_quantization_details:
+            new_config["kv_cache_quantized_layers"] = original_quantization_details[
+                "kv_cache_quantized_layers"
+            ]
+            new_config["kv_cache_schema_version"] = original_quantization_details.get(
+                "kv_cache_schema_version", 1
+            )
+            if "kv_cache_deployment_supported" in original_quantization_details:
+                new_config["kv_cache_deployment_supported"] = original_quantization_details[
+                    "kv_cache_deployment_supported"
+                ]
 
     producer_info = input_config.get("producer")
     if producer_info:

@@ -280,6 +280,147 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_fp32_master_weights: bool = ModeloptField(
+        default=True,
+        description=(
+            "Keep an fp32 master copy of the draft's parameters in the OPTIMIZER, while the "
+            "draft itself stays in the frozen base model's dtype.\n\n"
+            "Without it the draft is cast to the base dtype and AdamW allocates its moments "
+            "with `zeros_like(p)`, so the moments are bf16 too -- and that is where bf16 "
+            "hurts most. Adam's second moment `v` is a running average of the squared "
+            "gradient. At beta2=0.999 a single step can change `v` by at most 0.1%, but the "
+            "smallest change bf16 can represent near `v` is about 0.4%. Every DECREASE "
+            "therefore rounds back to the same number, `v` can only grow, and since the "
+            "update is divided by `sqrt(v)` the effective step size only shrinks -- from "
+            "step 1, at any learning rate.\n\n"
+            "The model is untouched, so nothing has to reconcile dtypes at forward time and "
+            "the exported drafter is unchanged. The cost is memory in the optimizer: 12 "
+            "bytes per draft parameter resident for the master plus Adam's two moments, "
+            "instead of 4, and 16 at the peak of a step, which also holds an fp32 copy of "
+            "the gradients (torch requires the update's gradients to match its parameters). "
+            "Gradients stay in the base dtype outside the step, so unlike an fp32 model this "
+            "does not double the DDP gradient all-reduce.\n\n"
+            "Requires the training loop to build "
+            "`modelopt.torch.speculative.plugins.master_weight_adamw.MasterWeightAdamW`; "
+            "`examples/speculative_decoding` does. `VerifyMasterWeightsCallback` raises after "
+            "the first step if it did not, rather than letting the flag be silently inert.\n\n"
+            "Applies to every projector_type, and on by default: what it costs is optimizer "
+            "memory and the fused AdamW kernel -- the fused path writes through to the "
+            "parameter it is handed, so a run with this flag uses foreach instead -- against "
+            "arithmetic that otherwise loses step size from step 1. Only the draft is in the "
+            "optimizer, so the absolute cost is small. Set it to False to reclaim it when "
+            "training at the limit of a node.\n\n"
+            "NOTE: a training loop that builds its own optimizer gets plain AdamW and "
+            "therefore none of this, silently. Build MasterWeightAdamW, or install "
+            "VerifyMasterWeightsCallback, which turns that into an error at the first step."
+        ),
+    )
+
+    dflash_lilicorr_w_ce: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
+            "per-slot conditional. The objective is "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "absolute — there is no outer multiplier scaling the three terms as a group — so "
+            "each is the coefficient with which its term enters the total, and "
+            "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
+            "weights are reported in the `lilicorr_metrics` dict the model attaches to its "
+            "forward output, so a consumer of those metrics can check the identity per step "
+            "and read which composition produced a checkpoint. The three weights are validated "
+            "all-or-nothing (a negative value means unset): a config that sets some but not "
+            "others is rejected rather than inheriting a default composition. Shipped "
+            "variants: 0.25 ('base') and 0.125 ('margin'). "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_margin: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the per-slot max-margin (hinge) term, which "
+            "pushes the ground-truth candidate's node potential above the best competing "
+            "candidate by dflash_lilicorr_margin. 0 disables the term (the 'base' variant); "
+            "the 'margin' variant splits the cross-entropy weight convexly into 0.125/0.125. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_margin: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: hinge width for the max-margin term, in units of the log-potential "
+            "(itself bounded by lilicorr_logit_scale). Required when "
+            "dflash_lilicorr_w_margin > 0 and unused otherwise; the shipped 'margin' variant "
+            "uses 2.0. Not one of the three term weights, so it is exempt from their "
+            "all-or-nothing validation. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_pen: float = ModeloptField(
+        default=-1.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the target-weighted distractor penalty, the "
+            "reranker's expected target-rejection over its own candidate distribution. Each "
+            "competing candidate is weighted by the target model's logit gap to the ground "
+            "truth, so candidates the target finds plausible are penalized lightly and "
+            "confident wrong ones hard. Requires the target's logits, hence online training "
+            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lk_loss_type: Literal["ce", "tv", "lambda"] = ModeloptField(
+        default="ce",
+        description=(
+            "DFlash2 only: which divergence the block objective minimizes against the "
+            "hard target. 'ce' is -log q(gold), today's behavior. 'tv' is 1 - q(gold), the "
+            "total variation to the one-hot target, which is also the per-position expected "
+            "acceptance loss. 'lambda' anneals between them: the CE share is "
+            "dflash_lk_ce_scale * exp(-dflash_lk_ce_decay * a), where a is the mean q(gold) "
+            "over supervised positions, so the objective moves from fitting the "
+            "distribution to maximizing acceptance as acceptance improves. "
+            "'lambda' and 'tv' require dflash_self_logit_distillation=false: both read "
+            "q(gold) from the per-position cross-entropy, which the KD path does not "
+            "produce. Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
+    dflash_lk_ce_scale: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: scale of the CE share in the dflash_lk_loss_type='lambda' "
+            "blend. 1.0 starts the run as pure CE. Ignored for other loss types."
+        ),
+    )
+
+    dflash_lk_ce_decay: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: how fast the CE share decays as acceptance rises in the "
+            "dflash_lk_loss_type='lambda' blend. 0 pins the blend at dflash_lk_ce_scale. "
+            "Ignored for other loss types."
+        ),
+    )
+
+    dflash_selector_loss_alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: weight of the candidate-selector cross-entropy term, added to "
+            "the backbone loss. The selector re-ranks the backbone's top-k candidates per "
+            "block position; 0 trains the backbone and convolutions only. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha

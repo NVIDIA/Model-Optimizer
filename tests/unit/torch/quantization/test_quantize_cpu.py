@@ -16,9 +16,12 @@
 """High-level tests for quantization."""
 
 import copy
+import os
+from unittest import mock
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
@@ -38,6 +41,7 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     SequentialQuantizer,
     TensorQuantizer,
 )
+from modelopt.torch.utils.distributed import ParallelState
 
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
@@ -439,6 +443,316 @@ def test_enable_only_entry_preserves_attributes():
             assert not module.is_enabled, "weight_quantizer should be disabled"
             assert module.num_bits == 4, "num_bits should be preserved by enable-only entry"
             assert module.axis == 0, "axis should be preserved by enable-only entry"
+
+
+def test_weight_patterns_matching_nothing_raise():
+    """A config whose weight patterns match no module must fail, not quantize nothing.
+
+    Otherwise calibration and export run to completion and produce a checkpoint that is
+    silently unquantized (``"quant_algo": null``).
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            # No module in this model is named `experts`.
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+def test_config_without_weight_quantization_is_allowed():
+    """Activation-only configs quantize no weight on purpose and must still run."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled
+
+
+def test_weight_quantizers_disabled_by_a_later_entry_are_allowed():
+    """Patterns that match and are then switched off are a choice, not a mismatch."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*weight_quantizer", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled
+
+
+def test_sequential_weight_quantizers_do_not_trip_the_guard():
+    """List-valued `cfg` builds `SequentialQuantizer`s, but the guard only ever looks at
+    `TensorQuantizer` instances -- this pins that it still doesn't wrongly raise for them.
+
+    `SequentialQuantizer` (itself an `nn.Sequential`) is not special-cased: its `TensorQuantizer`
+    children are reachable directly via `named_modules()`, individually named
+    `...weight_quantizer.0` / `.1`, so the substring match already finds them.
+    """
+    model = SimpleLinear()
+    calib_data = [model.get_input() for _ in range(2)]
+    quantize_model_and_forward(model, copy.deepcopy(WINT4INT8_CFG), calib_data)
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert isinstance(module, SequentialQuantizer)
+
+
+def test_fused_experts_quantizer_names_do_not_trip_the_guard():
+    """Fused-experts quantizers are named `..._weight_quantizers.N`, plural and indexed, but
+    still contain `weight_quantizer` as a substring and so are still read by the guard.
+    """
+    model = SimpleLinear()
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+
+    # Rename as the fused-experts path does; the config's `*weight_quantizer` must still match.
+    linear = model.net[0]
+    linear.add_module("gate_up_proj_weight_quantizers", torch.nn.ModuleList([TensorQuantizer()]))
+
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+def test_refining_an_already_quantized_model_does_not_raise():
+    """A second config whose own patterns match nothing still sees the earlier weight
+    quantizers as enabled, so this is refining an already-quantized model, not a no-op run.
+    """
+    model = SimpleLinear()
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+    assert any(m.is_enabled for n, m in model.named_modules() if n.endswith("weight_quantizer"))
+
+    refinement = {
+        "quant_cfg": [
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+        ],
+        "algorithm": None,
+    }
+    mtq.quantize(model, refinement)
+
+    # The earlier weight quantization is untouched.
+    assert any(m.is_enabled for n, m in model.named_modules() if n.endswith("weight_quantizer"))
+
+
+def test_weight_patterns_enabled_then_retracted_do_not_raise():
+    """An unmatched pattern that a later entry disables asks for nothing by the end."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*.missing.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*.missing.*weight_quantizer", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled
+
+
+def test_bare_wildcard_pattern_matching_nothing_raises():
+    """A bare `"*"` (or another pattern never mentioning "weight") still expresses weight
+    intent if it would match a `weight_quantizer` name -- and must still raise if nothing in
+    the model actually has one, exactly like an explicit `*weight_quantizer` pattern would.
+
+    A model with zero quantizable modules (e.g. `nn.Module()`, no Linear/Conv anywhere) is
+    the degenerate case where this matters: nothing in the config's own text says "weight",
+    so a substring-only check would silently return without ever looking at the model.
+    """
+    model = torch.nn.Module()  # no quantizable submodules at all
+    config = {"quant_cfg": [{"quantizer_name": "*", "cfg": {"num_bits": 8, "axis": 0}}]}
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
+        mtq.quantize(model, config)
+
+
+def test_overlapping_patterns_disabled_by_a_broader_later_one_still_raise():
+    """A narrower pattern "matching" is not enough -- the final enabled state is what counts.
+
+    `*weight_quantizer` enables real quantizers, but the later, broader `*` disables
+    everything again; the config's net effect is still "nothing quantized" and must raise.
+    A check that asked "did any weight pattern match something" instead of "is anything
+    actually enabled" would miss this, since the narrower pattern did match.
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_name": "*", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match="no weight quantizer is enabled"):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+def test_skip_weight_quant_check_env_var_bypasses_the_guard():
+    """Documented escape hatch for pipeline-parallel ranks whose local stage legitimately
+    has none of the targeted modules (e.g. a pure-attention stage under an experts-only
+    recipe): raising there while other ranks proceed into calibration is a collective hang,
+    not just a wrong per-rank verdict.
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    with mock.patch.dict(os.environ, {"MODELOPT_SKIP_WEIGHT_QUANT_CHECK": "1"}):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+class _ToyIndexer(torch.nn.Module):
+    """Stands in for a framework's sparse-attention indexer (vLLM ``Indexer``, MCore ``CSAIndexer``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.wk = torch.nn.Linear(16, 8)
+
+    def forward(self, x):
+        return self.wk(x)
+
+
+class _QuantToyIndexer(_ToyIndexer):
+    def _setup(self):
+        self.indexer_k_quantizer = TensorQuantizer()
+        # Like a pipeline stage's own layer: no amax sync with the other ranks.
+        self.parallel_state = ParallelState(data_parallel_group=-1)
+
+    def forward(self, x):
+        return self.indexer_k_quantizer(super().forward(x))
+
+
+class _ToyIndexerModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(16, 16)
+        self.indexer = _ToyIndexer()
+
+    def forward(self, x):
+        return self.indexer(self.linear(x))
+
+
+INDEXER_K_ONLY_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ],
+    "algorithm": "max",
+}
+
+
+def test_indexer_k_patterns_on_unconverted_indexer_raise():
+    """An indexer the plugins do not recognize must fail instead of leaving its K cache unquantized."""
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(_ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16)))
+
+
+def test_indexer_k_patterns_on_model_without_indexer_are_allowed():
+    """Other architectures and pipeline stages without an indexer layer have nothing to quantize."""
+    model = SimpleLinear()
+    mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: m(m.get_input()))
+
+
+def test_indexer_k_patterns_on_converted_indexer_pass():
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(
+            _ToyIndexerModel(), INDEXER_K_ONLY_CFG, lambda m: m(torch.randn(2, 16))
+        )
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert model.indexer.indexer_k_quantizer.is_enabled
+    assert model.indexer.indexer_k_quantizer.amax is not None
+
+
+class _ToyStage(torch.nn.Module):
+    """A pipeline stage holding the indexer layers ``layer_ids``."""
+
+    def __init__(self, layer_ids):
+        super().__init__()
+        self.layers = torch.nn.ModuleDict({str(i): _ToyIndexerModel() for i in layer_ids})
+
+    def forward(self, x):
+        return [layer(x) for layer in self.layers.values()]
+
+
+def _test_indexer_check_covers_all_ranks(rank, size):
+    # Rank 0 holds no indexer and rank 1 one that no plugin converted: every rank raises.
+    model = SimpleLinear() if rank == 0 else _ToyIndexerModel()
+    with pytest.raises(RuntimeError, match=r"indexer_k_quantizer.*\(_ToyIndexer\)"):
+        mtq.quantize(model, INDEXER_K_ONLY_CFG, lambda m: None)
+
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        # A layer-selective recipe: the stage holding layer 0 has no selected indexer, which is fine.
+        config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.1.indexer.indexer_k_quantizer"
+        model = mtq.quantize(_ToyStage([rank]), config, lambda m: m(torch.randn(2, 16)))
+        assert model.layers[str(rank)].indexer.indexer_k_quantizer.is_enabled == (rank == 1)
+
+        # A pattern that matches no stage: every rank raises.
+        config["quant_cfg"][1]["quantizer_name"] = "*layers.9.indexer.indexer_k_quantizer"
+        with pytest.raises(RuntimeError, match="no sparse-attention indexer has an enabled one"):
+            mtq.quantize(_ToyStage([rank]), config, lambda m: None)
+    finally:
+        mtq.unregister(_ToyIndexer)
+    torch.distributed.destroy_process_group()
+
+
+def test_indexer_k_check_covers_all_ranks(skip_on_windows):
+    spawn_multiprocess_job(2, _test_indexer_check_covers_all_ranks, backend="gloo")
+
+
+def test_indexer_q_patterns_need_the_query_quantizer():
+    """Each indexer quantizer is checked on its own: a converted key quantizer does not count."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"].append(
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": 8, "axis": None}}
+    )
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        with pytest.raises(RuntimeError, match=r"enables indexer_q_quantizer, but no"):
+            mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+
+
+def test_indexer_k_sequential_cfg_on_converted_indexer_pass():
+    """A list-valued cfg makes the quantizer a SequentialQuantizer, which still counts as attached."""
+    config = copy.deepcopy(INDEXER_K_ONLY_CFG)
+    config["quant_cfg"][1]["cfg"] = [{"num_bits": 8, "axis": None}, {"num_bits": 8, "axis": None}]
+    mtq.register(original_cls=_ToyIndexer, quantized_cls=_QuantToyIndexer)
+    try:
+        model = mtq.quantize(_ToyIndexerModel(), config, lambda m: m(torch.randn(2, 16)))
+    finally:
+        mtq.unregister(_ToyIndexer)
+    assert isinstance(model.indexer.indexer_k_quantizer, SequentialQuantizer)
 
 
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():

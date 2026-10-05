@@ -52,7 +52,7 @@ import onnx
 import onnxruntime as ort
 import pynvml
 from onnx import onnx_pb
-from onnxruntime.quantization import calibrate
+from onnxruntime.quantization import calibrate, qdq_quantizer
 from onnxruntime.quantization.base_quantizer import BaseQuantizer
 from onnxruntime.quantization.calibrate import (
     CalibraterBase,
@@ -74,6 +74,7 @@ from onnxruntime.quantization.quant_utils import (
     QuantType,
     add_infer_metadata,
 )
+from onnxruntime.quantization.quant_utils import compute_scale_zp as _ort_compute_scale_zp
 from onnxruntime.quantization.quantize import check_static_quant_arguments
 from onnxruntime.quantization.registry import QDQRegistry, QLinearOpsRegistry
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
@@ -94,6 +95,53 @@ def load_model_with_shape_infer(model_path: Path) -> onnx.ModelProto:
     return model
 
 
+def _compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=None):
+    """Retry FP16 scale calculation in FP32 when range subtraction overflows."""
+    range_dtype = np.asarray(rmax).dtype
+    if range_dtype != np.float16:
+        return _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        zero_point, scale = _ort_compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, min_real_range)
+        if np.all(np.isfinite(scale)):
+            return zero_point, scale
+
+        zero_point, scale = _ort_compute_scale_zp(
+            np.asarray(rmin, dtype=np.float32),
+            np.asarray(rmax, dtype=np.float32),
+            qmin,
+            qmax,
+            symmetric,
+            min_real_range,
+        )
+        return zero_point, np.asarray(scale, dtype=range_dtype)
+
+
+def _prepare_histogram_data(histogram_collector, tensor, data_arr):
+    """Use FP32 for histogram math while remembering the source dtype."""
+    if data_arr.dtype != np.float16:
+        return data_arr
+
+    original_dtypes = getattr(histogram_collector, "_modelopt_original_dtypes", {})
+    original_dtypes[tensor] = data_arr.dtype
+    histogram_collector._modelopt_original_dtypes = original_dtypes
+    return data_arr.astype(np.float32)
+
+
+def _restore_histogram_calibration_dtypes(histogram_collector, tensors_range):
+    """Restore source dtypes at the calibration-to-quantization boundary."""
+    original_dtypes = getattr(histogram_collector, "_modelopt_original_dtypes", {})
+    for tensor, dtype in original_dtypes.items():
+        if tensor not in tensors_range:
+            continue
+        tensor_data = tensors_range[tensor]
+        dtype_limits = np.finfo(dtype)
+        for attribute in ("lowest", "highest", "avg", "std"):
+            if hasattr(tensor_data, attribute):
+                value = np.clip(getattr(tensor_data, attribute), dtype_limits.min, dtype_limits.max)
+                setattr(tensor_data, attribute, np.asarray(value, dtype=dtype))
+
+
 def _collect_value(histogram_collector, name_to_arr):
     """Collect histogram on real value."""
     for tensor, data_arr in tqdm(name_to_arr.items()):
@@ -105,6 +153,7 @@ def _collect_value(histogram_collector, name_to_arr):
             curr_data_arr = curr_data_arr.flatten()
             concat_data_arr = np.concatenate((concat_data_arr, curr_data_arr))
 
+        concat_data_arr = _prepare_histogram_data(histogram_collector, tensor, concat_data_arr)
         data_arr = concat_data_arr
         # ==========================================================
         if data_arr.size > 0:
@@ -130,9 +179,6 @@ def _collect_value(histogram_collector, name_to_arr):
                 old_histogram, data_arr, min_value, max_value, threshold
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
@@ -287,10 +333,50 @@ def _select_tensors_to_calibrate(calibrator, model: onnx.ModelProto):
     return tensors_to_calibrate, value_infos
 
 
+def _configure_session_providers(
+    sess_options: ort.SessionOptions,
+    providers: list[str | tuple[str, dict]],
+    trt_rtx_backend: str,
+) -> dict[str, list[str | tuple[str, dict]]]:
+    """Configure providers using the mechanism required by the selected EP.
+
+    ``providers`` contains provider names or ``(name, options)`` pairs in priority order.
+    ABI EPs are exposed as devices and must be added to ``sess_options``; passing them through
+    ``InferenceSession(providers=...)`` overrides that configuration. This helper preserves the
+    ABI device path while returning normal provider arguments for other EPs.
+    """
+    if trt_rtx_backend != "abi":
+        return {"providers": providers}
+
+    available_providers = set(ort.get_available_providers())
+    ep_devices = ort.get_ep_devices()
+    plugin_provider_names = {device.ep_name for device in ep_devices} - available_providers
+    provider_names = {
+        provider[0] if isinstance(provider, tuple) else provider for provider in providers
+    }
+    if not plugin_provider_names.intersection(provider_names):
+        return {"providers": providers}
+
+    for provider in providers:
+        provider_name, provider_options = (
+            provider if isinstance(provider, tuple) else (provider, {})
+        )
+        if provider_name in plugin_provider_names:
+            selected_devices = [device for device in ep_devices if device.ep_name == provider_name]
+            sess_options.add_provider_for_devices(selected_devices, provider_options)
+        else:
+            sess_options.add_provider(provider_name, provider_options)
+    return {}
+
+
 def _create_inference_session_with_ep_config(calibrator, **kwargs):
     """Create an ORT InferenceSession."""
     model_path = kwargs.get("model_path")
     logger.debug("Creating inference session with Execution Provider configuration")
+
+    trt_rtx_backend = kwargs.get("trt_rtx_backend", "legacy")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
 
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
@@ -302,7 +388,6 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
 
     # Note. This path can be an empty string, which denotes that the model has custom ops and TRT EP is needed.
     calibrator.trt_extra_plugin_lib_paths = kwargs.get("trt_extra_plugin_lib_paths")
-
     if calibrator.trt_extra_plugin_lib_paths is not None:
         logger.debug(f"TRT extra plugin paths: {calibrator.trt_extra_plugin_lib_paths}")
         if "TensorrtExecutionProvider" not in ort.get_available_providers():
@@ -336,20 +421,13 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
                 providers[i], {"arena_extend_strategy": "kSameAsRequested"}
             )
 
-    if model_path is None:
-        # Create the inference session with EP configuration on augmented_model
-        calibrator.infer_session = ort.InferenceSession(
-            calibrator.augmented_model_path,
-            sess_options=sess_options,
-            providers=providers,
-        )
-    else:
-        # Create the inference session with EP configuration on provided model path
-        calibrator.infer_session = ort.InferenceSession(
-            model_path,
-            sess_options=sess_options,
-            providers=providers,
-        )
+    session_path = calibrator.augmented_model_path if model_path is None else model_path
+    provider_kwargs = _configure_session_providers(sess_options, providers, trt_rtx_backend)
+    calibrator.infer_session = ort.InferenceSession(
+        session_path,
+        sess_options=sess_options,
+        **provider_kwargs,
+    )
 
     # Group qdq tensors will have the same scaling factor.
     calibrator.group_qdq_tensors = kwargs.get("group_qdq_tensors")
@@ -1094,6 +1172,7 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
     """Collect histogram on real value."""
     for tensor, data_arr in name_to_arr.items():
         data_arr = np.asarray(data_arr).flatten()
+        data_arr = _prepare_histogram_data(histogram_collector, tensor, data_arr)
         min_value, max_value = (np.min(data_arr), np.max(data_arr)) if data_arr.size > 0 else (0, 0)
 
         # Replace inf/nan with float32 min/max
@@ -1115,9 +1194,6 @@ def _collect_value_histogram_collector_single_node_calibration(histogram_collect
                 threshold,
             )
         else:
-            # Cast range endpoints to Python float so numpy computes bin edges in
-            # float64. A fp16 threshold here can underflow the 128-bin linspace
-            # and trip "Too many bins for data range" on numpy >= 2.0.
             range_max = float(threshold)
             hist, hist_edges = np.histogram(
                 data_arr, histogram_collector.num_bins, range=(-range_max, range_max)
@@ -1568,6 +1644,8 @@ def _quantize_static(
             ExecutionProviders = list[string] :
                 Default is [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider",
                 "TensorrtExecutionProvider"]
+            TrtRtxBackend = string :
+                Selects the legacy or ABI TensorRT-RTX execution provider implementation.
     """
     logger.info("Starting static quantization")
     logger.debug(f"Quantization format: {quant_format}")
@@ -1607,6 +1685,7 @@ def _quantize_static(
         # ====================== Modification ======================
         ("TrtExtraPluginLibraryPaths", "trt_extra_plugin_lib_paths"),
         ("ExecutionProviders", "execution_providers"),
+        ("TrtRtxBackend", "trt_rtx_backend"),
         ("group_qdq_tensors", "group_qdq_tensors"),
         ("QDQDisableWeightAdjustForInt32Bias", "disable_int32_weight_adjustment"),
         # ==========================================================
@@ -1650,6 +1729,8 @@ def _quantize_static(
             raise TypeError(
                 f"Unexpected type {type(tensors_range)} for tensors_range and calibrator={type(calibrator)}."
             )
+        if isinstance(calibrator, HistogramCalibrater):
+            _restore_histogram_calibration_dtypes(calibrator.collector, tensors_range)
         del calibrator
 
     check_static_quant_arguments(quant_format, activation_type, weight_type)
@@ -1760,4 +1841,5 @@ def patch_ort_modules(calibrate_per_node: bool = False):
     CalibraterBase.select_tensors_to_calibrate = _select_tensors_to_calibrate
     QDQQuantizer.check_opset_version = _check_opset_version
     BaseQuantizer.adjust_tensor_ranges = _adjust_tensor_ranges
+    qdq_quantizer.compute_scale_zp = _compute_scale_zp
     CalibraterBase.__init__ = _init_calibrater_base

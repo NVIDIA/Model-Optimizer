@@ -13,94 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for modelopt.torch.export.layer_utils — MoE detection and expert naming."""
+"""Unit tests for modelopt.torch.export.layer_utils — expert naming."""
 
-import pytest
 import torch.nn as nn
 
-from modelopt.torch.export.layer_utils import get_expert_linear_names, is_moe
-
-# ---------------------------------------------------------------------------
-# is_moe tests
-# ---------------------------------------------------------------------------
-
-
-class _FakeSparseMoeBlock(nn.Module):
-    """Name ends with 'sparsemoeblock' — detected by naming convention."""
-
-
-class _FakeMoeLayer(nn.Module):
-    """Name contains 'moelayer' — detected by naming convention."""
-
-
-class _FakeArcticMoe(nn.Module):
-    """Name contains 'arcticmoe' — detected by explicit match."""
-
-
-class _StructuralMoeModule(nn.Module):
-    """Has router + experts attributes — detected by structural check."""
-
-    def __init__(self):
-        super().__init__()
-        self.router = nn.Linear(8, 4)
-        self.experts = nn.ModuleList([nn.Linear(8, 8) for _ in range(4)])
-
-
-class _NotMoeModule(nn.Module):
-    """Plain module — should NOT be classified as MoE."""
-
-    def __init__(self):
-        super().__init__()
-        self.fc = nn.Linear(8, 8)
-
-
-class _PartialStructuralModule(nn.Module):
-    """Has router but no experts — should NOT be classified as MoE."""
-
-    def __init__(self):
-        super().__init__()
-        self.router = nn.Linear(8, 4)
-
-
-@pytest.mark.parametrize(
-    "module_cls",
-    [_FakeSparseMoeBlock, _FakeMoeLayer, _FakeArcticMoe],
-)
-def test_is_moe_name_based(module_cls):
-    assert is_moe(module_cls())
-
-
-def test_is_moe_structural():
-    assert is_moe(_StructuralMoeModule())
-
-
-def test_is_moe_negative():
-    assert not is_moe(_NotMoeModule())
-
-
-def test_is_moe_partial_structural():
-    assert not is_moe(_PartialStructuralModule())
-
+from modelopt.torch.export.layer_utils import get_expert_linear_names
 
 # ---------------------------------------------------------------------------
 # get_expert_linear_names tests
 # ---------------------------------------------------------------------------
 
 
-class _FakeGemma4TextDecoderLayer(nn.Module):
+class Gemma4TextDecoderLayer(nn.Module):
     pass
 
 
-class _FakeMixtralSparseMoeBlock(nn.Module):
+class MixtralSparseMoeBlock(nn.Module):
     pass
 
 
-class _FakeNemotronHMOE(nn.Module):
+class NemotronHMOE(nn.Module):
     pass
 
 
 def test_get_expert_linear_names_gemma4():
-    assert get_expert_linear_names(_FakeGemma4TextDecoderLayer()) == [
+    assert get_expert_linear_names(Gemma4TextDecoderLayer(), "gemma4") == [
         "gate_proj",
         "down_proj",
         "up_proj",
@@ -108,8 +45,8 @@ def test_get_expert_linear_names_gemma4():
 
 
 def test_get_expert_linear_names_mixtral():
-    assert get_expert_linear_names(_FakeMixtralSparseMoeBlock()) == ["w1", "w2", "w3"]
+    assert get_expert_linear_names(MixtralSparseMoeBlock(), "mixtral") == ["w1", "w2", "w3"]
 
 
 def test_get_expert_linear_names_nemotron():
-    assert get_expert_linear_names(_FakeNemotronHMOE()) == ["up_proj", "down_proj"]
+    assert get_expert_linear_names(NemotronHMOE(), "nemotron_h") == ["up_proj", "down_proj"]

@@ -45,7 +45,7 @@ def test_qwen_vision_recipes_select_expected_quantizers(
 ):
     model = _get_tiny_qwen_vlm(model_type)
     assert model.config.model_type == model_type
-    quant_cfg = load_recipe(f"huggingface/{model_type}/ptq/{recipe}").quantize.model_dump()
+    quant_cfg = load_recipe(f"model_type/{model_type}/ptq/{recipe}").quantize.model_dump()
 
     mtq.quantize(model, quant_cfg, forward_loop=None)
     modules = dict(model.named_modules())

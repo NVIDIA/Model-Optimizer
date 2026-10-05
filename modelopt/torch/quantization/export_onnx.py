@@ -225,9 +225,12 @@ def _fp8_quantize(
         "Constant",
         value_t=torch.tensor(scale_inv).to(torch_dtype_map[inputs.type().scalarType()]),
     )
-    return g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
+    quantized = g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
         inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
     )
+    # PyTorch runs shape inference before setType for custom ops, so refresh its reliability state.
+    torch._C._jit_pass_onnx_node_shape_type_inference(quantized.node(), g.params_dict, g.opset)
+    return quantized
 
 
 def _fp8_dequantize(

@@ -15,10 +15,9 @@
 
 import copy
 import math
-import re
 import sys
 import types
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,7 +37,9 @@ from _test_utils.torch.megatron.utils import (
     get_batch,
     get_forward,
     initialize_for_megatron,
+    load_distributed_checkpoint,
     run_mcore_inference,
+    save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
 from _test_utils.torch.misc import set_seed
@@ -49,30 +50,47 @@ from _test_utils.torch.quantization.quantize_common import (
     data_tensor_context_parallel_test_helper,
     verify_kv_cache_amax_sync,
 )
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
+    get_expert_model_parallel_rank,
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer import MegatronModule, TransformerConfig
+from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.dynamic import DynamicModule
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    restore_sharded_modelopt_state,
+    save_sharded_modelopt_state,
+)
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _initialize_grouped_weight_quantizer_state,
+    _output_layer_extra_state_has_data,
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    keep_gpt_output_layer_extra_state,
     megatron_replace_quant_module_hook,
     quant_module_get_extra_state,
+)
+from modelopt.torch.quantization.plugins.megatron_indexer import (
+    CSAIndexer,
+    _QuantMegatronIndexer,
+    rotate_activation,
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
@@ -87,6 +105,13 @@ try:
     HAS_TE = True
 except ImportError:
     HAS_TE = False
+
+try:
+    from megatron.core.transformer.experimental_attention_variant.dsa import hadamard_transform
+
+    HAS_HADAMARD = hadamard_transform is not None
+except ImportError:
+    HAS_HADAMARD = False
 
 SEED = 1234
 
@@ -1090,100 +1115,252 @@ def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
     )
 
 
-def _te_grouped_expert_identity_from_sharded_state(module):
-    """Return {local_key: (global_expert_idx, num_global_experts)} for per-expert amax shards.
+def _set_te_grouped_weight_quantizer_state(model, ep_rank, num_local_experts):
+    """Give every local expert distinct quantizer state derived from its global index."""
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                amax = getattr(leaf, "_amax", None)
+                if amax is not None:
+                    amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
+                global_amax = getattr(leaf, "_global_amax", None)
+                if global_amax is not None:
+                    global_amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
 
-    The grouped linear must give each fused expert the same global identity the weights use:
-    the dict key keeps the local expert index (maps to the local buffer on restore) while the
-    ShardedTensor carries the global expert offset. Called with sharded_offsets=() so the expert
-    axis is the (only) prepended axis at index 0.
-    """
-    sharded_sd = module.sharded_state_dict(prefix="", sharded_offsets=(), metadata=None)
-    identity = {}
-    for key, sh_ten in sharded_sd.items():
-        if re.match(r"weight_quantizer\.\d+\..*_amax$", key):
-            assert sh_ten.prepend_axis_num >= 1, f"{key}: expected a prepended expert axis"
-            identity[key] = (int(sh_ten.global_offset[0]), int(sh_ten.global_shape[0]))
-    return identity
+
+def _assert_te_grouped_weight_quantizer_state(model, expected_amax, expect_global_amax):
+    checked = 0
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                amax = getattr(leaf, "_amax", None)
+                assert amax is not None, (
+                    "TEGrouped per-expert weight quantizer amax was not restored"
+                )
+                checked += 1
+                assert torch.equal(amax, torch.full_like(amax, expected_amax[local_expert_idx]))
+                global_amax = getattr(leaf, "_global_amax", None)
+                if expect_global_amax:
+                    assert global_amax is not None, (
+                        "TEGrouped per-expert weight quantizer global_amax was not restored"
+                    )
+                    assert torch.equal(
+                        global_amax,
+                        torch.full_like(global_amax, expected_amax[local_expert_idx]),
+                    )
+    assert checked > 0, "no TEGrouped per-expert weight quantizer amax was checked"
 
 
-def _test_te_grouped_sharded_state_dict_global_expert_identity_helper(
-    tp_size, ep_size, quant_cfg, rank, size
+def _override_te_grouped_modelopt_tp_group(model, tp_group):
+    grouped_linears = [
+        module for module in model.modules() if isinstance(module, _QuantMegatronTEGroupedLinear)
+    ]
+    assert grouped_linears, "no quantized TEGroupedLinear found"
+    for linear in grouped_linears:
+        assert getattr(linear, "_pg_collection", None) is not None
+        linear.parallel_state.tensor_parallel_group.group = tp_group
+
+
+def test_initialize_grouped_weight_quantizer_state_for_restore():
+    """Missing grouped state inherits the shape and dtype of a populated sibling."""
+    source = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(
+        mtq.nn.TensorQuantizer(amax=torch.tensor([1.0, 2.0])), global_amax=torch.tensor(2.0)
+    )
+    target = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled.disable()
+    mx = mtq.nn.TensorQuantizer(
+        mtq.config.QuantizerAttributeConfig(
+            num_bits=(4, 3), block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+        )
+    )
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.empty(1))
+    model.num_gemms = 4
+    model.weight_quantizer = torch.nn.ModuleList([target, source, disabled, mx])
+
+    _initialize_grouped_weight_quantizer_state(model)
+
+    assert torch.equal(target.amax, torch.zeros_like(source.amax))
+    assert torch.equal(target.global_amax, torch.zeros_like(source.global_amax))
+    assert disabled.amax is None
+    assert disabled.global_amax is None
+    assert mx.amax is None
+    assert not hasattr(mx, "_amax")
+
+
+def _test_te_grouped_sharded_state_dict_reshard_helper(
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+    quant_cfg,
+    expect_global_amax,
+    checkpoint_path,
+    rank,
+    size,
+    save_etp_size=None,
+    load_etp_size=None,
+    override_modelopt_tp_group=False,
 ):
-    """Per-expert quantizer amax must persist all num_global_experts across EP.
-
-    With EP>1 the base linear emitted ``weight_quantizer.{local_i}._amax`` at the local index with
-    no expert offset, so every rank wrote identical keys and torch_dist dedup collapsed them to a
-    single rank's experts. Assert each rank's fused experts now carry distinct global identities so
-    the union across ranks covers every global expert.
-    """
+    """Round-trip TEGroupedMLP amax through a topology change."""
+    num_experts = 4
+    save_num_local_experts = num_experts // save_ep_size
     initialize_for_megatron(
-        tensor_model_parallel_size=tp_size,
-        expert_model_parallel_size=ep_size,
+        tensor_model_parallel_size=save_tp_size,
+        expert_model_parallel_size=save_ep_size,
+        expert_tensor_parallel_size=save_etp_size,
         seed=SEED,
     )
-    num_experts = 4
-    num_local = num_experts // ep_size
 
-    te_grouped = _gpt_model_provider(
-        tp_size=tp_size,
-        ep_size=ep_size,
+    source = _gpt_model_provider(
+        tp_size=save_tp_size,
+        ep_size=save_ep_size,
+        etp_size=save_etp_size,
         hidden_size=32,
         moe_grouped_gemm=True,
         transformer_impl="transformer_engine",
         num_moe_experts=num_experts,
     )
-    forward = get_forward(te_grouped, batch_size=8)
-    for module in te_grouped.modules():
+    forward = get_forward(source, batch_size=8)
+    for module in source.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
-    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(source, copy.deepcopy(quant_cfg), forward)
+    if override_modelopt_tp_group:
+        _override_te_grouped_modelopt_tp_group(source, get_tensor_model_parallel_group())
+    _set_te_grouped_weight_quantizer_state(
+        source, get_expert_model_parallel_rank(), save_num_local_experts
+    )
+    save_distributed_checkpoint(checkpoint_path, source)
+    save_sharded_modelopt_state([source], checkpoint_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
 
-    grouped_linears = [
-        m for m in te_grouped.modules() if isinstance(m, _QuantMegatronTEGroupedLinear)
-    ]
-    assert grouped_linears, "No grouped quant linears found"
-
-    expected_global = {rank * num_local + i for i in range(num_local)}
-    for linear in grouped_linears:
-        # Give each expert a distinct amax so a value mix-up would also be observable.
-        for i in range(linear.num_gemms):
-            wq = linear.weight_quantizer[i]
-            leaves = list(wq) if isinstance(wq, SequentialQuantizer) else [wq]
-            for leaf in leaves:
-                if hasattr(leaf, "_amax") and leaf._amax is not None:
-                    leaf._amax.fill_(1.0 + rank * num_local + i)
-
-        identity = _te_grouped_expert_identity_from_sharded_state(linear)
-        # One entry per local expert per amax buffer; dict keys keep the LOCAL index.
-        local_keys = {int(re.search(r"weight_quantizer\.(\d+)\.", k).group(1)) for k in identity}
-        assert local_keys == set(range(num_local)), (
-            f"Expected local expert keys {set(range(num_local))}, got {local_keys}"
+    initialize_for_megatron(
+        tensor_model_parallel_size=load_tp_size,
+        expert_model_parallel_size=load_ep_size,
+        expert_tensor_parallel_size=load_etp_size,
+        seed=SEED,
+    )
+    target = _gpt_model_provider(
+        tp_size=load_tp_size,
+        ep_size=load_ep_size,
+        etp_size=load_etp_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=num_experts,
+    )
+    target_models = [target]
+    restore_sharded_modelopt_state(target_models, checkpoint_path)
+    target = target_models[0]
+    if override_modelopt_tp_group:
+        _override_te_grouped_modelopt_tp_group(target, get_tensor_model_parallel_group())
+    load_distributed_checkpoint(checkpoint_path, target)
+    load_num_local_experts = num_experts // load_ep_size
+    expected_amax = tuple(
+        range(
+            1 + get_expert_model_parallel_rank() * load_num_local_experts,
+            1 + (get_expert_model_parallel_rank() + 1) * load_num_local_experts,
         )
-        # ShardedTensor global identity: this rank owns experts {rank*num_local + i}.
-        local_global = {gidx for gidx, _ in identity.values()}
-        assert local_global == expected_global, (
-            f"rank {rank}: expected global experts {expected_global}, got {local_global}"
-        )
-        assert all(total == num_experts for _, total in identity.values()), (
-            f"num_global_experts should be {num_experts}, got {identity}"
-        )
+    )
+    _assert_te_grouped_weight_quantizer_state(target, expected_amax, expect_global_amax)
 
-    # Gather the global expert indices across all EP ranks: the union must cover every expert.
-    gathered = [None] * size
-    torch.distributed.all_gather_object(gathered, sorted(expected_global))
-    union = set()
-    for part in gathered:
-        union.update(part)
-    assert union == set(range(num_experts)), (
-        f"Union of global experts across EP ranks should be {set(range(num_experts))}, got {union}"
+
+@pytest.mark.parametrize(
+    (
+        "quant_cfg",
+        "expect_global_amax",
+        "save_tp_size",
+        "save_ep_size",
+        "load_tp_size",
+        "load_ep_size",
+    ),
+    [
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 2, 1, 1, id="fp8-ep-downsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 1, 2, id="fp8-ep-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 2, 1, id="fp8-tp-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 2, 1, 1, 1, id="fp8-tp-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 2, 1, 1, id="nvfp4-ep-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 1, 2, id="nvfp4-ep-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 2, 1, id="nvfp4-tp-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 2, 1, 1, 1, id="nvfp4-tp-downsize"),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            2,
+            1,
+            1,
+            id="nvfp4-mse-ep-downsize",
+        ),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            1,
+            1,
+            2,
+            id="nvfp4-mse-ep-upsize",
+        ),
+    ],
+)
+def test_te_grouped_sharded_state_dict_reshard(
+    dist_workers_size_2,
+    tmp_path,
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+    quant_cfg,
+    expect_global_amax,
+):
+    dist_workers_size_2.run(
+        partial(
+            _test_te_grouped_sharded_state_dict_reshard_helper,
+            save_tp_size,
+            save_ep_size,
+            load_tp_size,
+            load_ep_size,
+            quant_cfg,
+            expect_global_amax,
+            tmp_path,
+        )
     )
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_sharded_state_dict_global_expert_identity(dist_workers_size_2, quant_cfg):
-    dist_workers_size_2.run(
-        partial(_test_te_grouped_sharded_state_dict_global_expert_identity_helper, 1, 2, quant_cfg)
+@pytest.mark.parametrize("override_modelopt_tp_group", [False, True])
+def test_te_grouped_sharded_state_dict_combined_tp_ep(
+    dist_workers_size_4, tmp_path, override_modelopt_tp_group
+):
+    """Round-trip grouped expert quantizer state with TP and EP both greater than one."""
+    dist_workers_size_4.run(
+        partial(
+            _test_te_grouped_sharded_state_dict_reshard_helper,
+            2,
+            2,
+            2,
+            2,
+            mtq.NVFP4_DEFAULT_CFG,
+            False,
+            tmp_path,
+            save_etp_size=1,
+            load_etp_size=1,
+            # The True case simulates child conversion without the parent MLP setup: checkpoint
+            # groups must still come from the grouped linear's MCore process-group collection.
+            override_modelopt_tp_group=override_modelopt_tp_group,
+        )
     )
 
 
@@ -1695,6 +1872,323 @@ def test_kv_cache_quant(dist_workers_size_1, config):
     dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
 
 
+INDEXER_FP8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*indexer_q_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+        {"quantizer_name": "*indexer_k_quantizer", "cfg": {"num_bits": (4, 3)}, "enable": True},
+    ],
+    "algorithm": "max",
+}
+INDEXER_QUANTIZERS = ("indexer_q_quantizer", "indexer_k_quantizer")
+# The KV-cache preset merged onto a disable-all base, as every model recipe does.
+KV_ONLY_FP8_CFG = {
+    "quant_cfg": [{"quantizer_name": "*", "enable": False}, *mtq.FP8_KV_CFG["quant_cfg"]],
+    "algorithm": "max",
+}
+
+
+def _indexers(model):
+    return [m for m in model.modules() if isinstance(m, _QuantMegatronIndexer)]
+
+
+def _fp8_grid_error(x, amax):
+    """Mean distance of ``x`` from the per-tensor FP8 E4M3 grid, relative to its mean magnitude."""
+    scaled = (x.float() * (448.0 / amax.float())).clamp(-448.0, 448.0)
+    return (
+        (scaled - scaled.to(torch.float8_e4m3fn).float()).abs().mean() / scaled.abs().mean()
+    ).item()
+
+
+def _returned_queries_and_keys(model, forward):
+    """``(indexer, query, key)`` for every ``forward_before_topk`` call of ``forward(model)``."""
+    outputs = []
+    with ExitStack() as stack:
+        for module in _indexers(model):
+
+            def spy(*args, _original=module.forward_before_topk, _module=module, **kwargs):
+                q, k, weights = _original(*args, **kwargs)
+                outputs.append((_module, q, k))
+                return q, k, weights
+
+            stack.enter_context(patch.object(module, "forward_before_topk", spy))
+        forward(model)
+    assert outputs
+    return outputs
+
+
+def _assert_quantized_in_serving_basis(model, forward):
+    """The query and key every indexer returns are fake-quantized before the Hadamard rotation.
+
+    vLLM quantizes the DeepSeek-V4 query and key unrotated. After FP8 fake quantization in that
+    basis the unrotated tensor lies on the FP8 grid while the rotated one does not.
+    """
+    for module, query, key in _returned_queries_and_keys(model, forward):
+        for x, quantizer in (
+            (query, module.indexer_q_quantizer),
+            (key, module.indexer_k_quantizer),
+        ):
+            assert _fp8_grid_error(rotate_activation(x), quantizer.amax) < 0.01
+            assert _fp8_grid_error(x, quantizer.amax) > 0.01  # the check tells the bases apart
+
+
+def _csa_indexer_model():
+    """A standalone DeepSeek-V4 CSA indexer (compress ratio 4), as built by the dsv4_hybrid spec."""
+    # Imported here: CSA (older megatron-core) and Transformer Engine are optional; the test skips.
+    from megatron.core.extensions.transformer_engine import TELinear, TENorm
+    from megatron.core.models.common.embeddings import RotaryEmbedding
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from megatron.core.transformer.experimental_attention_variant.csa import (
+        Compressor,
+        CompressorSubmodules,
+        CSAIndexerSubmodules,
+    )
+    from megatron.core.transformer.spec_utils import ModuleSpec
+    from megatron.core.transformer.transformer_config import MLATransformerConfig
+
+    config = MLATransformerConfig(
+        num_layers=2,
+        hidden_size=256,
+        num_attention_heads=16,
+        use_cpu_initialization=True,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+        q_lora_rank=64,
+        kv_lora_rank=64,
+        qk_head_dim=32,
+        qk_pos_emb_head_dim=32,
+        v_head_dim=64,
+        rope_type="rope",
+        rotary_base=10000,
+        rotary_percent=1.0,
+        multi_latent_attention=True,
+        csa_compress_ratios=[4, 4],
+        dsa_indexer_n_heads=8,
+        dsa_indexer_head_dim=64,
+        dsa_indexer_topk=8,
+        dsa_indexer_loss_coeff=0.0,
+    )
+    pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["tp", "cp"])
+    compressor = partial(
+        Compressor,
+        submodules=CompressorSubmodules(
+            linear_wkv=ModuleSpec(module=TELinear),
+            linear_wgate=ModuleSpec(module=TELinear),
+            norm=ModuleSpec(module=TENorm),
+        ),
+    )
+    # A MegatronModule parent provides the sharded_state_dict of torch-dist checkpoints.
+    model = MegatronModule(config=config)
+    model.indexer = CSAIndexer(
+        config=config,
+        submodules=CSAIndexerSubmodules(
+            linear_wq_b=ModuleSpec(module=TELinear),
+            linear_weights_proj=ModuleSpec(module=TELinear),
+            compressor=compressor,
+        ),
+        compress_ratio=4,
+        rotary_pos_emb=RotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            cp_group=pg_collection.cp,
+        ),
+        pg_collection=pg_collection,
+    )
+    return model.cuda()
+
+
+def _test_csa_indexer_quant_helper(tmp_path, rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
+    )
+    x = torch.randn(64, 2, 256, dtype=torch.bfloat16, device="cuda")
+    qr = torch.randn(64, 2, 64, dtype=torch.bfloat16, device="cuda")
+
+    def forward(model):
+        return model.indexer(x, qr)
+
+    # The KV-cache glob does not match the indexer query and key.
+    kv_model = mtq.quantize(_csa_indexer_model(), KV_ONLY_FP8_CFG, forward)
+    assert _indexers(kv_model) and not any(
+        getattr(m, name).is_enabled for m in _indexers(kv_model) for name in INDEXER_QUANTIZERS
+    )
+
+    model = _csa_indexer_model()
+    with torch.no_grad():
+        rotated_query, rotated_key, _ = model.indexer.forward_before_topk(x, qr)
+    model = mtq.quantize(model, INDEXER_FP8_CFG, forward)
+    (indexer,) = _indexers(model)
+    # Calibrated on the unrotated query and key that vLLM quantizes, not on the rotated ones the
+    # scores use.
+    for name, rotated in zip(INDEXER_QUANTIZERS, (rotated_query, rotated_key)):
+        unrotated_amax = rotate_activation(rotated).abs().amax().float()
+        assert torch.allclose(getattr(indexer, name).amax.float(), unrotated_amax, rtol=0.02)
+    _assert_quantized_in_serving_basis(model, forward)
+    sharded_keys = list(model.sharded_state_dict())
+    assert any(k.endswith("indexer._extra_state") for k in sharded_keys)
+    for name in INDEXER_QUANTIZERS:
+        assert any(k.endswith(f"indexer.{name}._amax") for k in sharded_keys)
+
+    # Megatron resumes in two passes: the extra state recreates the quantizer buffers from their
+    # metadata (and must place them on device), then the full state dict fills in the values.
+    amaxes = {name: getattr(indexer, name).amax.clone() for name in INDEXER_QUANTIZERS}
+    state_dict = indexer.state_dict()
+    indexer.allow_post_restore = True
+    indexer.set_extra_state(indexer.get_extra_state())
+    for name, amax in amaxes.items():
+        quantizer = getattr(indexer, name)
+        assert quantizer.is_enabled
+        assert quantizer.amax.is_cuda
+        assert quantizer.amax.shape == amax.shape
+    indexer.load_state_dict(state_dict)
+    for name, amax in amaxes.items():
+        assert torch.equal(getattr(indexer, name).amax, amax)
+
+    def query_key_weights(model):
+        """A float output that depends on every indexer parameter, for the round-trip checks."""
+        return torch.cat([t.float().flatten() for t in model.indexer.forward_before_topk(x, qr)])
+
+    # torch-dist checkpoint + sharded modelopt_state round trip into a fresh model.
+    (tmp_path / "enabled").mkdir()
+    (tmp_path / "disabled").mkdir()
+    model_test = _csa_indexer_model()
+    sharded_state_dict_test_helper(tmp_path / "enabled", model, model_test, query_key_weights)
+    assert all(
+        getattr(m, name).is_enabled for m in _indexers(model_test) for name in INDEXER_QUANTIZERS
+    )
+
+    # A quantizer toggled outside the recipe (auto_quantize does this) must survive the round trip:
+    # the extra state, not the quant_cfg, is the record of the enabled flag.
+    mtq.disable_quantizer(model, "*indexer_k_quantizer")
+    model_test = _csa_indexer_model()
+    sharded_state_dict_test_helper(tmp_path / "disabled", model, model_test, query_key_weights)
+    assert all(
+        m.indexer_q_quantizer.is_enabled and not m.indexer_k_quantizer.is_enabled
+        for m in _indexers(model_test)
+    )
+
+
+@pytest.mark.skipif(not HAS_TE, reason="the CSA indexer is built from Transformer Engine layers")
+@pytest.mark.skipif(CSAIndexer is None, reason="megatron-core without Compressed Sparse Attention")
+@pytest.mark.skipif(not HAS_HADAMARD, reason="rotate_activation needs fast_hadamard_transform")
+def test_csa_indexer_quant(dist_workers_size_1, tmp_path):
+    """The DeepSeek-V4 CSA indexer query and key are fake-quantized before the Hadamard rotation,
+    and their quantizer state survives save/restore."""
+    dist_workers_size_1.run(partial(_test_csa_indexer_quant_helper, tmp_path))
+
+
+def test_registered_megatron_quant_modules_checkpoint_quantizer_state():
+    """Quantizer state rides in ``_extra_state``, which torch saves only for classes overriding it.
+
+    ``register_modelopt_extra_state_callbacks`` binds the hooks per instance, so a registered class
+    without a class-level ``get/set_extra_state`` silently drops its amax from checkpoints (as
+    DSAttention did). Containers whose child linears hold all quantizers are exempt.
+    """
+    containers = {MLP, SequentialMLP, TEGroupedMLP}
+    base = torch.nn.Module
+    missing = []
+    for cls, quant_cls in QuantModuleRegistry._registry.items():
+        if not issubclass(cls, MegatronModule) or cls in containers:
+            continue
+        if issubclass(cls, DynamicModule):
+            continue  # e.g. LoRA wrappers: the runtime class also includes the wrapped Megatron layer
+        routes = all(
+            any(getattr(c, attr) is not getattr(base, attr) for c in (quant_cls, cls))
+            for attr in ("get_extra_state", "set_extra_state")
+        )
+        if not routes:
+            missing.append(cls.__name__)
+    assert not missing, f"quantizer state would be dropped from checkpoints for: {missing}"
+
+
+def _get_tiny_dsa_gpt_model():
+    """Tiny GPT with DSA sparse attention (AbsorbedMLASelfAttention + DSAttention + indexer)."""
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
+    from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+        get_transformer_block_with_experimental_attention_variant_spec,
+    )
+    from megatron.core.transformer.transformer_config import MLATransformerConfig
+
+    config = MLATransformerConfig(
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        ffn_hidden_size=128,
+        q_lora_rank=32,
+        kv_lora_rank=16,
+        qk_head_dim=16,
+        qk_pos_emb_head_dim=16,
+        v_head_dim=16,
+        experimental_attention_variant="dsa",
+        dsa_indexer_n_heads=2,
+        dsa_indexer_head_dim=32,
+        dsa_indexer_topk=8,
+        normalization="RMSNorm",
+        add_bias_linear=False,
+        hidden_dropout=0.0,  # deterministic forward for the checkpoint round-trip comparison
+        attention_dropout=0.0,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+    )
+    spec = get_transformer_block_with_experimental_attention_variant_spec(config)
+    return GPTModel(
+        config=config,
+        transformer_layer_spec=spec,
+        vocab_size=64,
+        max_sequence_length=64,
+        position_embedding_type="rope",
+        # Tied so a checkpoint round-trip restores the output layer too.
+        share_embeddings_and_output_weights=True,
+    ).cuda()
+
+
+def _test_dsa_kv_cache_quant_helper(tmp_path, rank, size):
+    # Local: DSA is optional; test_dsa_kv_cache_quant importorskips it before calling this.
+    from megatron.core.transformer.experimental_attention_variant.dsa import DSAttention
+
+    initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
+    model, model_test = _get_tiny_dsa_gpt_model(), _get_tiny_dsa_gpt_model()
+    forward = get_forward(model)
+    # Calibrated (not constant-amax) FP8 KV cache: the case that needs a real V amax to export.
+    kv_fp8_calibrated = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, kv_fp8_calibrated, forward)
+
+    dsa_modules = [m for m in model.modules() if isinstance(m, DSAttention)]
+    assert dsa_modules, "DSAttention was not converted for KV-cache quantization"
+    for module in dsa_modules:
+        assert module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled
+        # Absorbed MLA passes value=None; V is calibrated on the shared KV latent like K, so a
+        # calibrated FP8 KV cache still exports a v_scale.
+        assert module.k_bmm_quantizer.amax is not None
+        assert torch.equal(module.v_bmm_quantizer.amax, module.k_bmm_quantizer.amax)
+
+    # The KV quantizer state (incl. amax) survives a torch-dist round-trip alongside the indexer.
+    # DSA trains its indexer through a separate indexer loss, so the LM-loss backward in the helper
+    # gives it no gradient; exclude it from that check.
+    for name, param in model_test.named_parameters():
+        if ".indexer." in name:
+            param.requires_grad_(False)
+    sharded_state_dict_test_helper(tmp_path, model, model_test, forward)
+    # The helper compares every restored tensor (incl. K/V amax), but V is unused in the forward
+    # pass, so also check both quantizers came back enabled.
+    restored = [m for m in model_test.modules() if isinstance(m, DSAttention)]
+    assert len(restored) == len(dsa_modules)
+    assert all(m.k_bmm_quantizer.is_enabled and m.v_bmm_quantizer.is_enabled for m in restored)
+
+
+def test_dsa_kv_cache_quant(dist_workers_size_1, tmp_path):
+    """DSAttention gets calibrated K/V KV-cache quantizers that survive a checkpoint round-trip."""
+    pytest.importorskip("megatron.core.transformer.experimental_attention_variant.dsa")
+    dist_workers_size_1.run(partial(_test_dsa_kv_cache_quant_helper, tmp_path))
+
+
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):
     """Helper function for testing KV cache quantizer amax sync across distributed world."""
     # Use rank in seed to produce different amax values across ranks
@@ -1925,3 +2419,109 @@ def test_output_layer_untied_not_stamped_onto_teacher_config():
 
     assert student.config.modelopt_output_layer_untied is True
     assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")
+
+
+# Captured at import, before any test can apply the patch, so tests can start from pristine mcore.
+_PRISTINE_GPT_SHARDED_STATE_DICT = GPTModel.sharded_state_dict
+
+
+def _stock_gpt_sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer.
+
+    Copied verbatim from ``GPTModel.sharded_state_dict`` in NVIDIA/Megatron-LM at ``be08ce5b1~1``
+    (Apache-2.0) so the patched path is exercised whichever megatron-core is installed.
+    """
+    sharded_state_dict = super(GPTModel, self).sharded_state_dict(prefix, sharded_offsets, metadata)
+    output_layer_extra_state_key = f"{prefix}output_layer._extra_state"
+    output_extra_state = sharded_state_dict.pop(output_layer_extra_state_key, None)
+    assert not (output_extra_state and output_extra_state.data), (
+        f"Expected output layer extra state to be empty, got: {output_extra_state}"
+    )
+    return sharded_state_dict
+
+
+class TestKeepGptOutputLayerExtraState:
+    """The GPTModel.sharded_state_dict patch that lets a quantized output_layer be checkpointed."""
+
+    @pytest.fixture(autouse=True)
+    def pristine_gpt_model(self):
+        """Run against unpatched megatron-core, then restore whatever the session had."""
+        applied = GPTModel.sharded_state_dict
+        GPTModel.sharded_state_dict = _PRISTINE_GPT_SHARDED_STATE_DICT
+        keep_gpt_output_layer_extra_state.cache_clear()
+        yield
+        GPTModel.sharded_state_dict = applied
+        keep_gpt_output_layer_extra_state.cache_clear()
+
+    @staticmethod
+    def _sharded_state_dict(entries: dict) -> dict:
+        """Run GPTModel.sharded_state_dict over a canned parent state dict, no built model needed."""
+        model = GPTModel.__new__(GPTModel)
+        with patch.object(LanguageModule, "sharded_state_dict", return_value=dict(entries)):
+            return GPTModel.sharded_state_dict(model, prefix="")
+
+    def test_keeps_populated_extra_state(self):
+        """Fails if neither our patch nor megatron-core itself keeps a quantized output_layer."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict(
+            {
+                "output_layer.weight": torch.ones(4),
+                "output_layer._extra_state": SimpleNamespace(data=b"quantizer_state"),
+            }
+        )
+        assert "output_layer._extra_state" in sharded
+
+    @pytest.mark.parametrize("empty", [None, SimpleNamespace(data=None), SimpleNamespace(data=b"")])
+    def test_drops_empty_extra_state(self, empty):
+        """Upstream behaviour for the placeholder an unquantized output_layer contributes."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict({"output_layer._extra_state": empty})
+        assert "output_layer._extra_state" not in sharded
+
+    def test_patches_stock_megatron_core(self):
+        """Pins the patched path: stock mcore matches the fingerprint and stops losing the entry."""
+        GPTModel.sharded_state_dict = _stock_gpt_sharded_state_dict
+        populated = {"output_layer._extra_state": SimpleNamespace(data=b"quantizer_state")}
+        with pytest.raises(AssertionError, match="Expected output layer extra state to be empty"):
+            self._sharded_state_dict(populated)
+
+        assert keep_gpt_output_layer_extra_state()
+        assert "output_layer._extra_state" in self._sharded_state_dict(populated)
+        assert "output_layer._extra_state" not in self._sharded_state_dict(
+            {"output_layer._extra_state": SimpleNamespace(data=b"")}
+        )
+
+    def test_second_call_is_a_no_op(self):
+        """Idempotent: @cache runs the body once, so a repeat call cannot stack a second patch."""
+        first = keep_gpt_output_layer_extra_state()
+        after_first = GPTModel.sharded_state_dict
+        assert keep_gpt_output_layer_extra_state() == first
+        assert keep_gpt_output_layer_extra_state.cache_info().hits >= 1
+        assert GPTModel.sharded_state_dict is after_first
+
+    def test_unrecognised_upstream_is_left_alone(self):
+        """An mcore whose body we do not recognise keeps its own logic, with a warning."""
+
+        def unrecognised(self, prefix="", sharded_offsets=(), metadata=None):
+            return {"untouched": True}
+
+        GPTModel.sharded_state_dict = unrecognised
+        with pytest.warns(UserWarning, match="not the version ModelOpt patches"):
+            assert not keep_gpt_output_layer_extra_state()
+        assert GPTModel.sharded_state_dict is unrecognised
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            (None, False),
+            (torch.empty(0, dtype=torch.uint8), False),
+            (torch.ones(4, dtype=torch.uint8), True),
+            (SimpleNamespace(data=None), False),
+            (SimpleNamespace(data=b""), False),
+            (SimpleNamespace(data=b"quantizer_state"), True),
+            (SimpleNamespace(data=torch.empty(0, dtype=torch.uint8)), False),
+            (SimpleNamespace(data=torch.ones(4, dtype=torch.uint8)), True),
+        ],
+    )
+    def test_extra_state_has_data(self, entry, expected):
+        assert _output_layer_extra_state_has_data(entry) is expected

@@ -1,0 +1,51 @@
+# Token-budgeted data blend for QAD on Qwen3.6-35B-A3B.
+# Consumed by the token-budgeted blend workflow in examples/dataset/MEGATRON_DATA_PREP.md
+# ("Prepare token-budgeted data blends"). Weights are each split's share of the dataset's own
+# token count, i.e. a single pass over the natural mixture rather than a tuned blend.
+#
+# QAD supports language-model distillation with text-only data, so this blend is SFT text only.
+
+tokenizer: Qwen/Qwen3.6-35B-A3B
+output_dir: /path/to/tokenized_cascade2_qwen36
+target_tokens: 17_300_000_000
+sources:
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: chat
+    split: train
+    content_field: messages
+    weight: 56.2
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: math
+    split: train
+    content_field: messages
+    weight: 21.1
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: science
+    split: train
+    content_field: messages
+    weight: 10.9
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: instruction_following
+    split: train
+    content_field: messages
+    weight: 3.3
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: conversational_agent
+    split: train
+    content_field: messages
+    weight: 3.3
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: terminal_agent
+    split: train
+    content_field: messages
+    weight: 3.3
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: swe
+    split: train
+    content_field: messages
+    weight: 1.8
+  - hf_dataset: nvidia/Nemotron-Cascade-2-SFT-Data
+    config: safety
+    split: train
+    content_field: messages
+    weight: 0.02

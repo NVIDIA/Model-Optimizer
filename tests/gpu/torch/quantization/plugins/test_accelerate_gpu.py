@@ -193,6 +193,21 @@ def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
         assert manifest["num_layers"] == num_layers
 
 
+def test_layerwise_calibrates_lm_head_with_accelerate_offload(tmp_path):
+    config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    config["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": True})
+    config = make_layerwise_cfg(config)
+    model, _, _, inputs = make_cpu_offloaded_model(tmp_path, num_hidden_layers=1)
+    offloaded_layer = model.model.layers[0]
+
+    assert isinstance(offloaded_layer._hf_hook, AlignDevicesHook)
+    assert all(parameter.device.type == "meta" for parameter in offloaded_layer.parameters())
+
+    mtq.quantize(model, config, lambda target: target(inputs))
+
+    assert model.lm_head.input_quantizer.amax is not None
+
+
 def test_sequential_checkpoint_resume_cpu_offloaded(tmp_path):
     """Resume from a partial checkpoint on a CPU-offloaded model matches a full run."""
     quant_cfg = mtq.NVFP4_AWQ_LITE_CFG

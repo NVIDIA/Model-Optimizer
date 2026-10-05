@@ -87,13 +87,33 @@ _FWD_CONFIGS = [
 ]
 
 _MEASURE_BLOCK_M = 128
-_P_QDQ_MEASURE_BLOCK_M = 16
 # 128 so the kernel sparsity-measurement block matches the PyTorch
 # calibration/reference granularity. This is deliberately independent of the
 # autotuned compute tile.
 _MEASURE_BLOCK_N = 128
 _MEASURE_NUM_STAGES = 1
 _MEASURE_NUM_WARPS = 4
+
+# Serving keeps the calibrated KV-tile granularity but does not inherit the
+# deliberately conservative measurement schedule. A one-token decode has only
+# one valid Q row, so padding-row masking makes its skip decision independent
+# of BLOCK_M; use the smallest dense-autotune Q tile there.
+_SKIP_SERVE_DECODE_BLOCK_M = 16
+
+_SKIP_SERVE_CONFIGS = [
+    triton.Config({}, num_stages=num_stages, num_warps=num_warps)
+    for num_stages in (1, 2, 3)
+    for num_warps in (4, 8)
+]
+
+
+def _skip_tile_resource_error(q_dtype, err) -> RuntimeError:
+    return RuntimeError(
+        "skip-softmax requires the fixed 128-wide KV calibration tile, "
+        f"which exceeds this GPU's shared memory for {q_dtype} inputs ({err}). "
+        "Use fp16/bf16 inputs or a device with more shared memory; re-tiling KV "
+        "would change the calibrated sparsity contract."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +529,20 @@ def _attn_fwd(
     # --- Store output [BLOCK_M, BLOCK_D] ---
     o_ptrs = (q_offset + q_pos[:, None]) * stride_obs + head_idx * stride_oh + dim_pos[None, :]
     tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
+
+
+# Serving autotunes only the execution schedule. BLOCK_M/BLOCK_N remain launch
+# arguments, so tuning cannot change which attention tiles the calibrated
+# threshold skips. Measurement uses _attn_fwd.fn directly because its counters
+# must not be incremented by autotune trials.
+_attn_fwd_skip_serve = triton.autotune(
+    configs=(
+        _SKIP_SERVE_CONFIGS[:1]
+        if "PYTEST_VERSION" in __import__("os").environ
+        else _SKIP_SERVE_CONFIGS
+    ),
+    key=["N_CTX", "HEAD_DIM", "Q_IS_FP32", "IS_PAGED"],
+)(_attn_fwd.fn)
 
 
 # ---------------------------------------------------------------------------
@@ -944,6 +978,16 @@ class _Attention(torch.autograd.Function):
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0
+        if apply_skip and (p_qdq_mode or v_qdq_mode):
+            # Quantized operands change what the calibrated skip thresholds mean,
+            # and P-QDQ additionally uses a different measurement tile geometry.
+            # The vLLM installers reject this composition at plan time; the raw
+            # kernel API rejects it here so no path can serve it.
+            raise ValueError(
+                "skip-softmax cannot be combined with attention quantization "
+                "(P/V QDQ): the calibrated tile-skip contract does not hold "
+                "under quantized operands"
+            )
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -1030,17 +1074,45 @@ class _Attention(torch.autograd.Function):
         # kernel dereferences the right pointers instead of triggering an
         # illegal memory access.
         with torch.cuda.device(q.device):
-            if do_measure:
-                # Runtime counters mutate global tensors, so do not run them through
-                # autotune candidate trials. Use one stable config for measurement.
-                _attn_fwd.fn[grid](
-                    *fwd_args,
-                    **fwd_kwargs,
-                    BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
-                    BLOCK_N=_MEASURE_BLOCK_N,
-                    num_warps=_MEASURE_NUM_WARPS,
-                    num_stages=_MEASURE_NUM_STAGES,
+            if apply_skip:
+                # Fixed skip-decision geometry:
+                # - Measurement: runtime counters mutate global tensors, so they
+                #   bypass autotuning to avoid repeated candidate trials.
+                # - Active prefill skip-softmax: the tile-skip decision depends
+                #   on the (BLOCK_M, BLOCK_N) geometry, and thresholds are
+                #   calibrated at 128x128 granularity (attention_calibrate and
+                #   flash_skip_softmax both use 128x128 blocks). Decode has one
+                #   valid Q row, so its decision is BLOCK_M-invariant and can use
+                #   a 16x128 compute tile. BLOCK_N remains fixed for both phases.
+                #
+                # Serving autotunes only num_warps/num_stages while holding the
+                # decision geometry fixed.
+                block_m = (
+                    _MEASURE_BLOCK_M
+                    if do_measure or max_input_len > 1
+                    else _SKIP_SERVE_DECODE_BLOCK_M
                 )
+                try:
+                    # P/V QDQ is rejected above when skip is active, so the tile
+                    # here always uses the calibrated 128-wide KV granularity.
+                    if do_measure:
+                        _attn_fwd.fn[grid](
+                            *fwd_args,
+                            **fwd_kwargs,
+                            BLOCK_M=block_m,
+                            BLOCK_N=_MEASURE_BLOCK_N,
+                            num_warps=_MEASURE_NUM_WARPS,
+                            num_stages=_MEASURE_NUM_STAGES,
+                        )
+                    else:
+                        _attn_fwd_skip_serve[grid](
+                            *fwd_args,
+                            **fwd_kwargs,
+                            BLOCK_M=block_m,
+                            BLOCK_N=_MEASURE_BLOCK_N,
+                        )
+                except triton.runtime.errors.OutOfResources as err:
+                    raise _skip_tile_resource_error(q.dtype, err) from err
             else:
                 _attn_fwd[grid](
                     *fwd_args,

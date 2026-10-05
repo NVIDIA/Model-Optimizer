@@ -27,7 +27,9 @@ pipeline:
     args:
       - --input-data /hf-local/modelopt/MiniMax-M2.7-synthetic-data-clean-v2
       - --output-dir /scratchspace/dflash_minimax_m2.7_hidden_states
-      # Must match the draft model's num_hidden_layers (recipe default: 5).
+      # Layer-selection preset (keyword, not a count). The draft depth it resolves
+      # to is --num-draft-layers (default 5), which must match the draft model's
+      # dflash_architecture_config.num_hidden_layers set on task_1 below.
       - --aux-layers dflash
       - --answer-only-loss
       - --chat-template examples/MiniMax/MiniMax-M2.7-DFlash/chat_template_train.jinja

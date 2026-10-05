@@ -90,7 +90,6 @@ def test_sparse_install_from_checkpoint_is_validation_atomic():
         nn.ModuleDict({"valid_attn": valid, "invalid_attn": invalid}),
         sparse_metadata=_sparse_metadata(),
     )
-    del runner.vllm_config
 
     with pytest.raises(NotImplementedError, match="sliding_window"):
         vllm_runtime.install_vllm_sparse_attention_from_checkpoint(runner)
@@ -107,7 +106,6 @@ def test_installer_rejects_cross_attention_layout_even_if_marked_decoder():
         nn.ModuleDict({"cross_attn": attention}),
         sparse_metadata=_sparse_metadata(),
     )
-    del runner.vllm_config
 
     with pytest.raises(NotImplementedError, match="layout CrossAttention"):
         vllm_runtime.install_vllm_sparse_attention_from_checkpoint(runner)
@@ -122,7 +120,6 @@ def test_sparse_install_uses_checkpoint_metadata(monkeypatch, impl_cls):
         nn.ModuleDict({"attn": attention}),
         sparse_metadata=_sparse_metadata(),
     )
-    del runner.vllm_config
     monkeypatch.setattr(
         vllm_runtime.attention_plugin, "patch_flashinfer_metadata_builder", lambda: True
     )

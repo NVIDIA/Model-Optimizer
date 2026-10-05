@@ -723,13 +723,14 @@ class LayerwiseConfig(ModeloptBaseConfig):
     )
 
     get_qdq_activations_from_prev_layer: bool = ModeloptField(
-        default=False,
+        default=True,
         title="Cache next-layer inputs from QDQ outputs of prior layers.",
         description=(
-            "If True (GPTQ default), capture each layer's next-layer inputs "
+            "If True (default), capture each layer's next-layer inputs "
             "after it is calibrated, so QDQ error and in-place weight updates "
-            "propagate forward. If False (max/mse default), capture before, so "
-            "the next layer sees the same FP activations as a non-layerwise pass."
+            "propagate forward. If False, capture before calibration, so "
+            "the next layer sees the same FP activations as a non-layerwise pass. "
+            "We recommend setting this to True for GPTQ and Local-Hessian."
         ),
     )
 
@@ -759,15 +760,16 @@ class LayerwiseConfig(ModeloptBaseConfig):
         title="Export each layer's quantized checkpoint as soon as it is calibrated.",
         description=(
             "If set, each decoder layer is written to a quantized HF checkpoint shard in "
-            "this directory the moment its calibration finishes, leaving a complete, "
-            "loadable checkpoint when the last layer lands. Removes the separate "
+            "this directory the moment its calibration finishes, replacing the separate "
             "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Calibration writes only the layer shards; the checkpoint does not load until "
+            "``finalize()`` is called on the exporter attached to the model, which adds "
+            "the tail shard, the index and the config artifacts. "
             "Combined with ``checkpoint_dir``, an interrupted run resumes without "
             "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
-            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
-            "weight-tied quantized modules, multimodal and MTP models raise "
-            "NotImplementedError. The model left in memory afterwards is not valid for "
-            "inference if the run resumed."
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs "
+            "and weight-tied quantized modules raise NotImplementedError. Per-layer export "
+            "leaves the model in memory in export form, never valid for inference."
         ),
     )
 
@@ -1240,21 +1242,6 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
-
-    @model_validator(mode="after")
-    def _gptq_qdq_default(self):
-        """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.
-
-        GPTQ's Hessian correctness depends on prior-layer QDQ activations, so the
-        default differs from the base class. Uses ``model_fields_set`` to detect
-        whether the user explicitly set the field — covers every input shape
-        (empty constructor, bool, dict) without a per-shape special case.
-        """
-        if "get_qdq_activations_from_prev_layer" not in self.layerwise.model_fields_set:
-            self.layerwise = self.layerwise.model_copy(
-                update={"get_qdq_activations_from_prev_layer": True}
-            )
-        return self
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig

@@ -18,58 +18,85 @@ pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 | agent | `terminus-2` (from the playbook) |
 | `repeats` | `8` (AA / leaderboard count — don't lower for a scored run) |
 | sandbox | `ecs_fargate`, `stateful: true` (agent + verifier share one container) |
-| `sandbox.region` | match the region in `${HARBOR_ECR_REPOSITORY}` (us-east-1 with the eval-config default) |
-| `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by the `modelopttools:eval-config` skill (internal harbor ECR) |
+| `sandbox.region` | `${HARBOR_ECS_REGION:-us-east-1}` |
+| `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by `modelopttools:eval-config`; repo name tracks the region (`harbor-<region>`) |
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
-| `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
-| timeout_strategy | `max` (canonical bench.yaml) + `agent_kwargs.llm_kwargs.timeout: 3600`; use `task` for leaderboard-comparable |
+| `max_concurrent` / `sandbox.concurrency` | `50` (canonical, nano-class); **`15` for larger models** (upstream non-nano leaves). Keep both equal and fixed across baseline/candidate (see Sharding) |
+| timeout_strategy | `max` + `run_timeout: 14400` (ModelOpt default); use `task` for leaderboard-comparable |
 | `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) *(shared — see `references/nel-next.md`)* |
-| `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
+| `proxy.request_timeout` | `3600` — set explicitly (TB2.1 has no benchmark key for it); must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
 | `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
 | `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` *(shared — see `references/nel-next.md`)* |
 | `http_pairs_dump` | **last** in the interceptor chain — canary/diagnostic only, drop it for a scored run (unbounded error-pair retention) |
+| `proxy.model_traffic.capture_request_body` | `true`, per service *(shared — see `references/nel-next.md`)* |
+| `output.export_config.mlflow.tags` | `task_name: terminal-bench-2.1` |
 | scope | 89 tasks × `repeats: 8` |
 
-These values mirror the canonical TB2.1 config — re-check it before a scored run:
+Except for the ModelOpt timeout/lifetime overrides below, these values follow
+the canonical TB2.1 config — re-check it before a scored run:
 `configs/benchmarks/terminal-bench-2.1/bench.yaml` (+ `manifest.yaml`) in
 nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the image pin in
 `configs/shared/nel_next_containers.yaml`. See `references/nel-next.md` + the eval-config
-"source of truth" note. The `benchmarks:` block (drop into the example template):
+"source of truth" note. The sibling `bench_direct.yaml` is a different backend (Gym-native)
+— don't mix its values in. The `benchmarks:` block (drop into the example template):
 
 ```yaml
 benchmarks:
   - playbook: terminal_bench_2_1
     repeats: 8
-    max_concurrent: 50            # canonical; keep == sandbox.concurrency
+    max_concurrent: 50            # nano-class; LARGE models use 15. Keep == sandbox.concurrency
     solver:
       service: <svc-name>
       timeout_strategy: max       # canonical bench.yaml; use "task" for leaderboard-comparable
-      run_timeout: 7200           # per-task agent wall-clock ceiling (2h)
+      run_timeout: 14400          # ModelOpt 4h budget; max chooses the larger task/config timeout
       agent_kwargs:
         llm_kwargs:
           timeout: 3600           # per-request LLM timeout (canonical)
     sandbox:
-      region: us-east-1                       # must match the region in ${HARBOR_ECR_REPOSITORY}
+      max_task_lifetime_sec: 21600 # 6h: allow agent execution plus setup/verification
+      region: ${HARBOR_ECS_REGION:-us-east-1}  # repo name below tracks it
       ecr_repository: ${HARBOR_ECR_REPOSITORY} # from eval-config (internal harbor account/region)
       concurrency: 50
-      log_stream_prefix: terminalbench21-<model>-<cluster>
+      log_stream_prefix: terminalbench-21-<model>-<framework>
 ```
 
 `cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (`0.5.0.1-harbor`) and the AWS creds
 come from `modelopttools:eval-config` (run it first) + the workspace `.env`.
 
+**Timeout policy.** `max` uses the larger of `run_timeout` and the task's own
+budget (subject to any `max_agent_timeout` cap); 14400 is not a hard ceiling.
+The pinned playbook's sandbox lifetime is only 14400, so override it as above.
+Check that the effective agent budget plus setup/verification fits both sandbox
+lifetime and SLURM walltime, allowing for model startup; the example uses 8h
+walltime where the partition permits it. Auto-resume does not by itself prove
+an in-flight trial can survive a shorter allocation. Apply the same policy to
+baseline and candidate, record the override, and remeasure both for comparison
+with older 2h runs. Four hours reduces one source of timeouts; it does not
+guarantee completion or leaderboard comparability.
+
 **Sharding.** `max_concurrent`/`sandbox.concurrency` are **per shard**, and each shard runs
 its own vLLM on its own node — `shards: N` multiplies both serving capacity and live Fargate
-sandboxes (`N × concurrency`). Trials are partitioned and merged, so the score is unaffected;
-it is purely a wall-clock lever. `shards: 4` suits 89 × r8 = 712 trials. Check
+sandboxes (`N × concurrency`). Trials are partitioned and merged, preserving the
+intended trial set. Sharding or concurrency changes can still affect scores when
+serving speed or queueing changes timeout rates. `shards: 4` suits 89 × r8 = 712 trials. Check
 `N × concurrency` against the Fargate quota and `N × gpus_per_node` against your allocation.
 
+Apply `references/run-validation.md`'s bounded policy before reporting scores:
+solver/harness timeouts and terminal transport/action errors may count only when
+recorded and scored as protocol-valid failures. Keep all expected trials and
+repeats, including zero scores; incomplete coverage remains a blocker.
+
 ## Score Extraction
+
+Before reporting `pass@1`, complete the evaluation skill's
+`references/run-validation.md` **Timeout and Output-Limit Accounting** across
+all 89 × 8 = 712 expected trials. Distinguish agent, request/proxy,
+sandbox/verifier, and SLURM limits; retain failures per the benchmark protocol.
 
 Report **`pass@1`** only — benchmark `terminal-bench@2.1`, scorer `pass@1` (0–1):
 the resolved rate over the 2.1 task set, **already averaged over repeats** (a single
 `pass@1`; no `avg-of-N` key). MLflow logs it as `pass_at_1`. Read from `report.md`
 (Benchmark / Scorer table) or `nel eval report -r <run_id>`, then push to MLflow with
 `nel-next.sh mlflow-push -r <run_id> -c <cfg>` (SLURM doesn't auto-export). Keep
-`timeout_strategy` fixed across baseline vs quantized for a valid delta. (Terminal-Bench
+`timeout_strategy` and effective limits fixed across baseline vs quantized. (Terminal-Bench
 2.0 and 2.1 use different task sets, so their `pass@1` numbers aren't directly comparable.)

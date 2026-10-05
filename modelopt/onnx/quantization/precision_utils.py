@@ -21,7 +21,7 @@ import onnx_graphsurgeon as gs
 
 from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import (
+from modelopt.onnx.quantization.graph_rewrites import (
     convert_fp16_io,
     insert_fp8_mha_casts,
     remove_output_initializers,

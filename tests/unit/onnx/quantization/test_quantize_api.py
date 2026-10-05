@@ -87,6 +87,19 @@ OPSET_SCENARIOS = [
 ]
 
 
+def test_quantize_rejects_trt_plugins_with_trt_rtx_abi():
+    with pytest.raises(
+        ValueError,
+        match="TensorRT plugin paths are not supported with the TensorRT-RTX backend",
+    ):
+        moq.quantize(
+            "model.onnx",
+            calibration_eps=["NvTensorRtRtx"],
+            trt_rtx_backend="abi",
+            trt_plugins=["custom_plugin.dll"],
+        )
+
+
 def test_realign_input_shapes_profile_after_calibration_eps_update():
     quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
 
@@ -294,8 +307,8 @@ def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp
         return [{"trt_profile_min_shapes": "trt_profile"}, {}]
 
     def fake_find_nodes_from_mha_to_exclude(*args):
-        captured["find_eps"] = list(args[-2])
-        captured["find_profile"] = args[-1]
+        captured["find_eps"] = list(args[-3])
+        captured["find_profile"] = args[-2]
         return []
 
     def fake_quantize_int8(**kwargs):

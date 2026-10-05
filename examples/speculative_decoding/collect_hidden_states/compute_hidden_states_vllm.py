@@ -55,9 +55,10 @@ def _resolve_aux_layers_standalone(
     This dump runs in a stock vLLM container. ``common.resolve_aux_layers`` resolves the
     'dflash'/'eagle' presets by importing ``modelopt.torch.speculative.plugins`` — which
     pulls in the full ``modelopt.torch`` init chain (omegaconf, etc.) that the vLLM
-    container does not have, so the import fails. Resolve the 'dflash' preset inline
-    (mirroring ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers)
-    and accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
+    container does not have, so the import fails. Resolve both presets inline -- 'eagle'
+    mirrors ``hf_eagle.default_eagle_aux_layer_ids``, 'dflash' mirrors
+    ``modeling_dflash.build_target_layer_ids`` for ``num_draft`` draft layers -- and
+    accept an explicit comma-separated int list. ``num_draft`` MUST match the recipe's
     ``dflash.dflash_architecture_config.num_hidden_layers`` (pass --num-draft-layers) or the
     dumped aux layers silently mis-align with what the draft consumes at training time.
     Keep in sync with modelopt.
@@ -65,15 +66,39 @@ def _resolve_aux_layers_standalone(
     TODO: drop this once ``common.resolve_aux_layers`` is decoupled from the heavy
     ``modelopt.torch`` import chain so it can be reused directly in a vLLM container.
     """
+    # One literal: a future preset means editing this message once, not twice. The bug
+    # this guards against was precisely a copy drifting from its original.
+    unsupported = (
+        f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
+        "'eagle' / 'dflash' presets or an explicit comma-separated layer-id list "
+        "are supported."
+    )
     spec = aux_layers.strip().lower()
+    if spec == "eagle":
+        # Mirrors hf_eagle.default_eagle_aux_layer_ids: three layers near the start,
+        # middle, and end of the stack. This is add_aux_layers_args' default, so the
+        # dump must resolve it without modelopt or the documented invocation fails.
+        return sorted({1, max(0, num_hidden_layers // 2 - 1), max(0, num_hidden_layers - 4)})
     if spec == "dflash":
+        # build_target_layer_ids raises here; without the same guard the interpolation
+        # below silently collapses to a short deduplicated list (e.g. [1] for a 4-layer
+        # target), dumping fewer aux layers than the draft consumes.
+        if num_hidden_layers < num_draft:
+            raise ValueError(
+                f"num_target_layers ({num_hidden_layers}) must be >= num_draft_layers ({num_draft})"
+            )
         if num_draft == 1:
             return [num_hidden_layers // 2]
         start = min(1, num_hidden_layers - 1)
         end = max(start, num_hidden_layers - 3)
         span = end - start
         return sorted({round(start + (i * span) / (num_draft - 1)) for i in range(num_draft)})
-    ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    try:
+        ids = sorted({int(t) for t in aux_layers.split(",") if t.strip()})
+    except ValueError as exc:
+        # An unrecognised preset name would otherwise surface as a bare
+        # "invalid literal for int()", which hides what the caller should pass.
+        raise ValueError(unsupported) from exc
     # Match the shared helper's contract: ids must be valid layer indices.
     out_of_range = [i for i in ids if not 0 <= i < num_hidden_layers]
     if out_of_range:
@@ -82,11 +107,35 @@ def _resolve_aux_layers_standalone(
             f"for a {num_hidden_layers}-layer model."
         )
     if not ids:
-        raise ValueError(
-            f"--aux-layers={aux_layers!r}: in the stock vLLM container (no modelopt) only the "
-            "'dflash' preset or an explicit comma-separated layer-id list are supported."
-        )
+        raise ValueError(unsupported)
     return ids
+
+
+def _conversation_id(entry) -> str:
+    """Return an entry's conversation id, rejecting values that are not a plain filename.
+
+    The id is used directly as the output filename (``<id>.pt``), so an absolute path or one
+    containing a separator or ``..`` would resolve outside ``--output-dir``. The dataset is
+    external input, so validate once here, where it is read, rather than at each use.
+    """
+    conversation_id = entry.get("conversation_id", entry.get("uuid", None))
+    if conversation_id is None:
+        raise ValueError("conversation_id is required")
+    conversation_id = str(conversation_id)
+    if conversation_id in {"", ".", ".."} or conversation_id != Path(conversation_id).name:
+        raise ValueError(
+            f"conversation_id {conversation_id!r} is not a usable filename: it must not be "
+            "empty, '.', '..', or contain a path separator."
+        )
+    return conversation_id
+
+
+def _positive_int(value: str) -> int:
+    """argparse type for options that must be >= 1."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value}")
+    return parsed
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +159,17 @@ def parse_args() -> argparse.Namespace:
         "--trust_remote_code", action="store_true", help="Trust remote code for HF models."
     )
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size.")
+    parser.add_argument(
+        "--save-chunk-size",
+        type=_positive_int,
+        default=256,
+        help="Number of conversations to generate before saving and freeing their staged "
+        "hidden states. Bounds how much the KV connector stages at once (its shared_storage_path "
+        "defaults to /dev/shm, i.e. RAM); larger values amortize generate() calls, smaller ones "
+        "use less staging space. Peak staging is roughly "
+        "chunk_size * max_seq_len * num_extracted_layers * hidden_size * 2 bytes; lower this if "
+        "you hit 'No space left on device' on the staging path (e.g. a small container --shm-size).",
+    )
     parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
@@ -154,12 +214,16 @@ def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def keep_conversation(entry):
-        conversation_id = entry.get("conversation_id", entry.get("uuid", None))
-        assert conversation_id is not None, "conversation_id is required"
-        return not (output_dir / f"{conversation_id}.pt").exists()
+        return not (output_dir / f"{_conversation_id(entry)}.pt").exists()
 
     original_num = len(dataset)
-    dataset = dataset.filter(keep_conversation)
+    # load_from_cache_file=False is required for correctness here: keep_conversation depends on
+    # on-disk state (which .pt files exist), which is NOT part of the cache fingerprint that
+    # datasets computes from the function and the dataset. With a persistent HF cache (e.g.
+    # HF_HOME on shared storage, reused across a resumed/requeued run) a cached result from an
+    # earlier run -- when fewer or no .pt files existed -- is reused, so the filter keeps
+    # everything and the run re-dumps and overwrites conversations it already finished.
+    dataset = dataset.filter(keep_conversation, load_from_cache_file=False)
     print(f"Removed {original_num - len(dataset)} conversations due to existing output files")
 
     if args.debug_max_num_conversations is not None:
@@ -198,7 +262,7 @@ def main(args: argparse.Namespace) -> None:
     num_invalid = 0
 
     for entry in dataset:
-        conversation_id = entry.get("conversation_id", entry.get("uuid"))
+        conversation_id = _conversation_id(entry)
         # Accept either the "conversations" or OpenAI-style "messages" key (the
         # MiniMax synthetic data uses "messages").
         conversations = entry.get("conversations") or entry.get("messages")
@@ -276,56 +340,91 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # max_tokens=1: we only need a single forward pass over the prompt tokens.
-    outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
+    #
+    # Generate and save in chunks of --save-chunk-size rather than generating everything up
+    # front: the connector stages each conversation's hidden states under its
+    # shared_storage_path (default /dev/shm, i.e. RAM) and they are only freed by
+    # cleanup_hidden_states() once saved. Generating the whole dataset first keeps every
+    # conversation staged simultaneously, which exhausts that space on large runs. Chunking
+    # bounds staging to one chunk, and makes the dump incrementally durable so an interrupted
+    # run keeps its finished conversations and can resume.
+    sampling_params = SamplingParams(max_tokens=1)
+    chunk_size = args.save_chunk_size
 
     # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
     num_success = 0
-    for conv_id, loss_mask, output in tqdm(
-        zip(conversation_ids, loss_masks, outputs), total=len(outputs), desc="Saving"
-    ):
-        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
-        if hidden_states_path is None:
-            print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
-            continue
+    progress = tqdm(total=len(prompts), desc="Dumping")
+    for chunk_start in range(0, len(prompts), chunk_size):
+        chunk = slice(chunk_start, chunk_start + chunk_size)
+        # use_tqdm=False: we already drive the outer "Dumping" bar, and one vLLM bar per
+        # chunk would otherwise flood the log (~one per save-chunk over the whole dataset).
+        outputs = llm.generate(prompts[chunk], sampling_params, use_tqdm=False)
+        # generate() returns one output per prompt in input order; assert it so a short or
+        # reordered result can't silently pair hidden states with the wrong id / loss_mask.
+        assert len(outputs) == len(conversation_ids[chunk]), (
+            f"vLLM returned {len(outputs)} outputs for {len(conversation_ids[chunk])} prompts"
+        )
+        for conv_id, loss_mask, output in zip(conversation_ids[chunk], loss_masks[chunk], outputs):
+            progress.update(1)
+            hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+            if hidden_states_path is None:
+                print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
+                continue
 
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        token_ids = obj["token_ids"]
-        # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
-        # extract_layer_ids. Last layer = final output; the rest = aux layers.
-        hidden_states = obj["hidden_states"]
+            # Staged hidden states must be freed on every path, not just the success one:
+            # an early `continue` (e.g. a short loss_mask) would otherwise leak this
+            # conversation's staging file, and enough of them exhaust shared_storage_path.
+            try:
+                obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+                token_ids = obj["token_ids"]
+                # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
+                # extract_layer_ids. Last layer = final output; the rest = aux layers.
+                hidden_states = obj["hidden_states"]
 
-        output_hidden_states = hidden_states[:, -1, :].cpu()
-        if hidden_states.shape[1] > 1:
-            # Concatenate aux layers along the hidden dim, matching the HF dump format.
-            aux = hidden_states[:, :-1, :].cpu()
-            aux_hidden_states = aux.reshape(aux.shape[0], -1)
-        else:
-            aux_hidden_states = torch.empty(0)
+                output_hidden_states = hidden_states[:, -1, :].cpu()
+                if hidden_states.shape[1] > 1:
+                    # Concatenate aux layers along the hidden dim, matching the HF dump format.
+                    aux = hidden_states[:, :-1, :].cpu()
+                    aux_hidden_states = aux.reshape(aux.shape[0], -1)
+                else:
+                    aux_hidden_states = torch.empty(0)
 
-        # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
-        # to itself and silently misalign with the hidden states, so guard explicitly.
-        n_hs = output_hidden_states.shape[0]
-        if loss_mask.shape[0] < n_hs:
-            print(
-                f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
-                f"states ({n_hs}); skipping to avoid misalignment"
-            )
-            continue
+                # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
+                # to itself and silently misalign with the hidden states, so guard explicitly.
+                n_hs = output_hidden_states.shape[0]
+                if loss_mask.shape[0] < n_hs:
+                    print(
+                        f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
+                        f"states ({n_hs}); skipping to avoid misalignment"
+                    )
+                    continue
 
-        output_file = output_dir / f"{conv_id}.pt"
-        with open(output_file, "wb") as f:
-            torch.save(
-                {
-                    "input_ids": token_ids.cpu(),
-                    "hidden_states": output_hidden_states,
-                    "aux_hidden_states": aux_hidden_states,
-                    "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
-                    "conversation_id": conv_id,
-                },
-                f,
-            )
-        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-        num_success += 1
+                # Write-then-rename: the resume filter (keep_conversation) treats any existing
+                # <id>.pt as finished work, so a partial file from a run killed mid-torch.save
+                # would be skipped forever and then fail in torch.load at training time.
+                # os.replace is atomic within the same directory.
+                output_file = output_dir / f"{conv_id}.pt"
+                tmp_file = output_file.with_suffix(".pt.tmp")
+                try:
+                    with open(tmp_file, "wb") as f:
+                        torch.save(
+                            {
+                                "input_ids": token_ids.cpu(),
+                                "hidden_states": output_hidden_states,
+                                "aux_hidden_states": aux_hidden_states,
+                                "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
+                                "conversation_id": conv_id,
+                            },
+                            f,
+                        )
+                    os.replace(tmp_file, output_file)
+                except BaseException:
+                    tmp_file.unlink(missing_ok=True)
+                    raise
+                num_success += 1
+            finally:
+                example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
+    progress.close()
 
     print(f"Successfully processed {num_success} out of {len(prompts)} conversations.")
 

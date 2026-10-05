@@ -20,7 +20,7 @@ import onnx
 from onnx import numpy_helper
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import get_tensor_producer_nodes
+from modelopt.onnx.quantization.graph_indexing import get_tensor_producer_nodes
 from modelopt.onnx.quantization.qdq_utils import _cast_fp8, onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import compute_e8m0, get_amax
 from modelopt.onnx.utils import get_attribute, has_attribute

@@ -16,18 +16,22 @@
 """Run lm-evaluation-harness against a TensorRT-LLM checkpoint.
 
 Entry point around lm-eval's built-in ``trtllm`` backend
-(``lm_eval.models.trtllm_causallms``, new in 0.4.12). It exists only to correct that
-backend's ``prompt_logprobs`` handling -- everything else is upstream. Drop this file and
-call ``lm_eval`` directly once the fix lands upstream.
+(``lm_eval.models.trtllm_causallms``, new in 0.4.12). It exists to correct that backend's
+``prompt_logprobs`` handling and to forward ``kv_cache_free_gpu_memory_fraction`` to
+TensorRT-LLM -- everything else is upstream. Drop this file and call ``lm_eval`` directly
+once both land upstream.
 
     python lm_eval_trtllm.py --model trtllm \
         --model_args model=<quantized checkpoint dir>,tokenizer=<HF model folder>,\
-tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096 \
+tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,\
+kv_cache_free_gpu_memory_fraction=0.8 \
         --tasks <comma separated tasks> --batch_size <max batch size>
 """
 
 import sys
+from functools import partial
 from importlib.metadata import version
+from importlib.util import find_spec
 
 from lm_eval.__main__ import cli_evaluate
 from packaging.version import Version
@@ -36,6 +40,7 @@ if Version(version("lm_eval")) < Version("0.4.12"):
     # 0.4.12 is the first release shipping lm_eval.models.trtllm_causallms.
     raise ImportError(f"lm_eval_trtllm.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
+from lm_eval.models import trtllm_causallms
 from lm_eval.models.trtllm_causallms import TRTLLM
 
 # TensorRT-LLM only started passing the prompt token ids into `compute_logprobs` in
@@ -123,6 +128,42 @@ if not hasattr(TRTLLM, "_parse_logprobs"):
 # should be deleted in favour of calling `lm_eval` directly.
 _UPSTREAM_PARSE_LOGPROBS = TRTLLM._parse_logprobs
 TRTLLM._parse_logprobs = staticmethod(_parse_logprobs)
+
+
+# lm-eval's backend builds `KvCacheConfig(enable_block_reuse=False)` itself and passes
+# `LLM(...)` a fixed set of keys, dropping every other `--model_args` entry, so patching the
+# class it calls is the only way to size the KV cache. Left at TensorRT-LLM's default of
+# 0.9, the cache leaves too little room for the `prompt_logprobs` buffers and a
+# loglikelihood run dies with a CUDA OOM on a large-memory GPU.
+#
+# Rebinding a module global is process-wide, but `evaluator.py` builds exactly one model per
+# run, and nothing introspects the constructor it calls -- `create_from_arg_obj` just does
+# `cls(**model_args)` -- so nothing else can observe the swap.
+if find_spec("tensorrt_llm") and not hasattr(trtllm_causallms, "KvCacheConfig"):
+    # Guarded on find_spec because without tensorrt_llm the name is absent by design, and
+    # the backend's own "package is not installed" error is the useful one.
+    raise RuntimeError(
+        "lm_eval.models.trtllm_causallms no longer imports KvCacheConfig at module scope, so "
+        f"the KV cache size cannot be set; the backend changed shape in lm-eval "
+        f"{version('lm_eval')}. Recheck whether this file is still needed."
+    )
+
+_UPSTREAM_INIT = TRTLLM.__init__
+
+
+def _init(self, *args, kv_cache_free_gpu_memory_fraction: float = 0.8, **kwargs) -> None:
+    """``TRTLLM.__init__``, with the KV cache share of free GPU memory made settable."""
+    kv_cache_config = trtllm_causallms.KvCacheConfig
+    trtllm_causallms.KvCacheConfig = partial(
+        kv_cache_config, free_gpu_memory_fraction=float(kv_cache_free_gpu_memory_fraction)
+    )
+    try:
+        _UPSTREAM_INIT(self, *args, **kwargs)
+    finally:
+        trtllm_causallms.KvCacheConfig = kv_cache_config
+
+
+TRTLLM.__init__ = _init
 
 
 if __name__ == "__main__":
