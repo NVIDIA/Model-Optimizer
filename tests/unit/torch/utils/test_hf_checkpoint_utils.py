@@ -16,14 +16,17 @@
 """Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
 import json
+import os
 import sys
 import warnings
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from safetensors.torch import save_file
 
@@ -695,6 +698,46 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
     assert exported == {*expected, *export_files}
 
 
+def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):
+    """An earlier export saved inside the checkpoint is not part of it."""
+    source_dir = tmp_path / "source"
+    (source_dir / "quantized").mkdir(parents=True)
+    (source_dir / "tokenizer.json").write_text("{}")
+    (source_dir / "quantized" / "tokenizer.json").write_text("{}")
+
+    copied = hf_checkpoint_utils.copy_non_model_files(source_dir, source_dir / "quantized")
+
+    assert copied == []
+    assert not (source_dir / "quantized" / "quantized").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_copy_non_model_files_does_not_write_through_an_export_link(tmp_path):
+    source_dir, export_dir, outside = tmp_path / "source", tmp_path / "export", tmp_path / "outside"
+    source_dir.mkdir()
+    export_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+    (export_dir / "tokenizer.json").symlink_to(outside)  # dangling: exists() is False
+
+    assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
+    assert not outside.exists()
+
+
+def test_copy_non_model_files_removes_a_partial_copy(monkeypatch, tmp_path):
+    source_dir, export_dir = tmp_path / "source", tmp_path / "export"
+    source_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+
+    def failing_copy(src, dst):
+        Path(dst).write_text("{")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", failing_copy)
+    with pytest.warns(UserWarning, match="disk full"):
+        assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
+    assert not (export_dir / "tokenizer.json").exists()
+
+
 def test_ensure_local_checkpoint_returns_a_local_dir_untouched(monkeypatch, tmp_path):
     def fail(*args, **kwargs):
         raise AssertionError("a local checkpoint must not hit the hub")
@@ -787,9 +830,27 @@ def test_ensure_local_checkpoint_raises_for_a_missing_repo(monkeypatch, tmp_path
     missing = hf_hub_errors.RepositoryNotFoundError.__new__(hf_hub_errors.RepositoryNotFoundError)
     calls = _fake_hub(monkeypatch, tmp_path, error=missing)
 
-    with pytest.raises(hf_hub_errors.RepositoryNotFoundError):
+    with pytest.raises(ValueError, match="not a local directory") as excinfo:
         hf_checkpoint_utils.ensure_local_checkpoint("org/typo")
+    assert isinstance(excinfo.value.__cause__, hf_hub_errors.RepositoryNotFoundError)
     assert calls == []
+
+
+def test_ensure_local_checkpoint_raises_for_a_gated_repo_unchanged(monkeypatch, tmp_path):
+    gated = hf_hub_errors.GatedRepoError.__new__(hf_hub_errors.GatedRepoError)
+    _fake_hub(monkeypatch, tmp_path, error=gated)
+
+    with pytest.raises(hf_hub_errors.GatedRepoError):
+        hf_checkpoint_utils.ensure_local_checkpoint("org/gated")
+
+
+def test_ensure_local_checkpoint_names_a_missing_local_path(tmp_path):
+    """A mistyped path is not a valid Hub ID either; the error must say it is not a directory."""
+    missing = tmp_path / "ckpt-typo"
+
+    with pytest.raises(ValueError, match="not a local directory") as excinfo:
+        hf_checkpoint_utils.ensure_local_checkpoint(str(missing))
+    assert isinstance(excinfo.value.__cause__, hf_hub_errors.HFValidationError)
 
 
 def test_copy_non_model_files_never_fetches_from_the_hub(monkeypatch, tmp_path):
@@ -847,12 +908,7 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path):
 
 
 def _ensure_local_checkpoint_job(tmp_path, fail, group_ranks, rank, size):
-    import os
-
-    import torch.distributed as dist
-
-    from modelopt.torch.utils.plugins import hf_checkpoint_utils as utils
-
+    utils = hf_checkpoint_utils
     snapshot = tmp_path / "snapshot"
 
     def fake_snapshot_download(repo_id, **kwargs):
@@ -878,9 +934,7 @@ def _ensure_local_checkpoint_job(tmp_path, fail, group_ranks, rank, size):
 
 
 def _ensure_local_checkpoint_local_path_job(tmp_path, hidden_from_rank1, rank, size):
-    import os
-
-    from modelopt.torch.utils.plugins import hf_checkpoint_utils as utils
+    utils = hf_checkpoint_utils
 
     def fail(*args, **kwargs):
         raise AssertionError("a local path must not be downloaded")

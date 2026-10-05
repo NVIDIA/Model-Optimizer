@@ -38,6 +38,8 @@ from typing import Any
 import torch
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import (
+    GatedRepoError,
+    HFValidationError,
     LocalEntryNotFoundError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
@@ -790,7 +792,16 @@ def _make_local(model_name_or_path: str | os.PathLike) -> tuple[str | None, str]
     if os.path.isdir(model_name_or_path):
         return None, str(model_name_or_path)
     hub_model_id = str(model_name_or_path)
-    return hub_model_id, _snapshot_download(hub_model_id)
+    try:
+        return hub_model_id, _snapshot_download(hub_model_id)
+    except GatedRepoError:
+        raise
+    except (HFValidationError, RepositoryNotFoundError) as error:
+        # A mistyped local path lands here as a Hub ID; say both lookups failed.
+        raise ValueError(
+            f"{hub_model_id!r} is not a local directory, and is not a model ID the Hugging Face "
+            "Hub can access."
+        ) from error
 
 
 def ensure_local_checkpoint(
@@ -814,7 +825,8 @@ def ensure_local_checkpoint(
     With ``HF_HUB_OFFLINE`` set, the cached snapshot is used as it is. With the Hub unexpectedly
     unreachable it is too, but with a warning: nothing can tell whether it is complete, and one
     filled by an earlier ``from_pretrained`` holds only the files loading needed, so non-model files
-    may be missing.
+    may be missing. A path that is neither a local directory nor a model ID the Hub can access (a
+    mistyped local path, say) raises ``ValueError``; a gated repo raises ``GatedRepoError``.
 
     Under ``torch.distributed`` rank 0 of ``group`` resolves the checkpoint -- whether it is a local
     directory, and if not, downloading it once -- and the other ranks of ``group`` wait for its
@@ -880,7 +892,8 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
     * model files: weight files in any format (``_WEIGHT_FILE_PATTERNS``) and top-level export
       metadata (``_EXPORT_OWNED_FILES``);
     * files the export already wrote (e.g. its own ``generation_config.json``), so call this after
-      the export has written its files;
+      the export has written its files, and paths that are links in the export;
+    * files under ``export_dir`` when it lies inside ``source``, e.g. an earlier export;
     * files under hidden directories (``.git``, ``.cache``), which are version-control or download
       state rather than part of the checkpoint;
     * links that resolve outside the checkpoint (or, for a Hub snapshot, its ``blobs/``), and
@@ -901,18 +914,21 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             "ensure_local_checkpoint()."
         )
     export_dir = Path(export_dir)
+    source_root, export_root = source_dir.resolve(), export_dir.resolve()
     copied = []
     for src in sorted(source_dir.rglob("*")):
         rel = src.relative_to(source_dir)
         if (
             src.is_dir()
+            or (source_root / rel).is_relative_to(export_root)
             or any(part.startswith(".") for part in rel.parts[:-1])
             or (len(rel.parts) == 1 and rel.name in _EXPORT_OWNED_FILES)
             or _matches_any_pattern(rel.name, _WEIGHT_FILE_PATTERNS)
         ):
             continue
         dst = export_dir / rel
-        if dst.exists():
+        # A dangling link fails exists(); copying through it would write outside the export.
+        if dst.exists() or dst.is_symlink():
             continue
         # A link is followed only to where a checkpoint file may live -- the checkpoint itself or,
         # for a Hub snapshot, its blobs/ directory -- or the export could copy any file on the host.
@@ -925,6 +941,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(resolved, dst)
         except OSError as error:
+            dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
             continue
         copied.append(rel.as_posix())
