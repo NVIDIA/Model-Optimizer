@@ -538,13 +538,16 @@ def test_loss_balancer_convex_combination():
 
 def test_distillation_config_removed_fields():
     """The removed fields raise, and a config can be rebuilt from itself."""
-    assert DistillationConfig().kd_loss_alpha == 1.0  # pure KD by default
+    cfg = DistillationConfig()
+    assert cfg.kd_loss_alpha == 1.0 and cfg.skip_lm_loss  # pure KD by default
+    assert not DistillationConfig(kd_loss_alpha=0.9).skip_lm_loss
+    assert {"skip_lm_loss", "kd_loss_scale"}.isdisjoint(f.name for f in dataclasses.fields(cfg))
 
     for removed in ({"skip_lm_loss": True}, {"skip_lm_loss": False}, {"kd_loss_scale": 2.0}):
         with pytest.raises(ValueError, match="have been removed"):
             DistillationConfig(**removed)
 
-    # Nothing is written back into the removed fields, so round-trips do not trip the check.
+    # skip_lm_loss is a derived property, not a field, so round-trips do not trip the check.
     cfg = dataclasses.replace(DistillationConfig(kd_loss_alpha=0.9), logit_kl_topk=4)
     assert cfg.kd_loss_alpha == 0.9 and cfg.logit_kl_topk == 4
     assert DistillationConfig(**dataclasses.asdict(cfg)).kd_loss_alpha == 0.9

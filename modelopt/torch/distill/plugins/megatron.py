@@ -51,6 +51,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Former DistillationConfig fields that now raise if passed (see ``DistillationConfig.__new__``).
+_REMOVED_DISTILLATION_CONFIG_FIELDS = frozenset({"skip_lm_loss", "kd_loss_scale"})
+
+
 @dataclass
 class DistillationConfig:
     """Knowledge-Distillation config.
@@ -60,9 +64,7 @@ class DistillationConfig:
         logit_layers: Tuple of logit layer names.
         kd_loss_alpha: Weight of the distillation loss in the convex combination
             ``(1 - alpha) * lm_loss + alpha * kd_loss``. Must be in [0, 1]. Default: ``1.0``. When ``1.0``,
-            the standard language model loss is skipped entirely.
-        skip_lm_loss: REMOVED; passing it raises. The LM loss is skipped iff ``kd_loss_alpha == 1.0``.
-        kd_loss_scale: REMOVED; passing it raises. Use ``kd_loss_alpha`` instead.
+            the standard language model loss is skipped entirely (see :attr:`skip_lm_loss`).
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
         logit_kl_topk: If not None, use TopLogitsKLLoss instead of LogitsKLLoss with this top-k value.
         logit_kl_top_p: Optional nucleus (top-P) threshold applied on top of the teacher's Top-K.
@@ -74,8 +76,6 @@ class DistillationConfig:
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
     logit_layers: tuple[str, str] = ("output_layer", "output_layer")
     kd_loss_alpha: float = 1.0
-    skip_lm_loss: bool | None = None  # removed; kept only to raise a helpful error
-    kd_loss_scale: float | None = None  # removed; kept only to raise a helpful error
     logit_kl_temperature: float = 1.0
     logit_kl_topk: int | None = None
     logit_kl_top_p: float | None = None
@@ -83,18 +83,32 @@ class DistillationConfig:
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
+    def __new__(cls, *args, **kwargs):
+        """Reject removed fields with a migration hint before the dataclass ``__init__`` runs.
+
+        Done here rather than in ``__init__`` so the check survives subclasses that re-apply
+        ``@dataclass`` (which regenerates ``__init__``).
+        """
+        removed = _REMOVED_DISTILLATION_CONFIG_FIELDS & kwargs.keys()
+        if removed:
+            raise ValueError(
+                f"DistillationConfig {sorted(removed)} have been removed. Use `kd_loss_alpha` "
+                "instead: the total loss is (1 - kd_loss_alpha) * lm_loss + kd_loss_alpha * "
+                "kd_loss, and the LM loss is skipped when kd_loss_alpha == 1.0 (the default, "
+                "equivalent to the old skip_lm_loss=True)."
+            )
+        return super().__new__(cls)
+
+    @property
+    def skip_lm_loss(self) -> bool:
+        """Whether the standard LM loss is skipped, i.e. ``kd_loss_alpha == 1.0``."""
+        return self.kd_loss_alpha == 1.0
+
     def __post_init__(self):
         assert len(self.logit_layers) == 2, f"{self.logit_layers=}"
         assert all(len(pair) in (2, 3) for pair in self.intermediate_layer_pairs), (
             f"{self.intermediate_layer_pairs=}"
         )
-        if self.skip_lm_loss is not None or self.kd_loss_scale is not None:
-            raise ValueError(
-                "DistillationConfig `skip_lm_loss` and `kd_loss_scale` have been removed. Use "
-                "`kd_loss_alpha` instead: the total loss is (1 - kd_loss_alpha) * lm_loss + "
-                "kd_loss_alpha * kd_loss, and the LM loss is skipped when kd_loss_alpha == 1.0 "
-                "(the default, equivalent to the old skip_lm_loss=True)."
-            )
         assert 0 <= self.kd_loss_alpha <= 1, f"{self.kd_loss_alpha=}"
         assert self.logit_kl_temperature > 0, f"{self.logit_kl_temperature=}"
         if self.logit_kl_top_p is not None:
@@ -184,7 +198,7 @@ def setup_distillation_config(
     if cfg.loss_balancer is None:
         cfg.loss_balancer = LogitsAndIntermediatesLossBalancer(
             kd_loss_alpha=cfg.kd_loss_alpha,
-            skip_original_loss=cfg.kd_loss_alpha == 1.0,
+            skip_original_loss=cfg.skip_lm_loss,
         )
 
     return cfg
@@ -684,11 +698,11 @@ def adjust_distillation_model_for_mcore(
     # Skip `lm_loss` bypassing it when training if not needed for backprop.
     # Uses a per-forward call counter so that MTP head calls (which always precede the
     # main LM head call in _postprocess) still receive real CE loss even when
-    # kd_loss_alpha == 1.0 — only the final main-head call is zeroed.
+    # skip_lm_loss=True — only the final main-head call is zeroed.
     # An MTP head left out of quantization is exempt from that: there is no quantization
     # error to recover there, and its CE materialises an fp32 [seq, vocab] tensor.
     skip_mtp_loss = _mtp_excluded_from_quantization(model)
-    skip_lm_loss = distill_cfg.kd_loss_alpha == 1.0
+    skip_lm_loss = distill_cfg.skip_lm_loss
     if skip_lm_loss and skip_mtp_loss:
         # Freeze the untrained MTP head: DDP's overlapped grad reduce asserts on params with no grad.
         warn_rank_0("MTP head is outside quantization and its loss is skipped: freezing it.")
