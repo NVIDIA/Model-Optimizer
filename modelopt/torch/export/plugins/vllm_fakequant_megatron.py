@@ -38,31 +38,43 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
     for name, quantizer in module.named_modules():
         if not isinstance(quantizer, TensorQuantizer):
             continue
-        # Rotation still affects forward when quantization is disabled.
-        unsupported = [
-            setting
-            for setting, active in {
-                "rotate": quantizer.rotate_is_enabled,
-                "unsigned": isinstance(quantizer.num_bits, int) and quantizer.unsigned,
-                "narrow_range": isinstance(quantizer.num_bits, int) and quantizer.narrow_range,
-                "fake_quant": not quantizer.fake_quant,
-                "type": quantizer._dynamic,
-                "bias": quantizer.bias is not None,
-                "backend": quantizer.backend is not None,
-            }.items()
-            if active
-        ]
+        is_weight_quantizer = "weight_quantizer" in name
+        is_quantizing = quantizer.is_enabled and quantizer._if_quant
+        # Weight transforms are folded; activation rotation also runs when quantization is off.
+        settings = {
+            "rotate": not is_weight_quantizer and quantizer.rotate_is_enabled,
+            "fake_quant": is_quantizing and not quantizer.fake_quant,
+        }
+        if is_quantizing and not is_weight_quantizer:
+            settings.update(
+                {
+                    "unsigned": isinstance(quantizer.num_bits, int) and quantizer.unsigned,
+                    "narrow_range": isinstance(quantizer.num_bits, int) and quantizer.narrow_range,
+                    "dynamic_amax": not (
+                        quantizer.is_mx_format
+                        or quantizer._use_constant_amax
+                        or getattr(quantizer, "_amax", None) is not None
+                    ),
+                    "bias": quantizer.bias is not None,
+                    "backend": quantizer.backend is not None,
+                }
+            )
+        unsupported = [setting for setting, active in settings.items() if active]
         if unsupported:
             raise ValueError(
                 f"Unsupported vLLM fakequant quantizer settings for {name or '<root>'}: "
                 f"{', '.join(unsupported)}. These settings are not preserved by quant_recipe.yaml."
             )
-        configs[get_unwrapped_name(name, module)] = {
-            "_num_bits": quantizer.num_bits,
-            "_axis": quantizer.axis,
-            "_block_sizes": quantizer.block_sizes,
-            "_disabled": not quantizer.is_enabled or not quantizer._if_quant,
-        }
+        recipe = {"_disabled": is_weight_quantizer or not is_quantizing}
+        if not recipe["_disabled"]:
+            recipe.update(
+                {
+                    "_num_bits": quantizer.num_bits,
+                    "_axis": quantizer.axis,
+                    "_block_sizes": quantizer.block_sizes,
+                }
+            )
+        configs[get_unwrapped_name(name, module)] = recipe
     return configs
 
 
@@ -335,7 +347,8 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             # (quantize then dequantize). The weight_quantizer amax is not exported;
             # the vLLM fakequant reload path disables the weight quantizer when absent.
             weight_quantizer = getattr(module, "weight_quantizer", None)
-            if weight_quantizer is not None and weight_quantizer.is_enabled:
+            # Disabled weight quantizers can still apply scaling or rotation.
+            if weight_quantizer is not None:
                 with torch.no_grad():
                     # NVFP4-like kernels may need CUDA; if weights are CPU after gather, run on
                     # CUDA then ``weight_quantizer.to`` back (full module round-trip).
