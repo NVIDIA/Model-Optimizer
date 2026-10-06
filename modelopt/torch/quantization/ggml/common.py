@@ -25,6 +25,7 @@ from typing import NamedTuple
 import torch
 
 GGML_BLOCK_SIZE = 256
+_SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 
 
 class _CacheKey(NamedTuple):
@@ -157,14 +158,23 @@ def _pin_name(format_name: str) -> str:
 
 def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:
     """For each row of ``rows``, the index of an equal row of ``table``; None if one has none."""
-    probe = torch.randn(table.shape[-1], generator=torch.Generator().manual_seed(0)).double()
-    table_keys, row_keys = (
-        table.double() @ probe.to(table.device),
-        rows.double() @ probe.to(rows.device),
-    )
+    table_keys, row_keys = _row_keys(table), _row_keys(rows)
     order = table_keys.argsort()
     found = order[torch.searchsorted(table_keys[order], row_keys).clamp_max(len(order) - 1)]
     return found if torch.equal(table[found], rows) else None
+
+
+def _row_keys(x: torch.Tensor) -> torch.Tensor:
+    """A 64-bit hash of each row's bits; equal rows always get equal keys.
+
+    Integer sums wrap and are associative, so unlike a floating-point projection the key does not
+    depend on how the reduction is ordered, which differs between differently shaped products.
+    """
+    multipliers = torch.randint(
+        -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
+    )
+    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()]).to(torch.int64)
+    return (bits * multipliers.to(x.device)).sum(-1)
 
 
 def fake_quantize_with_cache(

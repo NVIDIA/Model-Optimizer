@@ -26,7 +26,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import _row_keys, pinned_packed_weight
 from modelopt.torch.quantization.ggml.gptq import gptq_group_update
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.quantization.utils.calib_utils import (
@@ -230,14 +230,18 @@ def _megatron_exporter(weight):
     return exporter
 
 
-def _pinned_export(rows):
+def _pinned_export(rows, dtype):
     """A GPTQ'd weight in the export dtype, its quantizer, and its pinned payload."""
     model, _ = _gptq_model(rows)
-    return model.weight.detach().bfloat16(), model.weight_quantizer, _pin(model)
+    return model.weight.detach().to(dtype), model.weight_quantizer, _pin(model)
 
 
-def test_megatron_gated_mlp_export_writes_the_pinned_rows():
-    weight, quantizer, pinned = _pinned_export(8)
+EXPORT_DTYPES = pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+
+
+@EXPORT_DTYPES
+def test_megatron_gated_mlp_export_writes_the_pinned_rows(dtype):
+    weight, quantizer, pinned = _pinned_export(8, dtype)
     module = SimpleNamespace(config=SimpleNamespace(ffn_hidden_size=4), weight_quantizer=quantizer)
     exporter = _megatron_exporter(weight)
 
@@ -247,8 +251,9 @@ def test_megatron_gated_mlp_export_writes_the_pinned_rows():
     assert torch.equal(exporter._state_dict["mlp.up_proj.weight"], pinned[4:])
 
 
-def test_megatron_grouped_mlp_export_writes_the_pinned_rows():
-    weight, quantizer, pinned = _pinned_export(8)
+@EXPORT_DTYPES
+def test_megatron_grouped_mlp_export_writes_the_pinned_rows(dtype):
+    weight, quantizer, pinned = _pinned_export(8, dtype)
     module = SimpleNamespace(
         num_gemms=1,
         weight0=weight,
@@ -266,27 +271,31 @@ def test_megatron_grouped_mlp_export_writes_the_pinned_rows():
     assert torch.equal(exporter._state_dict["mlp.experts.0.up_proj.weight"], pinned[4:])
 
 
-def test_megatron_qkv_export_writes_the_pinned_rows():
-    weight, quantizer, pinned = _pinned_export(8)
+@EXPORT_DTYPES
+def test_megatron_qkv_export_writes_the_pinned_rows(dtype):
+    # 4 query groups of [2 q heads, k, v], 4 rows per head: K and V are gathered from scattered
+    # rows, which is where a lookup keyed on rounded projections went wrong.
+    weight, quantizer, pinned = _pinned_export(64, dtype)
     config = SimpleNamespace(
         hidden_size=512,
-        num_query_groups=1,
-        num_attention_heads=2,
-        kv_channels=2,
+        num_query_groups=4,
+        num_attention_heads=8,
+        kv_channels=4,
         attention_output_gate=False,
     )
     exporter = _megatron_exporter(weight)
 
     exporter._qkv_slicing(SimpleNamespace(config=config, weight_quantizer=quantizer), "attn.")
 
-    heads = pinned.view(4, 2, 2, IQ1_S.block_bytes)  # [q, q, k, v] heads of 2 rows each
-    assert torch.equal(exporter._state_dict["attn.q_proj.weight"], heads[:2].flatten(0, 1))
-    assert torch.equal(exporter._state_dict["attn.k_proj.weight"], heads[2])
-    assert torch.equal(exporter._state_dict["attn.v_proj.weight"], heads[3])
+    heads = pinned.view(4, 4, 4, 2, IQ1_S.block_bytes)  # [group, q q k v, row, block, byte]
+    assert torch.equal(exporter._state_dict["attn.q_proj.weight"], heads[:, :2].flatten(0, 2))
+    assert torch.equal(exporter._state_dict["attn.k_proj.weight"], heads[:, 2].flatten(0, 1))
+    assert torch.equal(exporter._state_dict["attn.v_proj.weight"], heads[:, 3].flatten(0, 1))
 
 
-def test_megatron_gated_delta_net_export_writes_the_pinned_rows():
-    weight, quantizer, pinned = _pinned_export(12)
+@EXPORT_DTYPES
+def test_megatron_gated_delta_net_export_writes_the_pinned_rows(dtype):
+    weight, quantizer, pinned = _pinned_export(12, dtype)
     module = SimpleNamespace(
         in_proj=SimpleNamespace(weight_quantizer=quantizer),
         in_proj_split_names=("query", "key", "value", "z", "beta", "alpha"),
@@ -298,3 +307,21 @@ def test_megatron_gated_delta_net_export_writes_the_pinned_rows():
 
     assert torch.equal(exporter._state_dict["mixer.in_proj_qkv.weight"], pinned[:6])
     assert torch.equal(exporter._state_dict["mixer.in_proj_z.weight"], pinned[6:8])
+
+
+@EXPORT_DTYPES
+def test_row_keys_do_not_depend_on_the_batch_a_row_is_hashed_in(dtype):
+    # Wide-range values make any floating-point key sensitive to how its reduction is ordered;
+    # the key must still be identical for a row hashed in a full table, a gathered subset, or alone.
+    generator = torch.Generator().manual_seed(0)
+    table = (
+        torch.randn(64, 512, generator=generator)
+        * torch.randn(64, 512, generator=generator).mul(8).exp()
+    ).to(dtype)
+    index = torch.tensor([56, 3, 52, 17])
+
+    keys = _row_keys(table)
+
+    assert torch.equal(_row_keys(table[index]), keys[index])
+    assert all(torch.equal(_row_keys(table[i : i + 1]), keys[i : i + 1]) for i in index.tolist())
+    assert len(keys.unique()) == len(table)
