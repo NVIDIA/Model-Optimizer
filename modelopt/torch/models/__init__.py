@@ -67,7 +67,6 @@ __all__ = [
 # Importing the model packages registers every spec as a side effect.
 from . import (  # isort: skip
     arctic,
-    dbrx,
     deepseek,
     deepseek_v3,
     deepseek_v4,
