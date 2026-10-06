@@ -229,6 +229,7 @@ def _autodetect_fakequant_paths(args) -> None:
         or args.modelopt_kv_quant_cfg
         or args.modelopt_quant_file_path
         or args.modelopt_recipe_path
+        or args.modelopt_state_path
     )
     if manual_ptq_requested:
         return

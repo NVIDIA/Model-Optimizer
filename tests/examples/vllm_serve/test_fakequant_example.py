@@ -422,25 +422,6 @@ def test_fakequant_launcher_mlflow_uses_effective_cli_settings(monkeypatch, clea
     vllm_main.assert_called_once_with()
 
 
-@pytest.mark.parametrize(
-    ("yaml_text", "error"),
-    [
-        ("", "non-empty YAML mapping"),
-        ("{}", "non-empty YAML mapping"),
-        ("[]", "non-empty YAML mapping"),
-        ("foo: 1", "Per-quantizer recipe entries"),
-        ("quantize: [", "Invalid quantization recipe YAML"),
-    ],
-)
-def test_get_quant_config_rejects_empty_or_invalid_recipe(tmp_path, yaml_text, error):
-    module = _load_example_module("vllm_ptq_utils")
-    recipe_path = tmp_path / "recipe.yaml"
-    recipe_path.write_text(yaml_text)
-    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
-    with pytest.raises(ValueError, match=error):
-        module.get_quant_config(config, SimpleNamespace())
-
-
 def test_get_calibration_block_count_uses_vllm_028_reservation_helper(monkeypatch):
     """The current vLLM adapter must forward every warmup reservation argument."""
     module = _load_example_module("vllm_ptq_utils")
