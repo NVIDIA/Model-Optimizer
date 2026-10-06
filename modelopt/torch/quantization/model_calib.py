@@ -1404,6 +1404,7 @@ def awq_lite(
     forward_loop: ForwardLoop,
     alpha_step: float = 0.1,
     debug: bool = False,
+    use_weight_scale: bool = True,
     **kwargs,
 ):
     """Lite version of AWQ.
@@ -1429,7 +1430,9 @@ def awq_lite(
             self.num_cache_steps = 0
             self.num_search_steps = 0
             self.block_size = _get_awq_quantizer_block_size(module.weight, module.weight_quantizer)
-            self.weight_scale = get_weight_scale(module.weight, self.block_size)
+            self.weight_scale = (
+                get_weight_scale(module.weight, self.block_size) if use_weight_scale else None
+            )
             self.loss = {
                 k.item(): torch.zeros((), device=module.weight.device, dtype=torch.float32)
                 for k in torch.arange(0, 1.0 + alpha_step, alpha_step)
@@ -1479,14 +1482,12 @@ def awq_lite(
         return x.abs().contiguous().view(-1, x.shape[-1]).mean(0).to(torch.float32)
 
     def get_scale(x_max, w_max, alpha, tensor_parallel_group=None):
-        scales = (
-            (
-                x_max.pow(alpha)
-                / (w_max.to(x_max.device).pow(1 - alpha) + torch.finfo(torch.float32).tiny)
+        scales = x_max.pow(alpha)
+        if use_weight_scale:
+            scales = scales / (
+                w_max.to(x_max.device).pow(1 - alpha) + torch.finfo(torch.float32).tiny
             )
-            .clamp(min=1e-4, max=1e4)
-            .view(-1)
-        )
+        scales = scales.clamp(min=1e-4, max=1e4).view(-1)
         scales = (scales / (scales.max() * scales.min()).sqrt()).view(-1)
         if tensor_parallel_group and tensor_parallel_group.is_initialized():
             dist.all_reduce(scales, op=dist.ReduceOp.SUM, group=tensor_parallel_group.group)
@@ -1609,9 +1610,11 @@ def awq_lite(
             module._if_calib = True
             module.awq_lite.act_scale = module.awq_lite.act_scale / module.awq_lite.num_cache_steps
 
-            has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale)) or torch.any(
-                torch.isnan(module.awq_lite.weight_scale)
-            )
+            has_nan_local = torch.any(torch.isnan(module.awq_lite.act_scale))
+            if use_weight_scale:
+                has_nan_local = has_nan_local or torch.any(
+                    torch.isnan(module.awq_lite.weight_scale)
+                )
             has_nan = DistributedProcessGroup.get_dist_syncd_obj(
                 has_nan_local, module.parallel_state.data_parallel_group, lambda objs: any(objs)
             )

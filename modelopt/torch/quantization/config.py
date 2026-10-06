@@ -1107,6 +1107,15 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
         description="The alpha will be searched from 0 to 1 with the step size specified.",
     )
 
+    use_weight_scale: bool = ModeloptField(
+        default=True,
+        title="Include weight statistics in AWQ scale search.",
+        description=(
+            "If True, search scales proportional to activation_scale**alpha / "
+            "weight_scale**(1-alpha). If False, use activation_scale**alpha as in the AWQ paper."
+        ),
+    )
+
     debug: bool | None = ModeloptField(
         default=False,
         title="Debug mode.",
