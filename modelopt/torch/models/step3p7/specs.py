@@ -23,5 +23,6 @@ from ..specs import ModelSpec, register
 
 __all__: list[str] = []
 
-# No MoESpec, for the same reason as step3p5 (see step3p5/specs.py).
-register(ModelSpec(model_type="step3p7", modeling_source="remote_code"))
+# Native in transformers since 5.16. No MoESpec, for the same reasons as step3p5 (see
+# step3p5/specs.py).
+register(ModelSpec(model_type="step3p7", min_transformers_version="5.16"))

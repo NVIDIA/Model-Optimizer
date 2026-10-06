@@ -19,8 +19,12 @@ from ..specs import ModelSpec, register
 
 __all__: list[str] = []
 
-# No MoESpec: the routed experts are expert-indexed MoELinear projections on the MoE MLP
-# itself, with no `experts` container, and are exported by the MoELinear handler rather
-# than through the MoE-block lookups. Declaring the block would make is_moe claim it and
-# send AWQ export into get_experts_list, which does not support this layout.
-register(ModelSpec(model_type="step3p5", modeling_source="remote_code"))
+# Native in transformers since 5.16, where the step3p7 package also registers this text model
+# type; older Step-3.5 checkpoints ship their own modeling code (trust_remote_code).
+#
+# No MoESpec. The native MoE block (Step3p7SparseMoeBlock, with fused gate_up_proj/down_proj
+# experts) is already recognized by is_moe by name and handled by the generic fused-experts
+# path. The remote-code layout keeps its routed experts as expert-indexed MoELinear
+# projections on the MoE MLP itself, with no `experts` container; declaring that block would
+# make is_moe claim it and send AWQ export into get_experts_list, which does not support it.
+register(ModelSpec(model_type="step3p5", min_transformers_version="5.16"))
