@@ -27,10 +27,29 @@ Please refer to [hf_ptq/README.md](../hf_ptq/README.md#pre-requisites) for conta
 recommendations and base ModelOpt installation guidance. For this QAT/QAD example,
 install the Hugging Face dependencies and the example-specific requirements:
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-install"
+profile = "cpu"
+timeout_seconds = 7200
+manual = true
+min_gpus = 0
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.installation import prepare_installation, verify_installation
+prepare_installation(ctx)
+-->
+<!-- modelopt-doc-test:run -->
 ```bash
 pip install -U nvidia-modelopt[hf]
-pip install -r examples/llm_qat/requirements.txt
+pip install --no-build-isolation -r examples/llm_qat/requirements.txt
 ```
+<!-- modelopt-doc-test:verify python
+verify_installation(ctx)
+-->
+<!-- modelopt-doc-test:end -->
+
+`--no-build-isolation` lets FlashAttention build against the PyTorch installed by
+the first command.
 
 The Qwen3-8B example below requires a minimum of **2 x 80GB GPUs**.
 
@@ -107,6 +126,18 @@ verify_llm_qat_workspace(workspace)
 
 Quantize, recover accuracy using the original model as teacher, and export:
 
+<!-- modelopt-doc-test:begin
+id = "llm-qad-quickstart"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace, verify_llm_qat_workspace
+workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
+ctx.cwd = workspace / "examples/llm_qat"
+ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+-->
+<!-- modelopt-doc-test:run -->
 ```sh
 # 1. Quantize
 python quantize.py \
@@ -126,14 +157,37 @@ accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
 python export.py --pyt_ckpt_path qwen3-8b-qad-nvfp4 --export_path qwen3-8b-qad-deploy
 ```
 
+<!-- modelopt-doc-test:verify python
+verify_llm_qat_workspace(workspace, variant="qad")
+-->
+<!-- modelopt-doc-test:end -->
+
 Exported checkpoints can be deployed on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang). See [hf_ptq/README.md](../hf_ptq/README.md#deployment) for deployment instructions. For quick accuracy evaluation without exporting, see [Native Fake-Quantized Evaluation](#native-fake-quantized-evaluation).
 
 > [!NOTE]
 > For a minimal end-to-end demo (quantize + train + save in one script), see [simple_qat_train.py](simple_qat_train.py). It runs on a **single GPU** only and is intended as a quick introduction to the QAT flow (without transformer trainer)—not for distributed training.
 >
+> <!-- modelopt-doc-test:begin
+> id = "llm-qat-simple"
+> profile = "gpu"
+> timeout_seconds = 900
+> -->
+> <!-- modelopt-doc-test:setup python
+> from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace, verify_llm_qat_workspace
+> workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp, llama=True)
+> ctx.cwd = workspace / "examples/llm_qat"
+> ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+> -->
+> <!-- modelopt-doc-test:run -->
 > ```sh
 > python simple_qat_train.py --model-path meta-llama/Llama-3.2-3B --recipe general/ptq/nvfp4_default-kv_fp8
 > ```
+>
+> <!-- modelopt-doc-test:verify python
+> assert (ctx.cwd / "qat_model/modelopt_state.pth").is_file()
+> assert (ctx.cwd / "qat_model/model.safetensors").stat().st_size > 0
+> -->
+> <!-- modelopt-doc-test:end -->
 >
 > For multi-GPU training (FSDP2, DDP, DeepSpeed), use [train.py](train.py) with `accelerate launch` as shown in the [commands](#qat) above.
 
@@ -183,6 +237,18 @@ Replace `--config-file configs/accelerate/fsdp2.yaml` with the desired backend c
 
 [QLoRA](https://arxiv.org/pdf/2305.14314) reduces training memory by quantizing LoRA backbone weights with real quantization via `mtq.compress()`.
 
+<!-- modelopt-doc-test:begin
+id = "llm-qlora-quickstart"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace, verify_llm_qat_workspace
+workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
+ctx.cwd = workspace / "examples/llm_qat"
+ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+-->
+<!-- modelopt-doc-test:run -->
 ```sh
 # 1. Quantize with compression
 python quantize.py \
@@ -203,11 +269,48 @@ python export.py \
   --pyt_ckpt_path qwen3-8b-fp4-qlora \
   --export_path qwen3-8b-fp4-qlora-hf
 
+```
+
+<!-- modelopt-doc-test:verify python
+import json
+trained = ctx.cwd / "qwen3-8b-fp4-qlora"
+exported = ctx.cwd / "qwen3-8b-fp4-qlora-hf"
+import math
+state = json.loads((trained / "trainer_state.json").read_text())
+assert state["global_step"] == 2
+losses = [entry["train_loss"] for entry in state["log_history"] if "train_loss" in entry]
+assert losses and all(math.isfinite(value) for value in losses)
+assert (exported / "adapter_config.json").is_file()
+assert (exported / "adapter_model.safetensors").stat().st_size > 0
+assert (exported / "base_model/config.json").is_file()
+-->
+<!-- modelopt-doc-test:end -->
+
+Serve the exported adapter with vLLM:
+
+<!-- modelopt-doc-test:begin
+id = "llm-qlora-serve"
+profile = "gpu"
+timeout_seconds = 900
+manual = true
+requires = ["vllm"]
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.serving import prepare_adapter_server, verify_adapter_server
+prepare_adapter_server(ctx)
+-->
+<!-- modelopt-doc-test:run background -->
+```sh
 # 4. Serve with vLLM
 vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
-  --lora-modules adapter=qwen3-8b-fp4-qlora-hf --port 8000 \
+  --lora-modules adapter=qwen3-8b-fp4-qlora-hf --port "${PORT:-8000}" \
   --tokenizer qwen3-8b-fp4-qlora-hf
 ```
+
+<!-- modelopt-doc-test:verify python
+verify_adapter_server(ctx)
+-->
+<!-- modelopt-doc-test:end -->
 
 > QLoRA export is not currently supported with FSDP2.
 
@@ -215,6 +318,16 @@ vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
 
 ### Quantize and Fine-Tune with Python
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-python"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_python_api, verify_python_api
+globals().update(prepare_python_api(ctx, quantized=False))
+-->
+<!-- modelopt-doc-test:run -->
 ```python
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
@@ -230,10 +343,25 @@ trainer.train()
 trainer.save_model()
 ```
 
+<!-- modelopt-doc-test:verify python
+verify_python_api(trainer, initial_weights)
+-->
+<!-- modelopt-doc-test:end -->
+
 ### Using `QATTrainer` and `QADTrainer`
 
 `QATTrainer` is a drop-in replacement for HuggingFace's `Trainer` that handles quantization-aware training seamlessly with various distributed backends (FSDP2, DeepSpeed, DDP):
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-trainer"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_python_api, verify_python_api
+globals().update(prepare_python_api(ctx, quantized=True))
+-->
+<!-- modelopt-doc-test:run -->
 ```python
 from modelopt.torch.quantization.plugins.transformers_trainer import QATTrainer
 
@@ -247,15 +375,33 @@ trainer.train()
 trainer.save_model()
 ```
 
-`QADTrainer` extends `QATTrainer` with distillation. Pass the teacher model and a `DistillArguments` instance:
+<!-- modelopt-doc-test:verify python
+verify_python_api(trainer, initial_weights)
+-->
+<!-- modelopt-doc-test:end -->
 
+`QADTrainer` extends `QATTrainer` with distillation. Load the teacher first and pass a `DistillArgsWithTeacherModel` instance:
+
+<!-- modelopt-doc-test:begin
+id = "llm-qad-trainer"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_python_api, verify_python_api
+globals().update(prepare_python_api(ctx, quantized=True))
+-->
+<!-- modelopt-doc-test:run -->
 ```python
-from modelopt.torch.distill.plugins.huggingface import DistillArguments
+from transformers import AutoModelForCausalLM
+
+from modelopt.torch.distill.plugins.huggingface import DistillArgsWithTeacherModel
 from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 
-distill_args = DistillArguments(
+teacher = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B", dtype=model.dtype)
+distill_args = DistillArgsWithTeacherModel(
     distill=True,
-    teacher_model="Qwen/Qwen3-8B",
+    teacher_model=teacher,
     criterion="logits_loss",
 )
 
@@ -270,6 +416,11 @@ trainer.train()
 trainer.save_model()
 ```
 
+<!-- modelopt-doc-test:verify python
+verify_python_api(trainer, initial_weights)
+-->
+<!-- modelopt-doc-test:end -->
+
 <details>
 <summary><b>FSDP2 and Model-Specific Layer Wrapping</b></summary>
 
@@ -279,18 +430,52 @@ You can either:
 
 1. **Override via CLI** (recommended for one-off runs):
 
+   <!-- modelopt-doc-test:begin
+   id = "llm-qat-llama-wrap"
+   profile = "gpu"
+   timeout_seconds = 900
+   -->
+   <!-- modelopt-doc-test:setup python
+   from _test_utils.doc_tests.fixtures.llm_qat import prepare_quantized_input
+   prepare_quantized_input(ctx, llama=True)
+   (ctx.cwd / "llama-quantized").symlink_to(ctx.cwd / "qwen3-8b-quantized", target_is_directory=True)
+   -->
+   <!-- modelopt-doc-test:run -->
    ```sh
    accelerate launch --config-file configs/accelerate/fsdp2.yaml \
      --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer \
-     train.py --config configs/train/qat_nvfp4.yaml ...
+     train.py --config configs/train/qat_nvfp4.yaml \
+     --model_name_or_path llama-quantized --output_dir llama-qat
    ```
+
+   <!-- modelopt-doc-test:verify python
+   import json
+   assert json.loads((ctx.cwd / "llama-qat/trainer_state.json").read_text())["global_step"] == 2
+   -->
+   <!-- modelopt-doc-test:end -->
 
 2. **Create a custom config** (recommended for repeated use):
 
+   <!-- modelopt-doc-test:begin
+   id = "llm-qat-copy-config"
+   profile = "cpu"
+   timeout_seconds = 900
+   -->
+   <!-- modelopt-doc-test:setup python
+   import shutil
+   ctx.cwd = ctx.tmp
+   shutil.copytree(ctx.repo / "examples/llm_qat/configs", ctx.tmp / "configs")
+   -->
+   <!-- modelopt-doc-test:run -->
    ```sh
    cp configs/accelerate/fsdp2.yaml configs/accelerate/fsdp2_llama.yaml
    # Edit fsdp2_llama.yaml: change Qwen3DecoderLayer -> LlamaDecoderLayer
    ```
+
+   <!-- modelopt-doc-test:verify python
+   assert (ctx.cwd / "configs/accelerate/fsdp2_llama.yaml").read_bytes() == (ctx.cwd / "configs/accelerate/fsdp2.yaml").read_bytes()
+   -->
+   <!-- modelopt-doc-test:end -->
 
 Common layer class names:
 
@@ -311,11 +496,30 @@ There are two types of configs:
 
 `quantize.py` only needs `--dataset_config` and `--recipe`. `train.py` uses a full training config via `--config`. All arguments can be specified via YAML, CLI flags, or both (CLI overrides YAML). See [ARGUMENTS.md](ARGUMENTS.md) for the full reference, regenerated with `python_pwd examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md`.
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-cli-override"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_quantized_input
+prepare_quantized_input(ctx)
+-->
+<!-- modelopt-doc-test:run -->
 ```sh
 # YAML + CLI override
 accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
-  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5
+  --config configs/train/qat_nvfp4.yaml --learning_rate 5e-5 \
+  --model_name_or_path qwen3-8b-quantized --output_dir qwen3-8b-qat-override
 ```
+
+<!-- modelopt-doc-test:verify python
+import json
+state = json.loads((ctx.cwd / "qwen3-8b-qat-override/trainer_state.json").read_text())
+assert state["global_step"] == 2
+assert any(entry.get("learning_rate") == 5e-5 for entry in state["log_history"])
+-->
+<!-- modelopt-doc-test:end -->
 
 See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends and adding new datasets.
 
@@ -326,11 +530,33 @@ See [Dataset Configuration](configs/dataset/README.md) for custom dataset blends
 
 You can pre-tokenize and cache the dataset before training using `dataset_utils.py`. This is useful for large blends or multi-node setups where you want to build the cache once and reuse it across experiments.
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-dataset"
+profile = "cpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace, verify_llm_qat_workspace
+workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
+ctx.cwd = workspace / "examples/llm_qat"
+ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+-->
+<!-- modelopt-doc-test:run -->
 ```sh
 python dataset_utils.py \
   --dataset_config configs/dataset/blend.yaml \
   --model_name_or_path Qwen/Qwen3-8B
 ```
+
+<!-- modelopt-doc-test:verify python
+from datasets import load_from_disk
+caches = list((ctx.cwd / ".dataset_cache/tokenized").glob("*/dataset_dict.json"))
+assert len(caches) == 1
+cached = load_from_disk(str(caches[0].parent))
+assert len(cached["train"]) == 16 and len(cached["eval"]) == 4
+assert {"input_ids", "attention_mask", "labels"} <= set(cached["train"].column_names)
+-->
+<!-- modelopt-doc-test:end -->
 
 The cached dataset is stored under `.dataset_cache/tokenized/` by default (configurable via `--dataset_cache_dir`). The cache key depends on the dataset config (`blend_size`, `splits`, sources) and tokenizer — changing `train_samples` or `eval_samples` in the training config does **not** invalidate the cache.
 
@@ -344,14 +570,41 @@ The cached dataset is stored under `.dataset_cache/tokenized/` by default (confi
 
 ModelOpt quantized models can be saved and restored without exporting to a deployment platform. This is useful for fast evaluation with fake quantization using standard LLM benchmarks (MMLU, WikiText, etc.). See [HuggingFace checkpointing](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis) for details.
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-evaluation"
+profile = "gpu"
+timeout_seconds = 7200
+manual = true
+requires = ["lm_eval"]
+-->
+<!-- modelopt-doc-test:setup python
+import os
+from pathlib import Path
+checkpoint = Path(os.environ["MODELOPT_DOC_EVAL_CHECKPOINT"]).resolve()
+assert (checkpoint / "modelopt_state.pth").is_file()
+ctx.cwd = ctx.tmp / "examples/llm_qat"
+ctx.cwd.mkdir(parents=True)
+(ctx.cwd / "qwen3-8b-qat-nvfp4").symlink_to(checkpoint, target_is_directory=True)
+import shutil
+shutil.copytree(ctx.repo / "examples/llm_eval", ctx.cwd.parent / "llm_eval")
+ctx.env["EVAL_OUTPUT"] = str(ctx.tmp / "eval-results")
+-->
+<!-- modelopt-doc-test:run -->
 ```sh
 cd ../llm_eval
 
 python lm_eval_hf.py --model hf \
     --tasks mmlu,wikitext \
     --model_args pretrained=../llm_qat/qwen3-8b-qat-nvfp4 \
-    --batch_size 4
+    --batch_size 4 --output_path "${EVAL_OUTPUT:-eval-results}"
 ```
+
+<!-- modelopt-doc-test:verify python
+import json
+files = list((ctx.tmp / "eval-results").rglob("results*.json"))
+assert files and json.loads(files[0].read_text())["results"]
+-->
+<!-- modelopt-doc-test:end -->
 
 See [llm_eval/README.md](../llm_eval/README.md) for supported tasks.
 

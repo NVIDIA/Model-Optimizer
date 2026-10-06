@@ -23,6 +23,8 @@ from _test_utils.doc_tests.pytest_utils import execute_scenario, scenario_parame
 REPO = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("scenario", scenario_parameters(REPO / "examples/llm_qat/README.md"))
+@pytest.mark.parametrize(
+    "scenario", scenario_parameters(REPO / "examples/megatron_bridge/README.md")
+)
 def test_readme(scenario, tmp_path, monkeypatch):
     execute_scenario(scenario, REPO, tmp_path, monkeypatch)

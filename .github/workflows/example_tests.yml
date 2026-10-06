@@ -74,6 +74,8 @@ jobs:
             megatron:
               - "{examples,tests/examples}/megatron_bridge/**"
               - "!**/*.{md,rst,png,ipynb}"
+            megatron_docs:
+              - examples/megatron_bridge/README.md
             onnx:
               - "{examples,tests/examples}/{diffusers,torch_onnx,torch_trt}/**"
               - examples/onnx_ptq/** # torch_trt reuses onnx_ptq
@@ -85,7 +87,7 @@ jobs:
           COMMON: ${{ steps.changed.outputs.common_any_modified }}
           TORCH: ${{ steps.changed.outputs.torch_any_modified == 'true' || steps.changed.outputs.torch_docs_any_modified == 'true' }}
           TRTLLM: ${{ steps.changed.outputs.trtllm_any_modified }}
-          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified }}
+          MEGATRON: ${{ steps.changed.outputs.megatron_any_modified == 'true' || steps.changed.outputs.megatron_docs_any_modified == 'true' }}
           ONNX: ${{ steps.changed.outputs.onnx_any_modified }}
         run: |
           any=false

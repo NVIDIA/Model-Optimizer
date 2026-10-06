@@ -108,7 +108,7 @@ assert False, "verification failed"
     "body",
     [
         "<!-- modelopt-doc-test:run -->\nprose\n```sh\ntrue\n```",
-        "<!-- modelopt-doc-test:run -->\n```python\npass\n```",
+        "<!-- modelopt-doc-test:run -->\n```javascript\ntrue\n```",
         "<!-- modelopt-doc-test:run -->\n```sh\ntrue",
         "<!-- modelopt-doc-test:unknown -->",
         "<!-- modelopt-doc-test:setup python\nthis is invalid python!\n-->",
@@ -212,6 +212,148 @@ true
 def test_pilot_collection_and_recipe_listing(tmp_path):
     repo = Path(__file__).resolve().parents[3]
     scenarios = parse_markdown(repo / "examples/llm_qat/README.md")
-    assert [scenario.id for scenario in scenarios] == ["llm-qat-recipes", "llm-qat-quickstart"]
-    assert [scenario.profile for scenario in scenarios] == ["cpu", "gpu"]
-    assert "nvfp4" in run_scenario(scenarios[0], repo, tmp_path)
+    assert {"llm-qat-recipes", "llm-qat-quickstart"} <= {s.id for s in scenarios}
+    recipe = next(s for s in scenarios if s.id == "llm-qat-recipes")
+    assert "nvfp4" in run_scenario(recipe, repo, tmp_path)
+
+
+@pytest.mark.parametrize("prefix", ["", "   ", "> "])
+def test_python_fences_share_namespace_and_context(tmp_path, prefix):
+    fence = "\n".join(
+        prefix + line
+        for line in [
+            "```python",
+            "answer += 2",
+            "import os",
+            "os.environ['ANSWER'] = str(answer)",
+            "```",
+        ]
+    )
+    path = _document(
+        tmp_path,
+        """<!-- modelopt-doc-test:setup python
+ctx.cwd = ctx.tmp
+answer = 40
+-->
+<!-- modelopt-doc-test:run -->
+"""
+        + fence
+        + """
+<!-- modelopt-doc-test:verify python
+assert answer == 42
+assert ctx.cwd == ctx.tmp
+assert ctx.env['ANSWER'] == '42'
+-->
+""",
+    )
+    run_scenario(parse_markdown(path)[0], tmp_path, tmp_path)
+
+
+def test_background_service_is_verified_then_cleaned_up(tmp_path):
+    path = _document(
+        tmp_path,
+        """<!-- modelopt-doc-test:setup python
+ctx.cwd = ctx.tmp
+-->
+<!-- modelopt-doc-test:run background -->
+```sh
+sleep 30 &
+echo $! > child.pid
+wait
+```
+<!-- modelopt-doc-test:verify python
+import os
+import time
+for _ in range(100):
+    if (ctx.cwd / 'child.pid').exists():
+        break
+    time.sleep(0.01)
+os.kill(ctx.background_pid, 0)
+assert (ctx.cwd / 'child.pid').is_file()
+-->
+""",
+    )
+    run_scenario(parse_markdown(path)[0], tmp_path, tmp_path)
+    pid = int((tmp_path / "child.pid").read_text())
+    status = Path(f"/proc/{pid}/stat")
+    assert not status.exists() or status.read_text().split()[2] == "Z"
+
+
+def test_coverage_requires_explicit_reason(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_text("```sh\nexit 99\n```\n")
+    with pytest.raises(DocTestError, match="unaccounted fence"):
+        parse_markdown(path, require_coverage=True)
+    path.write_text("<!-- modelopt-doc-test:skip Requires credentials. -->\n" + path.read_text())
+    assert parse_markdown(path, require_coverage=True) == []
+
+
+@pytest.mark.parametrize("example", ["llm_qat", "megatron_bridge"])
+def test_readme_fence_coverage(example):
+    repo = Path(__file__).resolve().parents[3]
+    assert parse_markdown(repo / "examples" / example / "README.md", require_coverage=True)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<!-- modelopt-doc-test:run -->\n```python\nx = 1\n```\n<!-- modelopt-doc-test:run -->\n```sh\ntrue\n```",
+        "<!-- modelopt-doc-test:run background -->\n```sh\nsleep 30\n```",
+    ],
+)
+def test_unsupported_execution_order(tmp_path, body):
+    with pytest.raises(DocTestError):
+        parse_markdown(_document(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "manual = 1",
+        "min_gpus = true",
+        "min_gpus = -1",
+        'requires = "torch"',
+        'requires = ["../torch"]',
+    ],
+)
+def test_resource_metadata_is_validated(tmp_path, metadata):
+    path = _document(tmp_path, "<!-- modelopt-doc-test:run -->\n```sh\ntrue\n```")
+    path.write_text(path.read_text().replace('profile = "cpu"', 'profile = "cpu"\n' + metadata))
+    with pytest.raises(DocTestError):
+        parse_markdown(path)
+
+
+def test_plain_shell_redirection_is_not_a_blockquote(tmp_path):
+    path = _document(
+        tmp_path,
+        """<!-- modelopt-doc-test:setup python
+ctx.cwd = ctx.tmp
+-->
+<!-- modelopt-doc-test:run -->
+```sh
+> empty.txt
+```
+<!-- modelopt-doc-test:verify python
+assert (ctx.cwd / 'empty.txt').is_file()
+-->
+""",
+    )
+    run_scenario(parse_markdown(path)[0], tmp_path, tmp_path)
+
+
+def test_quoted_directives_preserve_python_indentation(tmp_path):
+    path = _document(
+        tmp_path,
+        """<!-- modelopt-doc-test:setup python
+values = []
+for i in range(2):
+    values.append(i)
+-->
+<!-- modelopt-doc-test:run -->
+```python
+assert values == [0, 1]
+```
+""",
+    )
+    path.write_text("".join("> " + line for line in path.read_text().splitlines(keepends=True)))
+    run_scenario(parse_markdown(path)[0], tmp_path, tmp_path)

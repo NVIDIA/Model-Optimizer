@@ -83,7 +83,7 @@ def run_scenario(scenario, repo: Path, tmp: Path) -> str:
         output.seek(0)
         text = output.read().decode(errors="replace")
         for index, step in enumerate(scenario.steps):
-            if step.kind == "run":
+            if step.kind in {"run", "background"}:
                 text = text.replace(
                     str(Path(control_dir) / f"fence-{index}.sh"), str(scenario.path)
                 )
@@ -109,9 +109,25 @@ def _execute(scenario, repo, tmp, control):
     for step in scenario.steps:
         if step.kind == "setup":
             python_step(step)
+    if any(step.kind == "python" for step in scenario.steps):
+        os.chdir(ctx.cwd)
+        os.environ.clear()
+        os.environ.update(ctx.env)
+        for step in scenario.steps:
+            if step.kind == "python":
+                python_step(step)
+        ctx.cwd, ctx.env = Path.cwd(), dict(os.environ)
+    else:
+        _execute_shell(scenario, ctx, control)
+    for step in scenario.steps:
+        if step.kind == "verify":
+            python_step(step)
+
+
+def _execute_shell(scenario, ctx, control):
     script = ["set -Eeuo pipefail", f"DOC_TEST_SOURCE={shlex.quote(str(scenario.path))}"]
     for index, step in enumerate(scenario.steps):
-        if step.kind != "run":
+        if step.kind not in {"run", "background"}:
             continue
         source = control / f"fence-{index}.sh"
         source.write_text("\n" * (step.line - 1) + step.code)
@@ -120,7 +136,10 @@ def _execute(scenario, repo, tmp, control):
         script.append(
             'trap \'printf "%s:%s: shell command failed\\n" "$DOC_TEST_SOURCE" "$LINENO" >&2\' ERR'
         )
-        script.append(f"source {shlex.quote(str(source))}")
+        command = f"source {shlex.quote(str(source))}"
+        if step.kind == "background":
+            command += f" &\necho $! > {shlex.quote(str(control / 'background_pid'))}"
+        script.append(command)
     script.extend(
         [
             f"pwd -P > {shlex.quote(str(control / 'cwd'))}",
@@ -135,9 +154,8 @@ def _execute(scenario, repo, tmp, control):
         raise DocTestError(f"shell exited with {result.returncode}")
     ctx.cwd = Path((control / "cwd").read_text().rstrip("\n"))
     ctx.env = dict(item.split("=", 1) for item in (control / "env").read_text().split("\0") if item)
-    for step in scenario.steps:
-        if step.kind == "verify":
-            python_step(step)
+    if (control / "background_pid").exists():
+        ctx.background_pid = int((control / "background_pid").read_text())
 
 
 if __name__ == "__main__":
