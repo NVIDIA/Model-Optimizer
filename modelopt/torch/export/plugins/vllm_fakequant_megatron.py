@@ -207,8 +207,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             raise ValueError(f"Conflicting quantizer recipes routed to {name}")
         self._quantizer_state_for_recipe[name] = recipe
 
-    def _validate_export_state(self) -> None:
-        """Reject unsupported quantizers on every rank before writing weight shards."""
+    def _gather_exclude_modules(self) -> list[str]:
+        """Validate settings before gathering excluded modules."""
+        # All ranks reach this after MTP collection and before writing weights.
         failure = DistributedProcessGroup.get_dist_syncd_obj(
             self._quantizer_validation_failure,
             DistributedProcessGroup(None),
@@ -216,6 +217,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         )
         if failure:
             raise ValueError(failure)
+        return super()._gather_exclude_modules()
 
     def _extract_quantizer_recipe_markers(
         self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
