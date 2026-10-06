@@ -45,18 +45,42 @@ All arguments can be set via YAML, CLI, or both (CLI overrides YAML). See
 
 Recipes are declarative YAML files that specify the quantization configuration. Built-in recipes are available in [`modelopt_recipes/`](../../modelopt_recipes/):
 
+<!-- modelopt-doc-test:begin
+id = "llm-qat-recipes"
+profile = "cpu"
+timeout_seconds = 30
+-->
+<!-- modelopt-doc-test:run -->
+
 ```sh
 # From the Model-Optimizer repository root, list available built-in recipes
 ls modelopt_recipes/general/ptq/
 ```
 
+<!-- modelopt-doc-test:end -->
+
 See [custom calibration](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#advanced-configuration-creation) for creating your own recipe.
 
 ### QAT
 
-Quantize, fine-tune on labeled data, and export:
+Quantize, fine-tune on labeled data, and export. Start from the repository root:
+
+<!-- modelopt-doc-test:begin
+id = "llm-qat-quickstart"
+profile = "gpu"
+timeout_seconds = 900
+-->
+<!-- modelopt-doc-test:setup python
+from _test_utils.doc_tests.fixtures.llm_qat import prepare_llm_qat_workspace, verify_llm_qat_workspace
+workspace = prepare_llm_qat_workspace(ctx.repo, ctx.tmp)
+ctx.cwd = workspace
+ctx.env.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+-->
+<!-- modelopt-doc-test:run -->
 
 ```sh
+cd examples/llm_qat
+
 # 1. Quantize
 python quantize.py \
   --model_name_or_path Qwen/Qwen3-8B \
@@ -73,6 +97,11 @@ accelerate launch --config-file configs/accelerate/fsdp2.yaml train.py \
 # 3. Export
 python export.py --pyt_ckpt_path qwen3-8b-qat-nvfp4 --export_path qwen3-8b-qat-deploy
 ```
+
+<!-- modelopt-doc-test:verify python
+verify_llm_qat_workspace(workspace)
+-->
+<!-- modelopt-doc-test:end -->
 
 ### QAD
 

@@ -23,3 +23,9 @@ pytest tests/examples/$TEST
 The following environment variables can be set to control the behavior of the tests:
 
 - `MODELOPT_LOCAL_MODEL_ROOT`: If set, the tests will use the local model directory instead of downloading the model from the internet. Default is not set, which means the model will be downloaded.
+
+## Executable README scenarios
+
+The LLM QAT example also tests explicitly annotated Markdown shell fences. See
+[the directive contract and CPU/GPU commands](../_test_utils/doc_tests/README.md)
+for local development, collection, reduced-scale inputs and acceptance checks.
