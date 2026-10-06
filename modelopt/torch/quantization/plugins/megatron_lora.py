@@ -40,7 +40,10 @@ __all__ = []
     }
 )
 class _MegatronQuantLoRALinear(_QuantLoRALinear):
+    """Adapt local weight shards with synchronized replicated-factor gradients."""
+
     def _setup(self, config):
+        """Initialize sharded factors and synchronize replicated factors."""
         super()._setup(config)
         base_weight = self._parameters["weight"]
         self.lora_tp_group = self.parallel_state.tensor_parallel_group.group
@@ -66,6 +69,7 @@ class _MegatronQuantLoRALinear(_QuantLoRALinear):
 
     @staticmethod
     def _effective_weight(module, weight):
+        """Combine local weight shards with TP-correct adapter gradients."""
         a, b = module.lora_A, module.lora_B
         if torch.distributed.get_world_size(module.lora_tp_group) > 1:
             if module._is_column_parallel:
@@ -75,6 +79,7 @@ class _MegatronQuantLoRALinear(_QuantLoRALinear):
         return weight + (module.lora_scale * b @ a).to(weight.dtype)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Include adapter factors with their tensor-parallel checkpoint axes."""
         state = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         axes = {}
         if self._is_column_parallel:
@@ -94,6 +99,7 @@ class _MegatronQuantLoRALinear(_QuantLoRALinear):
         return state
 
     def merge_lora(self):
+        """Merge local factors and remove adapter-specific parallel state."""
         super().merge_lora()
         del self.lora_tp_group
 

@@ -49,6 +49,7 @@ QuantLoRARegistry = _DMRegistryCls("quant_lora")
 @QuantLoRARegistry.register({QuantModuleRegistry[nn.Linear]: "nn.Linear"})
 class _QuantLoRALinear(DynamicModule):
     def _setup(self, config: QuantLoRAConfig):
+        """Initialize factors with a zero effective update."""
         weight = self._parameters["weight"]
         self.lora_A = nn.Parameter(weight.new_empty(config.rank, weight.shape[1]))
         self.lora_B = nn.Parameter(weight.new_zeros(weight.shape[0], config.rank))
@@ -57,9 +58,11 @@ class _QuantLoRALinear(DynamicModule):
 
     @staticmethod
     def _effective_weight(module, weight):
+        """Combine the frozen weight and trainable low-rank update."""
         return weight + (module.lora_scale * module.lora_B @ module.lora_A).to(weight.dtype)
 
     def forward(self, *args, **kwargs):
+        """Run the quantized base layer on the combined weight."""
         # Keep the combined weight outside quantizers and TE custom autograd functions.
         weight = self._parameters["weight"]
         self._parameters["weight"] = self._effective_weight(self, weight)
@@ -70,6 +73,7 @@ class _QuantLoRALinear(DynamicModule):
 
     @torch.no_grad()
     def merge_lora(self):
+        """Fold the update into the base weight and remove the factors."""
         weight = self._parameters["weight"]
         weight.copy_(self._effective_weight(self, weight))
         self.export()
@@ -95,6 +99,7 @@ def merge_quant_lora(model: nn.Module) -> nn.Module:
 
 
 def _convert_quant_lora(model, config):
+    """Validate all targets before freezing the backbone and adding factors."""
     targets = []
     for name, module in model.named_modules():
         if not isinstance(module, QuantModule) or not hasattr(module, "weight_quantizer"):
@@ -122,15 +127,18 @@ def _convert_quant_lora(model, config):
 
 
 def _restore_quant_lora(model, config, metadata):
+    """Restore quantizers and recreate factors before loading checkpoint tensors."""
     restore_quantizer_state(model, QuantizeConfig(), metadata)
     return _convert_quant_lora(model, config)[0]
 
 
 def _update_quant_lora(model, config, metadata):
+    """Record quantizer metadata for adapter and merged checkpoints."""
     update_quantize_metadata(model, QuantizeConfig(), metadata)
 
 
 def _merge_quant_lora(model, config):
+    """Merge every adapter and record the remaining quantizers."""
     for module in list(model.modules()):
         if isinstance(module, _QuantLoRALinear):
             module.merge_lora()
@@ -140,6 +148,7 @@ def _merge_quant_lora(model, config):
 
 
 def _restore_merged_quant_lora(model, config, metadata):
+    """Remove reconstructed factors before restoring the merged checkpoint state."""
     model = _merge_quant_lora(model, config)[0]
     return restore_quantizer_state(model, QuantizeConfig(), metadata)
 

@@ -169,17 +169,37 @@ def test_qad(tmp_path: Path, num_gpus, create_student, lora_rank):
         # Reuse the output directory to exercise optimizer and trained-adapter restoration.
         run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
         assert tracker.read_text(encoding="utf-8").strip() == str(train_iters)
-        checkpoint_dir = distilled_megatron_path / f"iter_{train_iters:07d}"
-        reader = FileSystemReader(str(checkpoint_dir))
-        metadata = reader.read_metadata().state_dict_metadata
-        adapters = {
-            name: torch.empty(meta.size, dtype=meta.properties.dtype)
-            for name, meta in metadata.items()
-            if name.endswith("lora_B")
-        }
-        assert adapters, "Trained checkpoint lost the LoRA factors"
-        dcp.load(adapters, storage_reader=reader)
-        assert any(value.count_nonzero() > 0 for value in adapters.values())
+        # Compare against the same seed, data, schedule, and PTQ checkpoint without a restart.
+        reference_dir = tmp_path / "qad_uninterrupted"
+        reference_cmd = distill_cmd.copy()
+        reference_cmd[reference_cmd.index("--output_dir") + 1] = str(reference_dir)
+        reference_cmd[reference_cmd.index("--exit_interval") + 1] = str(train_iters)
+        run_example_command(reference_cmd, example_path="megatron_bridge", setup_free_port=True)
+        reference_checkpoint = reference_dir / "checkpoints"
+        assert (
+            reference_checkpoint / "latest_checkpointed_iteration.txt"
+        ).read_text().strip() == str(train_iters)
+        adapter_states = []
+        for checkpoint_path in (distilled_megatron_path, reference_checkpoint):
+            reader = FileSystemReader(str(checkpoint_path / f"iter_{train_iters:07d}"))
+            metadata = reader.read_metadata().state_dict_metadata
+            adapters = {
+                name: torch.empty(meta.size, dtype=meta.properties.dtype)
+                for name, meta in metadata.items()
+                if name.endswith(("lora_A", "lora_B"))
+            }
+            assert adapters, "Trained checkpoint lost the LoRA factors"
+            dcp.load(adapters, storage_reader=reader)
+            assert any(
+                value.count_nonzero() > 0
+                for name, value in adapters.items()
+                if name.endswith("lora_B")
+            )
+            adapter_states.append(adapters)
+        resumed, uninterrupted = adapter_states
+        assert resumed.keys() == uninterrupted.keys()
+        for name, value in resumed.items():
+            torch.testing.assert_close(value, uninterrupted[name], rtol=0, atol=0)
 
     # Step 3: export the distilled quantized checkpoint to a unified HF checkpoint. hf_quant_config.json
     # is only written for a quantized model, so its presence confirms the quantizers survived QAD.
