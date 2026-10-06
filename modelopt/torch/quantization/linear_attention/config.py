@@ -17,7 +17,7 @@
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -49,20 +49,41 @@ class _SolveConfig(ModeloptBaseConfig):
 
 
 class LinearAttentionReplayConfig(ModeloptBaseConfig):
-    """Anchor refresh and encoded rank-one update policy."""
+    """Anchor refresh and update encoding schedule; quantizers are configured by quant_cfg."""
 
     window: int = Field(default=8, ge=1, le=64, strict=True)
-    factor_qdq: bool = ModeloptField(default=True)
     encoding: Literal["once", "reencode"] = ModeloptField(default="once")
+    _legacy_factor_qdq: bool | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _load_legacy_factor_qdq(cls, values, handler):
+        legacy = None
+        if isinstance(values, dict) and "factor_qdq" in values:
+            values = dict(values)
+            legacy = values.pop("factor_qdq")
+            if not isinstance(legacy, bool):
+                raise ValueError("Legacy factor_qdq must be a boolean")
+        result = handler(values)
+        if legacy is not None:
+            result._legacy_factor_qdq = legacy
+        return result
 
 
 class LinearAttentionDecodeConfig(ModeloptBaseConfig):
-    """Explicit suffix recurrence; workload supplies per-sequence prefix lengths."""
+    """Explicit suffix recurrence; workload supplies per-sequence prefix lengths.
+
+    ``precision='vllm_0_15'`` uses the pinned serving forward arithmetic for
+    the chunked prefix and token suffix, with a differentiable Torch adjoint.
+    ``full`` retains the FP32/FP64 Torch reference. Quantization is configured
+    independently by TensorQuantizer; this profile does not enable QDQ.
+    """
 
     mode: Literal["token", "replay"] = ModeloptField(default="token")
     readout: Literal["working", "stored"] = ModeloptField(default="stored")
     quantize_initial: bool = ModeloptField(default=True)
     prefill_state_qdq: bool = ModeloptField(default=False)
+    precision: Literal["full", "vllm_0_15"] = ModeloptField(default="full")
     state_codec: Literal["tile", "int8_hadamard32"] = ModeloptField(default="tile")
     decay_log_step: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     replay: LinearAttentionReplayConfig | None = ModeloptField(default=None)
@@ -82,6 +103,18 @@ class LinearAttentionDecodeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "Hadamard state QDQ starts at decode handoff; disable prefill_state_qdq"
             )
+        if self.precision == "vllm_0_15" and (
+            self.mode != "token"
+            or self.readout != "working"
+            or self.state_codec != "tile"
+            or not self.quantize_initial
+            or self.prefill_state_qdq
+            or self.decay_log_step is not None
+        ):
+            raise ValueError(
+                "vllm_0_15 requires token mode, working readout, tile codec, initial-state QDQ, "
+                "and no additional prefill or gate rounding"
+            )
         return self
 
 
@@ -97,7 +130,7 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     groups; ``state.block_v`` controls only execution tiling (at least one group).
     """
 
-    schema_version: Literal[1] = ModeloptField(default=1)
+    schema_version: Literal[1, 2] = ModeloptField(default=2)
     backend: Literal["fla", "matmul"] = ModeloptField(default="fla")
     chunk_size: Literal[64] = ModeloptField(default=64)
     state: _StateConfig = ModeloptField(default=_StateConfig())
@@ -106,6 +139,11 @@ class LinearAttentionConfig(ModeloptBaseConfig):
     @model_validator(mode="before")
     @classmethod
     def _load_legacy_defaults(cls, values):
+        if isinstance(values, dict) and values.get("schema_version") == 1:
+            decode = values.get("decode")
+            if isinstance(decode, dict) and isinstance(decode.get("replay"), dict):
+                replay = {"factor_qdq": True, **decode["replay"]}
+                values = {**values, "decode": {**decode, "replay": replay}}
         if isinstance(values, dict) and "solve" in values:
             _SolveConfig.model_validate(values["solve"])
             values = {key: value for key, value in values.items() if key != "solve"}

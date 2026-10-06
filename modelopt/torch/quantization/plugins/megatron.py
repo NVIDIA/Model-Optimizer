@@ -1131,10 +1131,66 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
             mcore_parallel.get_tensor_model_parallel_group(),
         )
 
+    @property
+    def _serving_arithmetic(self):
+        decode = self.linear_attention_config.decode
+        return (
+            self.linear_attention_is_enabled
+            and decode is not None
+            and decode.precision == "vllm_0_15"
+        )
+
+    def _prepare_input_for_gated_delta_rule(self, *args, **kwargs):
+        # Preserve raw BF16 Q/K: prefill stores normalized BF16 operands, whereas
+        # decode normalizes inside its FP32 update. One shared pre-normalization
+        # would irreversibly change the suffix state trajectory.
+        normalize = self.use_qk_l2norm
+        if self._serving_arithmetic:
+            self.use_qk_l2norm = False
+        try:
+            return super()._prepare_input_for_gated_delta_rule(*args, **kwargs)
+        finally:
+            self.use_qk_l2norm = normalize
+
+    def _compute_gates(self, a_log, dt_bias, batch, seq_len, *gate_feats):
+        gate, inputs = super()._compute_gates(a_log, dt_bias, batch, seq_len, *gate_feats)
+        if self._serving_arithmetic and hasattr(self, "gdn_state_quantizer"):
+            # Import the optional vLLM backend only for the native precision profile.
+            from ...kernels.quantization.linear_attention.serving.forward import fused_gdn_gating
+            from ..linear_attention.utils import forward_value
+
+            raw_beta, raw_gate = gate_feats
+            with torch.no_grad():
+                native_gate, native_beta = fused_gdn_gating(
+                    a_log,
+                    raw_gate.reshape(-1, raw_gate.shape[-1]).contiguous(),
+                    raw_beta.reshape(-1, raw_beta.shape[-1]).contiguous(),
+                    dt_bias,
+                )
+            gate = forward_value(gate, native_gate.reshape_as(gate))
+            inputs["beta"] = forward_value(
+                inputs["beta"], native_beta.reshape_as(inputs["beta"])
+            ).to(raw_beta.dtype)
+        return gate, inputs
+
     @contextmanager
     def _quantized_linear_attention_kernel(self):
         kernel = self.gated_delta_rule
-        self.gated_delta_rule = partial(self._linear_attention_kernel, kernel)
+        if self._serving_arithmetic:
+            if not hasattr(super(), "_prepare_input_for_gated_delta_rule") or getattr(
+                self, "gdn_pre_gated_delta_rule_fusion", False
+            ):
+                raise NotImplementedError(
+                    "Serving arithmetic requires Megatron's unfused input-preparation hook"
+                )
+
+            def run_kernel(*args, **kwargs):
+                kwargs["use_qk_l2norm_in_kernel"] = self.use_qk_l2norm
+                return self._linear_attention_kernel(kernel, *args, **kwargs)
+
+            self.gated_delta_rule = run_kernel
+        else:
+            self.gated_delta_rule = partial(self._linear_attention_kernel, kernel)
         try:
             yield
         finally:

@@ -151,6 +151,12 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
 
     quantizer_state_dict = dict(metadata["quantizer_state"])
     _discard_legacy_w_quantizer_state(quantizer_state_dict)
+    for name, module in _linear_attention_modules(model).items():
+        policy = metadata.get("linear_attention", {}).get(name, {})
+        if policy.get("schema_version", 1) < 2:
+            for handle in module.replay_quantizer_names:
+                key = f"{name}.{handle}" if name else handle
+                quantizer_state_dict.setdefault(key, getattr(module, handle).get_modelopt_state())
     if "linear_attention" not in metadata:
         # Older checkpoints predate these disabled handles; preserve their baseline path.
         for name, module in _linear_attention_modules(model).items():
@@ -254,6 +260,7 @@ def _apply_linear_attention_policy(model, config, saved_policies=None):
         for name, policy in saved_policies.items():
             modules[name].linear_attention_config = LinearAttentionConfig(**policy)
     for name, module in modules.items():
+        module._migrate_legacy_replay_quantizers()
         module.validate_linear_attention()
         if getattr(config, "linear_attention", []):
             print_rank_0(

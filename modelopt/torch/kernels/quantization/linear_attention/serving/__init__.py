@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
+"""Optional vLLM forward kernels for the ``vllm_0_15`` precision profile."""
 
-from .config import *
-from .decode import *
-from .kda import *
-from .prefill import *
-from .training import *
+try:
+    import vllm
+except ImportError as error:
+    raise ImportError(
+        "decode.precision='vllm_0_15' requires the optional vLLM dependency; "
+        "install the dependencies in the linear-attention QAT example's requirements-vllm.txt."
+    ) from error

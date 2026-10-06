@@ -42,15 +42,14 @@ from fla.utils import (
 
 from modelopt.torch.kernels.quantization import linear_attention as state_formats
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
-
-from .int8 import int8_block_qdq, int8_scalar_qdq
+from modelopt.torch.kernels.quantization.common.int8_quant import int8_block_qdq, int8_scalar_qdq
 
 STATE_QDQ_MAX_BLOCK_V = 128
 
 
 @triton.jit
-def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.constexpr):
-    """[ModelOpt] Dynamic scale per full [K, BV] tile of one sequence and head."""
+def _state_amax(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr):
+    """[ModelOpt] Joint amax of the full [K, BV] tile for one sequence and head."""
     # The b_h blocks partition K; their joint amax gives one scale for the full [K, BV] tile.
     b_amax = tl.max(tl.abs(b_h1))
     if K > 64:
@@ -59,25 +58,26 @@ def _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K: tl.constexpr, STATE_QDQ: tl.cons
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h3)))
     if K > 192:
         b_amax = tl.maximum(b_amax, tl.max(tl.abs(b_h4)))
-    # Use scale=1 for zero tiles to avoid division by zero during QDQ.
-    if STATE_QDQ == state_formats.STATE_QDQ_INT8:
-        return tl.where(b_amax > 0, b_amax * (1.0 / 127.0), 1.0)
-    elif STATE_QDQ == state_formats.STATE_QDQ_FP8_E4M3:
-        return tl.where(b_amax > 0, b_amax / 448.0, 1.0)
-    else:
-        tl.static_assert(False, "Unsupported state QDQ format")
+    return b_amax
 
 
 @triton.jit
 def _state_scalar_qdq(
-    value, scale, STATE_QDQ: tl.constexpr, GROUP_SIZE: tl.constexpr, STATE_V_FIRST: tl.constexpr
+    value, amax, STATE_QDQ: tl.constexpr, GROUP_SIZE: tl.constexpr, STATE_V_FIRST: tl.constexpr
 ):
     if STATE_QDQ == state_formats.STATE_QDQ_INT8:
         if GROUP_SIZE:
-            return int8_block_qdq(value, GROUP_SIZE, STATE_V_FIRST)
-        return int8_scalar_qdq(value, scale)
+            # Quantization groups run along V regardless of the kernel's state layout.
+            if STATE_V_FIRST:
+                value = tl.trans(value)
+            value = int8_block_qdq(value, GROUP_SIZE)
+            if STATE_V_FIRST:
+                value = tl.trans(value)
+            return value
+        return int8_scalar_qdq(value, amax)
     elif STATE_QDQ == state_formats.STATE_QDQ_FP8_E4M3:
         tl.static_assert(GROUP_SIZE == 0, "Blockwise state QDQ currently supports only INT8")
+        scale = tl.where(amax > 0, amax / 448.0, 1.0)
         return fp8_scalar_qdq(value, scale)
     else:
         tl.static_assert(False, "Unsupported state QDQ format")
@@ -241,27 +241,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         # [ModelOpt] A state read from a quantized cache is quantized before the first chunk uses it.
         if STATE_QDQ != state_formats.STATE_QDQ_OFF:
             if STATE_QDQ_GROUP_SIZE:
-                b_scale = 1.0
+                b_amax = 0.0
             elif K > 192:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h3, b_h4, K=K)
             elif K > 128:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h3, b_h3, K=K)
             elif K > 64:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h2, b_h2, K=K)
             else:
-                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
-            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
+                b_amax = _state_amax(b_h1, b_h1, b_h1, b_h1, K=K)
+            b_h1 = _state_scalar_qdq(b_h1, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
             if K > 64:
                 b_h2 = _state_scalar_qdq(
-                    b_h2, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h2, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
             if K > 128:
                 b_h3 = _state_scalar_qdq(
-                    b_h3, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h3, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
             if K > 192:
                 b_h4 = _state_scalar_qdq(
-                    b_h4, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h4, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
 
     # main recurrence
@@ -420,27 +420,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         # Legacy quantizers share a [K, BV] scale; block quantizers scale per key/value group.
         if STATE_QDQ != state_formats.STATE_QDQ_OFF:
             if STATE_QDQ_GROUP_SIZE:
-                b_scale = 1.0
+                b_amax = 0.0
             elif K > 192:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h4, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h3, b_h4, K=K)
             elif K > 128:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h3, b_h3, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h3, b_h3, K=K)
             elif K > 64:
-                b_scale = _state_qdq_scale(b_h1, b_h2, b_h2, b_h2, K=K, STATE_QDQ=STATE_QDQ)
+                b_amax = _state_amax(b_h1, b_h2, b_h2, b_h2, K=K)
             else:
-                b_scale = _state_qdq_scale(b_h1, b_h1, b_h1, b_h1, K=K, STATE_QDQ=STATE_QDQ)
-            b_h1 = _state_scalar_qdq(b_h1, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
+                b_amax = _state_amax(b_h1, b_h1, b_h1, b_h1, K=K)
+            b_h1 = _state_scalar_qdq(b_h1, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST)
             if K > 64:
                 b_h2 = _state_scalar_qdq(
-                    b_h2, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h2, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
             if K > 128:
                 b_h3 = _state_scalar_qdq(
-                    b_h3, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h3, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
             if K > 192:
                 b_h4 = _state_scalar_qdq(
-                    b_h4, b_scale, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
+                    b_h4, b_amax, STATE_QDQ, STATE_QDQ_GROUP_SIZE, STATE_V_FIRST
                 )
 
     if STORE_FINAL_STATE:

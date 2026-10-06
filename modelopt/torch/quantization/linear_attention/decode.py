@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from .config import LinearAttentionDecodeConfig
-from .utils import _tile_qdq, state_quantizer_config
+from .utils import _resolve_state_quantizer, _tile_qdq, forward_value
 
 __all__ = [
     "EncodedLinearAttentionTensor",
@@ -91,16 +91,6 @@ def _hadamard32(value):
     return value * (32**-0.5)
 
 
-class _IdentityGradient(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, value, rounded):
-        return rounded
-
-    @staticmethod
-    def backward(ctx, gradient):
-        return gradient, None
-
-
 def _encode(
     value,
     enabled,
@@ -126,22 +116,38 @@ def _encode(
             codes = normalized.sign() * (normalized.abs() + 0.5).floor()
             metadata = scales.to(torch.float16)
             decoded = (codes.clamp(-127, 127) * metadata.float().unsqueeze(-1)).reshape_as(value)
-        return EncodedLinearAttentionTensor(
-            _IdentityGradient.apply(value, decoded.to(value.dtype)), metadata, "int8", 32
-        )
-    decoded, scales = _tile_qdq(value, block_v, state_format, state=state)
-    if state_format == "int8":
-        decoded = _IdentityGradient.apply(value, decoded)
+        return EncodedLinearAttentionTensor(forward_value(value, decoded), metadata, "int8", 32)
+    decoded, scales = _tile_qdq(value, block_v, state_format, state_quantizer=state_quantizer)
     return EncodedLinearAttentionTensor(decoded, scales, state_format, block_v)
 
 
-def _signature(config, state_qdq, block_v, state_format, state_quantizer):
+def _encode_factor(value, quantizer):
+    if quantizer is None:
+        return EncodedLinearAttentionTensor(value, None, "identity", None)
+    decoded = quantizer(value)
+    enabled = quantizer.is_enabled and quantizer._if_quant
+    format = str(quantizer.num_bits) if enabled else "identity"
+    return EncodedLinearAttentionTensor(decoded, None, format, None)
+
+
+def _signature(config, state_qdq, block_v, state_format, state_quantizer, replay_quantizers):
     signature = (
         config.model_dump_json(exclude={"prefill_state_qdq"})
         + f"/{state_qdq}/{block_v}/{state_format}"
     )
     if state_quantizer is not None and state_quantizer.block_sizes is not None:
         signature += f"/group={state_quantizer.block_sizes[-1]}"
+    for quantizer in replay_quantizers:
+        if quantizer is None:
+            signature += "/factor=None"
+        else:
+            grouping = (
+                quantizer.block_sizes if quantizer.block_sizes is not None else quantizer.axis
+            )
+            signature += (
+                f"/factor={quantizer.is_enabled}/{quantizer._if_quant}/{quantizer.num_bits}"
+                f"/{grouping}/{quantizer.backend}/{quantizer.backend_extra_args}"
+            )
     return signature
 
 
@@ -160,7 +166,7 @@ def _round_log_gate(gate, step):
     if step is None:
         return gate
     rounded = (gate / step).round() * step
-    return _IdentityGradient.apply(gate, rounded.detach())
+    return forward_value(gate, rounded)
 
 
 def _prepare_carry(
@@ -177,6 +183,7 @@ def _prepare_carry(
     position,
     state_format,
     state_quantizer,
+    replay_quantizers,
 ):
     if q.ndim != 3 or k.shape != q.shape or v.shape[:2] != q.shape[:2]:
         raise ValueError("q/k/v must have aligned [T,H,D] shapes")
@@ -194,7 +201,9 @@ def _prepare_carry(
             raise ValueError("int8_hadamard32 requires INT8 state quantization")
         if v.shape[-1] % 32 or block_v < 32:
             raise ValueError("int8_hadamard32 requires Dv divisible by 32 and block_v >= 32")
-    signature = _signature(config, state_qdq, block_v, state_format, state_quantizer)
+    signature = _signature(
+        config, state_qdq, block_v, state_format, state_quantizer, replay_quantizers
+    )
     if carry is not None and initial_state is not None:
         raise ValueError("Supply either carry or initial_state")
     shape = (q.shape[1], q.shape[2], v.shape[2])
@@ -241,22 +250,38 @@ def recurrent_decode(
     state_qdq=False,
     state_format="fp8_e4m3",
     state_quantizer=None,
+    replay_key_quantizer=None,
+    replay_update_quantizer=None,
     block_v=64,
     initial_state=None,
     carry=None,
     position=0,
     scale=None,
+    use_qk_l2norm_in_kernel=False,
 ):
     """Run one preactivated sequence [T,H,D] with explicit token/replay write events.
 
     Keys and value heads must already be aligned. Scalar GDN or per-key-channel
     KDA log gates are accepted. Outputs and all returned carry values retain their
     graphs. An empty call performs no write or initial-state quantization.
+    Replay factors use the supplied TensorQuantizers; omitted quantizers leave factors unchanged.
     """
-    if state_quantizer is not None:
-        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
-        if state_quantizer.is_enabled:
-            state_format, _ = state_quantizer_config(state_quantizer)
+    state_quantizer, state_qdq, state_format = _resolve_state_quantizer(
+        state_quantizer, state_qdq, state_format
+    )
+    serving = config.precision == "vllm_0_15"
+    if serving and q.device.type != "cuda":
+        raise ValueError("vllm_0_15 requires CUDA")
+    replay_quantizers = (replay_key_quantizer, replay_update_quantizer)
+    if config.replay is not None and config.replay._legacy_factor_qdq:
+        if any(quantizer is None for quantizer in replay_quantizers):
+            raise ValueError("Replace factor_qdq with explicit replay key/update TensorQuantizers")
+    for quantizer in replay_quantizers:
+        if quantizer is not None and quantizer.is_enabled:
+            if config.replay is None or not quantizer.fake_quant:
+                raise ValueError(
+                    "Replay factor quantizers require replay mode and fake quantization"
+                )
     carry, signature = _prepare_carry(
         q,
         k,
@@ -271,6 +296,7 @@ def recurrent_decode(
         position,
         state_format,
         state_quantizer,
+        replay_quantizers,
     )
     if len(q) == 0:
         # Keep empty input gradients defined without introducing a state write.
@@ -287,8 +313,8 @@ def recurrent_decode(
             if config.replay is not None and config.replay.encoding == "reencode":
                 entries = tuple(
                     ReplayEntry(
-                        _encode(e.key.values, config.replay.factor_qdq, k.shape[-1]),
-                        _encode(e.update.values, config.replay.factor_qdq, block_v),
+                        _encode_factor(e.key.values, replay_key_quantizer),
+                        _encode_factor(e.update.values, replay_update_quantizer),
                         e.log_retention,
                     )
                     for e in entries
@@ -298,18 +324,21 @@ def recurrent_decode(
                 )
             state = carry.reconstruct(original_basis=False)
             gate = _round_log_gate(g[t], config.decay_log_step)
-            decay = gate.exp().unsqueeze(-1)
-            if gate.ndim == 1:
-                decay = decay.unsqueeze(-1)
-            key = _encode(k[t], config.replay is not None and config.replay.factor_qdq, k.shape[-1])
-            decayed = state * decay
-            residual = v[t] - _sum_keys(key.values.unsqueeze(-1) * decayed)
-            update = _encode(
-                beta[t].unsqueeze(-1) * residual,
-                config.replay is not None and config.replay.factor_qdq,
-                block_v,
-            )
-            working = decayed + key.values.unsqueeze(-1) * update.values.unsqueeze(-2)
+            if serving:
+                from ._vllm_autograd import step as serving_step
+
+                native_output, working = serving_step(
+                    q[t], k[t], v[t], gate, beta[t], state, scale, use_qk_l2norm_in_kernel
+                )
+            else:
+                decay = gate.exp().unsqueeze(-1)
+                if gate.ndim == 1:
+                    decay = decay.unsqueeze(-1)
+                key = _encode_factor(k[t], replay_key_quantizer)
+                decayed = state * decay
+                residual = v[t] - _sum_keys(key.values.unsqueeze(-1) * decayed)
+                update = _encode_factor(beta[t].unsqueeze(-1) * residual, replay_update_quantizer)
+                working = decayed + key.values.unsqueeze(-1) * update.values.unsqueeze(-2)
             if config.replay is not None:
                 entries = (*entries, ReplayEntry(key, update, gate))
             refresh = config.replay is None or len(entries) == config.replay.window
@@ -332,7 +361,9 @@ def recurrent_decode(
                 anchor, entries, carry.position + 1, True, signature, carry.value_basis
             )
             read = working if config.readout == "working" else stored
-            outputs.append(_sum_keys(q[t].unsqueeze(-1) * read) * scale)
+            outputs.append(
+                native_output if serving else _sum_keys(q[t].unsqueeze(-1) * read) * scale
+            )
             carry = next_carry
     output = torch.stack(outputs)
     if config.state_codec == "int8_hadamard32":

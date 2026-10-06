@@ -60,6 +60,8 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.kda_state_quantizer,
+            replay_key_quantizer=self.replay_key_quantizer,
+            replay_update_quantizer=self.replay_update_quantizer,
             prefill_lengths=self._linear_attention_prefill_lengths,
             **kwargs,
         )

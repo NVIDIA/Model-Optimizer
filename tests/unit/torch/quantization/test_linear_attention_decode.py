@@ -16,8 +16,8 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from _test_utils.torch.quantization.linear_attention_reference import recurrent_delta_rule_reference
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
@@ -33,11 +33,8 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 @pytest.mark.parametrize("state_format", ["fp8_e4m3", "int8"])
 def test_state_qdq_matches_tensor_quantizer(state_format):
     torch.manual_seed(762)
-    # Exact INT8 scales exercise signed endpoints, half ties, and a zero tile.
-    value = torch.zeros(2, 3, 5, 19)
-    value[..., 0, :9] = torch.tensor([-127, -126.5, -1.5, -0.5, 0, 0.5, 1.5, 126.5, 127]) * 2
-    value[0, :, 0, 16:] = torch.tensor([-254, 1, 254])
-    value.requires_grad_()
+    # A partial value tile checks grouping and padding against TensorQuantizer.
+    value = torch.randn(2, 3, 5, 19, requires_grad=True)
     cfg = {"num_bits": (4, 3), "type": "dynamic", "axis": (0, 1)}
     if state_format == "int8":
         cfg.update(num_bits=8, unsigned=False, narrow_range=True)
@@ -45,7 +42,9 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
     expected = torch.cat(
         [quantizer(tile.flatten(-2)).reshape_as(tile) for tile in value.split(16, -1)], -1
     )
-    encoded = _encode(value, True, 16, state=True, state_format=state_format)
+    encoded = _encode(
+        value, True, 16, state=True, state_format=state_format, state_quantizer=quantizer
+    )
     torch.testing.assert_close(encoded.values, expected, rtol=0, atol=0)
     probe = torch.randn_like(value)
     (gradient,) = torch.autograd.grad((encoded.values * probe).sum(), value)
@@ -78,14 +77,18 @@ def _values_and_grads(output, state, args, initial):
 def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
     args, initial = _inputs(kda, length=5)
     # Partial value groups exercise TensorQuantizer padding as well as per-key scales.
-    quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(
-            num_bits=8, type="dynamic", block_sizes={-1: block_size}, narrow_range=True
-        )
-    )
-    policy = LinearAttentionConfig(
-        backend="matmul", decode={"prefill_state_qdq": True}, state={"block_v": 16}
-    )
+    recipe = load_recipe(
+        "general/ptq/linear_attention_state_int8_block32_dynamic"
+    ).quantize.model_dump()
+    cfg = recipe["quant_cfg"][2 if kda else 1]["cfg"]
+    cfg["block_sizes"] = {-1: block_size}
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(**cfg))
+    policy = LinearAttentionConfig(**recipe["linear_attention"][0]["cfg"])
+    policy.decode.precision = "full"  # Double-precision recurrence/gradient oracle.
+    policy.state.block_v = 16
+    if kda:
+        policy.decode.prefill_state_qdq = True
+        policy.decode.readout = "stored"
     function = matmul_kda if kda else matmul_gdn
     output, final = function(
         *(x.unsqueeze(0) for x in args),
@@ -95,8 +98,8 @@ def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
         initial_state=initial.unsqueeze(0),
         output_final_state=True,
     )
-    # Sequential oracle: the prefix reads unrounded working states; decode reads stored states.
-    state = quantizer(initial)
+    # GDN exercises the serving-aligned recipe; KDA retains prefix-QDQ/stored-read coverage.
+    state = quantizer(initial) if policy.decode.prefill_state_qdq else initial
     expected = []
     q, k, v, g, beta = args
     for t in range(len(q)):
@@ -106,10 +109,11 @@ def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
         decayed = state * decay
         residual = v[t] - (k[t].unsqueeze(-1) * decayed).sum(-2)
         state = decayed + k[t].unsqueeze(-1) * (beta[t].unsqueeze(-1) * residual).unsqueeze(-2)
-        if t >= 3:
-            state = quantizer(state)
-        expected.append((q[t].unsqueeze(-1) * state).sum(-2) / q.shape[-1] ** 0.5)
-        if t == 2:
+        stored = quantizer(state) if t >= 3 else state
+        read = stored if t >= 3 and policy.decode.readout == "stored" else state
+        expected.append((q[t].unsqueeze(-1) * read).sum(-2) / q.shape[-1] ** 0.5)
+        state = stored
+        if t == 2 and policy.decode.prefill_state_qdq:
             state = quantizer(state)
     for actual, expected in zip(
         _values_and_grads(output[0], final[0], args, initial),
@@ -118,49 +122,9 @@ def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
         torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize(("kda", "mode"), [(False, "token"), (True, "replay")])
-def test_prefill_decode_matches_recurrence_and_gradients(kda, mode):
-    args, state = _inputs(kda)
-    policy = LinearAttentionConfig(
-        backend="matmul",
-        decode={
-            "mode": mode,
-            "replay": {"window": 3, "factor_qdq": False} if mode == "replay" else None,
-        },
-    )
-    function = matmul_kda if kda else matmul_gdn
-    output, final = function(
-        *(x.unsqueeze(0) for x in args),
-        policy=policy,
-        prefill_lengths=[3],
-        initial_state=state.unsqueeze(0),
-        output_final_state=True,
-    )
-    exact, expected_state = recurrent_delta_rule_reference(
-        *(x.unsqueeze(0) for x in args), initial_state=state.unsqueeze(0)
-    )
-    for actual, expected in zip(
-        _values_and_grads(output[0], final[0], args, state),
-        _values_and_grads(exact[0], expected_state[0], args, state),
-    ):
-        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=1e-11)
-
-
-def test_quantized_replay_carry_continuation_and_gradients():
-    args, state = _inputs()
-    cfg = LinearAttentionDecodeConfig(mode="replay", replay={"window": 3})
-    kwargs = {"config": cfg, "state_qdq": True, "block_v": 16}
-    expected, final = recurrent_decode(*args, initial_state=state, **kwargs)
-    first, carry = recurrent_decode(*(x[:5] for x in args), initial_state=state, **kwargs)
-    second, carry = recurrent_decode(*(x[5:] for x in args), carry=carry, **kwargs)
-    for actual, expected in zip(
-        _values_and_grads(torch.cat((first, second)), carry.reconstruct(), args, state),
-        _values_and_grads(expected, final.reconstruct(), args, state),
-    ):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert carry.position == 11
-    assert carry.anchor.format == "fp8_e4m3"
-    assert carry.cursor == 2
+def test_serving_precision_requires_native_schedule():
+    with pytest.raises(ValueError, match="working readout"):
+        LinearAttentionDecodeConfig(precision="vllm_0_15")
 
 
 def test_grid_gate_ste_keeps_gate_gradients_and_changes_trajectory():

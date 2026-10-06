@@ -76,6 +76,8 @@ def compiled_gdn_case(request):
     )
     args, state = make_inputs()
     kwargs = {"state_qdq": state_qdq, "w_quantizer": quantizer}
+    if state_qdq == 2:
+        TensorQuantizer(QuantizerAttributeConfig(num_bits=8, type="dynamic"))(state)
     if request.param == "state-int8-block":
         kwargs["state_quantizer"] = TensorQuantizer(
             QuantizerAttributeConfig(
@@ -105,3 +107,20 @@ def test_gdn_forward_and_backward(compiled_gdn_case):
     )
     compare(actual[0], expected[0], 0.03)
     compare(actual[1], expected[1], 0.05)
+
+    if kwargs["state_qdq"] == 2 or "state_quantizer" in kwargs:
+        quantizer = kwargs.get("state_quantizer") or TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=8, type="dynamic")
+        )
+        # Zero updates isolate QDQ, reusing the compiled shape for both tile and block INT8.
+        zero_args = [torch.zeros_like(x) for x in args]
+        pattern = torch.linspace(-1, 1, state.numel(), device=state.device).reshape_as(state)
+        for amax in (2**-25, 2**-24, 2.0):
+            initial = pattern * amax
+            expected_state = initial
+            for _ in range(3):  # Initial handoff and two chunk boundaries.
+                expected_state = quantizer(expected_state[0]).unsqueeze(0)
+            _, actual_state = chunk_gated_delta_rule(
+                *zero_args, initial_state=initial, output_final_state=True, **kwargs
+            )
+            torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
