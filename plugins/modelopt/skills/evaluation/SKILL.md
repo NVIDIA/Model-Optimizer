@@ -8,7 +8,7 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for evaluation canaries and full runs; do not use independently launched or PTQ smoke-test servers as evaluation targets. External model-under-test endpoints require explicit user authorization; record their lifetime/availability as an external dependency. This restriction does not apply to judge/user-simulator endpoints or temporary serving diagnostics. Keeping a PTQ smoke server running does not authorize evaluating it.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for evaluation canaries and full runs. External model-under-test endpoints require explicit user authorization; record their lifetime/availability as an external dependency. This restriction does not apply to judge/user-simulator endpoints or temporary serving diagnostics.
 
 ### Completed-run analysis
 

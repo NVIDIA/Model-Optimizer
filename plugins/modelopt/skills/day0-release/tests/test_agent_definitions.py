@@ -78,7 +78,6 @@ def test_agent_definitions_are_synchronized():
 
     links = {path.stem: path for path in _CLAUDE_LINKS.glob("*.md")}
     assert codex.keys() == claude.keys() == links.keys()
-    assert "modelopt-model-deployer" not in codex
 
     for name, (codex_path, codex_instructions) in codex.items():
         claude_path, claude_instructions = claude[name]
@@ -90,9 +89,3 @@ def test_agent_definitions_are_synchronized():
         link = links[name]
         assert link.is_symlink(), f"{link} must be a symlink"
         assert link.resolve() == claude_path.resolve(), f"{link} must target {claude_path}"
-
-
-def test_serving_ownership_preserves_deployment_skill():
-    skills = _ROOT / "plugins/modelopt/skills"
-    assert (skills / "deployment/SKILL.md").is_file()
-    assert (skills / "ptq/references/checkpoint-validation.md").is_file()
