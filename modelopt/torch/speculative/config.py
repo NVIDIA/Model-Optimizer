@@ -322,7 +322,8 @@ class DFlashConfig(ModeloptBaseConfig):
         description=(
             "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
             "per-slot conditional. The objective is "
-            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty "
+            "(+ w_cal*calibration, see dflash_lilicorr_w_cal). The weights are "
             "absolute — there is no outer multiplier scaling the three terms as a group — so "
             "each is the coefficient with which its term enters the total, and "
             "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
@@ -369,8 +370,23 @@ class DFlashConfig(ModeloptBaseConfig):
             "reranker's expected target-rejection over its own candidate distribution. Each "
             "competing candidate is weighted by the target model's logit gap to the ground "
             "truth, so candidates the target finds plausible are penalized lightly and "
-            "confident wrong ones hard. Requires the target's logits, hence online training "
-            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "confident wrong ones hard. Requires the target's logits: online training reads "
+            "them directly, offline training reconstructs them from the captured final hidden "
+            "state. Both shipped variants use 0.25. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_cal: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "LiLiCorr only: absolute weight of the optional calibration term, a KL divergence "
+            "from the target's distribution renormalized over each slot's k candidates to "
+            "the reranker's. An alternative to w_pen whose gradient does not scale with the "
+            "target's logit gap. Requires the target's logits, like w_pen. 0.0 (default) is a "
+            "no-op, and it is not part of the three weights' all-or-nothing validation. "
             "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
         ),
     )

@@ -81,6 +81,11 @@ intended trial set. Sharding or concurrency changes can still affect scores when
 serving speed or queueing changes timeout rates. `shards: 4` suits 89 × r8 = 712 trials. Check
 `N × concurrency` against the Fargate quota and `N × gpus_per_node` against your allocation.
 
+Apply `references/run-validation.md`'s bounded policy before reporting scores:
+solver/harness timeouts and terminal transport/action errors may count only when
+recorded and scored as protocol-valid failures. Keep all expected trials and
+repeats, including zero scores; incomplete coverage remains a blocker.
+
 ## Score Extraction
 
 Before reporting `pass@1`, complete the evaluation skill's

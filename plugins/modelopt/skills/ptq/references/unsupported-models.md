@@ -142,9 +142,8 @@ class QuantCustomModule(OriginalModule):
 
 | MoE design | Strategy | Plugin example |
 | --- | --- | --- |
-| Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` |
+| Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` (walkthrough in `docs/source/guides/_customized_model_quantization.rst`) |
 | Fused weights + functional interception | Intercept matmul ops | `_QuantGptOssExperts` |
-| Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
 | Fused weights + `forward(x, expert_id)` | Expand + reconstruct on export | `_QuantMoELinear` (Step3.5) |
 
 For the full guide, see `examples/hf_ptq/README.md`.

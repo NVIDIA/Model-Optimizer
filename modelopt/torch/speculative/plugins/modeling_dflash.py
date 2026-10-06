@@ -148,6 +148,9 @@ class DFlashBaseModelOutput:
             out_hiddens = d.get("base_model_hidden_states")
             if out_hiddens is None:
                 raise KeyError("base_model_hidden_states")
+            # A producer can store the hidden states in a wider dtype than the target's weights.
+            # Cast before the final norm too, which online training runs in the target's dtype.
+            out_hiddens = out_hiddens.to(base_model_lm_head.weight.dtype)
             out_hiddens = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
             logits = base_model_lm_head(out_hiddens)
         return cls(
