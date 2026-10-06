@@ -319,7 +319,6 @@ def collect_shared_input_modules(
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # TODO: Handle DBRX MoE case
             input_to_linear[input[0]].append(module)
 
     def _output_hook(module, input, output):
@@ -511,7 +510,6 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
 
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
-    # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
     model_hf_type = hf_model_type(model)
     module_names = set()

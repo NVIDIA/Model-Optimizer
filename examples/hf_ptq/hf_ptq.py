@@ -1141,7 +1141,6 @@ def quantize_main(
                 is_nemotron_vl_model,
             )
         else:
-            assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
     # If asked, run the closed-form MXFP4 -> NVFP4 cast: read the source MXFP4
