@@ -22,6 +22,9 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+
+pytest.importorskip("transformers")
+
 from huggingface_hub import constants as hub_constants
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, PreTrainedModel
