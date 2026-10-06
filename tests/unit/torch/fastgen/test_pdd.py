@@ -39,7 +39,8 @@ from modelopt.torch.fastgen.flow_matching import (
 
 
 def test_pdd_config_defaults_and_yaml_loading(tmp_path):
-    config = PDDConfig()
+    with torch.device("meta"):
+        config = PDDConfig()
     assert (
         config.grid_size,
         config.grid_max_t,

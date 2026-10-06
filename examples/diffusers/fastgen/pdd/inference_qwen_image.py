@@ -63,8 +63,7 @@ def _parse_args() -> argparse.Namespace:
     schedule = parser.add_mutually_exclusive_group()
     schedule.add_argument(
         "--blocks",
-        default="32,32,32,32",
-        help="Comma-separated PDD block sizes; values must sum to grid_size.",
+        help="Comma-separated PDD block sizes; defaults to pdd.inference_blocks in the config.",
     )
     schedule.add_argument(
         "--pdd-steps",
@@ -90,7 +89,9 @@ def _parse_blocks(value: str) -> list[int]:
     return blocks
 
 
-def _load_config(path: Path, blocks: list[int], *, pdd_steps: int | None = None) -> PDDConfig:
+def _load_config(
+    path: Path, blocks: list[int] | None, *, pdd_steps: int | None = None
+) -> PDDConfig:
     raw = yaml.safe_load(path.read_text())
     values = dict(raw["pdd"])
     if pdd_steps is not None:
@@ -100,7 +101,8 @@ def _load_config(path: Path, blocks: list[int], *, pdd_steps: int | None = None)
                 f"--pdd-steps must be positive and evenly divide grid_size={grid_size}."
             )
         blocks = [grid_size // pdd_steps] * pdd_steps
-    values["inference_blocks"] = blocks
+    if blocks is not None:
+        values["inference_blocks"] = blocks
     return PDDConfig.model_validate(values)
 
 
@@ -126,7 +128,8 @@ def _decode(pipe: QwenImagePipeline, latents: torch.Tensor):
 @torch.inference_mode()
 def main() -> None:
     args = _parse_args()
-    config = _load_config(args.config, _parse_blocks(args.blocks), pdd_steps=args.pdd_steps)
+    blocks_arg = _parse_blocks(args.blocks) if args.blocks is not None else None
+    config = _load_config(args.config, blocks_arg, pdd_steps=args.pdd_steps)
     blocks = config.inference_blocks
     device = torch.device(args.device)
     transformer_dir = args.transformer_dir or args.model_dir / "transformer"

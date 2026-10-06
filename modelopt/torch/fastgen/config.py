@@ -319,6 +319,7 @@ class PDDConfig(ModeloptBaseConfig):
                 self.grid_size,
                 self.flow_shift,
                 max_t=self.grid_max_t,
+                device="cpu",
             )
         except RuntimeError as error:
             raise ValueError(

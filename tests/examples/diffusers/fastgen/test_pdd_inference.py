@@ -70,10 +70,18 @@ def test_widened_diffusers_projection_restores_pdd_fusion_metadata(tmp_path) -> 
 
 
 @pytest.mark.parametrize(
-    ("pdd_steps", "expected"),
-    [(None, (2, 2, 4)), (2, (4, 4)), (4, (2, 2, 2, 2)), (0, None), (-1, None), (3, None)],
+    ("blocks_arg", "pdd_steps", "expected"),
+    [
+        (None, None, (4, 4)),
+        ("2, 2,4", None, (2, 2, 4)),
+        (None, 2, (4, 4)),
+        (None, 4, (2, 2, 2, 2)),
+        (None, 0, None),
+        (None, -1, None),
+        (None, 3, None),
+    ],
 )
-def test_inference_block_override_is_validated(tmp_path, pdd_steps, expected) -> None:
+def test_inference_block_override_is_validated(tmp_path, blocks_arg, pdd_steps, expected) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "pdd:\n"
@@ -83,8 +91,7 @@ def test_inference_block_override_is_validated(tmp_path, pdd_steps, expected) ->
         "  inference_blocks: [4, 4]\n"
     )
 
-    blocks = _parse_blocks("2, 2,4")
-    assert blocks == [2, 2, 4]
+    blocks = _parse_blocks(blocks_arg) if blocks_arg is not None else None
     if expected is None:
         with pytest.raises(ValueError, match=r"--pdd-steps.*grid_size=8"):
             _load_config(config_path, blocks, pdd_steps=pdd_steps)
@@ -92,10 +99,11 @@ def test_inference_block_override_is_validated(tmp_path, pdd_steps, expected) ->
         assert _load_config(config_path, blocks, pdd_steps=pdd_steps).inference_blocks == expected
 
 
-def test_inference_schedule_options_are_mutually_exclusive(monkeypatch, capsys) -> None:
+def test_inference_schedule_options(monkeypatch, capsys) -> None:
     argv = ["inference", "--model-dir", ".", "--prompt", "test", "--output", "test.png"]
-    argv += ["--blocks", "32,32,32,32", "--pdd-steps", "4"]
     monkeypatch.setattr(sys, "argv", argv)
+    assert _parse_args().blocks is None
+    argv += ["--blocks", "32,32,32,32", "--pdd-steps", "4"]
     with pytest.raises(SystemExit) as error:
         _parse_args()
     assert error.value.code == 2
