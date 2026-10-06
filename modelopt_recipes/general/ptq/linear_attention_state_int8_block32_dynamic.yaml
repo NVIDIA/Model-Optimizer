@@ -32,7 +32,7 @@ quantize:
   linear_attention:
     - module_name: '*'
       cfg:
-        backend: matmul
+        backend: serving
         decode:
           mode: token
           state_codec: tile

@@ -1,7 +1,6 @@
 # Adapted from: https://github.com/fla-org/flash-linear-attention/blob/516143e31fce/fla/ops/gated_delta_rule/chunk.py
-# Adapted with modifications (marked [ModelOpt]): threads state_qdq / state_qdq_block_v through
-# the autograd function, applies an optional w_quantizer to the WY tensor w, and imports the
-# state kernels from the vendored sibling module.
+# Modifications: optional W fake QDQ, saved rounded W for backward recomputation,
+# and explicit validation. State forward/backward kernels are imported from FLA.
 #
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 #
@@ -31,6 +30,10 @@ import warnings
 import fla
 import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.common.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu,
+    chunk_gated_delta_rule_fwd_h,
+)
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
@@ -54,14 +57,8 @@ from fla.utils import (
     input_guard,
 )
 
-from modelopt.torch.quantization.linear_attention.utils import (
-    state_quantizer_config,
-    validate_gdn_quantizer,
-)
+from modelopt.torch.quantization.linear_attention.utils import validate_gdn_quantizer
 from modelopt.torch.quantization.nn import TensorQuantizer
-
-from . import STATE_QDQ_FORMATS, STATE_QDQ_FP8_E4M3, STATE_QDQ_OFF
-from .fla_chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 
 
 def chunk_gated_delta_rule_fwd(
@@ -81,9 +78,6 @@ def chunk_gated_delta_rule_fwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
-    state_qdq: int = STATE_QDQ_OFF,
-    state_qdq_block_v: int | None = None,
-    state_qdq_group_size: int = 0,
     w_quantizer: TensorQuantizer | None = None,
 ):
     g_input = g if use_gate_in_kernel else None
@@ -145,9 +139,6 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
-        state_qdq=state_qdq,
-        state_qdq_block_v=state_qdq_block_v,
-        state_qdq_group_size=state_qdq_group_size,
     )
 
     if cp_context is not None:
@@ -188,9 +179,6 @@ def chunk_gated_delta_rule_bwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
-    state_qdq: int = STATE_QDQ_OFF,
-    state_qdq_block_v: int | None = None,
-    state_qdq_group_size: int = 0,
     quantized_w: torch.Tensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
@@ -210,8 +198,6 @@ def chunk_gated_delta_rule_bwd(
     if cp_context is not None:
         initial_state = expand_h0(initial_state, context=cp_context)
 
-    # [ModelOpt] The backward recomputes the forward's chunk states, so it sees the same
-    # fake-quantized states; the state gradient itself passes straight through the QDQ.
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
@@ -223,9 +209,6 @@ def chunk_gated_delta_rule_bwd(
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
-        state_qdq=state_qdq,
-        state_qdq_block_v=state_qdq_block_v,
-        state_qdq_group_size=state_qdq_group_size,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -336,9 +319,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         allow_neg_eigval: bool = False,
         cp_context: FLACPContext | None = None,
         chunk_size: int = 64,
-        state_qdq: int = STATE_QDQ_OFF,
-        state_qdq_block_v: int | None = None,
-        state_qdq_group_size: int = 0,
         w_quantizer: TensorQuantizer | None = None,
     ):
         q_rstd, k_rstd = None, None
@@ -371,9 +351,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=chunk_size,
-            state_qdq=state_qdq,
-            state_qdq_block_v=state_qdq_block_v,
-            state_qdq_group_size=state_qdq_group_size,
             w_quantizer=w_quantizer,
         )
         ctx.save_for_backward(
@@ -402,9 +379,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.cp_context = cp_context
         ctx.state_v_first = state_v_first
         ctx.use_gate_in_kernel = use_gate_in_kernel
-        ctx.state_qdq = state_qdq
-        ctx.state_qdq_block_v = state_qdq_block_v
-        ctx.state_qdq_group_size = state_qdq_group_size
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -453,9 +427,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=ctx.chunk_size,
-            state_qdq=ctx.state_qdq,
-            state_qdq_block_v=ctx.state_qdq_block_v,
-            state_qdq_group_size=ctx.state_qdq_group_size,
             quantized_w=quantized_w,
         )
         if ctx.use_qk_l2norm_in_kernel:
@@ -485,14 +456,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
         )
 
 
 # [ModelOpt] Not registered with fla's backend dispatch: another backend must not take over a
-# call that asks for state quantization.
+# call that asks for W quantization.
 @torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -561,9 +529,8 @@ def chunk_gated_delta_rule(
             the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
         state_v_first (Optional[bool]):
             Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
-        state_quantizer (Optional[TensorQuantizer]):
-            [ModelOpt] State QDQ settings, including optional INT8 last-axis ``block_sizes``.
-            Blocks always refer to the logical V dimension, regardless of storage layout.
+        w_quantizer (Optional[TensorQuantizer]):
+            [ModelOpt] Dynamic FP8 QDQ of the WY operand W, with identity STE.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -646,39 +613,24 @@ def chunk_gated_delta_rule(
     if chunk_size != 64:
         raise ValueError("ModelOpt GDN supports only chunk_size=64; FLA WY backward assumes 64.")
 
-    # [ModelOpt] state_qdq: 0 keeps fla's numerics; 1 fake-quantizes the state carried between
-    # chunks to FP8 E4M3; 2 uses signed narrow-range INT8. Both use a dynamic scale per
-    # [K, state_qdq_block_v] tile of each head.
-    state_qdq = kwargs.pop("state_qdq", STATE_QDQ_OFF)
-    state_qdq_block_v = kwargs.pop("state_qdq_block_v", None)
     state_quantizer = kwargs.pop("state_quantizer", None)
-    state_qdq_group_size = 0
-    if state_quantizer is not None:
-        if state_qdq != STATE_QDQ_OFF:
-            raise ValueError("Specify state_quantizer or state_qdq, not both")
-        if state_quantizer.is_enabled:
-            state_format, group_size = state_quantizer_config(state_quantizer)
-            if state_quantizer._if_quant:
-                state_qdq = STATE_QDQ_FORMATS[state_format]
-                state_qdq_group_size = group_size
+    kwargs.pop("state_qdq_block_v", None)
+    if kwargs.pop("state_qdq", 0) or (state_quantizer is not None and state_quantizer.is_enabled):
+        raise ValueError(
+            "Chunk-only state QAT is retired; use the serving-aligned training workflow"
+        )
     # w_quantizer: dynamic FP8 TensorQuantizer applied to the WY tensor
-    # ``w`` of shape [B, T, HV, K] before it multiplies the state, emulating an FP8 x FP8 matmul.
+    # ``w`` of shape [B, T, HV, K] before it multiplies the unquantized state.
     w_quantizer = kwargs.pop("w_quantizer", None)
     use_gate_in_kernel = kwargs.pop("use_gate_in_kernel", False)
     A_log = kwargs.pop("A_log", None)
     dt_bias = kwargs.pop("dt_bias", None)
     if kwargs:
         raise TypeError(f"Unexpected keyword arguments: {', '.join(sorted(kwargs))}")
-    if state_qdq != STATE_QDQ_OFF and state_qdq not in STATE_QDQ_FORMATS.values():
-        raise ValueError(f"Unsupported state_qdq format {state_qdq}.")
     if w_quantizer is not None:
         validate_gdn_quantizer(w_quantizer, name="gdn_w_quantizer")
-    if state_qdq == STATE_QDQ_FP8_E4M3 and (
-        not q.is_cuda or torch.cuda.get_device_capability(q.device) < (8, 9)
-    ):
-        raise RuntimeError("GDN state QDQ requires native E4M3 conversion on CUDA SM89 or newer.")
-    if (state_qdq != STATE_QDQ_OFF or w_quantizer is not None) and cp_context is not None:
-        raise ValueError("State or w quantization is not supported together with `cp_context`.")
+        if cp_context is not None:
+            raise ValueError("W quantization does not support context parallelism")
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
@@ -735,9 +687,6 @@ def chunk_gated_delta_rule(
         allow_neg_eigval,
         cp_context,
         chunk_size,
-        state_qdq,
-        state_qdq_block_v,
-        state_qdq_group_size,
         w_quantizer,
     )
     return o, final_state

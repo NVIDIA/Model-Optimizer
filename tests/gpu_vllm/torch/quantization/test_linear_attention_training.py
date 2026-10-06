@@ -40,7 +40,7 @@ def compiled_serving_case(request):
     ]
     args = [x.requires_grad_() for x in args]
     policy = LinearAttentionConfig(
-        backend="matmul", decode={"precision": "vllm_0_15", "readout": "working"}
+        backend="serving", decode={"precision": "vllm_0_15", "readout": "working"}
     )
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(

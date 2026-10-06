@@ -33,10 +33,10 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `experts_nvfp4.yaml` | NVFP4 W4A4 on `*.experts.*` weight/input quantizers |
 | `mixer_mlp_nvfp4.yaml` | NVFP4 W4A4 on dense `*.mixer.{up,down}_proj` weight/input quantizers |
 | `attention_qkv_fp8.yaml` | FP8 E4M3 on attention q/k/v bmm and softmax quantizers |
-| `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at every kernel chunk boundary; needs `fla-core==0.5.1`, Triton, and SM89+ |
+| `gdn_state_fp8_dynamic.yaml` | FP8 E4M3 dynamic fake quantization of the GatedDeltaNet recurrent state (per sequence, head and 64-column tile) at serving cache boundaries; requires an explicit serving execution policy |
 | `linear_attention_state_int8_dynamic.yaml` | GDN/KDA INT8 state quantizer entries; the [complete recipe](../../../general/ptq/linear_attention_state_int8_dynamic.yaml) enables Hadamard during decode |
 | `linear_attention_state_int8_block32_dynamic.yaml` | Standard dynamic INT8 with one scale per key row and 32 value channels; the [complete training recipe](../../../general/ptq/linear_attention_state_int8_block32_dynamic.yaml) uses token QDQ and working-state readout |
-| `linear_attention_replay_fp8_dynamic.yaml` | GDN/KDA ReplaySSM key/update FP8 quantizers; requires a replay execution policy |
+| `linear_attention_replay_fp8_dynamic.yaml` | GDN/KDA ReplaySSM key/update FP8 quantizers; for the explicit reference backend; native ReplaySSM uses BF16 ring entries |
 | `gdn_w_fp8_dynamic.yaml` | FP8 E4M3 dynamic (per token and head) fake quantization of the WY tensor `w` that multiplies the GatedDeltaNet state; requires identity STE, `fla-core==0.5.1`, and Triton |
 | `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
@@ -49,7 +49,7 @@ scheduling only; for example:
 linear_attention:
   - module_name: "*"
     cfg:
-      backend: matmul
+      backend: reference
       decode:
         mode: replay
         replay: {window: 8, encoding: once}

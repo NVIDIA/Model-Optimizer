@@ -59,6 +59,7 @@ class LinearAttentionCarry:
     started: bool
     signature: str
     value_basis: str = "identity"
+    precision: str = "full"
 
     @property
     def cursor(self):
@@ -67,17 +68,28 @@ class LinearAttentionCarry:
 
     def reconstruct(self, *, original_basis=True):
         """Replay entries, returning the original value basis unless explicitly disabled."""
-        state = self.anchor.values
-        for entry in self.entries:
-            gate = entry.log_retention
-            decay = gate.exp().unsqueeze(-1)
-            if gate.ndim == 1:
-                decay = decay.unsqueeze(-1)
-            state = state * decay + entry.key.values.unsqueeze(-1) * entry.update.values.unsqueeze(
-                -2
-            )
+        if self.precision == "replayssm":
+            state = _replay_state(self)
+        else:
+            state = self.anchor.values
+            for entry in self.entries:
+                gate = entry.log_retention
+                decay = gate.exp().unsqueeze(-1)
+                if gate.ndim == 1:
+                    decay = decay.unsqueeze(-1)
+                state = state * decay + entry.key.values.unsqueeze(
+                    -1
+                ) * entry.update.values.unsqueeze(-2)
         if original_basis and self.value_basis == "hadamard32":
-            state = _hadamard32(state)
+            if self.precision == "replayssm":
+                # The optional serving fork owns the checkpoint basis transform.
+                from ...kernels.quantization.linear_attention.serving.replay import (
+                    original_basis as restore_basis,
+                )
+
+                state = restore_basis(state)
+            else:
+                state = _hadamard32(state)
         return state
 
 
@@ -89,6 +101,29 @@ def _hadamard32(value):
         left, right = pairs.unbind(-2)
         value = torch.stack((left + right, left - right), dim=-2).reshape(shape)
     return value * (32**-0.5)
+
+
+def _replay_state(carry, current_gate=None):
+    """Differentiate serving's weighted BF16 ring reconstruction, including KDA decay."""
+    state = carry.anchor.values
+    if not carry.entries:
+        if current_gate is not None:
+            state = state * current_gate.exp().unsqueeze(-1)
+        return state
+    gates = torch.stack([entry.log_retention for entry in carry.entries], dim=1)
+    keys = torch.stack([entry.key.values for entry in carry.entries], dim=1)
+    updates = torch.stack([entry.update.values for entry in carry.entries], dim=1)
+    total = gates.sum(1)
+    if current_gate is not None:
+        total = total + current_gate
+    weights = (total.unsqueeze(1) - gates.cumsum(1)).exp()
+    if gates.ndim == 3:
+        weighted = keys * weights
+        weighted = forward_value(weighted, weighted.to(torch.bfloat16))
+        return state * total.exp().unsqueeze(-1) + weighted.transpose(-1, -2) @ updates
+    weighted = updates * weights.unsqueeze(-1)
+    weighted = forward_value(weighted, weighted.to(torch.bfloat16))
+    return state * total.exp()[:, None, None] + keys.transpose(-1, -2) @ weighted
 
 
 def _encode(
@@ -233,8 +268,22 @@ def _prepare_carry(
             state_codec=config.state_codec,
             state_quantizer=state_quantizer,
         )
+        if config.precision == "replayssm":
+            # The optional serving fork owns checkpoint rounding and Hadamard arithmetic.
+            from ...kernels.quantization.linear_attention.serving.replay import checkpoint
+
+            with torch.no_grad():
+                decoded, metadata = checkpoint(carry.anchor.values, state_qdq)
+            anchor.values = forward_value(initial, decoded)
+            anchor.scales = metadata
         carry = LinearAttentionCarry(
-            anchor, (), carry.position, True, signature, "hadamard32" if hadamard else "identity"
+            anchor,
+            (),
+            carry.position,
+            True,
+            signature,
+            "hadamard32" if hadamard else "identity",
+            config.precision,
         )
     return carry, signature
 
@@ -258,6 +307,7 @@ def recurrent_decode(
     position=0,
     scale=None,
     use_qk_l2norm_in_kernel=False,
+    replay_gate_inputs=None,
 ):
     """Run one preactivated sequence [T,H,D] with explicit token/replay write events.
 
@@ -270,14 +320,29 @@ def recurrent_decode(
         state_quantizer, state_qdq, state_format
     )
     serving = config.precision == "vllm_0_15"
-    if serving and q.device.type != "cuda":
-        raise ValueError("vllm_0_15 requires CUDA")
+    native_replay = config.precision == "replayssm"
+    if (serving or native_replay) and q.device.type != "cuda":
+        raise ValueError("Serving arithmetic requires CUDA")
+    if (
+        native_replay
+        and len(q)
+        and (
+            q.shape[-1] < 32
+            or q.shape[-1] & (q.shape[-1] - 1)
+            or (g.ndim == 2 and replay_gate_inputs is None)
+        )
+    ):
+        raise ValueError("ReplaySSM requires power-of-two K >= 32 and raw GDN gate inputs")
     replay_quantizers = (replay_key_quantizer, replay_update_quantizer)
     if config.replay is not None and config.replay._legacy_factor_qdq:
         if any(quantizer is None for quantizer in replay_quantizers):
             raise ValueError("Replace factor_qdq with explicit replay key/update TensorQuantizers")
     for quantizer in replay_quantizers:
         if quantizer is not None and quantizer.is_enabled:
+            if native_replay:
+                raise ValueError(
+                    "Native ReplaySSM stores BF16 factors; additional factor QDQ is unsupported"
+                )
             if config.replay is None or not quantizer.fake_quant:
                 raise ValueError(
                     "Replay factor quantizers require replay mode and fake quantization"
@@ -303,10 +368,12 @@ def recurrent_decode(
         zero = (q.sum() + k.sum() + v.sum() + g.sum() + beta.sum()) * 0
         output = v + zero
         return output, carry
+    original_v = v
     if config.state_codec == "int8_hadamard32":
         v = _hadamard32(v)
     scale = q.shape[-1] ** -0.5 if scale is None else scale
     outputs = []
+    native_outputs = []
     with torch.autocast(device_type=q.device.type, enabled=False):
         for t in range(len(q)):
             entries = carry.entries
@@ -324,6 +391,30 @@ def recurrent_decode(
                 )
             state = carry.reconstruct(original_basis=False)
             gate = _round_log_gate(g[t], config.decay_log_step)
+            if native_replay:
+                from ...kernels.quantization.linear_attention.serving.replay import step
+
+                with torch.no_grad():
+                    native = step(
+                        q[t],
+                        k[t],
+                        original_v[t],
+                        gate,
+                        beta[t],
+                        carry,
+                        config.replay.window if config.replay is not None else 1,
+                        state_qdq,
+                        scale,
+                        use_qk_l2norm_in_kernel,
+                        (
+                            replay_gate_inputs[0][t],
+                            replay_gate_inputs[1][t],
+                            *replay_gate_inputs[2:],
+                        )
+                        if replay_gate_inputs is not None
+                        else None,
+                    )
+                native_outputs.append(native[0])
             if serving:
                 from ._vllm_autograd import step as serving_step
 
@@ -334,12 +425,23 @@ def recurrent_decode(
                 decay = gate.exp().unsqueeze(-1)
                 if gate.ndim == 1:
                     decay = decay.unsqueeze(-1)
-                key = _encode_factor(k[t], replay_key_quantizer)
+                current_key = k[t]
+                if native_replay and use_qk_l2norm_in_kernel:
+                    current_key = (
+                        current_key / (current_key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+                    )
+                key = _encode_factor(current_key, replay_key_quantizer)
                 decayed = state * decay
+                if native_replay and gate.ndim == 2:
+                    decayed = _replay_state(carry, gate)
                 residual = v[t] - _sum_keys(key.values.unsqueeze(-1) * decayed)
                 update = _encode_factor(beta[t].unsqueeze(-1) * residual, replay_update_quantizer)
                 working = decayed + key.values.unsqueeze(-1) * update.values.unsqueeze(-2)
             if config.replay is not None:
+                if native_replay and carry.cursor + 1 < config.replay.window:
+                    key.values = forward_value(key.values, native[3])
+                    update.values = forward_value(update.values, native[4])
+                    gate = forward_value(gate, native[5])
                 entries = (*entries, ReplayEntry(key, update, gate))
             refresh = config.replay is None or len(entries) == config.replay.window
             if refresh:
@@ -352,20 +454,34 @@ def recurrent_decode(
                     state_codec=config.state_codec,
                     state_quantizer=state_quantizer,
                 )
+                if native_replay:
+                    anchor.values = forward_value(working, native[1])
+                    anchor.scales = native[2]
                 entries = ()
                 stored = anchor.values
             else:
                 anchor = carry.anchor
                 stored = working
             next_carry = LinearAttentionCarry(
-                anchor, entries, carry.position + 1, True, signature, carry.value_basis
+                anchor,
+                entries,
+                carry.position + 1,
+                True,
+                signature,
+                carry.value_basis,
+                config.precision,
             )
             read = working if config.readout == "working" else stored
+            query = q[t]
+            if native_replay and use_qk_l2norm_in_kernel:
+                query = query / (query.square().sum(-1, keepdim=True) + 1e-6).sqrt()
             outputs.append(
-                native_output if serving else _sum_keys(q[t].unsqueeze(-1) * read) * scale
+                native_output if serving else _sum_keys(query.unsqueeze(-1) * read) * scale
             )
             carry = next_carry
     output = torch.stack(outputs)
     if config.state_codec == "int8_hadamard32":
         output = _hadamard32(output)
+    if native_replay:
+        output = forward_value(output, torch.stack(native_outputs))
     return output, carry

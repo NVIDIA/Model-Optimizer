@@ -61,31 +61,16 @@ def compare(actual, expected, tolerance):
         )
 
 
-@pytest.fixture(
-    scope="module", params=["disabled", "w", "state-w", "state-int8", "state-int8-block"]
-)
+@pytest.fixture(scope="module", params=[False, True])
 def compiled_gdn_case(request):
-    """Compile only the selected BF16 forward/backward path, outside the test-call timer."""
-    state_qdq = {"state-w": 1, "state-int8": 2}.get(request.param, 0)
-    if state_qdq == 1 and torch.cuda.get_device_capability() < (8, 9):
-        pytest.skip("State QDQ needs native E4M3 conversion (SM89+)")
+    """Compile the retained W-QAT path outside the test-call timer."""
     quantizer = (
         TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=(0, 1, 2), type="dynamic"))
-        if request.param in ("w", "state-w")
+        if request.param
         else None
     )
     args, state = make_inputs()
-    kwargs = {"state_qdq": state_qdq, "w_quantizer": quantizer}
-    if state_qdq == 2:
-        TensorQuantizer(QuantizerAttributeConfig(num_bits=8, type="dynamic"))(state)
-    if request.param == "state-int8-block":
-        kwargs["state_quantizer"] = TensorQuantizer(
-            QuantizerAttributeConfig(
-                num_bits=8, type="dynamic", block_sizes={-1: 16}, narrow_range=True
-            )
-        )
-        # Compile the reference quantizer's CUDA extension outside the test-call timer too.
-        kwargs["state_quantizer"](state[0])
+    kwargs = {"w_quantizer": quantizer}
     values_and_grads(chunk_gated_delta_rule, args, state, output_final_state=True, **kwargs)
     torch.cuda.synchronize()
     return args, state, kwargs
@@ -99,7 +84,6 @@ def test_gdn_forward_and_backward(compiled_gdn_case):
         chunk_gdn_reference,
         reference_args,
         reference_state,
-        state_format="int8" if kwargs["state_qdq"] == 2 else "fp8_e4m3",
         **kwargs,
     )
     actual = values_and_grads(
@@ -107,20 +91,3 @@ def test_gdn_forward_and_backward(compiled_gdn_case):
     )
     compare(actual[0], expected[0], 0.03)
     compare(actual[1], expected[1], 0.05)
-
-    if kwargs["state_qdq"] == 2 or "state_quantizer" in kwargs:
-        quantizer = kwargs.get("state_quantizer") or TensorQuantizer(
-            QuantizerAttributeConfig(num_bits=8, type="dynamic")
-        )
-        # Zero updates isolate QDQ, reusing the compiled shape for both tile and block INT8.
-        zero_args = [torch.zeros_like(x) for x in args]
-        pattern = torch.linspace(-1, 1, state.numel(), device=state.device).reshape_as(state)
-        for amax in (2**-25, 2**-24, 2.0):
-            initial = pattern * amax
-            expected_state = initial
-            for _ in range(3):  # Initial handoff and two chunk boundaries.
-                expected_state = quantizer(expected_state[0]).unsqueeze(0)
-            _, actual_state = chunk_gated_delta_rule(
-                *zero_args, initial_state=initial, output_final_state=True, **kwargs
-            )
-            torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)

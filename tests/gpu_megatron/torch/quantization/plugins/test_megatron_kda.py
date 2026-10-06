@@ -163,8 +163,10 @@ def _test_kda(rank, size, cfg, checkpoint_path):
 def compiled_kda_workers(dist_workers_size_1):
     """Warm one KDA shape outside the functional test timer."""
     cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
+    # Exercise mathematical replay/checkpointing without the optional serving fork.
+    cfg["linear_attention"][0]["cfg"]["backend"] = "reference"
     cfg["linear_attention"][0]["cfg"]["decode"].update(
-        mode="replay", replay={"window": 5}, decay_log_step=1 / 256
+        precision="full", mode="replay", replay={"window": 5}, decay_log_step=1 / 256
     )
     cfg["quant_cfg"].extend(
         entry.model_dump(exclude_unset=True)

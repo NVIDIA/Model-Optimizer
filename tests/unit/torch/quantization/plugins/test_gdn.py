@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from copy import deepcopy
-from functools import partial
 
 import pytest
 import torch
@@ -23,7 +22,10 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
+from modelopt.torch.quantization.linear_attention import (
+    LinearAttentionConfig,
+    linear_attention_training_phase,
+)
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gdn
 from modelopt.torch.quantization.plugins.gdn import GatedDeltaNetStateQuantMixin
@@ -131,55 +133,39 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-@pytest.mark.parametrize("partial_kernel", [False, True])
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel):
-    calls = []
-
-    def fake_state_qdq_kernel(*args, **kwargs):
-        calls.append(kwargs)
-        return chunk_gated_delta_rule(*args)
-
-    monkeypatch.setattr(gdn, "_state_qdq_chunk_gated_delta_rule", lambda: fake_state_qdq_kernel)
-    model = TinyGatedDeltaNet()
-    if partial_kernel:
-        model.gated_delta_rule = partial(chunk_gated_delta_rule, output_final_state=True)
+def test_state_qat_requires_explicit_serving_policy(monkeypatch):
+    model = mtq.quantize(TinyGatedDeltaNet(), {**quant_cfg(), "algorithm": None})
     x = torch.randn(2, 8, 3, 4)
-    mtq.quantize(model, quant_cfg(), lambda m: m(x))
-
-    model(x)
-    assert calls and calls[-1] == {
-        "chunk_size": 64,
-        "state_quantizer": model.gdn_state_quantizer,
-        "state_qdq_block_v": 64,
-        "w_quantizer": None,
-        **({"output_final_state": True} if partial_kernel else {}),
-    }
-
-    # An unrelated callable must not pass validation merely by copying the FLA name.
-    model.gated_delta_rule = lambda *a, **kw: chunk_gated_delta_rule(*a, **kw)
-    model.gated_delta_rule.__name__ = "chunk_gated_delta_rule"
-    with pytest.raises(NotImplementedError, match="supports only FLA"):
+    with pytest.raises(ValueError, match="Chunk-only state QAT is retired"):
         model(x)
-
-
-@pytest.mark.parametrize("state", [False, True])
-def test_w_quantizer_is_passed_to_the_kernel(monkeypatch, state):
-    """``*gdn_w_quantizer`` in the config hands the module's TensorQuantizer to the kernel, with
-    or without the state quantizer."""
     calls = []
 
-    def fake_state_qdq_kernel(*args, **kwargs):
+    def forward(*args, **kwargs):
         calls.append(kwargs)
         return chunk_gated_delta_rule(*args)
 
-    monkeypatch.setattr(gdn, "_state_qdq_chunk_gated_delta_rule", lambda: fake_state_qdq_kernel)
+    monkeypatch.setattr(gdn, "matmul_gdn", forward)
+    model.linear_attention_config = LinearAttentionConfig(backend="serving", decode={})
+    with linear_attention_training_phase(model, [4, 4]):
+        model(x)
+    assert calls[-1]["prefill_lengths"] == (4, 4)
+
+
+def test_w_quantizer_is_passed_to_the_kernel(monkeypatch):
+    """Pass the configured W TensorQuantizer to the FLA wrapper."""
+    calls = []
+
+    def fake_w_qdq_kernel(*args, **kwargs):
+        calls.append(kwargs)
+        return chunk_gated_delta_rule(*args)
+
+    monkeypatch.setattr(gdn, "_w_qdq_chunk_gated_delta_rule", lambda: fake_w_qdq_kernel)
     model = TinyGatedDeltaNet()
     x = torch.randn(2, 8, 3, 4)
-    mtq.quantize(model, quant_cfg(state=state, w=True), lambda m: m(x))
-    assert model.gdn_w_quantizer.is_enabled and model.gdn_state_quantizer.is_enabled == state
+    mtq.quantize(model, quant_cfg(state=False, w=True), lambda m: m(x))
+    assert model.gdn_w_quantizer.is_enabled and not model.gdn_state_quantizer.is_enabled
 
     model(x)
-    assert calls[-1]["state_quantizer"] is model.gdn_state_quantizer
     assert calls[-1]["w_quantizer"] is model.gdn_w_quantizer
 
     # The w quantizer really quantizes: 256 random values per token collapse onto the E4M3 grid,
