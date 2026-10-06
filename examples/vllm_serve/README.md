@@ -266,6 +266,10 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
+For Nemotron-H MTP, add `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`.
+The same files restore both target and MTP quantizers. Enable MTP quantizers during
+Megatron calibration if your preset excludes them.
+
 ## Fake-quantize the sparse-attention indexer query and K cache
 
 The sparse-attention models DeepSeek-V4 and GLM-5.3-Flash keep a separate indexer key cache next
