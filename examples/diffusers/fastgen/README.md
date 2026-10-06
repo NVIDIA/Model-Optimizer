@@ -12,4 +12,5 @@ configs, checkpoint helpers, and documentation live in their corresponding subdi
 ## References
 
 - Upstream FastGen: [NVlabs/FastGen](https://github.com/NVlabs/FastGen)
+- Training framework: [NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel)
 - ModelOpt implementation: [`modelopt/torch/fastgen/`](../../../modelopt/torch/fastgen/)
