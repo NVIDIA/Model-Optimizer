@@ -44,6 +44,7 @@ def _batchnorm(graph, tensor):
 
 
 def _quantize(tmp_path, graph, **kwargs):
+    """Check exported topology and inference against the floating-point source model."""
     for output in graph.outputs:
         output.dtype = np.float32
         output.shape = [1, 2, 4, 4]
@@ -77,6 +78,7 @@ def _quantize(tmp_path, graph, **kwargs):
 
 
 def _assert_qdq(tensor):
+    """Validate a symmetric INT8 boundary and return its floating-point source."""
     dq = tensor.inputs[0]
     assert dq.op == "DequantizeLinear"
     q = dq.inputs[0].inputs[0]

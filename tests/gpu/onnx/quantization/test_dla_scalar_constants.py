@@ -21,14 +21,16 @@ import pytest
 import modelopt.onnx.quantization as moq
 
 
-@pytest.mark.parametrize("target_dla", [False, True])
+@pytest.mark.parametrize("high_precision_dtype", ["fp32", "fp16"])
+@pytest.mark.parametrize(("target_dla", "dq_only"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize(
     ("op_type", "scalar_shape", "constant_node"),
     [("Mul", [], False), ("Mul", [1, 1, 1, 1], False), ("Div", [1], True), ("Pad", [], True)],
 )
 def test_dla_preserves_scalar_operator_constants(
-    tmp_path, target_dla, op_type, scalar_shape, constant_node
+    tmp_path, target_dla, op_type, scalar_shape, constant_node, dq_only, high_precision_dtype
 ):
+    """Preserve scalar values and shared quantized weights in Q/DQ and DQ-only exports."""
     data = np.linspace(-1, 1, 8, dtype=np.float32).reshape(1, 1, 2, 4)
     value = np.full(scalar_shape, 0.0 if op_type == "Pad" else 2.0, dtype=np.float32)
     scalar = onnx.numpy_helper.from_array(value, "scalar")
@@ -75,10 +77,11 @@ def test_dla_preserves_scalar_operator_constants(
         str(source),
         output_path=str(output),
         quantize_mode="int8",
-        high_precision_dtype="fp16",
+        high_precision_dtype=high_precision_dtype,
         calibration_data={"input": data},
         calibration_eps=["cpu"],
         target_dla=target_dla,
+        dq_only=dq_only,
         enable_shared_constants_duplication=not shared_weight,
         op_types_to_quantize=["Conv", op_type],
     )
@@ -97,9 +100,16 @@ def test_dla_preserves_scalar_operator_constants(
     scalar_input = operation.input[2 if op_type == "Pad" else 1]
     if target_dla:
         assert scalar_input in constants, "DLA scalar operands must stay compile-time constants"
-        np.testing.assert_array_equal(constants[scalar_input], value.astype(np.float16))
+        scalar_dtype = np.float16 if high_precision_dtype == "fp16" else np.float32
+        assert constants[scalar_input].dtype == scalar_dtype
+        np.testing.assert_array_equal(constants[scalar_input], value.astype(scalar_dtype))
         conv = next(node for node in quantized.graph.node if node.op_type == "Conv")
-        assert producers[conv.input[1]].op_type == "DequantizeLinear"
+        weight_dq = producers[conv.input[1]]
+        assert weight_dq.op_type == "DequantizeLinear"
+        if dq_only:
+            assert constants[weight_dq.input[0]].dtype == np.int8
+        else:
+            assert producers[weight_dq.input[0]].op_type == "QuantizeLinear"
         assert producers[operation.input[0]].op_type == "DequantizeLinear"
     else:
         assert producers[scalar_input].op_type == "DequantizeLinear"

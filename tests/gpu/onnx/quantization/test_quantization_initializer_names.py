@@ -36,6 +36,7 @@ def test_quantization_preserves_existing_parameter_initializers(
     collision_shape,
     use_calibration_cache,
 ):
+    """Keep quantization numerically equivalent when parameter names collide."""
     data = np.linspace(-2, 2, 64, dtype=np.float32).reshape(1, 4, 4, 4)
     cache = None
     if use_calibration_cache:
@@ -129,16 +130,19 @@ def test_quantization_preserves_existing_parameter_initializers(
 
 @pytest.mark.parametrize("output_name", ["output", "output_QuantizeLinear_Input"])
 def test_calibration_cache_preserves_graph_outputs_with_parameter_collisions(tmp_path, output_name):
+    """Restore cached output scales without overwriting renamed per-channel weight scales."""
     data = np.linspace(-1, 1, 8, dtype=np.float32).reshape(2, 4)
     weight = np.eye(4, dtype=np.float32)
     cache = tmp_path / "calibration.cache"
     names = ["input", "product", "shifted", output_name]
     encoded_scale = struct.pack("!f", 0.125).hex()
-    cache.write_text(
-        "TRT-8501-EntropyCalibration2\n" + "".join(f"{name}: {encoded_scale}\n" for name in names)
-    )
     results = []
     for collide in (False, True):
+        cache_names = [*names, "weight"] if collide else names
+        cache.write_text(
+            "TRT-8501-EntropyCalibration2\n"
+            + "".join(f"{name}: {encoded_scale}\n" for name in cache_names)
+        )
         offsets = ["weight_scale", f"{output_name}_scale"] if collide else ["offset_1", "offset_2"]
         model = onnx.helper.make_model(
             onnx.helper.make_graph(
