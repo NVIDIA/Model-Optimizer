@@ -14,7 +14,6 @@
 # limitations under the License.
 import json
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
 import torch
@@ -40,7 +39,7 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir, resize_vocab=False):
     """
 
     # Load the model
-    source_config = (Path(model_dir) / "config.json").read_bytes()
+    source_config = (model_dir / "config.json").read_bytes()
     model = AutoModelForCausalLM.from_pretrained(model_dir)
     if resize_vocab:
         model.resize_token_embeddings(model.config.vocab_size + 8)
