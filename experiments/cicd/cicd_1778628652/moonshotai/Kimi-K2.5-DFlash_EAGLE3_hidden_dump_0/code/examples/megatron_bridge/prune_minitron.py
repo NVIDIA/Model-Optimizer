@@ -1,0 +1,491 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Example script for pruning a GPT / Mamba model using Minitron algorithm on a Megatron-Bridge model (load from HF).
+
+Supports three NAS-based pruning targets (can be combined):
+  --prune_target_params       Total parameter count (e.g. 6e9 for 6B total params)
+  --prune_target_active_params Active parameter count for MoE models (e.g. 3e9 for 3B active params)
+  --prune_target_memory_mb    Memory footprint in MB (uses --seq_length for KV-cache estimate, assumes BF16)
+
+Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2)
+while skipping pruning of num_attention_heads using following defaults:
+    1024 samples from nemotron-post-training-dataset-v2 for calibration,
+    at-most 20% depth (num_layers) and 40% width is pruned per prunable hparam (hidden_size, ffn_hidden_size, ...),
+    top-10 candidates are evaluated for MMLU score (10% sampled data) to select the best model.
+
+    torchrun --nproc_per_node 2 prune_minitron.py \
+        --hf_model_name_or_path Qwen/Qwen3-8B \
+        --prune_target_params 6e9 \
+        --hparams_to_skip num_attention_heads \
+        --output_hf_path /tmp/Qwen3-8B-Pruned-6B
+
+To see the full usage for advanced configurations, run:
+    torchrun --nproc_per_node 1 prune_minitron.py --help
+
+See `README.md` in this directory for more details.
+"""
+
+# TODO: Test multi-node pruning
+import argparse
+import json
+import os
+import re
+
+import torch
+from megatron.bridge import AutoBridge
+from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
+from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+from transformers import AutoConfig, AutoModelForCausalLM
+
+import modelopt.torch.opt as mto
+import modelopt.torch.prune as mtp
+import modelopt.torch.utils.distributed as dist
+from modelopt.torch.utils import get_supported_datasets, print_rank_0, warn_rank_0
+from modelopt.torch.utils.plugins.mbridge import (
+    get_hf_mbridge_calibration_loop,
+    load_mbridge_model_from_hf,
+)
+from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
+
+
+def get_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--hf_model_name_or_path", type=str, required=True)
+    parser.add_argument("--trust_remote_code", action="store_true")
+
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        "--output_megatron_path",
+        type=str,
+        help="Path to save the pruned model in Megatron checkpoint format",
+    )
+    target_group.add_argument(
+        "--output_hf_path", type=str, help="Path to save the pruned model in HF checkpoint format"
+    )
+
+    # Parallelism arguments
+    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument(
+        "--num_layers_in_first_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the first pipeline stage (Uneven Pipeline Parallelism)",
+    )
+    parser.add_argument(
+        "--num_layers_in_last_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the last pipeline stage (Uneven Pipeline Parallelism)",
+    )
+
+    # Calibration dataset parameters
+    parser.add_argument(
+        "--calib_dataset_name",
+        type=str,
+        default="nemotron-post-training-dataset-v2",
+        help=(
+            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
+            "You can also pass any other dataset and see if auto-detection for your dataset works."
+        ),
+    )
+    parser.add_argument(
+        "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
+    )
+    # TODO: Add support for pre-training dataset (pre-tokenized)
+    # TODO: only allow mbs>1 for pretraining dataset
+    parser.add_argument(
+        "--calib_mbs", type=int, default=1, choices=[1], help="Calibration micro-batch size"
+    )
+    parser.add_argument("--calib_gbs", type=int, default=1, help="Calibration global batch size")
+    parser.add_argument("--seq_length", type=int, default=4096)
+    # Pruning parameters
+    parser.add_argument(
+        "--prune_intermediate_ckpt",
+        type=str,
+        default=None,
+        help=(
+            "Directory to save/restore per-rank intermediate pruning scores for resuming / faster re-run. "
+            "If not provided, it will default to `<output_path>/modelopt_pruning_scores`"
+        ),
+    )
+
+    parser.add_argument(
+        "--prune_export_config",
+        type=str,
+        help=(
+            'Target pruned config as JSON e.g., \'{"hidden_size": 512, "ffn_hidden_size": 2048}\'. '
+            f"Supported hyperparameters: {mtp.mcore_minitron.SUPPORTED_HPARAMS}. "
+            "Cannot be combined with NAS-based targets."
+        ),
+    )
+    parser.add_argument(
+        "--prune_target_params",
+        type=float,
+        help=(
+            "Target total parameter count e.g., 6e9 for 6B params. "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_active_params and/or --prune_target_memory_mb."
+        ),
+    )
+    parser.add_argument(
+        "--prune_target_active_params",
+        type=float,
+        help=(
+            "Target active parameter count e.g., 3e9 for 3B active params (useful for MoE models). "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_params and/or --prune_target_memory_mb."
+        ),
+    )
+    parser.add_argument(
+        "--prune_target_memory_mb",
+        type=float,
+        help=(
+            "Target memory footprint in MB (weights + KV-cache estimated via seq_length and "
+            "--inference_batch_size; assumes BF16). "
+            "Uses NAS to find the best pruned model that maximizes --prune_score_func. "
+            "Can be combined with --prune_target_params and/or --prune_target_active_params."
+        ),
+    )
+    parser.add_argument(
+        "--inference_batch_size",
+        type=int,
+        default=None,
+        help=(
+            "Batch size used only for KV-cache sizing in --prune_target_memory_mb. "
+            "Defaults to --calib_mbs when not set. "
+            "Use this to target an inference batch size that differs from the calibration micro-batch size."
+        ),
+    )
+
+    parser.add_argument(
+        "--prune_score_func",
+        type=str,
+        default="mmlu_10pct_bs1",
+        help=(
+            "Score function to use for NAS-based pruning. Only supports MMLU at the moment. "
+            "Format: mmlu_<N>pct_<bs> where <N> is the percentage of MMLU data to sample per subject and <bs> is "
+            "batch size for fast evaluation (default is mmlu_10pct_bs1)."
+        ),
+    )
+    parser.add_argument(
+        "--ss_channel_divisor",
+        type=int,
+        default=None,
+        help=(
+            "hidden_size / ffn_hidden_size divisor for NAS-based pruning. "
+            "Leave as None to use default divisors."
+        ),
+    )
+    parser.add_argument(
+        "--max_width_pruning",
+        type=float,
+        default=0.4,
+        help=(
+            f"Maximum width pruning percentage ({mtp.mcore_minitron.SUPPORTED_HPARAMS - {'num_layers'}}) "
+            "for NAS-based pruning"
+        ),
+    )
+    parser.add_argument(
+        "--max_depth_pruning",
+        type=float,
+        default=0.2,
+        help="Maximum depth pruning percentage ('num_layers') for NAS-based pruning",
+    )
+    parser.add_argument(
+        "--hparams_to_skip",
+        nargs="*",
+        type=str,
+        default=[],
+        choices=mtp.mcore_minitron.SUPPORTED_HPARAMS,
+        help=(
+            "Space-separated list of hparams to skip for NAS-based pruning "
+            "e.g. dont prune 'num_attention_heads'"
+        ),
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=10,
+        help=(
+            "Number of top candidates to consider for NAS-based pruning. "
+            "Higher values will take longer to prune but may find a better model."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    # Validate pruning target arguments
+    _nas_targets = [
+        args.prune_target_params,
+        args.prune_target_active_params,
+        args.prune_target_memory_mb,
+    ]
+    if args.prune_export_config and any(t is not None for t in _nas_targets):
+        parser.error("--prune_export_config cannot be combined with NAS-based targets.")
+    if not args.prune_export_config and not any(t is not None for t in _nas_targets):
+        parser.error(
+            "At least one of --prune_export_config, --prune_target_params,"
+            " --prune_target_active_params, or --prune_target_memory_mb is required."
+        )
+
+    # Post-process arguments
+    if args.prune_intermediate_ckpt is None:
+        if args.output_megatron_path:
+            args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
+        elif args.output_hf_path:
+            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
+        print_rank_0(
+            "No directory provided to cache per-rank intermediate pruning scores. "
+            f"Setting to: {args.prune_intermediate_ckpt}"
+        )
+
+    if args.prune_export_config:
+        try:
+            prune_export_config = json.loads(args.prune_export_config)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON for --prune_export_config: {args.prune_export_config}"
+            ) from exc
+        if not isinstance(prune_export_config, dict):
+            raise ValueError("--prune_export_config must parse to a dictionary.")
+        args.prune_export_config = prune_export_config
+
+    print_rank_0("\n==================== Arguments ====================")
+    for k, v in args.__dict__.items():
+        print_rank_0(f"{k:<35} {v}")
+    print_rank_0("===================================================\n")
+
+    return args
+
+
+def main(args: argparse.Namespace):
+    assert dist.size() == args.pp_size, "Only Pipeline parallelism is supported for pruning."
+
+    if args.output_megatron_path and os.path.exists(
+        f"{args.output_megatron_path}/latest_checkpointed_iteration.txt"
+    ):
+        warn_rank_0(f"\nPruned model already exists at {args.output_megatron_path}. Exiting...")
+        return
+    elif args.output_hf_path and os.path.exists(f"{args.output_hf_path}/config.json"):
+        warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
+        return
+
+    bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
+        hf_model_name_or_path=args.hf_model_name_or_path,
+        trust_remote_code=args.trust_remote_code,
+        provider_overrides={
+            "tensor_model_parallel_size": 1,
+            "pipeline_model_parallel_size": args.pp_size,
+            "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
+            "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
+            "pipeline_dtype": torch.bfloat16,
+            "seq_length": args.seq_length,
+        },
+        init_model_parallel=True,
+        moe_grouped_gemm=False,
+    )
+    forward_loop = get_hf_mbridge_calibration_loop(
+        model=model,
+        provider=provider,
+        tokenizer=tokenizer,
+        hf_model_name_or_path=args.hf_model_name_or_path,
+        trust_remote_code=args.trust_remote_code,
+        dataset_name=args.calib_dataset_name,
+        num_samples=args.calib_num_samples,
+        micro_batch_size=args.calib_mbs,
+        global_batch_size=args.calib_gbs,
+    )
+
+    pruning_config = {
+        "forward_loop": forward_loop,
+        "checkpoint": args.prune_intermediate_ckpt,
+    }
+    if args.prune_export_config is not None:
+        # Less restrictive search space for manual pruning
+        ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
+            hidden_size_divisor=64,
+            ffn_hidden_size_divisor=64,
+            mamba_head_dim_divisor=8,
+            num_moe_experts_divisor=8,
+            num_layers_divisor=1,
+        )
+        pruning_constraints = {"export_config": args.prune_export_config}
+    else:
+        # NAS-based pruning: restrict search space to a smaller set of candidates.
+        # Allow more choices for MoE FFN as they are generally smaller.
+        # NOTE: Reduce divisors and increase config['top_k'] to potentially find a better model.
+        hidden_size_divisor = args.ss_channel_divisor if args.ss_channel_divisor else 256
+        ffn_hidden_size_divisor = (
+            args.ss_channel_divisor
+            if args.ss_channel_divisor
+            else (256 if (provider.num_moe_experts or 0) > 0 else 512)
+        )
+        ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
+            hidden_size_divisor=hidden_size_divisor,
+            ffn_hidden_size_divisor=ffn_hidden_size_divisor,
+            mamba_head_dim_divisor=8,
+            num_moe_experts_divisor=8,
+            num_layers_divisor=2,
+        )
+        print_rank_0(f"Using search space config: {ss_config}")
+
+        pruning_constraints = {}
+        if args.prune_target_params is not None:
+            pruning_constraints["params"] = args.prune_target_params
+        if args.prune_target_active_params is not None:
+            pruning_constraints["active_params"] = args.prune_target_active_params
+        if args.prune_target_memory_mb is not None:
+            pruning_constraints["memory_mb"] = args.prune_target_memory_mb
+
+        print_rank_0(
+            f"Using NAS-based automatic pruning with score function: {args.prune_score_func}. "
+            "You can change this to be any other metric you want to maximize (e.g. negative validation loss)."
+        )
+
+        match = re.fullmatch(r"mmlu_(\d+)pct_bs(\d+)", args.prune_score_func)
+        legacy_match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
+        if match:
+            mmlu_frac = float(match.group(1)) / 100.0
+            batch_size = int(match.group(2))
+        elif legacy_match:
+            warn_rank_0(
+                f"Score function '{args.prune_score_func}' uses the deprecated format "
+                "'mmlu_<N>pct'. Use 'mmlu_<N>pct_bs<bs>' to specify the evaluation batch size. "
+                "Falling back to batch_size=1."
+            )
+            mmlu_frac = float(legacy_match.group(1)) / 100.0
+            batch_size = 1
+        else:
+            raise ValueError(
+                f"Invalid score function: {args.prune_score_func}. "
+                "Expected format: mmlu_<N>pct_bs<bs> (e.g. mmlu_10pct_bs1)"
+            )
+
+        def score_func(m):
+            return megatron_mmlu(
+                m, tokenizer, few_shots=0, fraction=mmlu_frac, batch_size=batch_size
+            )
+
+        pruning_config["score_func"] = score_func
+        pruning_config["max_width_pruning"] = args.max_width_pruning
+        pruning_config["max_depth_pruning"] = args.max_depth_pruning
+        pruning_config["hparams_to_skip"] = args.hparams_to_skip
+        pruning_config["top_k"] = args.top_k
+        # memory_mb constraint requires batch_size and seq_length
+        pruning_config["batch_size"] = (
+            args.inference_batch_size if args.inference_batch_size is not None else args.calib_mbs
+        )
+        pruning_config["seq_length"] = args.seq_length
+    print_rank_0(f"Pruning constraints: {pruning_constraints}")
+
+    unwrapped_model, pruning_scores = mtp.prune(  # in-place pruning
+        unwrapped_model,
+        mode=[("mcore_minitron", ss_config)],  # type: ignore[arg-type]
+        constraints=pruning_constraints,
+        dummy_input=None,
+        config=pruning_config,
+    )
+    # Remove unnecessary modelopt_state since ckpt is homogeneous
+    if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=unwrapped_model):
+        mto.ModeloptStateManager.remove_state(unwrapped_model)
+    if isinstance(provider, MambaModelProvider):
+        hybrid_key = (
+            "hybrid_override_pattern"
+            if hasattr(unwrapped_model, "hybrid_override_pattern")
+            else "hybrid_layer_pattern"
+        )
+        setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
+
+    if args.output_megatron_path is not None:
+        print_rank_0(
+            f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
+        )
+
+        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
+        use_fast_tokenizer = isinstance(provider, NemotronHModelProvider)
+        bridge.save_megatron_model(
+            model,
+            args.output_megatron_path,
+            hf_tokenizer_path=args.hf_model_name_or_path,
+            hf_tokenizer_kwargs={
+                "trust_remote_code": args.trust_remote_code,
+                "use_fast": use_fast_tokenizer,
+            },
+        )
+        print_rank_0(
+            f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
+        )
+    else:
+        print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
+
+        # [WAR] Hacky way to save pruned HF model until Megatron-Bridge natively supports it
+        bridge.hf_pretrained.save_artifacts(args.output_hf_path)
+        hf_cfg = AutoConfig.from_pretrained(
+            args.output_hf_path, trust_remote_code=args.trust_remote_code
+        )
+        mcore_cfg = unwrapped_model.config
+
+        hf_cfg.hidden_size = mcore_cfg.hidden_size
+        hf_cfg.intermediate_size = mcore_cfg.ffn_hidden_size
+        hf_cfg.num_attention_heads = mcore_cfg.num_attention_heads
+        hf_cfg.head_dim = mcore_cfg.kv_channels
+        hf_cfg.num_key_value_heads = mcore_cfg.num_query_groups
+        if hasattr(hf_cfg, "mamba_num_heads"):
+            hf_cfg.mamba_num_heads = mcore_cfg.mamba_num_heads
+        if hasattr(hf_cfg, "mamba_head_dim"):
+            hf_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
+        if hasattr(hf_cfg, "moe_intermediate_size"):
+            hf_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
+        if hasattr(hf_cfg, "moe_shared_expert_intermediate_size"):
+            hf_cfg.moe_shared_expert_intermediate_size = (
+                mcore_cfg.moe_shared_expert_intermediate_size
+            )
+        if hasattr(hf_cfg, "num_experts"):
+            hf_cfg.num_experts = mcore_cfg.num_moe_experts
+        if hasattr(hf_cfg, "n_routed_experts"):
+            hf_cfg.n_routed_experts = mcore_cfg.num_moe_experts
+        if hasattr(hf_cfg, "n_shared_experts"):
+            hf_cfg.n_shared_experts = (
+                mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
+            )
+        if hasattr(hf_cfg, "layer_types"):
+            kept_layer_nums = pruning_scores["sorted_layers"][: mcore_cfg.num_layers]  # 1-indexed
+            hf_cfg.layer_types = [
+                lt for i, lt in enumerate(hf_cfg.layer_types) if i + 1 in kept_layer_nums
+            ]
+        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
+        hf_cfg.num_hidden_layers = mcore_cfg.num_layers
+
+        # Save dummy pruned HF model to get the correct bridge for saving pruned weights
+        AutoModelForCausalLM.from_config(
+            hf_cfg, trust_remote_code=args.trust_remote_code
+        ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
+        pruned_bridge = AutoBridge.from_hf_pretrained(
+            args.output_hf_path, trust_remote_code=args.trust_remote_code
+        )
+        pruned_bridge.save_hf_weights(model, args.output_hf_path)
+        print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
+
+    print_rank_0("Done!")
+
+
+if __name__ == "__main__":
+    dist.setup()
+    args = get_args()
+    try:
+        main(args)
+    finally:
+        dist.cleanup()

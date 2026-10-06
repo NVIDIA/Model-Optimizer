@@ -1,0 +1,45 @@
+# FSDP Configuration
+#
+# FULL_SHARD across all GPUs for maximum memory efficiency.
+# For multi-node training with `accelerate launch`.
+#
+# Usage:
+#   accelerate launch \
+#       --config_file configs/accelerate/fsdp.yaml \
+#       --num_processes 16 \
+#       --num_machines 2 \
+#       --machine_rank $MACHINE_RANK \
+#       --main_process_ip $MASTER_IP \
+#       --main_process_port 29500 \
+#       distillation_trainer.py --config configs/distillation_example.yaml
+
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+
+fsdp_config:
+  # FULL_SHARD: Shard optimizer states, gradients, and parameters across ALL GPUs
+  # This provides maximum memory efficiency for large models like LTX-2 19B
+  # Parameters are fully sharded across all nodes (not replicated)
+  fsdp_sharding_strategy: FULL_SHARD
+
+  # Enable activation checkpointing to reduce memory during backward pass
+  # Critical for 19B model training
+  fsdp_activation_checkpointing: true
+
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_forward_prefetch: false
+  fsdp_offload_params: false
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_transformer_layer_cls_to_wrap: BasicAVTransformerBlock
+  fsdp_use_orig_params: true
+  fsdp_version: 1
+
+# Note: num_machines and num_processes are overridden by accelerate launch command-line args
+# These are just defaults for local testing
+num_machines: 1
+num_processes: 8

@@ -1,0 +1,7 @@
+defaults:
+  - /pruning/ffn_pruning_base@_here_
+  - _self_
+
+pruning_mixin:
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralFFNIntermediateLayerDescriptor

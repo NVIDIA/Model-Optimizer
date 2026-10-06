@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  recipe_type: ptq
+  description: NVFP4 static weight and dynamic activation for all linear layers including output projections, FP8 KV cache, max calibration.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*mlp*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*o_proj*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*o_proj*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers
