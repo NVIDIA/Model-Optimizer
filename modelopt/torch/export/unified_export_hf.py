@@ -864,10 +864,14 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
     if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
         return
     # Restore unpacked weight so the export path can read the live quantizer state.
-    if hasattr(sub_module, "weight_packed") or (
-        "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-    ):
+    if hasattr(sub_module, "weight_packed"):
         sub_module.unpack_weight()
+    elif "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1:
+        sub_module.unpack_weight()
+        # unpack_weight() dequantizes to torch's default dtype (fp32). A layer the recipe leaves
+        # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
+        if get_quantization_format(sub_module) == QUANTIZATION_NONE:
+            sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)
