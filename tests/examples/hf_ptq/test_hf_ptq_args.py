@@ -860,3 +860,12 @@ def test_post_quantize_export_survives_a_failed_sanity_generate(monkeypatch):
         )
 
     assert len(export_calls) == 1
+
+
+def test_kl_divergence_reference_implies_kl_divergence(monkeypatch):
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/m", "--kl_divergence_reference", "ref.pt"
+    )
+
+    assert args.kl_divergence
+    assert args.kl_divergence_data == "wikitext2"

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Re-export ``examples/hf_ptq/example_utils`` so tests can import it via
+"""Re-export ``examples/hf_ptq`` helper modules so tests can import them via
 ``from _test_utils.examples.hf_ptq_example_utils import example_utils``
 without per-file ``sys.path`` shims.
 """
@@ -26,5 +26,6 @@ if str(_HF_PTQ_DIR) not in sys.path:
     sys.path.insert(0, str(_HF_PTQ_DIR))
 
 import example_utils
+import kl_divergence
 
-__all__ = ["example_utils"]
+__all__ = ["example_utils", "kl_divergence"]

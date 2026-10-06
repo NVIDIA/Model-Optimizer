@@ -54,6 +54,14 @@ from example_utils import (
     setup_distributed_args,
     validate_fsdp2_supported,
 )
+from kl_divergence import (
+    WIKITEXT2,
+    build_reference,
+    format_kl_divergence,
+    kl_divergence,
+    load_reference,
+    save_reference,
+)
 from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
@@ -755,6 +763,26 @@ def export_quantized(
         )
 
 
+def kl_divergence_reference(
+    args: argparse.Namespace, full_model: torch.nn.Module, tokenizer: PreTrainedTokenizerBase
+):
+    """Load --kl_divergence_reference if it exists, else score the unquantized model (and save it)."""
+    path = args.kl_divergence_reference
+    if path is not None and os.path.exists(path):
+        print(f"Scoring --kl_divergence against the saved reference {path}")
+        return load_reference(path)
+    reference = build_reference(
+        full_model,
+        tokenizer,
+        args.kl_divergence_data,
+        args.kl_divergence_chunks,
+        args.kl_divergence_seq_len,
+    )
+    if path is not None:
+        save_reference(reference, path)
+    return reference
+
+
 def pre_quantize(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
@@ -1005,6 +1033,11 @@ def quantize_main(
                 "layerwise.export_dir is not supported with an AutoQuantize recipe; "
                 "use a PTQ recipe, or drop export_dir and export afterwards."
             )
+        if args.kl_divergence:
+            raise ValueError(
+                "--kl_divergence needs the quantized model in memory, but layerwise.export_dir "
+                "leaves it in export form."
+            )
         if not args.skip_generate:
             print("Layerwise export: forcing --skip_generate, the model is left in export form.")
         args.skip_generate = True
@@ -1078,6 +1111,9 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
+    kld_reference = (
+        kl_divergence_reference(args, full_model, tokenizer) if args.kl_divergence else None
+    )
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
@@ -1155,6 +1191,9 @@ def quantize_main(
         # ``from_pretrained`` already populated so the cast works with the documented command.
         source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
         apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
+
+    if kld_reference is not None:
+        print(format_kl_divergence(kl_divergence(full_model, kld_reference)))
 
     post_quantize(
         args,
@@ -1343,6 +1382,47 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
+        "--kl_divergence",
+        help=(
+            "Report the quantized model's KL divergence from the unquantized model, and both "
+            "perplexities, scored like llama.cpp's `llama-perplexity --kl-divergence`. The "
+            "unquantized log-probabilities are held in host memory: chunks x seq_len / 2 x vocab "
+            "float16 values (about 12.7 GB for 100 x 512 tokens of a 248k vocabulary)."
+        ),
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--kl_divergence_chunks",
+        help="Number of consecutive text chunks to score for --kl_divergence.",
+        type=int,
+        default=100,
+    )
+    parser.add_argument(
+        "--kl_divergence_seq_len",
+        help="Tokens per --kl_divergence chunk; the second half of each chunk is scored.",
+        type=int,
+        default=512,
+    )
+    parser.add_argument(
+        "--kl_divergence_data",
+        help=(
+            "Text for --kl_divergence: wikitext2 (the test split, as llama.cpp scores it), a "
+            "UTF-8 text file, or a ModelOpt dataset name (chat-formatted where supported)."
+        ),
+        default=WIKITEXT2,
+    )
+    parser.add_argument(
+        "--kl_divergence_reference",
+        help=(
+            "Reference file for --kl_divergence (implied). If it exists, score against it and "
+            "skip the unquantized pass; it fixes the data and chunking. Otherwise it is written "
+            "from this run's unquantized model. Build one without quantizing with "
+            "`python kl_divergence.py`."
+        ),
+        default=None,
+    )
+    parser.add_argument(
         "--low_memory_mode",
         help=(
             "Use low memory mode for quantization."
@@ -1481,6 +1561,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
         parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
+    args.kl_divergence |= args.kl_divergence_reference is not None
+    if args.kl_divergence and (
+        args.use_fsdp2 or args.low_memory_mode or args.specdec_offline_dataset is not None
+    ):
+        parser.error(
+            "--kl_divergence needs a single-process model loaded unquantized with a tokenizer; "
+            "it does not support --use_fsdp2, --low_memory_mode or --specdec_offline_dataset."
+        )
 
     if args.offload_folder is not None and args.low_memory_mode:
         parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")

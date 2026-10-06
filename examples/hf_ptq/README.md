@@ -241,6 +241,25 @@ Available KV cache formats:
 
 > *Formats ending in `_cast` (fp8_cast, nvfp4_cast) are fast — they set the amax to the format's full range without data-driven calibration. Other formats use data-driven calibration for potentially better accuracy.*
 
+#### KL divergence from the unquantized model
+
+`--kl_divergence` measures the quantized model right after quantization, before export. It reports the mean KL divergence from the unquantized model, both perplexities, and how often the most likely next token is unchanged. Scoring follows llama.cpp's `llama-perplexity --kl-divergence`: the text is split into consecutive 512-token chunks, 100 by default, and the second half of each chunk is scored. On the default `wikitext2` data the numbers are directly comparable with llama.cpp's for GGUF quants of the same model.
+
+```bash
+python hf_ptq.py --pyt_ckpt_path <model> --recipe <recipe> --export_path <path> --kl_divergence
+```
+
+The unquantized log-probabilities come from the same model before it is quantized, so it is loaded only once. They are kept in host memory: chunks × seq_len / 2 × vocabulary float16 values, about 12.7 GB for a 248k vocabulary. `--kl_divergence_chunks` and `--kl_divergence_seq_len` change the split.
+
+`--kl_divergence_data` picks the text: `wikitext2` (default), a UTF-8 text file, or a ModelOpt dataset name such as `nemotron-post-training-dataset-v2`, which is chat-formatted where the dataset and tokenizer support it.
+
+To compare many runs on the same data, or to change the data without re-running PTQ, keep the reference in a file. `--kl_divergence_reference ref.pt` scores against `ref.pt` if it exists and skips the unquantized pass. Otherwise it writes `ref.pt` from this run's unquantized model. A reference can also be built offline, without quantizing:
+
+```bash
+python kl_divergence.py --pyt_ckpt_path <model> --output ref.pt --data nemotron-post-training-dataset-v2
+python hf_ptq.py --pyt_ckpt_path <model> --recipe <recipe> --export_path <path> --kl_divergence_reference ref.pt
+```
+
 #### MXFP4 → NVFP4 cast (for GPT-OSS)
 
 GPT-OSS checkpoints (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`) ship with native MXFP4 weights (`*_blocks` + `*_scales` in the checkpoint, `quantization_config.quant_method == "mxfp4"`). Passing `--cast_mxfp4_to_nvfp4` tells `hf_ptq.py` to read the source MXFP4 scales and produce a closed-form, bit-exact NVFP4 weight export — no GEMM-level recalibration of the weights needed.
