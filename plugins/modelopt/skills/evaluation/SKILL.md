@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "run nel". Handles deployment, config generation, and evaluation execution. Always load when validating completed runs or reporting evaluation scores, including standalone launching-evals analysis. Not for quantizing models (use ptq), deploying/serving models (use deployment), or comparing completed baseline-vs-quantized results (use compare-results).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073).
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -9,6 +9,10 @@ license: Apache-2.0
 ## NeMo Evaluator Launcher Assistant
 
 Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress.
+
+### Completed-run analysis
+
+For completed runs, skip launch/config; use launching-evals for artifacts/analysis and apply [run-validation.md](references/run-validation.md) before scores. Its policy overrides blanket uncapping and fixed token/context limits.
 
 ### Workspace integration
 
@@ -130,10 +134,10 @@ Read [Step 8](references/launcher-workflow.md#step-8--run-evaluation-gated-dry-r
 
 ### Step 9 — Verify completed run
 
-Read [run-validation.md](references/run-validation.md) before reporting scores:
-validate logs and sample coverage, complete **Timeout and Output-Limit Accounting**
-for every task, and report missing telemetry as unknown. For comparisons, also
-apply its **External Baseline Sanity Check**, then use `compare-results`.
+Apply [run-validation.md](references/run-validation.md)'s **Bounded Evaluation-Failure
+Policy** and **Timeout and Output-Limit Accounting** before reporting scores. For
+comparisons, also apply its **External Baseline Sanity Check**, then use
+`compare-results`.
 
 ---
 

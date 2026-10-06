@@ -246,4 +246,6 @@ kwargs after `--` (e.g. `-- -o copy_artifacts=true`).
   retries (≤8); lower `max_concurrent` if frequent.
 - `solver failed — grading 0.0` agent crashes are rare but real (e.g. terminus-2
   tmux `send-keys`) — distinguish from genuine misses + task timeouts; the final
-  report breaks them out.
+  report breaks them out. Apply `run-validation.md`'s bounded failure policy:
+  verify protocol-valid scored failures and complete trial accounting. A harness
+  crash leaving missing/unscored trials is a blocker, not a zero score.
