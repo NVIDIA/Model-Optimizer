@@ -1,0 +1,395 @@
+{
+  "timestamp_utc": "2026-10-06T17:24:13.741273+00:00",
+  "scope": "Public vLLM 0.15.1 Python/Triton source rerun on RTX A6000, with existing local compiled extensions. Kernel/layer checks, not model quality, engine scheduling, or speed.",
+  "dependency": "vllm==0.15.1",
+  "source_audit": {
+    "public_version": "0.15.1",
+    "public_commit": "1892993bc18e243e2c05841314c5e9c06a80c70d",
+    "previous_fork_commit": "930288170c31e8568290fff407dca8caf17d16ad",
+    "source_files_identical": 17,
+    "source_sha256": {
+      "vllm/model_executor/layers/fla/__init__.py": "5dbbfa3fc286edb2e970e175ef33cee4f6181c89b0784f5a8986201b2312f54e",
+      "vllm/model_executor/layers/fla/ops/__init__.py": "4f1f5a8e66ec082a6db89a1f5fe429082fd4b764b06414d3e7a4948c65c636cd",
+      "vllm/model_executor/layers/fla/ops/chunk.py": "349167aec3bf4dd997c00b32026c94a6d48cc6b5421faf53ff11e30e9e83464a",
+      "vllm/model_executor/layers/fla/ops/chunk_delta_h.py": "ad204fa257499cfb3d3073bf5ce0b0fc4f9fcbe4791fcbc0dfccec4908c8f420",
+      "vllm/model_executor/layers/fla/ops/chunk_o.py": "b9c7c53289ecfe08e8a1fe4ddfa74898555c5836697818c7571745308d57393c",
+      "vllm/model_executor/layers/fla/ops/chunk_scaled_dot_kkt.py": "fe2ecc3063bae8c8c3d51610143a8da5af721a49cfc8704e4c40f00a173d845c",
+      "vllm/model_executor/layers/fla/ops/cumsum.py": "aa14bf2e7cbeae888408c103bed5811364698856032a3a96c7040e35174bda00",
+      "vllm/model_executor/layers/fla/ops/fused_recurrent.py": "7a5f30be6172499a2147c4d367a76f2a6508b49d9c4fabbe81b8a891948ace28",
+      "vllm/model_executor/layers/fla/ops/index.py": "720d885794e7edcbc3ccfc3c7d3748f7ab08605cbceed93deb46f49cf2455d21",
+      "vllm/model_executor/layers/fla/ops/kda.py": "ede46fdc7b3ca0e58cd7f9e7ac10b59044434948b169ac7ff911c32a3433e711",
+      "vllm/model_executor/layers/fla/ops/l2norm.py": "1df50a58a97512fad429ca306c3bb813940f4028196cf16e98ae377a58b443a4",
+      "vllm/model_executor/layers/fla/ops/layernorm_guard.py": "9df430cb6f56bba3eddd7dd92f7a0f56ac61cc84daaf37fb026c6307368a0d62",
+      "vllm/model_executor/layers/fla/ops/op.py": "6ad9192acc939815136baf069d193455f1157ca01b991a052d8b5095ff3f2413",
+      "vllm/model_executor/layers/fla/ops/solve_tril.py": "0117db52028e1e577665bab75658233f4edb8dccc54820907343112e6001715f",
+      "vllm/model_executor/layers/fla/ops/utils.py": "f11461aa3a73493bf40d4b19a54a2bfeaceb06b5fa16416e38ea616bf1e99867",
+      "vllm/model_executor/layers/fla/ops/wy_fast.py": "4eac9908352b014a3464576d1cf458e27b54c5abf1b18b001868f49b6de8ca22",
+      "vllm/model_executor/models/qwen3_next.py": "3b513d4611d5a306045380212d5f23f95b86ebbcfb3ddc1133af774fd08ce53b"
+    },
+    "native_extensions": "Reuses the existing local compiled extensions; csrc, setup.py, pyproject.toml, platforms, and Triton utility sources have no differences from v0.15.1."
+  },
+  "trajectories": [
+    {
+      "artifact": "long-results.json",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    },
+    {
+      "artifact": "holdout-results.json",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1539,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "gdn",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1537,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1539,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1537,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    },
+    {
+      "artifact": "wide-results.json",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 256,
+          "V": 128,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 256,
+          "V": 256,
+          "comparisons": 771,
+          "bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    }
+  ],
+  "megatron_layers": [
+    {
+      "kind": "gdn",
+      "prefix": 73,
+      "suffix": 64,
+      "qdq_calls": 65,
+      "comparisons": 133,
+      "bitwise_equal": true,
+      "max_absolute_error": 0.0
+    },
+    {
+      "kind": "kda",
+      "prefix": 73,
+      "suffix": 64,
+      "qdq_calls": 65,
+      "comparisons": 131,
+      "bitwise_equal": true,
+      "max_absolute_error": 0.0
+    }
+  ],
+  "training": {
+    "scope": "Single Megatron attention layer; no full model trainer or quality evaluation",
+    "torch": "2.9.1+cu128",
+    "device": "NVIDIA RTX A6000",
+    "tokens": 128,
+    "batch": 1,
+    "hidden_size": 64,
+    "results": [
+      {
+        "kind": "gdn",
+        "loss": 1.8592974811326712e-05,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      },
+      {
+        "kind": "kda",
+        "loss": 0.0031944913789629936,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      }
+    ]
+  },
+  "total_native_comparisons": 11042,
+  "previous_validation": {
+    "receipt": "vllm_import_results.json",
+    "sha256": "d01ff37ef5488d518a860a368738bb41d04e8475117abd313f3b4c27c5adfa0a",
+    "cpu_tests_passed": 43,
+    "gradient_directions_passed": 12,
+    "gradient_implementation_unchanged": true,
+    "max_directional_error": 3.7569763966516234e-10
+  },
+  "current_tests": {
+    "gpu_cases_passed": 2,
+    "dependency_guards": [
+      {
+        "case": "ordinary_training_leaves_backend_unloaded",
+        "passed": true
+      },
+      {
+        "case": "missing_dependency",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires the optional vLLM dependency; install it with: pip install vllm==0.15.1"
+      },
+      {
+        "case": "unsupported_version",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires vLLM 0.15.1; found 0.16.0. Install it with: pip install vllm==0.15.1"
+      },
+      {
+        "case": "FLA_USE_FAST_OPS",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires FLA_USE_FAST_OPS=0"
+      },
+      {
+        "case": "USE_DEFAULT_FLA_NORM",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires USE_DEFAULT_FLA_NORM=0"
+      },
+      {
+        "case": "FLA_GDN_FIX_BT",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires FLA_GDN_FIX_BT=0"
+      },
+      {
+        "case": "FLA_USE_CUDA_GRAPH",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires FLA_USE_CUDA_GRAPH=0"
+      },
+      {
+        "case": "FLA_TRIL_PRECISION",
+        "passed": true,
+        "message": "decode.precision='vllm_0_15' requires FLA_TRIL_PRECISION=ieee"
+      },
+      {
+        "case": "pinned_dependency_imports",
+        "passed": true
+      }
+    ]
+  },
+  "source_sha256": {
+    "modelopt/torch/kernels/quantization/linear_attention/serving/__init__.py": "a7adcd2b11c35406c3438967f66e5bd82077868daf23575ad7e366c9b15f88f6",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_delta_h.py": "bfb7cfeff6bb5fbbc8e31778d93ce915605584e70084c6971345e52b48514c22",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/forward.py": "cf144524a93063b563cd70b57792639999a28700643127e0eeab7accea351ad3",
+    "modelopt/torch/quantization/linear_attention/__init__.py": "cb03f576820338eeabce6f424adb9b1fc289ff13f94319fcb0e2701959ae7d38",
+    "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+    "modelopt/torch/quantization/linear_attention/_chunk_prefill.py": "1fcebf6b8374ff2be81710105bb348812b63f23cc962432db94237522655529b",
+    "modelopt/torch/quantization/linear_attention/config.py": "8a684183c0106f17e1ce6b2368cdca180276c74f40f3a1c8179554c1997e3e49",
+    "modelopt/torch/quantization/linear_attention/decode.py": "a668d1db05082d545717d0cea8f0ebb1ec5efb95a3969bb740b0c5f9b1286839",
+    "modelopt/torch/quantization/linear_attention/decode_prefill.py": "75925e5643df825becfd6b43d420ba02fd533e05091306a10c71e20c961ab76f",
+    "modelopt/torch/quantization/linear_attention/kda.py": "330c70069d3c0aa3bc186a1f0e6b8aafe70dd89bd153d9a9b4116796bb0ab821",
+    "modelopt/torch/quantization/linear_attention/prefill.py": "bfa45263685c243468118e61c479e48d1c6bd8849cae8e7bc0da8993cd263aab",
+    "modelopt/torch/quantization/linear_attention/_serving.py": "b9c2cce56888a51df710c14e825b365e3208c0fbf98b6693d55b1d1443477573",
+    "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "dfd34e7d49947d084f0bbb61f9c2879c7cee19b8e50ed03942ec3c042c7c09bc",
+    "modelopt/torch/quantization/plugins/megatron.py": "5dd4f9448f8884b329921592a6dd7b9075a14f4adad04725821f5d69a952563c",
+    "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "997aefd34057587ef926598e6af1cb92f421a71c7584159e5f8a692b552aae55",
+    "tests/gpu_vllm/torch/quantization/test_linear_attention_training.py": "de2b44eea3adc22051bca067c1e6ac469cdf3b48d209d91c2cafc264334c8130"
+  },
+  "implementation": {
+    "base_head": "1da0f35a1584e9eccfcd14c50c706518ad1737b3",
+    "uncommitted": true,
+    "serving_adapter_lines": 227
+  },
+  "artifacts": {
+    "files.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/files.json",
+      "sha256": "be90e85786329eb4a6f88122f9483829b10aa72490ae918b77722f235777fee4"
+    },
+    "example-files.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/example-files.json",
+      "sha256": "591731926bbf209084881d69672d75eaae5a91751f46eda1faa6355bc7a684b1"
+    },
+    "precommit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/precommit.log",
+      "sha256": "e3c535be88037222d2d32ac8cf6a64cf44ee830cff63b66da4b28908527466c7"
+    },
+    "example-precommit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/example-precommit.log",
+      "sha256": "ac93d3e9fbd8ed93800e5d039a0682f6f3986779c90baf92c447e4c262c639ba"
+    },
+    "optional_dependency_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/optional_dependency_check.py",
+      "sha256": "3168332740a4b2f8b649e663502ce737900293c306d636319ae76a8dc904cff5"
+    },
+    "long_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/long_check.py",
+      "sha256": "e57c759a42c9856599e3524d0105dfee99fa31b25e55b006a4de2dcef240586e"
+    },
+    "holdout_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/holdout_check.py",
+      "sha256": "e376a8d49d15c6023ae72cee88e281fe9976c2f62d7a4a99fe745db25636cb11"
+    },
+    "wide_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/wide_check.py",
+      "sha256": "e9506e04ade06384e32b12320a33a7b7eb1cfe4489018d11dc93ff10e011fa89"
+    },
+    "megatron_parity.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/megatron_parity.py",
+      "sha256": "748d3c8e503044e14cec69f0293201a239fb8d41658340cdd92af3e6c0a2a914"
+    },
+    "train_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/train_check.py",
+      "sha256": "9196d5b8402ac40dfd078bcd8b2758dbc9db46ddced329983af49e35d3b9b88d"
+    },
+    "public-source-audit.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/public-source-audit.json",
+      "sha256": "2e4a385e07c4f92f440cf8ddca7630237965fb269a32af2c5cc5d9e4c5c48ee7"
+    },
+    "long.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/long.log",
+      "sha256": "56e0a6e5d24e40de8fbf5b8cb9c2e6abd091463aa3d996bdab92f0b07ca1e37d"
+    },
+    "gpu-tests.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/gpu-tests.log",
+      "sha256": "4276590e8d61d687d58f641b11a58b6c9e359a17bf91d6109adfbed85f3d42ce"
+    },
+    "long-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/long-results.json",
+      "sha256": "b870476148119ad959d27a696297d6f407110c5166666cec94cee4ac3d4449fc"
+    },
+    "megatron-parity.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/megatron-parity.log",
+      "sha256": "48bda5d2203afe3adcdd488e888baaef73d08c164ff6dd62db0c4c67e0500210"
+    },
+    "holdout.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/holdout.log",
+      "sha256": "5acad0d1d74abf68e0f855f9c58b5a65ee1401bf051053d574eb49f96a5aac7d"
+    },
+    "optional-dependency.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/optional-dependency.log",
+      "sha256": "e9218e91b53d3c81d9e29ccd4a833ee5568a57d471d3b7f70d5eba4ced7b996c"
+    },
+    "optional-dependency-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/optional-dependency-results.json",
+      "sha256": "a9541bc41589a3d38ce61fa69e1b3448f043f06350f2f4d33c970cfa5fc40b25"
+    },
+    "megatron-parity-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/megatron-parity-results.json",
+      "sha256": "e68af5867d20777c7496388ef1e904784609246b9be3aabb5cd6a4fc80fa27c2"
+    },
+    "holdout-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/holdout-results.json",
+      "sha256": "342adc61bc389781db1de97b10512cdd282cbd543df2403a890c5a7b989680d5"
+    },
+    "wide.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/wide.log",
+      "sha256": "224f6b4c5f2709c1a83e56895677f74d27b166e7f823d3d186e7391b7a07e3c9"
+    },
+    "train.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/train.log",
+      "sha256": "e93ae7a25c410a3032abcebae963203627d96006ed685bd1979d32171a649365"
+    },
+    "wide-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/wide-results.json",
+      "sha256": "d0a15ef41da999358b0a4095cb57ba3ef7f4b7459557d92beaecedb9a7f66937"
+    },
+    "train-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/train-results.json",
+      "sha256": "b4ad91db5ac47d28df735ec0eafe594bd489ce4df602e789c7331e2f1981edf7"
+    },
+    "precommit-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/precommit-final.log",
+      "sha256": "449515d235b19ebd5ca5de76a0b655de6a16e2e966a0ecd4d00e1587c7a3ebcf"
+    },
+    "save_public_report.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/publish-state-alignment-20261006/save_public_report.py",
+      "sha256": "57c48fa80f63a1f1daaf929882a403abd435ca47c3069980f99d20018f931b00"
+    }
+  },
+  "notes": [
+    "The earlier GitHub URL incorrectly used a local fork commit. The release pin now names the public PyPI version and upstream tag.",
+    "The prior fork receipts are historical. All seventeen relevant vLLM source files match v0.15.1 byte for byte, and all ten trajectories plus both Megatron layers were rerun on the public checkout.",
+    "The Torch adjoint was unchanged; its twelve directional checks and the prior 43 CPU tests were not rerun for the dependency-only correction."
+  ]
+}

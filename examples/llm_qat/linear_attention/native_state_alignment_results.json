@@ -1,0 +1,1011 @@
+{
+  "timestamp_utc": "2026-10-06T02:03:59.952033+00:00",
+  "conclusion": "Resolved the reproduced state-quantization mismatch for the pinned runtime, blockwise INT8 recipe, and tested shapes; all independent output/state comparisons are bitwise equal.",
+  "scope": "Kernel/adapter numerical parity plus actual Megatron-layer preparation, STE gradients, optimizer update, and distributed checkpoint restore. The #2541 adapter is loaded with the current #2519 TensorQuantizer, without rebasing either branch. No full-model checkpoint conversion, engine scheduler, QAT/QAD quality, or speed result.",
+  "environment": {
+    "gpu": "RTX A6000",
+    "torch": "2.9.1+cu128",
+    "triton": "3.5.1",
+    "fla_core": "0.5.1",
+    "native_flags": {
+      "FLA_USE_FAST_OPS": 0,
+      "USE_DEFAULT_FLA_NORM": 0,
+      "FLA_GDN_FIX_BT": 0
+    },
+    "vllm_commit": "930288170c31e8568290fff407dca8caf17d16ad",
+    "megatron_commit": "ac100f773f9d8fac918ce3e64698be4ed84fa428"
+  },
+  "implementation": {
+    "training_head": "1da0f35a1584e9eccfcd14c50c706518ad1737b3",
+    "uncommitted": true,
+    "worktree": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase",
+    "precision": "vllm_0_15",
+    "native_forward": "Pinned standalone FLA/vLLM arithmetic adapted into ModelOpt; no vLLM runtime import in training",
+    "backward": "Torch local adjoint at native rounded state/intermediate values, identity STE",
+    "state_quantization": "Standard TensorQuantizer, signed narrow-range dynamic INT8, block_sizes={-1:32}, working-state readout"
+  },
+  "trajectories": {
+    "long-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 1701,
+      "suffix": 256,
+      "scope": "Production adapter calls real native vLLM kernels; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "kda",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        }
+      ]
+    },
+    "holdout-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 2903,
+      "suffix": 512,
+      "scope": "Production adapter calls real native vLLM kernels; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1539,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "gdn",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1537,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "local_decode": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1539,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "kda",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1537,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "local_decode": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 512,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        }
+      ]
+    },
+    "wide-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 3871,
+      "suffix": 256,
+      "initial_state": "nonzero, QDQ before continuation prefill",
+      "scope": "Independent native-prefix and token trajectories, raw QK with native normalization; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 256,
+          "V": 128,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 256,
+          "V": 256,
+          "comparisons": 771,
+          "all_within_original_tolerance": true,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0,
+          "by_event": {
+            "prefill_output": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "prefill_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "local_decode": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "trajectory_output": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "consumed_state": {
+              "comparisons": 256,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            },
+            "final_state": {
+              "comparisons": 1,
+              "all_bitwise_equal": true,
+              "max_absolute_error": 0.0
+            }
+          },
+          "failed_rows": []
+        }
+      ]
+    }
+  },
+  "megatron_preparation": {
+    "scope": "Real Megatron layer preparation and ModelOpt kernel output versus pinned native vLLM attention kernels; not full-model or engine parity",
+    "seed": 2903,
+    "cases": [
+      {
+        "kind": "gdn",
+        "prefix": 73,
+        "suffix": 64,
+        "qdq_calls": 65,
+        "comparisons": 133,
+        "all_within_original_tolerance": true,
+        "all_bitwise_equal": true,
+        "max_absolute_error": 0.0,
+        "by_event": {
+          "gate": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "beta": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "prefill_output": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "handoff": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "output": {
+            "comparisons": 64,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "state": {
+            "comparisons": 64,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "final": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          }
+        },
+        "failed_rows": []
+      },
+      {
+        "kind": "kda",
+        "prefix": 73,
+        "suffix": 64,
+        "qdq_calls": 65,
+        "comparisons": 131,
+        "all_within_original_tolerance": true,
+        "all_bitwise_equal": true,
+        "max_absolute_error": 0.0,
+        "by_event": {
+          "prefill_output": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "handoff": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "output": {
+            "comparisons": 64,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "state": {
+            "comparisons": 64,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          },
+          "final": {
+            "comparisons": 1,
+            "all_bitwise_equal": true,
+            "max_absolute_error": 0.0
+          }
+        },
+        "failed_rows": []
+      }
+    ]
+  },
+  "gradients": {
+    "scope": "Directional derivatives of the identity-STE surrogate with fixed forward-rounding offsets, not derivatives of discontinuous rounding",
+    "rtol": 1e-05,
+    "atol": 1e-07,
+    "cases": [
+      {
+        "kind": "gdn",
+        "phase": "prefix",
+        "offset_count": 33,
+        "directions": [
+          {
+            "autograd": 0.04684418707704012,
+            "finite_difference": 0.04684418724032468,
+            "error": 1.6328455948455556e-10
+          },
+          {
+            "autograd": 0.21522499010816826,
+            "finite_difference": 0.215224990451901,
+            "error": 3.43732736718394e-10
+          },
+          {
+            "autograd": -0.0632317310473668,
+            "finite_difference": -0.06323173096234312,
+            "error": 8.502368253893167e-11
+          }
+        ]
+      },
+      {
+        "kind": "gdn",
+        "phase": "step",
+        "offset_count": 2,
+        "directions": [
+          {
+            "autograd": 1.6802465173791628,
+            "finite_difference": 1.6802465172993661,
+            "error": 7.979661376111835e-11
+          },
+          {
+            "autograd": -0.8126685675013869,
+            "finite_difference": -0.8126685674403332,
+            "error": 6.1053717637094e-11
+          },
+          {
+            "autograd": -0.24179189873244322,
+            "finite_difference": -0.24179189882511662,
+            "error": 9.267339673435515e-11
+          }
+        ]
+      },
+      {
+        "kind": "kda",
+        "phase": "prefix",
+        "offset_count": 41,
+        "directions": [
+          {
+            "autograd": 0.10891344775053216,
+            "finite_difference": 0.10891344794927703,
+            "error": 1.9874486778537204e-10
+          },
+          {
+            "autograd": 0.0501927879240015,
+            "finite_difference": 0.050192787792724396,
+            "error": 1.3127710724036845e-10
+          },
+          {
+            "autograd": -0.29538208983393055,
+            "finite_difference": -0.2953820902096282,
+            "error": 3.7569763966516234e-10
+          }
+        ]
+      },
+      {
+        "kind": "kda",
+        "phase": "step",
+        "offset_count": 2,
+        "directions": [
+          {
+            "autograd": 1.485777717879285,
+            "finite_difference": 1.4857777179355656,
+            "error": 5.628053578732306e-11
+          },
+          {
+            "autograd": -0.9844175685123819,
+            "finite_difference": -0.9844175686168909,
+            "error": 1.0450895704394725e-10
+          },
+          {
+            "autograd": -0.09717582363208943,
+            "finite_difference": -0.09717582357682274,
+            "error": 5.5266693999023175e-11
+          }
+        ]
+      }
+    ]
+  },
+  "training": {
+    "scope": "Single Megatron attention layer; no full model trainer or quality evaluation",
+    "torch": "2.9.1+cu128",
+    "device": "NVIDIA RTX A6000",
+    "tokens": 128,
+    "batch": 1,
+    "hidden_size": 64,
+    "results": [
+      {
+        "kind": "gdn",
+        "loss": 1.8592974811326712e-05,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      },
+      {
+        "kind": "kda",
+        "loss": 0.0031944913789629936,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      }
+    ]
+  },
+  "static_checks": {
+    "precommit": "Passed",
+    "mypy": "Passed",
+    "ruff": "Passed",
+    "diff_check": "Passed"
+  },
+  "regression_tests": {
+    "cpu_tests": 42,
+    "dynamic_quantizer_test": 1,
+    "gpu_tests": 2,
+    "gpu_test_call_seconds": [
+      0.08,
+      0.11
+    ],
+    "compilation": "Module-scoped fixture; setup excluded from test-call timeout/timing"
+  },
+  "historical_failures": {
+    "artifact": "extended_state_alignment_results.json",
+    "gdn_first_failed_update": 2,
+    "kda_first_failed_update": 9,
+    "retained": true,
+    "tolerances_unchanged": true
+  },
+  "implementation_attempts": {
+    "raw_logs": [
+      "train.log",
+      "gradient.log",
+      "gpu-tests.log",
+      "precommit.log",
+      "mypy-final.log"
+    ],
+    "explanation": "Intermediate implementation failures retained: a config rename during a live test process, a removed re-export during lint cleanup, an invalid test quantizer backend, and copied wrapper type annotations. Final checks use the corrected source."
+  },
+  "source_sha256": {
+    "modelopt/torch/quantization/linear_attention/__init__.py": "cb03f576820338eeabce6f424adb9b1fc289ff13f94319fcb0e2701959ae7d38",
+    "modelopt/torch/quantization/linear_attention/_chunk_prefill.py": "1fcebf6b8374ff2be81710105bb348812b63f23cc962432db94237522655529b",
+    "modelopt/torch/quantization/linear_attention/_serving.py": "efd8ee9b107f18400c84bf872431099996486a915215481e36481879937f0fc4",
+    "modelopt/torch/quantization/linear_attention/config.py": "8a684183c0106f17e1ce6b2368cdca180276c74f40f3a1c8179554c1997e3e49",
+    "modelopt/torch/quantization/linear_attention/decode.py": "a668d1db05082d545717d0cea8f0ebb1ec5efb95a3969bb740b0c5f9b1286839",
+    "modelopt/torch/quantization/linear_attention/decode_prefill.py": "75925e5643df825becfd6b43d420ba02fd533e05091306a10c71e20c961ab76f",
+    "modelopt/torch/quantization/linear_attention/kda.py": "6e317d30df8ce9659d20841f5051f15435091929354a18590075e32d7560a99d",
+    "modelopt/torch/quantization/linear_attention/prefill.py": "bfa45263685c243468118e61c479e48d1c6bd8849cae8e7bc0da8993cd263aab",
+    "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/__init__.py": "d59ce9ba24b9d5884b0de7fc01c84d077e5bb477ad4c0d5d97723c23e22525cb",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_delta_h.py": "eccb2c6cbcc6808f207d38f82e54cacabb109eee751e9727fd72103fd325ea0c",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_o.py": "ca46ac4f273db71605b2f4c8bccd379e6a78e0e6e09df31bae7a9243a2ef23c5",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_scaled_dot_kkt.py": "664194a50be1f7a8caf5201ddc290716eb0df2e4b8f2b08c48946eb7be8f4bf5",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/cumsum.py": "981ba54fa565453c0a97d1511653344d2f79ef76b4067ded67a25d3bdf08bbb6",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/forward.py": "e56e30605614a5f7cbe3df954dc1519186f69c10987328e8140604f24a81bf17",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/fused_recurrent.py": "9ee3755277767d27fd47288dbd0b383219466954d7a1543637b4b474afa5649a",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/gate.py": "cbf01acd980f93e277f2c55744a02c9c2f8af0df7202e3b6d640215cbb60f52d",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/kda.py": "3b18fe50bcfa5a13b2fff7c17450eb214ad0aa6a1b1988cbad6d4d5047099a58",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/l2norm.py": "107d472ad4aa4e3581936691b883ab187ec1d22bfeb2b86293e119f18203e9ef",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/utils.py": "981995e3d119be87802dbe0095cc69aef45d7564f9f22525072db4e91c705d05",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/wy_fast.py": "277619412b5ea77998e0fad28ce8a25b7e253c97f6073a9dffd275b47ed20ff8",
+    "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "dfd34e7d49947d084f0bbb61f9c2879c7cee19b8e50ed03942ec3c042c7c09bc",
+    "modelopt/torch/quantization/plugins/megatron.py": "e099126d94a993f02ceb3e2b572c812cbef97ba7e73be04805d3eead4bd46eda",
+    "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "997aefd34057587ef926598e6af1cb92f421a71c7584159e5f8a692b552aae55",
+    "tests/gpu/torch/kernels/quantization/linear_attention/test_serving.py": "7c3e77aac0e05323fd2aeb888dc46e6d1bb9e16df16bbe7c249d00d235c5815b"
+  },
+  "serving_adapter_sha256": "7ab5e51df98a6e9bcc37d0ba0cba64eabc8996490840aefc20ab940c7624b2b8",
+  "serving_head": "864973e890b092216aa6094ae7ce9c5aa0083262",
+  "artifacts": {
+    "chunk_prefill_before.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/chunk_prefill_before.py",
+      "sha256": "873b4b833c4c5029da0d95f63c33224d96bd24c25ad654cf8b653d70b1d719ca"
+    },
+    "cleanup.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/cleanup.py",
+      "sha256": "b63a12d715454aa319a0228ecdc7ab2740b881141e41edf933d0d84d6b09dbfd"
+    },
+    "connect.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/connect.py",
+      "sha256": "f2082bbf9ddb6a1d3206cfa93716183d563558057fff1db196789d96f5b55863"
+    },
+    "decode-probe.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/decode-probe.log",
+      "sha256": "8d3cb1258a22c501719a54558af387d2fbdfce3da7cc16fa60197c904b4f8ce2"
+    },
+    "decode_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/decode_probe.py",
+      "sha256": "9ad042d904cfd32a8055f13174385b4a857954ba0dfa619a8e313c7582723b38"
+    },
+    "docs-precommit-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/docs-precommit-final.log",
+      "sha256": "67a30eb55cd36a8f1450e5f2c389a55a7f85baf67806425ac07fbce5ef874c82"
+    },
+    "docs-precommit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/docs-precommit.log",
+      "sha256": "9fb30a83b2afbccfb4be668557084a7ab3754eb86d15f7191c0034589dcff82b"
+    },
+    "final-trajectories.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/final-trajectories.log",
+      "sha256": "8c490bcac5fa8f6ff628e6f7eb5a8b3b528fb4723b8e65bf6338a4478d74fab6"
+    },
+    "gpu-tests-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gpu-tests-final.log",
+      "sha256": "b36551174e660f2bba6bc6327d5c6c1f2d5e7e0888f8562049b999af40a84640"
+    },
+    "gpu-tests.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gpu-tests.log",
+      "sha256": "a9c7da611be736c9ac34c0f170f76060601b2b054a019f7e093e87794f8e6f3e"
+    },
+    "gradient-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gradient-final.log",
+      "sha256": "d5cab2ae9f17b6f4b78832d3ebd480797c21184d87edfd36e4fae0168ea07cf2"
+    },
+    "gradient-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gradient-results.json",
+      "sha256": "ae1b4efcee4091cc2ed149c24d4abdef19866bec4e7e3f88f7abe55a69a41e4f"
+    },
+    "gradient.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gradient.log",
+      "sha256": "9d6deaad14e7da4db37dcba53a61fc30e6472c0f08423d7c279bd3b85f35ef0d"
+    },
+    "gradient_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/gradient_check.py",
+      "sha256": "4e731e6fb74eee01969c9794a47cfc941c377731ea7d52633cf6fa5863be85ad"
+    },
+    "holdout-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/holdout-results.json",
+      "sha256": "a7b76baf243db0efe49f2f27fd022bb423d089732788ef20d4b9a037751ad611"
+    },
+    "holdout.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/holdout.log",
+      "sha256": "75454b6301a8608f4704329c6f4de27c0b1651e7ea2f29052283236f390dba32"
+    },
+    "holdout_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/holdout_check.py",
+      "sha256": "ce17b7b784388f6e877a1fe4502373a3ecfe5b7139acfaf635d854baab78601f"
+    },
+    "implement_adapter.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/implement_adapter.py",
+      "sha256": "c59529672a5afcab3809d311f8a53c6d088f3ac2fe7fa2f1bad7055945c0001e"
+    },
+    "long-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/long-results.json",
+      "sha256": "ac85229843a9ebc572e657c55eb5cb0c892678d61406edee2ba53c61a3f8da2d"
+    },
+    "long.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/long.log",
+      "sha256": "0cef354b7741a93b6ab7de9a11a36a07fedbe87f81bee5c502f7eba3c8136117"
+    },
+    "long_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/long_check.py",
+      "sha256": "5e77cc3297832353e72c2d6d1f88f2b16bfbe3631846953c769f7a8b6213e900"
+    },
+    "megatron-parity-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/megatron-parity-results.json",
+      "sha256": "e68af5867d20777c7496388ef1e904784609246b9be3aabb5cd6a4fc80fa27c2"
+    },
+    "megatron-parity.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/megatron-parity.log",
+      "sha256": "7b908d0157c4dcb9679e74250c279ea6621ff2b7060422187f6ba2bbf8052338"
+    },
+    "megatron_parity.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/megatron_parity.py",
+      "sha256": "77090cb3a3161c629ec370483828f8ba68eb61486c3e796105d98163d530ac6e"
+    },
+    "minimal_tests.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/minimal_tests.py",
+      "sha256": "ffee68b854fa205ea6d25fefc8231e6176587366e44e98a5366e506af2ba572b"
+    },
+    "mypy-clean.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/mypy-clean.log",
+      "sha256": "8bca95791673ca182db44addb517b80d46d715b8f0258c2a6303be9efcb05af1"
+    },
+    "mypy-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/mypy-final.log",
+      "sha256": "f1599b4be9ee781b3bd5312f67f744169d1058209fbca9660a18883852364561"
+    },
+    "native-decode-probe-fixed.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/native-decode-probe-fixed.log",
+      "sha256": "f56bcbb991d76a3bc89b0b03d2289dfe6308c0e5110df8179a23ede454092e9b"
+    },
+    "native-decode-probe-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/native-decode-probe-results.json",
+      "sha256": "52c18e17678bdc7db539a43cf208d57963133fd71aff5e77efe89f84ba0dcdb9"
+    },
+    "native-decode-probe.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/native-decode-probe.log",
+      "sha256": "5426bf59f0f49f7f5b73531ce2f3359c69a44c9ebab6369dabf9a74a965dc4b5"
+    },
+    "native_decode_kernel.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/native_decode_kernel.py",
+      "sha256": "52d4cdffef337ffaa548a46844e6ae85f1b6a1617244531d2204d8be0a1555fa"
+    },
+    "native_decode_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/native_decode_probe.py",
+      "sha256": "e90334bfa18020df514d55954b39e44ac9914b8a495a713c3cec18ec4de136bf"
+    },
+    "precommit-clean.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/precommit-clean.log",
+      "sha256": "76f75173dde7ed0150343411a83654ba64ec1da794723c38e97709db18294af3"
+    },
+    "precommit-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/precommit-final.log",
+      "sha256": "e760fa3a3995dae9ac7e8225589cd206214fbc2619bdb5cb601c733cd47c8998"
+    },
+    "precommit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/precommit.log",
+      "sha256": "97f097155027866eff015b537a45a80815721d529f151a4a65e0e07386eb6501"
+    },
+    "prefix-probe-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/prefix-probe-results.json",
+      "sha256": "4400676b50bb3ac701da7166dcadbb369a4f65b1afc825555098ff7760fd9c20"
+    },
+    "prefix-probe.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/prefix-probe.log",
+      "sha256": "322ae67b82ffe510fe59cd3abc61349301b98bc104deeeed4c76a61bd1718623"
+    },
+    "prefix_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/prefix_probe.py",
+      "sha256": "2ed9e4d1d59ae8db6b3e20be934d161fb1ac93b2c36588b1efc13bab8e0542af"
+    },
+    "prepare.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/prepare.py",
+      "sha256": "f0055f3c2999fd079ad5279518ab236d776e667e4241b28932db501d58534430"
+    },
+    "primitive-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/primitive-results.json",
+      "sha256": "7b93d3b6f68a3812fbe8f65166e6baabad9d1a20a4ba10b222192158c1cbef4c"
+    },
+    "primitive.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/primitive.log",
+      "sha256": "2f86c55c62fe854cd29195c8de863a73a62ce8d1d902f1c265a805adc457c569"
+    },
+    "primitive_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/primitive_probe.py",
+      "sha256": "36cb9c8db5195aa8ae95342234d0b0d615135dfd7a47de316fd079907f0ace29"
+    },
+    "quantizer-test.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/quantizer-test.log",
+      "sha256": "8ac99ce7e2d626e6239032051744d70df3a1999b90e75dbfcac8eff66bdcae79"
+    },
+    "ruff-initial.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/ruff-initial.log",
+      "sha256": "39469665c1e4ea142bc5369ce182c27b4930257cde6342f138e51e0967d2ef2e"
+    },
+    "save_report.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/save_report.py",
+      "sha256": "38a2e77e944451abb9b44f42e954d2998a3ae58253b3cbd30a16f235566324ed"
+    },
+    "train-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/train-final.log",
+      "sha256": "2200f52b818b0a0d96da31b793cfc2a9b8f2a51e8bd449c4fffb9d58b4c8c3f9"
+    },
+    "train-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/train-results.json",
+      "sha256": "69f231b6d59c1c5a5edd08da8675e0f86e1c64f3059efd7e5eeab969649c4ade"
+    },
+    "train.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/train.log",
+      "sha256": "bf883b669ee50312718a3dff213a82fa5e6559ff4f89437cd1b99f57cdbfbaff"
+    },
+    "train_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/train_check.py",
+      "sha256": "5bf8e11207c330e2fdfdf9039f9a3f09981818657b48538b704beed2470b0d70"
+    },
+    "unit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/unit.log",
+      "sha256": "b8b21877ef25efe4f1832d1c98034ac5e1429488dbcd635ae732ec1364599167"
+    },
+    "vendor.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/vendor.py",
+      "sha256": "aeeef926e6c8eb174289f227401b405c06e5d2312ad31af810ae3c0e61dd8a19"
+    },
+    "wide-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/wide-results.json",
+      "sha256": "673b839cfa9b28b703599000c80916ed7c163b2ff3d52849fd220b5dc3e80c55"
+    },
+    "wide.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/wide.log",
+      "sha256": "5538842c62cb5b8ceddc24df400cee9f623a85b3e5956d66733d502e9bf3c859"
+    },
+    "wide_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/wide_check.py",
+      "sha256": "731e743e1377563e96e2749df9391eaccd3ab98db2eaa5ee4aa79cb477bb2bf7"
+    },
+    "write_forward.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-parity-fix-20261005/write_forward.py",
+      "sha256": "a0f63bb040603a1280485c4125179978ee69d5fbfd14d9e25c3527dda817591b"
+    }
+  },
+  "reproduction": {
+    "env": "source tmp/megatron-only/env.sh; use the existing validation Python and pinned vLLM source on PYTHONPATH",
+    "scripts": [
+      "long_check.py",
+      "holdout_check.py",
+      "wide_check.py",
+      "megatron_parity.py",
+      "gradient_check.py",
+      "train_check.py"
+    ]
+  },
+  "remaining": [
+    "Matched full-model weights, projections/convolution/output normalization and checkpoint conversion",
+    "Engine scheduler and cache-slot lifecycle",
+    "Full-model QAT/QAD quality recovery",
+    "Other GPU/compiler versions and quantization recipes",
+    "Training-performance optimization in PR #2562"
+  ]
+}

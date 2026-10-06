@@ -1,0 +1,64 @@
+{
+  "scope": "CPU INT8 QDQ schedule reference; no native vLLM execution",
+  "device": "cpu",
+  "dtype": "float32",
+  "torch_version": "2.9.1+cu128",
+  "seed": 514,
+  "shape": {
+    "T": 16,
+    "H": 2,
+    "K": 16,
+    "V": 128
+  },
+  "source_sha256": {
+    "modelopt/torch/quantization/linear_attention/config.py": "dd743944cd025268cd2c5fa7d81dcfc102b578ab4d4b70171125a83a44e94dbe",
+    "modelopt/torch/quantization/linear_attention/decode.py": "05632afa8d9fa5a6c511efe3e38b1488fa1b7206dc9ae98a6f3220f76ac1e237",
+    "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+    "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "24fa57e99d8c6daea1a52c175a6aca04342b7d9996b73f533eeb0360bfa7c52c",
+    "modelopt/torch/quantization/tensor_quant.py": "995a7f0b7c105d1efb5c6e2e9b3c4efc4751ee435dcba9089732862b6a943e95"
+  },
+  "results": [
+    {
+      "kind": "GDN",
+      "block_v": 128,
+      "readout": "working",
+      "max_output_error": 0.0,
+      "max_consumed_state_error": 0.0
+    },
+    {
+      "kind": "GDN",
+      "block_v": 128,
+      "readout": "stored",
+      "max_output_error": 0.02254343032836914,
+      "max_consumed_state_error": 0.0
+    },
+    {
+      "kind": "GDN",
+      "block_v": 64,
+      "readout": "working",
+      "max_output_error": 0.05220260098576546,
+      "max_consumed_state_error": 0.2567150294780731
+    },
+    {
+      "kind": "KDA",
+      "block_v": 128,
+      "readout": "working",
+      "max_output_error": 0.0,
+      "max_consumed_state_error": 0.0
+    },
+    {
+      "kind": "KDA",
+      "block_v": 128,
+      "readout": "stored",
+      "max_output_error": 0.01966226100921631,
+      "max_consumed_state_error": 0.0
+    },
+    {
+      "kind": "KDA",
+      "block_v": 64,
+      "readout": "working",
+      "max_output_error": 0.05183375999331474,
+      "max_consumed_state_error": 0.2135387361049652
+    }
+  ]
+}
