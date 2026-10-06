@@ -280,7 +280,7 @@ python quantize.py \
     --hf-ckpt-dir ./flux-schnell-fp8
 ```
 
-To reuse a ModelOpt PyTorch checkpoint, add `--restore-from /path/to/checkpoint.pt` to the matching model's command. Keep the original model selection and any model-specific options. An ONNX file or TensorRT engine cannot be restored this way; use the saved ModelOpt checkpoint or quantize the original model again.
+To reuse a ModelOpt PyTorch checkpoint, add `--restore-from /path/to/checkpoint_dir/` to the matching model's command. This is the directory passed as `--quantized-torch-ckpt-save-path` in the original run; it must contain a `<backbone>.pt` file for each selected backbone (for example, `transformer.pt` for FLUX or `unet.pt` for SDXL). Keep the original model selection and any model-specific options. An ONNX file or TensorRT engine cannot be restored this way; use the saved ModelOpt checkpoint or quantize the original model again.
 
 The export contains weights and configuration for downstream loading. Preserve the complete export directory, including component configuration and quantization metadata. See the [unified HF export guide](../../docs/source/deployment/3_unified_hf.rst) for the artifact format.
 
