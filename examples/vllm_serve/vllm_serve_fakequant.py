@@ -218,30 +218,30 @@ def _fakequant_requested(modelopt_args) -> bool:
 
 
 def _autodetect_fakequant_paths(args) -> None:
-    """Fill in --modelopt-state-path / --modelopt-recipe-path / --modelopt-quant-file-path
-    from the model dir's standard export sidecar files, when unset. state-path wins over
-    recipe-path if both are present; quant-file-path (amax override) only applies when no
-    state path is in play.
-    """
-    model = args.model
-    manual_ptq_requested = bool(
-        args.modelopt_quant_cfg
-        or args.modelopt_kv_quant_cfg
-        or args.modelopt_quant_file_path
-        or args.modelopt_recipe_path
-        or args.modelopt_state_path
+    """Use local export sidecars when no quantization settings were provided."""
+    manual_ptq_requested = any(
+        (
+            args.modelopt_quant_cfg,
+            args.modelopt_kv_quant_cfg,
+            args.modelopt_quant_file_path,
+            args.modelopt_recipe_path,
+            args.modelopt_state_path,
+        )
     )
     if manual_ptq_requested:
         return
-    if not args.modelopt_state_path and os.path.exists(f"{model}/vllm_fq_modelopt_state.pth"):
-        args.modelopt_state_path = str(Path(model) / "vllm_fq_modelopt_state.pth")
 
-    if not args.modelopt_quant_file_path and not args.modelopt_state_path:
-        if os.path.exists(f"{model}/quantizer_state.pth") and os.path.exists(
-            f"{model}/quant_recipe.yaml"
-        ):
-            args.modelopt_quant_file_path = str(Path(model) / "quantizer_state.pth")
-            args.modelopt_recipe_path = str(Path(model) / "quant_recipe.yaml")
+    model_dir = Path(args.model)
+    state_path = model_dir / "vllm_fq_modelopt_state.pth"
+    if state_path.is_file():
+        args.modelopt_state_path = str(state_path)
+        return
+
+    quant_file_path = model_dir / "quantizer_state.pth"
+    recipe_path = model_dir / "quant_recipe.yaml"
+    if quant_file_path.is_file() and recipe_path.is_file():
+        args.modelopt_quant_file_path = str(quant_file_path)
+        args.modelopt_recipe_path = str(recipe_path)
 
 
 def _apply_fakequant_env(args, rest_argv: list) -> None:

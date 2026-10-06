@@ -122,21 +122,19 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         )
         return ("group", group_key, value)
 
-    # Fused HF expert containers keep one activation quantizer beside their packed 3-D
-    # expert weights instead of one quantizer below each ``experts.<index>`` module.
-    # Nemotron-H's non-gated experts use ``up_proj_*``; gated variants use
-    # ``gate_up_proj_*``. Both feed vLLM's routed-expert w13 projection.
-    fused_expert_first_match = re.search(
-        r"(.*\.experts)\.(?:gate_up_proj|up_proj)_([^.]+_quantizer)(\..+)?$", key
+    # Fused HF experts keep quantizers beside packed expert weights. Gate/up
+    # map to w13; down maps to w2.
+    fused_expert_match = re.search(
+        r"(.*\.experts)\.(gate_up|up|down)_proj_([^.]+_quantizer)(\..+)?$", key
     )
-    if fused_expert_first_match:
-        suffix = fused_expert_first_match.group(3) or ""
+    if fused_expert_match:
+        projection = "w2" if fused_expert_match.group(2) == "down" else "w13"
         group_key = (
-            fused_expert_first_match.group(1)
+            fused_expert_match.group(1)
             + _EXPERTS_INFIX
-            + ".w13_"
-            + fused_expert_first_match.group(2)
-            + suffix
+            + f".{projection}_"
+            + fused_expert_match.group(3)
+            + (fused_expert_match.group(4) or "")
         )
         return ("group", group_key, value)
 
@@ -158,18 +156,6 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
             + _EXPERTS_INFIX
             + ".w2_"
             + expert_down_match.group(2)
-            + suffix
-        )
-        return ("group", group_key, value)
-
-    fused_expert_down_match = re.search(r"(.*\.experts)\.down_proj_([^.]+_quantizer)(\..+)?$", key)
-    if fused_expert_down_match:
-        suffix = fused_expert_down_match.group(3) or ""
-        group_key = (
-            fused_expert_down_match.group(1)
-            + _EXPERTS_INFIX
-            + ".w2_"
-            + fused_expert_down_match.group(2)
             + suffix
         )
         return ("group", group_key, value)
@@ -651,34 +637,14 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
 
     current_state_dict = model.state_dict()
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
-    model_quant_keys = [key for key in current_state_dict if "quantizer" in key]
-    ckpt_key_set = set(checkpoint_quant_keys)
     global_ckpt_key_set = _union_quantizer_keys_across_ranks(checkpoint_quant_keys)
-    # For weight quantizers absent from the checkpoint the weights were already fake-quantized
-    # at export time (amax folded into weights). Disable those quantizers so that fold_weight
-    # is a no-op for them. Non-weight keys missing on this rank but present on another rank's
-    # shard are omitted from global_missing (all_gather union of key strings).
-    missing_wq_module_paths: set[str] = set()
-    global_missing_non_wq: list[str] = []
-    for key in model_quant_keys:
-        if key in ckpt_key_set:
-            continue
-        if "weight_quantizer" in key:
-            # Per-rank shard: only disable using this rank's checkpoint contents.
-            parts = key.split(".")
-            weight_quantizer_index = next(
-                (i for i, p in enumerate(parts) if p.endswith("weight_quantizer")),
-                None,
-            )
-            if weight_quantizer_index is not None:
-                missing_wq_module_paths.add(".".join(parts[: weight_quantizer_index + 1]))
-            else:
-                raise ValueError(
-                    f"Missing checkpoint key {key!r} looks like a weight quantizer, but no path "
-                    "component ends with 'weight_quantizer'; cannot map to a module to disable."
-                )
-        elif key not in global_ckpt_key_set:
-            global_missing_non_wq.append(key)
+    # Report non-weight quantizer keys absent on every rank. Exported weights are
+    # already folded, so weight quantizers are disabled below regardless of checkpoint keys.
+    global_missing_non_wq = [
+        key
+        for key in current_state_dict
+        if "quantizer" in key and "weight_quantizer" not in key and key not in global_ckpt_key_set
+    ]
 
     if global_missing_non_wq:
         keys = sorted(global_missing_non_wq)
@@ -689,28 +655,17 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
             f"{sample}{' ... (+{rest} more)' if rest > 0 else ''}"
         )
 
-    unconditional_wq_disabled = 0
+    disabled_weight_quantizers = 0
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and is_weight_quantizer_state_key(
             get_unwrapped_name(name, model)
         ):
-            if module.is_enabled:
-                print(f"[load_state_dict_from_path] disabling weight quantizer: {name}")
             module.disable()
-            unconditional_wq_disabled += 1
+            disabled_weight_quantizers += 1
     print(
         f"[load_state_dict_from_path] {len(checkpoint_quant_keys)} checkpoint quantizer keys, "
-        f"{len(missing_wq_module_paths)} weight quantizers flagged missing via state_dict diff, "
-        f"{unconditional_wq_disabled} weight quantizer modules disabled unconditionally"
+        f"{disabled_weight_quantizers} weight quantizers disabled"
     )
-
-    for name, module in model.named_modules():
-        if (
-            name in missing_wq_module_paths
-            and isinstance(module, TensorQuantizer)
-            and hasattr(module, "disable")
-        ):
-            module.disable()
 
     # Update quant values
     saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)

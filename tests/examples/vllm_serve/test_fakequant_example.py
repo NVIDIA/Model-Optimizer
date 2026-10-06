@@ -111,25 +111,56 @@ def test_fakequant_launcher_rejects_unusable_quant_file(
         launcher.main()
 
 
-def test_manual_quantizer_state_and_cfg_prevent_full_state_autodetection(
-    monkeypatch, clean_launcher_env, tmp_path
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "modelopt_quant_cfg",
+        "modelopt_kv_quant_cfg",
+        "modelopt_quant_file_path",
+        "modelopt_recipe_path",
+        "modelopt_state_path",
+    ],
+)
+def test_manual_quantization_setting_prevents_sidecar_autodetection(
+    monkeypatch, clean_launcher_env, tmp_path, setting
 ):
     launcher = _load_fakequant_launcher(monkeypatch)
     (tmp_path / "vllm_fq_modelopt_state.pth").touch()
-    explicit_quantizer_state = "/explicit/quantizer_state.pth"
     args = SimpleNamespace(
         model=str(tmp_path),
-        modelopt_quant_cfg="FP8_DEFAULT_CFG",
+        modelopt_quant_cfg=None,
         modelopt_kv_quant_cfg=None,
-        modelopt_quant_file_path=explicit_quantizer_state,
+        modelopt_quant_file_path=None,
+        modelopt_recipe_path=None,
+        modelopt_state_path=None,
+    )
+    setattr(args, setting, "explicit-value")
+    original_args = vars(args).copy()
+
+    launcher._autodetect_fakequant_paths(args)
+
+    assert vars(args) == original_args
+
+
+def test_full_state_sidecar_takes_priority(monkeypatch, clean_launcher_env, tmp_path):
+    launcher = _load_fakequant_launcher(monkeypatch)
+    (tmp_path / "vllm_fq_modelopt_state.pth").touch()
+    (tmp_path / "quantizer_state.pth").touch()
+    (tmp_path / "quant_recipe.yaml").touch()
+    args = SimpleNamespace(
+        model=str(tmp_path),
+        modelopt_quant_cfg=None,
+        modelopt_kv_quant_cfg=None,
+        modelopt_quant_file_path=None,
         modelopt_recipe_path=None,
         modelopt_state_path=None,
     )
 
     launcher._autodetect_fakequant_paths(args)
 
-    assert args.modelopt_quant_file_path == explicit_quantizer_state
-    assert args.modelopt_state_path is None
+    assert args.modelopt_state_path == str(tmp_path / "vllm_fq_modelopt_state.pth")
+    assert args.modelopt_quant_file_path is None
+    assert args.modelopt_recipe_path is None
 
 
 def test_fakequant_launcher_autodetects_megatron_sidecars(

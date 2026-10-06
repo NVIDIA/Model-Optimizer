@@ -341,7 +341,7 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
 
             quant_cfg = quantizer_recipe_to_quant_cfg(raw_recipe, model)
         else:
-            recipe = load_recipe(quant_config["recipe_path"])
+            recipe = load_recipe(recipe_path)
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
             )
