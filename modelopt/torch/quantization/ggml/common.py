@@ -19,11 +19,13 @@ import math
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import NamedTuple
 
 import torch
 
 GGML_BLOCK_SIZE = 256
+_SIGNED_INT_OF_SIZE = {2: torch.int16, 4: torch.int32, 8: torch.int64}
 
 
 class _CacheKey(NamedTuple):
@@ -132,6 +134,49 @@ def _matching_cache(
     return None
 
 
+def pin_packed_weight(quantizer, format_name: str, packed_weights: torch.Tensor) -> None:
+    """Make ``packed_weights`` the ``format_name`` payload of ``quantizer``'s weight while it fits.
+
+    For payloads an algorithm chose itself, such as GPTQ, which leaves the weight equal to their
+    decoding: encoding that decoding again does not return the same codes. The pin is a buffer, so
+    it moves with offloading and is kept by ``mto.save``/``restore`` and layerwise checkpoints. Fake
+    quant and export use it while the weight, or the rows an export takes from it, is exactly its
+    decoding, and encode afresh otherwise -- including once the quantizer is given another format.
+    """
+    quantizer._set_buffer(_pin_name(format_name), packed_weights)
+    quantizer._quantizer_cache = None
+
+
+def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
+    """The ``format_name`` payload pinned to ``quantizer``, if any."""
+    return getattr(quantizer, _pin_name(format_name), None)
+
+
+def _pin_name(format_name: str) -> str:
+    return f"_ggml_pinned_{format_name}"
+
+
+def _matching_rows(table: torch.Tensor, rows: torch.Tensor) -> torch.Tensor | None:
+    """For each row of ``rows``, the index of an equal row of ``table``; None if one has none."""
+    table_keys, row_keys = _row_keys(table), _row_keys(rows)
+    order = table_keys.argsort()
+    found = order[torch.searchsorted(table_keys[order], row_keys).clamp_max(len(order) - 1)]
+    return found if torch.equal(table[found], rows) else None
+
+
+def _row_keys(x: torch.Tensor) -> torch.Tensor:
+    """A 64-bit hash of each row's bits; equal rows always get equal keys.
+
+    Integer sums wrap and are associative, so unlike a floating-point projection the key does not
+    depend on how the reduction is ordered, which differs between differently shaped products.
+    """
+    multipliers = torch.randint(
+        -(2**62), 2**62, (x.shape[-1],), generator=torch.Generator().manual_seed(0)
+    )
+    bits = x.contiguous().view(_SIGNED_INT_OF_SIZE[x.element_size()]).to(torch.int64)
+    return (bits * multipliers.to(x.device)).sum(-1)
+
+
 def fake_quantize_with_cache(
     inputs: torch.Tensor,
     quantizer,
@@ -220,7 +265,7 @@ class GGMLFormat:
             decode_chunk_size=(
                 self.decode_chunk_size if decode_chunk_size is None else decode_chunk_size
             ),
-            quantize=self.quantize,
+            quantize=partial(self._pinned_or_quantize, quantizer),
             dequantize=self.dequantize,
         )
 
@@ -229,7 +274,8 @@ class GGMLFormat:
 
         Export calls this. A model that ran a forward since quantization already holds each
         weight's payload, and reusing it both skips a second search and exports exactly the
-        bytes the evaluated model decoded. Any other tensor is packed afresh.
+        bytes the evaluated model decoded. Any other tensor is packed afresh, or takes the payload
+        pinned to ``quantizer`` if it is that payload's decoding.
         """
         cache = (
             _matching_cache(quantizer, weight, self.name, any_contiguous_view=True)
@@ -237,10 +283,49 @@ class GGMLFormat:
             else None
         )
         if cache is None:
-            return self.quantize(weight)[0]
+            return self._pinned_or_quantize(quantizer, weight)[0]
         return cache.packed_weights.reshape(
             *weight.shape[:-1], weight.shape[-1] // self.block_size, self.block_bytes
         )
+
+    def _pinned_or_quantize(
+        self, quantizer, weight: torch.Tensor, *, block_chunk_size: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``quantize(weight)``, or the pinned payload's rows if ``weight`` decodes them."""
+        packed = self._pinned_rows(quantizer, weight)
+        if packed is not None:
+            return packed, torch.tensor(weight.shape, dtype=torch.int64)
+        if block_chunk_size is None:
+            return self.quantize(weight)
+        return self.quantize(weight, block_chunk_size=block_chunk_size)
+
+    def _pinned_rows(self, quantizer, weight: torch.Tensor) -> torch.Tensor | None:
+        """The pinned payload of ``weight``, a view of the pinned weight or rows taken from it.
+
+        Fake quant hands over the pinned weight itself in 256-value rows; export may hand over row
+        slices of it, such as the gate and up halves of a fused projection. The comparison syncs,
+        but it only runs for weights the identity cache has not seen.
+        """
+        pinned = pinned_packed_weight(quantizer, self.name)
+        width = weight.shape[-1] // self.block_size
+        if (
+            pinned is None
+            or weight.shape[-1] % self.block_size
+            or pinned.numel() % (width * self.block_bytes)
+        ):
+            return None
+        pinned = pinned.to(weight.device).reshape(-1, width, self.block_bytes)
+        table = self.dequantize(
+            pinned, torch.tensor((pinned.shape[0], weight.shape[-1])), dtype=torch.float32
+        ).to(weight.dtype)
+        rows = weight.reshape(-1, weight.shape[-1])
+        if rows.shape == table.shape and torch.equal(rows, table):
+            index = slice(None)
+        else:
+            index = _matching_rows(table, rows)
+            if index is None:
+                return None
+        return pinned[index].reshape(*weight.shape[:-1], width, self.block_bytes)
 
 
 # Compatibility alias for callers that imported the record type before the registry was

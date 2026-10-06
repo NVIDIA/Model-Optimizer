@@ -15,8 +15,9 @@
 
 """GGML-compatible block quantization formats."""
 
-# Importing the backend installs its TensorQuantizer dispatch entry.
+# Importing these installs the TensorQuantizer dispatch entry and the GPTQ helper.
 from . import backend as _backend
+from . import gptq as _gptq
 from .iq1_m import *
 from .iq1_m import __all__ as _iq1_m_all
 from .iq1_s import *
