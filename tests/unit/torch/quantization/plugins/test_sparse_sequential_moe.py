@@ -23,7 +23,8 @@ import torch.nn as nn
 
 pytest.importorskip("transformers")
 
-from modelopt.torch.quantization.nn import QuantModuleRegistry
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _is_sparse_sequaential_moe_block,
     register_sparse_moe_on_the_fly,
@@ -89,6 +90,37 @@ class _MoEBlockFallback(nn.Module):
             mask = (selected == i).any(dim=-1)
             if mask.any():
                 out[mask] += self.experts[i](hidden_states[mask])
+        return out
+
+
+class _RoutedExpertsGate(nn.Module):
+    """A router gate that names its expert count ``n_routed_experts`` and returns logits."""
+
+    def __init__(self, top_k=2, num_experts=4):
+        super().__init__()
+        self.top_k = top_k
+        self.n_routed_experts = num_experts
+        self.linear = nn.Linear(8, num_experts)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+class _MoEBlockRoutedExpertsGate(nn.Module):
+    """Matches the primary detection path through gate.top_k + gate.n_routed_experts."""
+
+    def __init__(self, num_experts=4, top_k=2):
+        super().__init__()
+        self.gate = _RoutedExpertsGate(top_k=top_k, num_experts=num_experts)
+        self.experts = nn.ModuleList([nn.Linear(8, 8) for _ in range(num_experts)])
+
+    def forward(self, hidden_states):
+        _, selected = torch.topk(self.gate(hidden_states), self.gate.top_k, dim=-1)
+        out = torch.zeros_like(hidden_states)
+        for i, expert in enumerate(self.experts):
+            mask = (selected == i).any(dim=-1)
+            if mask.any():
+                out[mask] += expert(hidden_states[mask])
         return out
 
 
@@ -225,3 +257,62 @@ class TestQuantSparseSequentialMoe:
         with torch.no_grad():
             converted.gate(torch.randn(8, 8))
         assert converted.expert_token_count.sum().item() == 8 * 2
+
+    @pytest.mark.parametrize(
+        ("block_cls", "top_k_owner"),
+        [
+            (_MoEBlockWithGateRouter, "gate"),
+            (_MoEBlockFallback, "block"),  # top_k + num_experts on the block, nn.Linear gate
+            (_MoEBlockRoutedExpertsGate, "gate"),  # gate.n_routed_experts instead of num_experts
+        ],
+    )
+    def test_calib_forward_supports_detected_layouts(self, block_cls, top_k_owner):
+        """Every layout detection accepts must also calibrate with token forcing."""
+        converted = self._convert(block_cls(num_experts=4, top_k=1))
+        owner = converted.gate if top_k_owner == "gate" else converted
+        converted._moe_calib_experts_ratio = 0.75
+        converted.experts[0]._if_calib = True
+
+        with torch.no_grad():
+            converted(torch.randn(16, 8))
+        assert owner.top_k == 1  # restored after the forced pass
+        # The forced pass routed each token to round(4 * 0.75) = 3 experts.
+        assert converted.expert_token_count.sum().item() == 16 * 3
+
+
+class _TinySequentialMoEModel(nn.Module):
+    def __init__(self, block):
+        super().__init__()
+        self.block = block
+
+    def forward(self, x):
+        return self.block(x)
+
+
+@pytest.mark.parametrize("block_cls", [_MoEBlockWithGateRouter, _MoEBlockFallback])
+def test_quantize_sequential_moe_with_token_forcing(block_cls):
+    """End-to-end: mtq.quantize calibrates every expert of a sequential MoE via token forcing."""
+    torch.manual_seed(0)
+    model = _TinySequentialMoEModel(block_cls(num_experts=4, top_k=1))
+    calib_data = [torch.randn(32, 8) for _ in range(2)]
+    quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {"method": "max", "moe_calib_experts_ratio": 0.75}
+
+    def forward_loop(m):
+        for x in calib_data:
+            m(x)
+
+    mtq.quantize(model, quant_cfg, forward_loop)
+
+    block = model.block
+    assert block._moe_calib_experts_ratio == 0.75
+    # Each calibration batch routed every token to round(4 * 0.75) = 3 experts.
+    assert block.expert_token_count.sum().item() == 2 * 32 * 3
+    assert (block.expert_token_count > 0).all()
+    for name, module in block.experts.named_modules():
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
+            assert module.amax is not None, f"expert quantizer {name} was not calibrated"
+    owner = block.gate if hasattr(block.gate, "top_k") else block
+    assert owner.top_k == 1  # routing restored after calibration
+    with torch.no_grad():
+        assert torch.isfinite(model(torch.randn(4, 8))).all()

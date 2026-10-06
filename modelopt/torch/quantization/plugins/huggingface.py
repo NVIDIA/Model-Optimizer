@@ -680,19 +680,18 @@ class _QuantSparseSequentialMoe(QuantModule):
         self._moe_calib_experts_ratio = None
         self._token_counting_initialized = False
 
+    def _num_experts(self) -> int:
+        """Expert count from the gate, the block or the experts container (0 if unknown)."""
+        for obj in [getattr(self, "gate", None), self, getattr(self, "experts", None)]:
+            for attr in ("num_experts", "n_routed_experts"):
+                if getattr(obj, attr, None):
+                    return getattr(obj, attr)
+        return len(self.experts) if hasattr(self.experts, "__len__") else 0
+
     def _init_token_counting(self):
         """Lazy-init token counting infra (buffer + gate hook). Called once from forward."""
         self._token_counting_initialized = True
-        num_experts = 0
-        for obj in [getattr(self, "gate", None), self, getattr(self, "experts", None)]:
-            if obj is not None:
-                for attr in ("num_experts", "n_routed_experts"):
-                    if hasattr(obj, attr):
-                        num_experts = getattr(obj, attr)
-                        break
-            if num_experts:
-                break
-
+        num_experts = self._num_experts()
         if num_experts == 0:
             warnings.warn(
                 f"{self.__class__.__name__}: could not resolve num_experts; "
@@ -733,17 +732,22 @@ class _QuantSparseSequentialMoe(QuantModule):
         # During calibration, forward all tokens to a larger fraction of experts to improve
         # calibration coverage, then re-run with the original top_k for actual outputs.
         if is_calib:
-            # Skip counting when all experts are calibrated (ratio == 1.0).
-            self._count_expert_tokens = self._moe_calib_experts_ratio < 1.0
-            if self._count_expert_tokens and not self._token_counting_initialized:
+            # Skip counting when all experts are calibrated (ratio == 1.0). Init first: it resets
+            # the counting flag, which would otherwise drop the first batch's counts.
+            count_tokens = self._moe_calib_experts_ratio < 1.0
+            if count_tokens and not self._token_counting_initialized:
                 self._init_token_counting()
-            assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
-            original_top_k = self.gate.top_k
-            self.gate.top_k = max(
-                original_top_k, round(self.gate.num_experts * self._moe_calib_experts_ratio)
+            self._count_expert_tokens = count_tokens
+            # top_k lives on the router gate, or on the block itself (e.g. remote-code MoEs)
+            top_k_owner = self.gate if hasattr(getattr(self, "gate", None), "top_k") else self
+            original_top_k = top_k_owner.top_k
+            top_k_owner.top_k = max(
+                original_top_k, round(self._num_experts() * self._moe_calib_experts_ratio)
             )
-            super().forward(hidden_states)
-            self.gate.top_k = original_top_k
+            try:
+                super().forward(hidden_states)
+            finally:
+                top_k_owner.top_k = original_top_k
             self._count_expert_tokens = False
 
         output = super().forward(hidden_states)
