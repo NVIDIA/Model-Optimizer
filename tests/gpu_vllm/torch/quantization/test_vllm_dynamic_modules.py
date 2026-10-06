@@ -31,6 +31,7 @@ from __future__ import annotations
 import gc
 import importlib.util
 import inspect
+import sys
 from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import yaml
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
     create_tiny_deepseek_v4_config_dir,
@@ -72,6 +74,8 @@ from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBa
 def _load_example_module(name: str):
     """Import a module from ``examples/vllm_serve/`` by path (not an installed package)."""
     path = Path(__file__).parents[4] / "examples/vllm_serve" / f"{name}.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(f"{name}_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -701,7 +705,7 @@ def test_kv_nvfp4_mla_quantizer_replays_in_cuda_graph(name, shape):
     assert torch.equal(static_out, quantizer(new_in))
 
 
-def _quantize_and_summarize(self):
+def _quantize_and_summarize(self, recipe_path=None):
     """Run on the worker via ``LLM.collective_rpc``.
 
     Module-level so it survives pickle over engine-core IPC. ``self`` is the
@@ -714,8 +718,13 @@ def _quantize_and_summarize(self):
         # ``num_tokens=1`` is enough for the ``"max"`` calibrator.
         self.model_runner._dummy_run(1)
 
+    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+    if recipe_path is not None:
+        quant_cfg = _load_example_module("vllm_ptq_utils").get_quant_config(
+            {"recipe_path": recipe_path, "quant_cfg": None, "kv_quant_cfg": None}, model
+        )
     with disable_compilation(model):
-        mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=_forward_loop)
+        mtq.quantize(model, quant_cfg, forward_loop=_forward_loop)
 
     parallel_linear_counts: dict[str, int] = {}
     moe_count = 0
@@ -782,6 +791,11 @@ def _quantize_and_summarize(self):
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
         "enabled_quantizer_count": enabled_quantizer_count,
+        "enabled_quantizers": {
+            name: {"num_bits": m.num_bits, "axis": m.axis, "block_sizes": m.block_sizes}
+            for name, m in model.named_modules()
+            if isinstance(m, TensorQuantizer) and m.is_enabled
+        },
         "quantizer_names": sorted(
             name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
         ),
@@ -1032,9 +1046,21 @@ def test_tiny_llama_quantize(tiny_llama_llm):
     _assert_quantizer_amax_is_static(summary)
 
 
-def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
-    """Tiny Qwen3-MoE adds FusedMoE coverage on top of the dense linears."""
-    summaries = tiny_qwen3_moe_llm.collective_rpc(_quantize_and_summarize)
+def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
+    """Load an exported recipe on real Qwen3-MoE linears and fused experts."""
+    active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
+    recipe = {}
+    for layer in range(2):
+        for projection in ("q", "k", "v"):
+            recipe[f"model.layers.{layer}.self_attn.{projection}_proj.input_quantizer"] = active
+        for expert in range(4):
+            for projection in ("gate", "up", "down"):
+                prefix = f"model.layers.{layer}.mlp.experts.{expert}.{projection}_proj"
+                recipe[f"{prefix}.input_quantizer"] = active
+                recipe[f"{prefix}.weight_quantizer"] = {"_disabled": True}
+    path = tmp_path / "quant_recipe.yaml"
+    path.write_text(yaml.safe_dump(recipe))
+    summaries = tiny_qwen3_moe_llm.collective_rpc(_quantize_and_summarize, args=(str(path),))
     summary = summaries[0]
 
     assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
@@ -1048,6 +1074,12 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
     assert summary["attention_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+    enabled = summary["enabled_quantizers"]
+    assert len(enabled) == 6  # One fused QKV and two expert projections per layer.
+    assert all("weight_quantizer" not in name for name in enabled)
+    assert all(
+        cfg == {"num_bits": (4, 3), "axis": None, "block_sizes": None} for cfg in enabled.values()
+    )
 
     # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:
     # a stale mapping is dropped silently at load and serves uncalibrated experts.
