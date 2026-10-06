@@ -17,12 +17,13 @@
 
 import pytest
 
+from modelopt.torch.opt import searcher as searcher_module
 from modelopt.torch.quantization.algorithms import AutoQuantizeGradientSearcher
 
 
-@pytest.mark.parametrize("layout", ["existing_directory", "new_directory", "file"])
-def test_search_checkpoint_fresh_and_resume(tmp_path, layout):
-    checkpoint = tmp_path / ("state.pth" if layout == "file" else "state")
+@pytest.mark.parametrize("layout", ["existing_directory", "new_directory", "file", "legacy_file"])
+def test_search_checkpoint_fresh_and_resume(tmp_path, monkeypatch, layout):
+    checkpoint = tmp_path / ("state.pth" if layout.endswith("file") else "state")
     if layout == "existing_directory":
         checkpoint.mkdir()
     searcher = AutoQuantizeGradientSearcher()
@@ -32,5 +33,12 @@ def test_search_checkpoint_fresh_and_resume(tmp_path, layout):
     searcher.best["score"] = 3.0
     searcher.save_search_checkpoint()
     searcher.reset_search()
-    assert searcher.load_search_checkpoint()
+    if layout == "legacy_file":
+        monkeypatch.setattr(searcher_module.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(searcher_module.dist, "rank", lambda group=None: 0)
+        assert not checkpoint.with_name("state0.pth").exists()
+        with pytest.warns(UserWarning, match="falling back to"):
+            assert searcher.load_search_checkpoint()
+    else:
+        assert searcher.load_search_checkpoint()
     assert searcher.best["score"] == 3.0

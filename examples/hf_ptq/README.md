@@ -412,6 +412,13 @@ search-disabled layers, and cost-excluded layers — see
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/model_type/<model>/auto_quantize/`.
 
+For non-FSDP2 runs with `--batch_size 0`, automatic sizing probes the recipe's scoring workload.
+Gradient recipes retain gradient activations; KL recipes instead retain reference logits and
+FP32 log-probabilities across candidate forwards and KL computation. Composed recipes probe both
+stages. KL batch sizes can therefore differ from the previous gradient-enabled probe, changing
+the number of scoring batches derived from `score_size`. Set `--batch_size` explicitly when
+comparing runs with an identical batching schedule.
+
 [Script](./scripts/huggingface_example.sh)
 
 ```bash

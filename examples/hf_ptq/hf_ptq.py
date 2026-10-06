@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
 from autoquant_utils import (
+    _get_autoquant_memory_probe,
     _quantize_config_explicitly_enables_kv,
     _recipe_is_auto_quantize,
     auto_quantize,
@@ -1059,6 +1060,11 @@ def quantize_main(
                 sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
                 sample_input_single_batch=sample_input_single_batch,
                 enable_grad=aq_config is not None and aq_config.auto_quantize_method == "gradient",
+                forward_step=(
+                    _get_autoquant_memory_probe(recipe, getattr(full_model, "lm_head", None))
+                    if run_auto_quant
+                    else None
+                ),
             )
             args.batch_size = min(args.batch_size, sum(args.calib_size))
 
@@ -1319,8 +1325,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
-            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
-            "speculative / auto-quantize / sparsity / VLM / MTP)."
+            "--use_seq_device_map. Includes experimental weight and KV-cache AutoQuantize. "
+            "v1: standard causal-LM only (no VILA / pack-quantized / speculative / sparsity / VLM / MTP)."
         ),
     )
     parser.add_argument(

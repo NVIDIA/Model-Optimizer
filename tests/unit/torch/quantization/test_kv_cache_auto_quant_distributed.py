@@ -115,11 +115,28 @@ def _distributed_search(rank, world_size, directory, expected):
     with pytest.raises(ValueError, match="NaN or Inf logits"):
         _search(batches, 2, forward_step=nonfinite)
 
+    for coverage in ("missing", "shape"):
+
+        def inconsistent_scales(model, batch):
+            quantizer = model.model.layers[0].self_attn.k_bmm_quantizer
+            if rank == 0 and coverage == "missing":
+                quantizer.disable_calib()
+            output = _logits(model, batch)
+            if rank == 0 and coverage == "shape" and quantizer._calibrator._calib_amax is not None:
+                quantizer._calibrator._calib_amax = quantizer._calibrator._calib_amax.reshape(1)
+            return output
+
+        with pytest.raises(
+            ValueError, match="matching candidate scale presence, shapes and dtypes"
+        ):
+            _search(batches[:1], 1, forward_step=inconsistent_scales)
+
 
 @pytest.mark.timeout(180)
-def test_distributed_kv_search_and_resume_matches_global_data(tmp_path):
+@pytest.mark.parametrize("backend", ["gloo", "cpu:gloo"])
+def test_distributed_kv_search_and_resume_matches_global_data(tmp_path, backend):
     expected = _search(_batches(), 4)
-    pool = DistributedWorkerPool(world_size=2, backend="gloo")
+    pool = DistributedWorkerPool(world_size=2, backend=backend)
     try:
         pool.run(partial(_distributed_search, directory=tmp_path / "search", expected=expected))
     finally:

@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
 from modelopt.torch.utils.dataset_utils import create_forward_loop
 from modelopt.torch.utils.distributed import size as world_size
 
@@ -36,6 +37,35 @@ _FSDP2_AUTOQUANT_WARNING = (
     "AutoQuantize with --use_fsdp2 is experimental; use at your own risk. "
     "Resume with the same world size, model, recipe, and calibration data."
 )
+
+
+def _get_autoquant_memory_probe(recipe: ModelOptAutoQuantizeRecipe, lm_head=None):
+    """Include retained reference logits and KL intermediates in batch-size probing."""
+    stages = (recipe.auto_quantize, recipe.kv_auto_quantize)
+    if not any(stage is not None and stage.auto_quantize_method == "kl_div" for stage in stages):
+        return None
+
+    def probe(model, inputs):
+        # Composed searches must still budget for the gradient stage's activations.
+        if torch.is_grad_enabled():
+            model(inputs)
+
+        def get_logits():
+            output = model(inputs)
+            logits = (
+                output.logits if hasattr(output, "logits") else lm_head(output.last_hidden_state)
+            )
+            return _select_unpadded_logits(logits, {"attention_mask": torch.ones_like(inputs)})
+
+        with torch.no_grad():
+            logits_ref = get_logits()
+            log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
+            # Keep the previous candidate alive during the next forward, as the scorer does.
+            for _ in range(2):
+                logits_quant = get_logits()
+                _forward_kl(logits_quant, log_prob_ref)
+
+    return probe
 
 
 # Presets safe to mix into an AutoQuantize search *and* write via the unified HF checkpoint

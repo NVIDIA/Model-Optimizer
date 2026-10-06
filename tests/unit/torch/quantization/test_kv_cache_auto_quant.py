@@ -35,6 +35,7 @@ from modelopt.torch.quantization.kv_cache_auto_quant import (
     _validate_kv_only_config,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.utils.distributed import ParallelState
 
 
 @pytest.fixture
@@ -741,10 +742,21 @@ def test_public_kv_autoquant_rejects_unmatched_or_unexportable_candidates_before
         assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_rejects_invalid_formats_before_mutation():
+@pytest.mark.parametrize("unsupported_sharding", [False, True])
+def test_public_kv_autoquant_rejects_invalid_inputs_before_mutation(
+    monkeypatch, unsupported_sharding
+):
     model = get_tiny_llama(num_hidden_layers=1)
     original_types = {name: type(module) for name, module in model.named_modules()}
-    with pytest.raises(ValueError, match="non-empty quantization_formats"):
+    if unsupported_sharding:
+        monkeypatch.setattr(model_quant.dist, "size", lambda: 2)
+        monkeypatch.setattr(model_quant.dist, "is_dtensor_sharded", lambda _: True)
+        monkeypatch.setattr(model_quant.dist, "is_fsdp2_model", lambda _: False)
+    error = NotImplementedError if unsupported_sharding else ValueError
+    message = (
+        "supports DP/FSDP2, not TP" if unsupported_sharding else "non-empty quantization_formats"
+    )
+    with pytest.raises(error, match=message):
         mtq.auto_quantize(
             model,
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
@@ -755,6 +767,23 @@ def test_public_kv_autoquant_rejects_invalid_formats_before_mutation():
 
     assert not hasattr(model, "_modelopt_state")
     assert {name: type(module) for name, module in model.named_modules()} == original_types
+
+
+@pytest.mark.parametrize("group", ["tensor_parallel_group", "expert_model_parallel_group"])
+def test_public_kv_autoquant_rejects_tp_ep_before_forward(monkeypatch, group):
+    model = get_tiny_llama(num_hidden_layers=1)
+    model.parallel_state = ParallelState()
+    monkeypatch.setattr(getattr(model.parallel_state, group), "world_size", lambda: 2)
+    with pytest.raises(NotImplementedError, match="supports DP/FSDP2, not TP or EP"):
+        mtq.auto_quantize(
+            model,
+            {"effective_bits": 8.0, "cost_model": "kv_cache"},
+            [_kv_config((4, 3), 8.0).model_dump(exclude_none=True)],
+            [torch.ones((1, 8), dtype=torch.long)],
+            lambda *_: pytest.fail("TP/EP must be rejected before calibration."),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
 
 
 def test_gradient_then_kv_autoquant_resumes_without_forward(tmp_path, monkeypatch):

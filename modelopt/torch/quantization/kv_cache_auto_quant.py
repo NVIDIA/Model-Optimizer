@@ -574,14 +574,28 @@ def _validate_persistent_candidate_scales(
     candidate_quantizers: dict[str, dict[str, dict[str, TensorQuantizer]]],
 ) -> None:
     """Require every calibrated candidate scale to be persistent in its state dict."""
+    scales = {}
     for layer_name, layer_candidates in candidate_quantizers.items():
         for candidate_name, layer_quantizers in layer_candidates.items():
             for attr, quantizer in layer_quantizers.items():
-                if "_amax" not in quantizer.state_dict():
-                    raise ValueError(
-                        f"KV-cache AutoQuantize candidate {candidate_name!r} for "
-                        f"{layer_name!r}/{attr} has no persistent export scale after calibration."
-                    )
+                amax = quantizer.state_dict().get("_amax")
+                scales[layer_name, candidate_name, attr] = (
+                    (tuple(amax.shape), amax.dtype) if amax is not None else None
+                )
+    if size() > 1:
+        rank_scales = [None] * size()
+        dist.all_gather_object(rank_scales, scales)
+        if any(other != rank_scales[0] for other in rank_scales):
+            raise ValueError(
+                "Distributed KV-cache AutoQuantize requires matching candidate scale presence, "
+                "shapes and dtypes across ranks; check calibration coverage."
+            )
+    for (layer_name, candidate_name, attr), metadata in scales.items():
+        if metadata is None:
+            raise ValueError(
+                f"KV-cache AutoQuantize candidate {candidate_name!r} for "
+                f"{layer_name!r}/{attr} has no persistent export scale after calibration."
+            )
 
 
 class QuantKVRecipeHparam(Hparam):
@@ -700,9 +714,10 @@ class AutoQuantizeKVSearcher(BaseSearcher):
 
     @property
     def _collective_device(self) -> torch.device:
+        device_backends = dict(pair.split(":", 1) for pair in dist.get_backend_config().split(","))
         return (
             torch.device("cuda", torch.cuda.current_device())
-            if dist.get_backend() == "nccl"
+            if "cuda" in device_backends and torch.cuda.is_available()
             else torch.device("cpu")
         )
 

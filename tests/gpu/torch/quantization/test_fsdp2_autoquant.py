@@ -24,13 +24,36 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, get_tiny_llama
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.quantization.kv_cache_auto_quant import AutoQuantizeKVSearcher
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 
 pytestmark = [pytest.mark.usefixtures("need_2_gpus"), pytest.mark.timeout(300)]
+
+
+def test_kl_memory_probe_reserves_logit_working_memory(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"))
+    autoquant_utils = importlib.import_module("autoquant_utils")
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    model = get_tiny_llama(vocab_size=32768).to(device="cuda", dtype=torch.bfloat16).eval()
+    model.config.use_cache = False
+    tokens = torch.ones((2, 32), dtype=torch.long, device="cuda")
+    probe = autoquant_utils._get_autoquant_memory_probe(recipe)
+    peaks = []
+    with torch.no_grad():
+        model(tokens)
+        for workload in (lambda: model(tokens), lambda: probe(model, tokens)):
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            baseline = torch.cuda.memory_allocated()
+            workload()
+            torch.cuda.synchronize()
+            peaks.append(torch.cuda.max_memory_allocated() - baseline)
+    assert peaks[1] > peaks[0] + tokens.numel() * model.config.vocab_size * 4
 
 
 def _run_gradient_autoquant(rank, size, checkpoint_dir, search_dir):
@@ -72,7 +95,9 @@ def test_fsdp2_gradient_autoquant(dist_workers, tmp_path):
 
 
 def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
+    torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
+    assert AutoQuantizeKVSearcher()._collective_device == device
     recipe_name = "general/auto_quantize/" + (
         "nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
         if composed
@@ -142,8 +167,15 @@ def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
     assert resumed["best"] == state["best"]
 
 
+@pytest.fixture(scope="module", params=["cpu:gloo,cuda:nccl", "cuda:nccl"])
+def kv_dist_workers(request):
+    pool = DistributedWorkerPool(world_size=2, backend=request.param)
+    yield pool
+    pool.shutdown()
+
+
 @pytest.mark.parametrize("composed", [False, True], ids=["kv", "weight_then_kv"])
-def test_fsdp2_kv_autoquant_example(dist_workers, tmp_path, composed):
+def test_fsdp2_kv_autoquant_example(kv_dist_workers, tmp_path, composed):
     checkpoint = create_tiny_llama_dir(
         tmp_path,
         with_tokenizer=True,
@@ -154,7 +186,7 @@ def test_fsdp2_kv_autoquant_example(dist_workers, tmp_path, composed):
         num_key_value_heads=2,
         num_hidden_layers=2,
     )
-    dist_workers.run(
+    kv_dist_workers.run(
         partial(
             _run_kv_autoquant_example,
             checkpoint_dir=checkpoint,
