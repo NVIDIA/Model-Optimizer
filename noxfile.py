@@ -50,8 +50,9 @@ TRANSFORMERS_VERSIONS = {
     # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
     # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
     # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
-    # models silently misroute to the LLM path on export.
-    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
+    # models silently misroute to the LLM path on export. Likewise ``datasets>=5.1`` requires
+    # ``huggingface_hub>=1.31`` and fails to import against the downgraded hub.
+    "tf_min": ("transformers~=4.57.0", "diffusers<0.40", "datasets<5.1"),
 }
 
 
