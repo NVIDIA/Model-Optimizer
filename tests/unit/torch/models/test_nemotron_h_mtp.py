@@ -35,6 +35,7 @@ from modelopt.torch.export.unified_export_hf import _process_quantized_modules
 from modelopt.torch.models import hf
 from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     awq,
@@ -42,6 +43,7 @@ from modelopt.torch.quantization.model_calib import (
     max_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 
 
 @pytest.mark.parametrize(
@@ -454,6 +456,57 @@ def test_local_hessian_collects_mtp_inputs(tiny_checkpoint, activation, projecti
         calls.clear()
         model(inputs, use_cache=False)
         assert not calls  # Retained debug accumulators must not keep MTP execution enabled.
+    finally:
+        handle.remove()
+
+
+@pytest.mark.parametrize("activation", ["disabled", "constant", "dynamic"])
+@torch.no_grad()
+def test_gptq_collects_mtp_inputs_and_restores_forward(tiny_checkpoint, activation):
+    _, model, _ = tiny_checkpoint
+    mtp = getattr(model, "language_model", model).mtp
+    cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    cfg["quant_cfg"].extend(
+        [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": f"{_PROJECTION}.weight_quantizer", "enable": True},
+        ]
+    )
+    if activation != "disabled":
+        cfg["quant_cfg"].append(
+            {
+                "quantizer_name": f"{_PROJECTION}.input_quantizer",
+                "cfg": {"constant_amax": 1.0} if activation == "constant" else {"type": "dynamic"},
+            }
+        )
+    mtq.quantize(mtp, {**cfg, "algorithm": None})
+    hf.prepare_model_for_calibration(model)
+    inputs = torch.tensor([[1, 2, 3, 4]])
+    max_calibrate(model, lambda m: m(inputs, use_cache=False))
+    projection = mtp.get_submodule(_PROJECTION)
+    original_forward = projection.forward
+    # The real GPTQ collector and unfused weight update run on CPU without GPU-memory offload.
+    helper = GPTQHelper(projection, _PROJECTION)
+    helper.setup()
+    try:
+        with set_quantizer_by_cfg_context(
+            model, [{"quantizer_name": "*weight_quantizer", "enable": False}]
+        ):
+            model(inputs, use_cache=False)
+        assert helper.n_samples == inputs.numel()
+        assert torch.isfinite(helper.hessian).all() and helper.hessian.abs().sum() > 0
+        helper.update_weights(block_size=16, perc_damp=0.01)
+        assert torch.isfinite(projection.weight).all()
+    finally:
+        helper.cleanup()
+        helper.free()
+    assert projection.forward == original_forward
+    assert not hasattr(projection, GPTQHelper.CACHE_NAME)
+    calls = []
+    handle = mtp.register_forward_hook(lambda *_: calls.append(True))
+    try:
+        model(inputs, use_cache=False)
+        assert not calls
     finally:
         handle.remove()
 
