@@ -370,8 +370,9 @@ def get_parser() -> argparse.ArgumentParser:
         "--target_dla",
         action="store_true",
         help=(
-            "If set, enables Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has "
-            "effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution."
+            "Expand INT8 Q/DQ coverage for DLA. Direct deployment of the explicit Q/DQ output requires "
+            "TensorRT 11.4 or later with strongly typed DLA support enabled. The legacy Q/DQ Translator "
+            "workflow is separate. This option only affects INT8 quantization and may reduce accuracy."
         ),
     )
     argparser.add_argument(

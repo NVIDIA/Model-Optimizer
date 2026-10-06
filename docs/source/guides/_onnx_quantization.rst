@@ -107,6 +107,41 @@ Deploy Quantized ONNX Model
 
     trtexec --onnx=quant.onnx --saveEngine=quant.engine --best
 
+Deploy on DLA
+-------------
+
+Use ``--target_dla`` (or ``target_dla=True`` in Python) to expand INT8 Q/DQ coverage
+when quantizing a floating-point ONNX model for DLA. The exported model retains explicit
+Q/DQ nodes; the flag controls ModelOpt quantization placement.
+
+.. important::
+
+    The direct deployment workflow described here requires **TensorRT 11.4 or later**
+    with strongly typed DLA support enabled. Validation used a pre-release TensorRT
+    11.4.1.22 build. Confirm DLA availability for your TensorRT platform and package;
+    the version number alone does not establish support.
+
+.. code-block:: bash
+
+    python -m modelopt.onnx.quantization \
+        --onnx_path=model.onnx \
+        --output_path=model.int8.dla.onnx \
+        --quantize_mode=int8 \
+        --high_precision_dtype=fp16 \
+        --calibration_data_path=calib.npy \
+        --target_dla
+
+Deploy this explicit Q/DQ model directly with the DLA-enabled TensorRT build.
+No Q/DQ Translator is needed for this workflow. The flag does not perform TensorRT
+implicit-to-explicit quantization or weak-to-strong typing conversion.
+
+For older TensorRT releases that support legacy implicit-quantization DLA deployment,
+the existing workflow remains separate: ModelOpt generates the Q/DQ model, then
+`NVIDIA's Q/DQ Translator <https://github.com/NVIDIA/Deep-Learning-Accelerator-SW/tree/main/tools/qdq-translator>`_
+extracts calibration scales and layer precision settings for the legacy build.
+The TensorRT 11.4 requirement above applies to direct strongly typed DLA deployment,
+not to this legacy use of ``target_dla``. Check accuracy after changing Q/DQ placement.
+
 Compare the performance
 =======================
 
