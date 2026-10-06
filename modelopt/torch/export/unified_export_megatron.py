@@ -307,6 +307,9 @@ class GPTModelExporter:
             and get_expert_model_parallel_rank() == 0
         )
 
+    def _validate_export_state(self) -> None:
+        """Validate collected model and MTP state before writing weight shards."""
+
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
@@ -435,6 +438,7 @@ class GPTModelExporter:
                 layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
                 print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
 
+        self._validate_export_state()
         combined_exclude_modules = self._gather_exclude_modules()
         combined_layer_config_dict = self._gather_layer_config_dict()
         # kv_cache_dtype is only set on attention-owning ranks; writer rank may not be one.

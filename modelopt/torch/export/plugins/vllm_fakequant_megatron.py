@@ -207,11 +207,8 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             raise ValueError(f"Conflicting quantizer recipes routed to {name}")
         self._quantizer_state_for_recipe[name] = recipe
 
-    def _extract_quantizer_recipe_markers(
-        self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
-    ) -> None:
-        """Resolve temporary recipe markers after the normal export mapping has routed them."""
-        # Module checks run during export; defer rejection until all ranks finish its collectives.
+    def _validate_export_state(self) -> None:
+        """Reject unsupported quantizers on every rank before writing weight shards."""
         failure = DistributedProcessGroup.get_dist_syncd_obj(
             self._quantizer_validation_failure,
             DistributedProcessGroup(None),
@@ -219,6 +216,11 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         )
         if failure:
             raise ValueError(failure)
+
+    def _extract_quantizer_recipe_markers(
+        self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
+    ) -> None:
+        """Resolve temporary recipe markers after the normal export mapping has routed them."""
         routed_marker_ids: set[int] = set()
         for state_dict in layer_state_dicts.values():
             for key in list(state_dict):
