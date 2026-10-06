@@ -963,7 +963,10 @@ def quantize_main(
     default_padding_side,
     default_pad_token,
     device: torch.device,
+    *,
+    export: bool = True,
 ):
+    """Run PTQ; export=False returns the live model before post-processing and export."""
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
     if args.recipe is not None:
@@ -984,6 +987,9 @@ def quantize_main(
 
     layerwise_cfgs = recipe_layerwise_blocks(recipe)
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
+
+    if not export and any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs):
+        raise ValueError("In-memory evaluation does not support layerwise export recipes.")
 
     # The value is a placeholder, replaced with --export_path below; presence is the switch.
     args.layerwise_export = any(
@@ -1156,6 +1162,9 @@ def quantize_main(
         source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
         apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
 
+    if not export:
+        return full_model
+
     post_quantize(
         args,
         full_model,
@@ -1174,7 +1183,7 @@ def quantize_main(
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyt_ckpt_path",
@@ -1444,7 +1453,7 @@ def parse_args() -> argparse.Namespace:
 
     add_mlflow_args(parser, HF_PTQ)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # Flipped by export_quantized once a checkpoint is actually on disk. The MLflow pointer
     # is gated on it rather than on --export_path existing, which proves nothing.
     args.checkpoint_exported = False
