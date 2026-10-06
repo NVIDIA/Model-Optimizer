@@ -39,6 +39,8 @@ Changelog
 *Speculative Decoding*
 
 - Add the DFlash2 draft variant, selected with ``dflash_architecture_config.projector_type="dflash2"``: DFlash's one-pass parallel backbone plus a grouped dynamic convolution around every attention/MLP sublayer (``conv_kernel_size`` / ``conv_group_size``) and a low-rank candidate selector (``selector_rank`` / ``selector_top_k``, weighted by ``dflash_selector_loss_alpha``). Exported checkpoints declare ``DFlash2DraftModel`` and load in the SGLang/vLLM DFlash2 serving path.
+- LiLiCorr now trains offline and in streaming mode, not only online: the target logits its distractor penalty reads are reconstructed from the captured final hidden state, the same path self-logit distillation uses.
+- Add ``dflash_lilicorr_w_cal`` (default ``0.0``, off): an optional LiLiCorr proposal-calibration term, a KL divergence from the target's distribution over each slot's candidates to the reranker's candidate distribution, usable in place of the distractor penalty.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -101,11 +103,14 @@ Changelog
 - The TensorRT-LLM checkpoint export format is deprecated and will be removed in 0.49.0: ``export_tensorrt_llm_checkpoint`` and ``torch_to_tensorrt_llm_checkpoint`` now emit a ``DeprecationWarning`` on use. Use ``export_hf_checkpoint``, which exports a unified Hugging Face checkpoint deployable on TensorRT-LLM, vLLM and SGLang. Its implementation moved to ``modelopt.torch.export.trtllm``, so import those two functions from there and the ``ModelConfig`` dataclasses from ``modelopt.torch.export.trtllm.model_config``; both functions remain importable from ``modelopt.torch.export`` for this release only.
 - ``modelopt.torch.export.get_model_type`` and ``modelopt.torch.export.model_utils.MODEL_NAME_TO_TYPE`` return TensorRT-LLM model names and are deprecated for removal in 0.49.0 (they now emit a ``DeprecationWarning``); use the Hugging Face model type, ``model.config.model_type``, instead. ``export_tensorrt_llm_checkpoint`` now detects ``decoder_type`` when it is omitted, and ``examples/hf_ptq`` uses Hugging Face model types throughout.
 - The ``evaluation`` agent skill no longer supports GDPVal: its task recipe, example config and Apptainer SIF helper are removed, and the shared NeMo Gym machinery it carried now lives at ``references/gym.md`` with the launcher wrapper renamed ``scripts/nel-gym.sh``. GDPVal is an AA-suite member, so an "AA" request now generates the ``aa/`` tasks only -- report per-task scores rather than an aggregate compared against a published AA Index.
+- DBRX model support is removed: ModelOpt no longer quantizes or exports DBRX (``DbrxForCausalLM``) checkpoints. Use ModelOpt 0.47 to quantize DBRX, or write your own plugin as described in the customized-model quantization guide.
 - Deprecate ``metadata.recipe_type`` in recipe YAML, for both single-file recipes and a directory recipe's ``metadata.yml``. A recipe now says what kind it is with a ``# modelopt-schema:`` comment naming its schema class, or by delegating to a recipe that does (single-file recipes only -- a directory recipe has no body to delegate through); ``recipe_type`` is still read and still honoured, so a recipe outside this repo keeps working unchanged, but new recipes should leave it out and every recipe shipped here has been converted. Where both are present they must agree, and so must a recipe and the recipe it delegates to -- a disagreement is an error rather than a silent preference.
 
 **Bug Fixes**
 
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
+- Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
+- Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.
 - Fix Megatron-Core checkpoint saving for quantized grouped MoE experts when tensor and expert parallelism are both enabled.
 - Fix unified HuggingFace export of RADIO-based VLMs retaining post-conversion vision and
   projector names instead of restoring the hub layout; deployment loaders could skip those weights.
