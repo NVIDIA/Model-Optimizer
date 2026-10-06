@@ -37,6 +37,7 @@ from modelopt.torch.export.quant_format import (
     QUANTIZATION_IQ2_XS,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
+    QUANTIZATION_W4A16_MXFP4,
 )
 from modelopt.torch.export.quant_utils import (
     _get_carried_over_module_names,
@@ -49,6 +50,7 @@ from modelopt.torch.export.quant_utils import (
     seed_carried_over_exclusions,
     uses_iq_quantization,
 )
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import (
     GroupedQuantizer,
     NVFP4StaticQuantizer,
@@ -320,6 +322,17 @@ def test_get_quantization_format(config, expected):
     model = ToyModel()
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10)))
     assert get_quantization_format(model) == expected
+
+
+def test_mxfp4_weight_only_without_input_quantizer():
+    module = torch.nn.Linear(32, 32, bias=False)
+    module.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+        )
+    )
+    assert get_quantization_format(module) == QUANTIZATION_W4A16_MXFP4
 
 
 def test_nvfp4_static_quantizer_export():

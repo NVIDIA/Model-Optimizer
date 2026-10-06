@@ -46,6 +46,7 @@ from .quant_format import (
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
@@ -333,9 +334,7 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    if quantization_format == QUANTIZATION_MXFP4 and (
-        input_quantizer is None or not input_quantizer.is_enabled
-    ):
+    if quantization_format == QUANTIZATION_W4A16_MXFP4:
         raise _UnsupportedQuantizedWeightExportFormatError(
             "Functional export does not support weight-only MXFP4"
         )

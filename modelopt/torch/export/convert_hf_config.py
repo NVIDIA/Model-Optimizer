@@ -144,16 +144,9 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
                 "strategy": "group",
             },
         }
-    elif quant_algo == "MXFP4":
+    elif quant_algo in ("MXFP4", "W4A16_MXFP4"):
         gs = group_size or 32
-        return {
-            "input_activations": {
-                "dynamic": True,
-                "num_bits": 4,
-                "type": "float",
-                "group_size": gs,
-                "strategy": "group",
-            },
+        config = {
             "weights": {
                 "dynamic": False,
                 "num_bits": 4,
@@ -162,6 +155,15 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
                 "strategy": "group",
             },
         }
+        if quant_algo == "MXFP4":
+            config["input_activations"] = {
+                "dynamic": True,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            }
+        return config
     elif quant_algo.lower() in IQ_FORMATS:
         iq_format = IQ_FORMAT_REGISTRY[quant_algo.lower()]
         block_size, payload_bytes = iq_format.block_size, iq_format.block_bytes
@@ -304,6 +306,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         "FP8_PER_CHANNEL_PER_TOKEN",
         "FP8_PB_WO",
         "MXFP4",
+        "W4A16_MXFP4",
         "MXFP8",
         "W4A8_MXFP4_FP8",
         "W4A8_NVFP4_FP8",

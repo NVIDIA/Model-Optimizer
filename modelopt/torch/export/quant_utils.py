@@ -73,6 +73,7 @@ from .quant_format import (
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
+    QUANTIZATION_W4A16_MXFP4,
     QUANTIZATION_W4A16_NVFP4,
 )
 
@@ -224,7 +225,11 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
             weight_scaling_factor_2.to(weight.device),
         )[0]
 
-    if quantization_format in [QUANTIZATION_W4A8_MXFP4_FP8, QUANTIZATION_MXFP4]:
+    if quantization_format in [
+        QUANTIZATION_W4A8_MXFP4_FP8,
+        QUANTIZATION_MXFP4,
+        QUANTIZATION_W4A16_MXFP4,
+    ]:
         return MXFP4QTensor.quantize(weight, block_size=weight_quantizer.block_sizes[-1])[
             1
         ].reshape(*weight.shape[:-1], -1)
@@ -545,6 +550,8 @@ def _get_quantization_from_quantizers(
         if input_quantizer is None or not input_quantizer.is_enabled:
             if scale_bits == (4, 3):
                 return QUANTIZATION_W4A16_NVFP4
+            if scale_bits == (8, 0):
+                return QUANTIZATION_W4A16_MXFP4
         assert input_quantizer is not None, "input_quantizer is required for weight-activation FP4"
         if (
             block_sizes.get("type", "static") == "dynamic"
@@ -756,9 +763,9 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
-        elif v == "mxfp4":
+        elif v in ["mxfp4", "w4a16_mxfp4"]:
             layer_config = {
-                "quant_algo": "MXFP4",
+                "quant_algo": v.upper(),
                 "group_size": block_size_value,
             }
         elif v in IQ_FORMATS:
@@ -961,7 +968,11 @@ def to_quantized_weight(
             else weights_scaling_factor2,
         )[0]._quantized_data
 
-    if quantization in [QUANTIZATION_W4A8_MXFP4_FP8, QUANTIZATION_MXFP4]:
+    if quantization in [
+        QUANTIZATION_W4A8_MXFP4_FP8,
+        QUANTIZATION_MXFP4,
+        QUANTIZATION_W4A16_MXFP4,
+    ]:
         return MXFP4QTensor.quantize(weight, block_size=block_size)[0]._quantized_data
 
     raise NotImplementedError(f"quantization format {quantization} not supported")
