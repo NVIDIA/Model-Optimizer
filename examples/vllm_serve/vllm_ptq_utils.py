@@ -25,7 +25,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
-from vllm_reload_utils import quantizer_recipe_to_quant_cfg
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
@@ -334,6 +333,9 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
             and raw_recipe
             and all(isinstance(name, str) and "_quantizer" in name for name in raw_recipe)
         ):
+            # Defer the serve dependency so standalone PTQ imports work.
+            from vllm_reload_utils import quantizer_recipe_to_quant_cfg
+
             quant_cfg = quantizer_recipe_to_quant_cfg(raw_recipe, model)
         else:
             recipe = load_recipe(quant_config["recipe_path"])
