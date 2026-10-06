@@ -1122,6 +1122,7 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
 
     def _setup(self):
         super()._setup()
+        self._register_temp_attribute("_linear_attention_replay_gate_inputs", None)
         try:
             data_parallel_group = get_data_parallel_group(with_context_parallel=True)
         except AssertionError:
@@ -1135,9 +1136,7 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
     def _serving_arithmetic(self):
         decode = self.linear_attention_config.decode
         return (
-            self.linear_attention_is_enabled
-            and decode is not None
-            and decode.precision == "vllm_0_15"
+            self.linear_attention_is_enabled and decode is not None and decode.precision != "full"
         )
 
     def _prepare_input_for_gated_delta_rule(self, *args, **kwargs):
@@ -1160,6 +1159,8 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
             from ..linear_attention.utils import forward_value
 
             raw_beta, raw_gate = gate_feats
+            if self.linear_attention_config.decode.precision == "replayssm":
+                self._linear_attention_replay_gate_inputs = (raw_gate, raw_beta, a_log, dt_bias)
             with torch.no_grad():
                 native_gate, native_beta = fused_gdn_gating(
                     a_log,
@@ -1176,6 +1177,7 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
     @contextmanager
     def _quantized_linear_attention_kernel(self):
         kernel = self.gated_delta_rule
+        previous_gates = self._linear_attention_replay_gate_inputs
         if self._serving_arithmetic:
             if not hasattr(super(), "_prepare_input_for_gated_delta_rule") or getattr(
                 self, "gdn_pre_gated_delta_rule_fusion", False
@@ -1186,15 +1188,19 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
 
             def run_kernel(*args, **kwargs):
                 kwargs["use_qk_l2norm_in_kernel"] = self.use_qk_l2norm
+                if self._linear_attention_replay_gate_inputs is not None:
+                    kwargs["replay_gate_inputs"] = self._linear_attention_replay_gate_inputs
                 return self._linear_attention_kernel(kernel, *args, **kwargs)
 
             self.gated_delta_rule = run_kernel
         else:
             self.gated_delta_rule = partial(self._linear_attention_kernel, kernel)
+        self._linear_attention_replay_gate_inputs = None
         try:
             yield
         finally:
             self.gated_delta_rule = kernel
+            self._linear_attention_replay_gate_inputs = previous_gates
 
     def forward(self, *args, **kwargs):
         # Newer Megatron versions recompute the core independently during backward.

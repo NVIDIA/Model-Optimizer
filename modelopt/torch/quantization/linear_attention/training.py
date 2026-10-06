@@ -22,7 +22,7 @@ import torch
 
 from ._chunk_prefill import chunk_gdn, chunk_kda
 from .decode import recurrent_decode
-from .utils import _resolve_state_quantizer, _state_qdq
+from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
 __all__ = ["linear_attention_training_phase"]
 
@@ -67,13 +67,15 @@ def linear_attention_training_phase(model, prefill_lengths):
 
 def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size, normalize):
     """Validate the shared policy and prepare GDN/KDA working dtypes and Q/K normalization."""
-    if policy.backend != "matmul" or chunk_size != policy.chunk_size:
-        raise ValueError("Matmul prefill requires backend='matmul' and its configured chunk size")
+    if policy.backend not in ("serving", "reference") or chunk_size != policy.chunk_size:
+        raise ValueError(
+            "State training requires backend='serving' or 'reference' and its configured chunk size"
+        )
     if policy.decode is None:
         raise ValueError("An explicit decode policy is required")
-    serving = policy.decode.precision == "vllm_0_15"
+    serving = policy.decode.precision != "full"
     if serving and (q.device.type != "cuda" or any(x.dtype != torch.bfloat16 for x in (q, k, v))):
-        raise ValueError("precision='vllm_0_15' requires CUDA BF16 Q/K/V inputs")
+        raise ValueError("Serving arithmetic requires CUDA BF16 Q/K/V inputs")
     dtype = torch.float64 if q.dtype == torch.float64 else torch.float32
     q, k, v, g, beta = (x.to(dtype) for x in (q, k, v, g, beta))
     if normalize and not serving:
@@ -104,6 +106,7 @@ def _prefill_decode_forward(
     beta_dtype,
     prefill_lengths,
     use_qk_l2norm_in_kernel=False,
+    replay_gate_inputs=None,
 ):
     """Run both prefill and decode phases in one differentiable training forward.
 
@@ -149,14 +152,14 @@ def _prefill_decode_forward(
         p > end - start for p, (_, start, end) in zip(prefixes, sequences)
     ):
         raise ValueError("Supply one valid prefill length per sequence")
-    serving_precision = policy.decode.precision == "vllm_0_15"
+    serving_precision = policy.decode.precision != "full"
     if serving_precision and (
         keys > 256
         or (g.ndim == 4 and values != keys)
         or (use_qk_l2norm_in_kernel and keys & (keys - 1))
     ):
         raise ValueError(
-            "vllm_0_15 requires K <= 256, KDA V=K, and power-of-two K for normalization"
+            "Serving arithmetic requires K <= 256, KDA V=K, and power-of-two K for normalization"
         )
     if initial_state is None:
         states = q.new_zeros(len(sequences), heads, keys, values)
@@ -178,9 +181,20 @@ def _prefill_decode_forward(
                     # A continuation prefill consumes a stored cache just as native serving
                     # does. A fresh zero-state prefix has no incoming cache to quantize.
                     if initial_state is not None and state_qdq:
-                        state = _state_qdq(
-                            state, policy.state.block_v, state_format, state_quantizer
-                        )
+                        if policy.decode.precision == "replayssm":
+                            from ...kernels.quantization.linear_attention.serving.replay import (
+                                checkpoint,
+                                original_basis,
+                            )
+
+                            with torch.no_grad():
+                                decoded, _ = checkpoint(state, True)
+                                decoded = original_basis(decoded)
+                            state = forward_value(state, decoded)
+                        else:
+                            state = _state_qdq(
+                                state, policy.state.block_v, state_format, state_quantizer
+                            )
                     prefix, state = serving_prefix(
                         q=q[b, start:split],
                         k=k[b, start:split],
@@ -216,6 +230,15 @@ def _prefill_decode_forward(
             block_v=policy.state.block_v,
             initial_state=state,
             position=prefixes[n],
+            replay_gate_inputs=(
+                (
+                    replay_gate_inputs[0][b, split:end],
+                    replay_gate_inputs[1][b, split:end],
+                    *replay_gate_inputs[2:],
+                )
+                if replay_gate_inputs is not None
+                else None
+            ),
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             scale=scale,
         )

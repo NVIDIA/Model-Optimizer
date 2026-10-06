@@ -51,6 +51,7 @@ def matmul_gdn(
     chunk_size=64,
     cp_context=None,
     prefill_lengths=None,
+    replay_gate_inputs=None,
 ):
     """Normalize GDN inputs and run a chunked prefix plus configured suffix recurrence.
 
@@ -68,7 +69,7 @@ def matmul_gdn(
     dtype = q.dtype
     if serving and (use_gate_in_kernel or use_beta_sigmoid_in_kernel):
         raise ValueError(
-            "vllm_0_15 GDN expects prepared log gates and beta from the Megatron adapter"
+            "Serving GDN expects prepared log gates and beta from the Megatron adapter"
         )
     if use_gate_in_kernel:
         if A_log is None or dt_bias is None:
@@ -99,5 +100,6 @@ def matmul_gdn(
         output_dtype=output_dtype,
         beta_dtype=beta_dtype,
         prefill_lengths=prefill_lengths,
+        replay_gate_inputs=replay_gate_inputs,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel if serving else False,
     )

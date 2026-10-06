@@ -34,11 +34,11 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 pytest.importorskip("fla")  # Megatron-Core GatedDeltaNet and the state QDQ kernel need fla
 GatedDeltaNet = pytest.importorskip("megatron.core.ssm.gated_delta_net").GatedDeltaNet
 
-from modelopt.torch.quantization.plugins.gdn import _state_qdq_chunk_gated_delta_rule
+from modelopt.torch.quantization.plugins.gdn import _w_qdq_chunk_gated_delta_rule
 from modelopt.torch.quantization.plugins.megatron import _QuantGatedDeltaNet
 
 try:
-    _state_qdq_chunk_gated_delta_rule()
+    _w_qdq_chunk_gated_delta_rule()
 except RuntimeError as e:
     pytest.skip(str(e), allow_module_level=True)
 
@@ -94,8 +94,7 @@ def _gdn_config(sites):
 
 
 def _config_for_mode(mode):
-    # Ampere exercises W QDQ; native FP8 devices also exercise chunk state QDQ.
-    sites = ("state", "w") if torch.cuda.get_device_capability() >= (8, 9) else ("w",)
+    sites = ("w",)
     if mode == "decode_replay_int8":
         sites = ("state",)
     cfg = _gdn_config(sites)

@@ -40,8 +40,8 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
     def validate_linear_attention(self):
         """Require the materialized backend for KDA numerical emulation."""
         super().validate_linear_attention()
-        if self.linear_attention_is_enabled and self.linear_attention_config.backend != "matmul":
-            raise ValueError("KDA numerical emulation requires backend='matmul'")
+        if self.linear_attention_is_enabled and self.linear_attention_config.backend == "fla":
+            raise ValueError("KDA numerical emulation requires backend='serving'")
 
     def _state_quantized_chunk_kda(self, kernel, *args, **kwargs):
         self.validate_linear_attention()
