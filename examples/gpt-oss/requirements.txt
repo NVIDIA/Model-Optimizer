@@ -1,5 +1,6 @@
 kernels>=0.9.0,<0.13
-trackio<0.21
+# trackio<0.38.1 imports CommitOperationAdd from huggingface_hub.hf_api, which huggingface_hub>=1.32 no longer exports
+trackio>=0.38.1
 # transformers>=5.3 avoids CVE-2026-4372 (RCE via the `kernels` Hub download path, which this example installs)
 transformers>=5.3
 trl>=1.0
