@@ -32,7 +32,10 @@ from safetensors import SafetensorError
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 
-from modelopt.torch.quantization.model_calib import _needs_activation_forward_for_max_calib
+from modelopt.torch.quantization.model_calib import (
+    _LocalHessianInputHook,
+    _needs_activation_forward_for_max_calib,
+)
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
@@ -230,7 +233,7 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_
 
 
 def prepare_for_calibration(full_model) -> bool:
-    """Install an MTP forward for activation statistics and activation-dependent AWQ search."""
+    """Install an MTP forward for activation statistics and activation-dependent weight search."""
     language_model = getattr(full_model, "language_model", full_model)
 
     mtp = getattr(language_model, "mtp", None)
@@ -244,9 +247,15 @@ def prepare_for_calibration(full_model) -> bool:
 
     @wraps(original_forward)
     def forward_with_mtp(*args, **kwargs):
-        # AWQ needs inputs even while activation quantizers are disabled; its wrapper is scoped.
+        # AWQ and local-Hessian need inputs even with activation quantizers disabled.
+        # Their wrappers/hooks exist only during calibration, unlike retained debug statistics.
         if not _needs_activation_forward_for_max_calib(mtp) and not any(
-            hasattr(module, "_forward_no_awq") for module in mtp.modules()
+            hasattr(module, "_forward_no_awq")
+            or any(
+                isinstance(hook, _LocalHessianInputHook)
+                for hook in module._forward_pre_hooks.values()
+            )
+            for module in mtp.modules()
         ):
             return original_forward(*args, **kwargs)
         captured = []

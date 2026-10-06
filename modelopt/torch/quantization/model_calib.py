@@ -941,6 +941,16 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
+class _LocalHessianInputHook:
+    """Identify active input collectors so auxiliary modules can request a calibration forward."""
+
+    def __init__(self, hook: Callable):
+        self.hook = hook
+
+    def __call__(self, module, args):
+        self.hook(module, args)
+
+
 def _register_local_hessian_input_hooks(model, names, capture, block_size, warned):
     """Register forward hooks feeding each weight's input activations to ``capture``.
 
@@ -978,7 +988,7 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                 if args:
                     capture(linear.weight_quantizer, linear.weight, args[0])
 
-            handles.append(module.register_forward_pre_hook(_dense_hook))
+            handles.append(module.register_forward_pre_hook(_LocalHessianInputHook(_dense_hook)))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, names):
                 first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
@@ -1001,9 +1011,13 @@ def _register_local_hessian_input_hooks(model, names, capture, block_size, warne
                     # Snapshot which experts are enabled now, before the caching forward silences
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
+                    if not enabled:
+                        continue
                     handles.append(
                         input_quantizer.register_forward_pre_hook(
-                            _make_expert_hook(module, weight_name, quantizers, enabled)
+                            _LocalHessianInputHook(
+                                _make_expert_hook(module, weight_name, quantizers, enabled)
+                            )
                         )
                     )
     return handles

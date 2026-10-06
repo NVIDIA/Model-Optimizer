@@ -38,6 +38,7 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     awq,
+    local_hessian_calibrate,
     max_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -397,6 +398,62 @@ def test_awq_runs_mtp_with_disabled_activation_quantizers(tiny_checkpoint, algor
             calls.clear()
             model(inputs, use_cache=False)
             assert not calls  # Retained debug helpers must not keep MTP execution enabled.
+    finally:
+        handle.remove()
+
+
+@pytest.mark.parametrize("activation", ["disabled", "constant", "dynamic"])
+@pytest.mark.parametrize("projection", [_PROJECTION, "layers.1.mixer.experts"])
+def test_local_hessian_collects_mtp_inputs(tiny_checkpoint, activation, projection):
+    _, model, _ = tiny_checkpoint
+    language_model = getattr(model, "language_model", model)
+    mtp = language_model.mtp
+    cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    cfg["quant_cfg"].extend(
+        [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": f"{projection}.*weight_quantizer", "enable": True},
+        ]
+    )
+    if activation != "disabled":
+        cfg["quant_cfg"].append(
+            {
+                "quantizer_name": f"{projection}.*input_quantizer",
+                "enable": True,
+                "cfg": {"constant_amax": 448.0}
+                if activation == "constant"
+                else {"type": "dynamic"},
+            }
+        )
+    mtq.quantize(mtp, {**cfg, "algorithm": None})
+    hf.prepare_model_for_calibration(model)
+    weight_quantizers = {
+        id(q): q
+        for name, q in mtp.get_submodule(projection).named_modules()
+        if isinstance(q, TensorQuantizer) and q.is_enabled and "weight_quantizer" in name
+    }
+    inputs = torch.tensor([[1, 2, 3, 4]])
+    calls = []
+    handle = mtp.register_forward_hook(lambda *_: calls.append(True))
+    try:
+        local_hessian_calibrate(
+            model,
+            lambda calibrated: calibrated(inputs, use_cache=False),
+            fp8_scale_sweep=False,
+            debug=True,
+        )
+        accumulators = model._local_hessian_accumulators
+        assert accumulators and accumulators.keys() <= weight_quantizers.keys()
+        for acc in accumulators.values():
+            assert acc.num_samples > 0
+            assert acc.hessian_per_block is not None
+            assert torch.isfinite(acc.hessian_per_block).all()
+        assert all(torch.isfinite(q.amax).all() for q in weight_quantizers.values())
+        assert calls
+        assert not any(module._forward_pre_hooks for module in mtp.modules())
+        calls.clear()
+        model(inputs, use_cache=False)
+        assert not calls  # Retained debug accumulators must not keep MTP execution enabled.
     finally:
         handle.remove()
 
