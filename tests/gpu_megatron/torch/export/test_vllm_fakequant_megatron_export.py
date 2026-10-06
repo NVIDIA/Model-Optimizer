@@ -357,6 +357,17 @@ def _test_mcore_vllm_export_mtp(tmp_path, rank, size):
         )
     torch.distributed.barrier()
 
+    unsupported_dir = tmp_path / "unsupported_mtp_export"
+    if is_pipeline_last_stage():
+        mtp_quantizer = model.mtp.layers[0].eh_proj.input_quantizer
+        mtp_quantizer.set_from_attribute_config({"fake_quant": False})
+    with pytest.raises(ValueError, match=r"Unsupported.*input_quantizer: fake_quant"):
+        export_mcore_gpt_to_hf_vllm_fq(model, str(source), export_dir=str(unsupported_dir))
+    assert not list(unsupported_dir.glob("*.safetensors"))
+    assert not (unsupported_dir / "model.safetensors.index.json").exists()
+    if is_pipeline_last_stage():
+        mtp_quantizer.set_from_attribute_config({"fake_quant": True})
+
     export_dir = tmp_path / "mtp_export"
     with _assert_weight_qdq_once(model, prefix="mtp."):
         export_mcore_gpt_to_hf_vllm_fq(
@@ -432,6 +443,8 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfgs, rank, 
         )
         with pytest.raises(ValueError, match=f"Unsupported.*{quantizer_name}: {setting}"):
             export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+        assert not list(export_dir.glob("*.safetensors"))
+        assert not (export_dir / "model.safetensors.index.json").exists()
         assert not (export_dir / "quantizer_state.pth").exists()
         assert not (export_dir / "quant_recipe.yaml").exists()
 
