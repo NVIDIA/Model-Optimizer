@@ -32,7 +32,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
-def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
+def _quantizer_configs(module: torch.nn.Module, *, is_mtp: bool = False) -> dict[str, dict]:
     """Return quantizer recipes, rejecting settings that cannot be restored."""
     configs = {}
     for name, quantizer in module.named_modules():
@@ -40,9 +40,16 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
             continue
         is_weight_quantizer = "weight_quantizer" in name
         is_quantizing = quantizer.is_enabled and quantizer._if_quant
-        # Weight transforms are folded; activation rotation also runs when quantization is off.
+        if is_mtp and (
+            is_quantizing or quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None
+        ):
+            raise ValueError(
+                f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
+            )
+        # Weight transforms are folded; activation transforms also run when quantization is off.
         settings = {
             "rotate": not is_weight_quantizer and quantizer.rotate_is_enabled,
+            "pre_quant_scale": not is_weight_quantizer and quantizer.pre_quant_scale is not None,
             "fake_quant": is_quantizing and not quantizer.fake_quant,
         }
         if is_quantizing and not is_weight_quantizer:
@@ -63,7 +70,7 @@ def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
         if unsupported:
             raise ValueError(
                 f"Unsupported vLLM fakequant quantizer settings for {name or '<root>'}: "
-                f"{', '.join(unsupported)}. These settings are not preserved by quant_recipe.yaml."
+                f"{', '.join(unsupported)}. These settings are not supported by vLLM fakequant export/reload."
             )
         recipe = {"_disabled": is_weight_quantizer or not is_quantizing}
         if not recipe["_disabled"]:
@@ -197,7 +204,6 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         super().__init__(*args, **kwargs)
         self._quantizer_state_for_recipe: dict[str, dict] = {}
         self._quantizer_recipe_markers: list[tuple[str, dict]] = []
-        self._quantizer_tensor_states: list[dict[str, torch.Tensor]] = []
         self._quantizer_validation_failure = ""
 
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
@@ -246,28 +252,20 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             if marker_id not in routed_marker_ids:
                 self._store_quantizer_recipe(source_name, recipe)
 
-    def _get_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> None:
+    def _get_quantizer_state(self, state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Move routed quantizer tensors and recipe markers out of a weight shard."""
-        quantizer_state = {
+        return {
             key: state_dict.pop(key)
             for key in list(state_dict)
             if "quantizer" in key or key.endswith(self._QUANT_RECIPE_MARKER_SUFFIX)
         }
-        if quantizer_state:
-            self._quantizer_tensor_states.append(quantizer_state)
-
-    def _get_mtp_state_dict(self, copy_from_pretrained: bool = True) -> dict[str, torch.Tensor]:
-        """Collect MTP quantizer state before the base exporter merges its weights."""
-        state_dict = super()._get_mtp_state_dict(copy_from_pretrained=copy_from_pretrained)
-        self._get_quantizer_state(state_dict)
-        return state_dict
 
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save folded weights, quantizer state, and recipes, including the live MTP head.
+        """Save folded weights, quantizer state, and recipes; MTP weights remain unquantized.
 
         Args:
             save_directory: The directory to save the exported model.
@@ -289,14 +287,13 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         # Cached shards still reference markers collected when they were built.
         if not self._layer_state_dicts:
             self._quantizer_recipe_markers = []
-        self._quantizer_tensor_states = []
-        for state_dict in self.layer_state_dicts.values():
-            self._get_quantizer_state(state_dict)
-        self._get_quantizer_state(self._state_dict)
+        quantizer_state_dicts = {
+            index: self._get_quantizer_state(state_dict)
+            for index, state_dict in enumerate([*self.layer_state_dicts.values(), self._state_dict])
+        }
         super().save_pretrained(save_directory, pretrained_model_name_or_path)
 
-        # Save quantizer files after the base exporter collects MTP and copies source files.
-        quantizer_state_dicts = dict(enumerate(self._quantizer_tensor_states))
+        # Save fresh quantizer files after the base exporter copies source files.
         self._extract_quantizer_recipe_markers(quantizer_state_dicts)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, quantizer_state_dicts, save_directory)
         gather_mcore_vllm_fq_quantizer_recipe(self._quantizer_state_for_recipe, save_directory)
@@ -325,12 +322,15 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        is_mtp = prefix.startswith("mtp.")
         try:
-            quantizer_configs = _quantizer_configs(module)
+            quantizer_configs = _quantizer_configs(module, is_mtp=is_mtp)
         except ValueError as exc:
             if not self._quantizer_validation_failure:
                 self._quantizer_validation_failure = str(exc)
             # Skip unsupported kernels while peers complete the export collectives.
+            return self._get_weight_bias(module, dtype), qformat, 0
+        if is_mtp:
             return self._get_weight_bias(module, dtype), qformat, 0
         source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
         for qname, qstate in quantizer_configs.items():
@@ -393,8 +393,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             # The constant amax takes precedence over any stored calibration buffer.
             if quantizer._use_constant_amax and not quantizer.is_mx_format:
                 param["_amax"] = quantizer._get_amax(module.weight)
-            if quantizer.pre_quant_scale is None:
-                param.pop("_pre_quant_scale", None)
+            param.pop("_pre_quant_scale", None)
             name = get_unwrapped_name(name, module)
             for key, value in param.items():
                 name_to_value[name + "." + key] = value.detach().cpu().clone()

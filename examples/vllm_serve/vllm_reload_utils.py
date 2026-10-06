@@ -333,24 +333,6 @@ def convert_modelopt_state_to_vllm(
     return modelopt_state
 
 
-def is_nemotron_mtp(model: Any) -> bool:
-    """Identify Nemotron's separate MTP model across vLLM config versions."""
-    return hasattr(model, "mtp_start_layer_idx") and getattr(
-        getattr(model, "config", None), "model_type", None
-    ) in ("nemotron_h", "nemotron_h_puzzle", "nemotron_h_mtp")
-
-
-def _quantizer_state_for_model(state: dict[str, Any], model: Any) -> dict[str, Any]:
-    if not is_nemotron_mtp(model):
-        return state
-    # Match Nemotron's MTP root remap, which its weight mapper does not include.
-    return {
-        key.replace("mtp.layers.", "model.layers.", 1): value
-        for key, value in state.items()
-        if key.startswith("mtp.layers.")
-    }
-
-
 def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[str, Any]:
     """Map an exported quantizer recipe to vLLM quantization configuration."""
     if any(
@@ -358,7 +340,6 @@ def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[st
         for state in recipe.values()
     ):
         raise ValueError("Exported quantizer recipe entries must include a boolean _disabled")
-    recipe = _quantizer_state_for_model(recipe, model)
     map_fun = model.hf_to_vllm_mapper.apply_dict if hasattr(model, "hf_to_vllm_mapper") else None
     mapped_recipe = convert_dict_to_vllm(recipe, max_or_concat=False, map_fun=map_fun)
 
@@ -628,7 +609,6 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
     """Overlay mapped, TP-sharded quantizer tensors on the model's state dict."""
     # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
     saved_quant_dict = torch.load(quantizer_file_path, weights_only=True, map_location="cpu")
-    saved_quant_dict = _quantizer_state_for_model(saved_quant_dict, model)
     if hasattr(model, "hf_to_vllm_mapper"):
         saved_quant_dict = model.hf_to_vllm_mapper.apply_dict(saved_quant_dict)
         saved_quant_dict = {
