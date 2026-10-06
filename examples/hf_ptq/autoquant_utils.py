@@ -28,17 +28,13 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils.dataset_utils import create_forward_loop
+from modelopt.torch.utils.distributed import size as world_size
 
 __all__ = ["auto_quantize"]
 
-_FSDP2_KV_AUTOQUANT_ERROR = (
-    "KV-cache AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
-    "selection, and checkpoint writes are synchronized across ranks."
-)
 _FSDP2_AUTOQUANT_WARNING = (
-    "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-    "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-    "synchronization across ranks); use at your own risk."
+    "AutoQuantize with --use_fsdp2 is experimental; use at your own risk. "
+    "Resume with the same world size, model, recipe, and calibration data."
 )
 
 
@@ -99,8 +95,6 @@ def auto_quantize(
         allow_uniform_kv=allow_uniform_kv,
     )
     if args.use_fsdp2:
-        if inputs["search_domain"] == "kv_cache":
-            raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
         warnings.warn(_FSDP2_AUTOQUANT_WARNING)
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -151,6 +145,7 @@ def auto_quantize(
             f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
         )
 
+    score_batch_size = args.batch_size * (world_size() if args.use_fsdp2 else 1)
     auto_quantize_kwargs: dict[str, Any] = {
         "constraints": inputs["constraints"],
         "data_loader": calib_dataloader,
@@ -158,7 +153,7 @@ def auto_quantize(
         "quantization_formats": inputs["quantization_formats"],
         "num_calib_steps": len(calib_dataloader),
         "num_score_steps": min(
-            len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+            len(calib_dataloader), max(inputs["score_size"] // score_batch_size, 1)
         ),
         "verbose": True,
         "disabled_layers": inputs["disabled_layers"],

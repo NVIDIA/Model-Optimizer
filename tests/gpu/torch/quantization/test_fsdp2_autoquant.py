@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exercise real gradient AutoQuant on a root-and-decoder FSDP2 model."""
+"""Exercise weight and KV AutoQuant with real FSDP2 and the Hugging Face example."""
 
+import importlib
 import math
 from functools import partial
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,6 +27,7 @@ import torch.distributed as dist
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 
 pytestmark = [pytest.mark.usefixtures("need_2_gpus"), pytest.mark.timeout(300)]
@@ -64,4 +68,97 @@ def test_fsdp2_gradient_autoquant(dist_workers, tmp_path):
     search_dir.mkdir()
     dist_workers.run(
         partial(_run_gradient_autoquant, checkpoint_dir=str(checkpoint), search_dir=str(search_dir))
+    )
+
+
+def _run_kv_autoquant_example(rank, size, checkpoint_dir, search_dir, composed):
+    device = torch.device(f"cuda:{rank}")
+    recipe_name = "general/auto_quantize/" + (
+        "nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+        if composed
+        else "kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+    )
+    args = SimpleNamespace(
+        pyt_ckpt_path=str(checkpoint_dir),
+        recipe=recipe_name,
+        use_fsdp2=True,
+        dist_state=SimpleNamespace(rank=rank, world_size=size, device=device),
+        trust_remote_code=False,
+        cpu_offload=False,
+        attn_implementation="eager",
+        calib_with_images=False,
+        specdec_offline_dataset=None,
+        low_memory_mode=False,
+        dataset=["local-test-data"],
+        calib_size=[2 * size],
+        batch_size=1,
+        inference_pipeline_parallel=1,
+        kv_cache_qformat="none",
+        auto_quantize_checkpoint=str(search_dir / "weights"),
+        kv_auto_quantize_checkpoint=str(search_dir / "kv"),
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.syspath_prepend(str(Path(__file__).resolve().parents[4] / "examples" / "hf_ptq"))
+        hf_ptq = importlib.import_module("hf_ptq")
+    recipe = load_recipe(recipe_name)
+    for stage in (recipe.auto_quantize, recipe.kv_auto_quantize):
+        if stage is not None:
+            stage.score_size = 2 * size
+    kv_stage = recipe.kv_auto_quantize if composed else recipe.auto_quantize
+    kv_stage.constraints.effective_bits = 6.25
+    torch.manual_seed(rank)
+    batches = []
+    for _ in range(2):
+        tokens = torch.randint(0, 128, (1, 16), device=device)
+        batches.append(
+            {"input_ids": tokens, "labels": tokens, "attention_mask": torch.ones_like(tokens)}
+        )
+
+    model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+    model.config.use_cache = False
+    hf_ptq._run_auto_quantize_recipe(
+        args, recipe, model, language_model, model_type, calibration_only, batches, False
+    )
+    state = torch.load(search_dir / "kv" / f"rank{rank}.pth", weights_only=True)
+    assert state["num_scored_tokens"] == 32 * size
+    assert state["best"]["is_satisfied"]
+    assert state["best"]["constraints"]["effective_bits"] <= 6.25
+    results = [None] * size
+    dist.all_gather_object(results, (state["layers"], state["best"]))
+    assert all(result == results[0] for result in results)
+    if composed:
+        assert (search_dir / "weights" / f"rank{rank}.pth").is_file()
+
+    del language_model, model
+    model, language_model, model_type, calibration_only, *_ = hf_ptq.load_model(args)
+    model.config.use_cache = False
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(model, "forward", lambda *_a, **_kw: pytest.fail("Resume ran a forward"))
+        hf_ptq._run_auto_quantize_recipe(
+            args, recipe, model, language_model, model_type, calibration_only, batches, False
+        )
+    resumed = torch.load(search_dir / "kv" / f"rank{rank}.pth", weights_only=True)
+    assert resumed["layers"] == state["layers"]
+    assert resumed["best"] == state["best"]
+
+
+@pytest.mark.parametrize("composed", [False, True], ids=["kv", "weight_then_kv"])
+def test_fsdp2_kv_autoquant_example(dist_workers, tmp_path, composed):
+    checkpoint = create_tiny_llama_dir(
+        tmp_path,
+        with_tokenizer=True,
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+    )
+    dist_workers.run(
+        partial(
+            _run_kv_autoquant_example,
+            checkpoint_dir=checkpoint,
+            search_dir=tmp_path / "search",
+            composed=composed,
+        )
     )

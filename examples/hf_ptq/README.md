@@ -570,7 +570,7 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
+> *Weight and KV-cache AutoQuantize with `--use_fsdp2` are experimental. Use data parallelism/FSDP2 only; distributed KV AutoQuantize does not support tensor or expert parallelism.*
 
 ### Usage
 
@@ -608,10 +608,33 @@ Use a weight AutoQuantize recipe with the same `torchrun` launch. For example, r
 the recipe above with `general/auto_quantize/nvfp4_fp8_at_5p4bits` and add
 `--auto_quantize_checkpoint <shared_search_state_directory>`. Each rank saves its state as
 `rank<N>.pth`; resume with the same model, recipe, data, and parallelism configuration.
-Keep `--batch_size` explicit: gradient scoring runs both forward and backward passes.
+Set `--batch_size` per rank: gradient scoring runs both forward and backward passes.
+With FSDP2, an unspecified batch size defaults to 1 instead of probing memory independently
+on each rank. Recipe `score_size` is a global sample budget, divided by the world size and
+per-rank batch size, with at least one scoring batch per rank.
 
-Weight AutoQuantize with FSDP2 remains experimental; KV-cache AutoQuantize is not
-supported on this path.
+#### KV-cache AutoQuantize
+
+The same launch supports `general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits`
+or the composed weight-then-KV recipe
+`general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits`.
+For a composed search, pass two distinct shared directories:
+
+```bash
+--auto_quantize_checkpoint <weight_search_directory> \
+--kv_auto_quantize_checkpoint <kv_search_directory>
+```
+
+KV calibration synchronizes candidate scales across ranks. Sensitivity scoring sums KL over
+all ranks and divides by the total number of scored tokens; rank 0 solves the bit-constrained
+recipe and broadcasts it. Every rank must use the same candidate configuration and perform
+the same number of calibration and scoring forwards. The example's distributed sampler
+provides equal-length shards.
+
+KV search checkpoints also use `rank<N>.pth`. Resume all rank files together with the same
+world size, model, data, recipe, and preceding weight-quantizer state. Inconsistent rank
+checkpoints are rejected before calibration/scoring. These changes enable distributed search;
+the deployment restrictions for mixed-KV exports described above still apply.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 

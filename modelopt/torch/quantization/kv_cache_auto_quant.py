@@ -25,13 +25,16 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 
 from modelopt.torch.opt.hparam import Hparam
 from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
 from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils.distributed import is_master, size
 
 from ._auto_quantize_cost import (
     COST_MODEL_KV_CACHE,
@@ -480,6 +483,8 @@ def _checkpoint_state_is_compatible(state: dict[str, Any], signature: dict[str, 
 def _fingerprint_value(value: Any) -> Any:
     """Convert quantizer configuration and tensor state into a stable JSON value."""
     if isinstance(value, torch.Tensor):
+        if isinstance(value, DTensor):
+            value = value.full_tensor()
         if value.device.type == "meta":
             raise ValueError("Cannot fingerprint a meta-device preceding quantizer state.")
         tensor = value.detach().contiguous().cpu()
@@ -694,6 +699,55 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         return super().load_search_checkpoint(strict=False)
 
     @property
+    def _collective_device(self) -> torch.device:
+        return (
+            torch.device("cuda", torch.cuda.current_device())
+            if dist.get_backend() == "nccl"
+            else torch.device("cpu")
+        )
+
+    def _validate_distributed_state(self, signature: dict[str, Any]) -> None:
+        if size() == 1:
+            return
+        signature["distributed_world_size"] = size()
+        state = {
+            "signature": signature,
+            "checkpoint_signature": self.search_signature,
+            "calibration_complete": self.calibration_complete,
+            "layers": self.layers,
+            "quantizer_state": _fingerprint_value(self.quantizer_state),
+            "target_bits": self._target_bits,
+            "checkpoint_enabled": self.config["checkpoint"] is not None,
+        }
+        states = [None] * size()
+        dist.all_gather_object(states, state)
+        if any(other != states[0] for other in states):
+            raise ValueError(
+                "Distributed KV-cache AutoQuantize requires identical search configuration and "
+                "consistent per-rank checkpoint progress. Restore all rank files from the same "
+                "search, or use a new checkpoint path on every rank."
+            )
+
+    def _batches(self, num_steps: int):
+        """Keep sharded-model forward schedules identical, including iterator exhaustion."""
+        iterator = iter(self.config["data_loader"])
+        sentinel = object()
+        for _ in range(num_steps):
+            data = next(iterator, sentinel)
+            available = data is not sentinel
+            if size() > 1:
+                availability = [None] * size()
+                dist.all_gather_object(availability, available)
+                if any(availability) != all(availability):
+                    raise ValueError(
+                        "Distributed KV-cache AutoQuantize requires the same number of batches "
+                        "on every rank; use a distributed sampler with equal-length shards."
+                    )
+            if not available:
+                break
+            yield data
+
+    @property
     def _candidate_quantizer_map(
         self,
     ) -> dict[str, dict[str, dict[str, TensorQuantizer]]]:
@@ -708,7 +762,6 @@ class AutoQuantizeKVSearcher(BaseSearcher):
     def _calibrate_candidates(self) -> None:
         from .model_quant import calibrate
 
-        data_loader = self.config["data_loader"]
         forward_step = self.config["forward_step"]
         num_calib_steps = self.config["num_calib_steps"]
         for candidate_index, (_, config) in enumerate(self._candidates):
@@ -718,10 +771,16 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             if config.algorithm is not None:
 
                 def calibration_loop(calibration_model):
-                    for step, data in enumerate(data_loader):
-                        if step >= num_calib_steps:
-                            break
-                        _get_logits(forward_step, calibration_model, data)
+                    for data in self._batches(num_calib_steps):
+                        logits = _get_logits(
+                            forward_step, calibration_model, data, validate_finite=False
+                        )
+                        finite = torch.isfinite(logits).all()
+                        if size() > 1:
+                            finite = finite.to(device=self._collective_device, dtype=torch.int32)
+                            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+                        if not finite:
+                            raise ValueError("KV-cache AutoQuantize encountered NaN or Inf logits.")
 
                 active_quantizers = [
                     quantizer
@@ -742,6 +801,14 @@ class AutoQuantizeKVSearcher(BaseSearcher):
 
         candidate_quantizers = self._candidate_quantizer_map
         _validate_persistent_candidate_scales(candidate_quantizers)
+        # The proxy is not a QuantModule, so calibrate() does not synchronize its scales.
+        if size() > 1:
+            for layer_candidates in candidate_quantizers.values():
+                for quantizers in layer_candidates.values():
+                    for quantizer in quantizers.values():
+                        amax = quantizer._amax.to(self._collective_device)
+                        dist.all_reduce(amax, op=dist.ReduceOp.MAX)
+                        quantizer._amax.copy_(amax)
         self.quantizer_state = _quantizer_state_dict(candidate_quantizers)
         self.calibration_complete = True
         self.num_calib_steps = num_calib_steps
@@ -750,6 +817,15 @@ class AutoQuantizeKVSearcher(BaseSearcher):
     def before_search(self) -> None:
         """Resolve attention decisions and calibrate or restore candidate scales."""
         super().before_search()
+        for module in self.model.modules():
+            parallel_state = getattr(module, "parallel_state", None)
+            if parallel_state is not None and (
+                parallel_state.tensor_parallel_group.world_size() > 1
+                or parallel_state.expert_model_parallel_group.world_size() > 1
+            ):
+                raise NotImplementedError(
+                    "Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP or EP."
+                )
         self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
         target_bits, self._candidates = _validate_search_inputs(
             self.constraints,
@@ -767,6 +843,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             self.config["num_score_steps"],
             _preceding_quantizer_signature(self.model),
         )
+        self._validate_distributed_state(signature)
         if self.search_signature is not None and not _checkpoint_state_is_compatible(
             self.state_dict(), signature
         ):
@@ -819,14 +896,12 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         scored_steps = 0
         all_logits_finite: torch.Tensor | None = None
         iterator = tqdm(
-            self.config["data_loader"],
+            self._batches(self.config["num_score_steps"]),
             total=self.config["num_score_steps"],
             desc="Estimating KV-cache KL sensitivity",
             disable=not self.config["verbose"],
         )
         for data in iterator:
-            if scored_steps >= self.config["num_score_steps"]:
-                break
             logits_ref = _get_logits(
                 self.config["forward_step"], self.model, data, validate_finite=False
             )
@@ -859,9 +934,20 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                 all_logits_finite.logical_and_(batch_logits_finite)
             scored_steps += 1
 
-        if scored_steps == 0 or scored_tokens == 0:
+        if scored_steps == 0:
             raise ValueError("KV-cache AutoQuantize data_loader produced no scoring batches.")
         assert all_logits_finite is not None
+        if size() > 1:
+            counts = torch.tensor(
+                [scored_tokens, int(all_logits_finite)],
+                dtype=torch.int64,
+                device=self._collective_device,
+            )
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+            scored_tokens = int(counts[0])
+            all_logits_finite = counts[1] == size()
+        if scored_tokens == 0:
+            raise ValueError("KV-cache AutoQuantize data_loader produced no scoring tokens.")
         if not all_logits_finite:
             raise ValueError("KV-cache AutoQuantize encountered NaN or Inf logits.")
 
@@ -876,7 +962,11 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                         f"{hparam.name!r}/{candidate_name!r}."
                     )
                 layer_score_sums.append(score_sum)
-            layer_scores = (torch.stack(layer_score_sums) / scored_tokens).tolist()
+            sums = torch.stack(layer_score_sums)
+            if size() > 1:
+                sums = sums.to(device=self._collective_device, dtype=torch.float64)
+                dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+            layer_scores = (sums / scored_tokens).tolist()
             scores = {}
             for candidate_name, score in zip(candidate_names, layer_scores):
                 if not math.isfinite(score):
@@ -902,15 +992,31 @@ class AutoQuantizeKVSearcher(BaseSearcher):
             [layers[hparam.name]["scores"][name] for name in candidate_names]
             for hparam in self._hparams
         ]
-        selections, status = _solve_additive_recipe(
-            [hparam.name for hparam in self._hparams],
-            [(hparam.k_width, hparam.v_width) for hparam in self._hparams],
-            candidate_names,
-            candidate_kv_bits,
-            scores,
-            self._target_bits,
-            self.config["verbose"],
-        )
+        result: list[Any] = [None]
+        if is_master():
+            try:
+                result[0] = (
+                    _solve_additive_recipe(
+                        [hparam.name for hparam in self._hparams],
+                        [(hparam.k_width, hparam.v_width) for hparam in self._hparams],
+                        candidate_names,
+                        candidate_kv_bits,
+                        scores,
+                        self._target_bits,
+                        self.config["verbose"],
+                    ),
+                    None,
+                )
+            except Exception as solver_error:
+                if size() == 1:
+                    raise
+                result[0] = (None, str(solver_error))
+        if size() > 1:
+            dist.broadcast_object_list(result, src=0)
+        selection, error = result[0]
+        if error is not None:
+            raise ValueError(f"KV-cache AutoQuantize solver failed on rank 0: {error}")
+        selections, status = selection
         denominator = float(sum(hparam.k_width + hparam.v_width for hparam in self._hparams))
         cost_model = self._cost_model
         assert isinstance(cost_model, KVCacheCostModel)

@@ -159,6 +159,8 @@ class TensorQuantizer(nn.Module):
     """
 
     _skip_properties_for_save_restore = {
+        # Buffer/parameter layouts are serialized separately from quantizer properties.
+        "_pytorch_state_metadata",
         "_calibrator",
         "_bias_calibrator",
         "_original_shape",

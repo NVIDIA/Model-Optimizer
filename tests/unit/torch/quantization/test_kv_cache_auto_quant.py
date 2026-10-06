@@ -741,24 +741,60 @@ def test_public_kv_autoquant_rejects_unmatched_or_unexportable_candidates_before
         assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_rejects_distributed_execution_before_mutation(monkeypatch):
+def test_public_kv_autoquant_rejects_invalid_formats_before_mutation():
     model = get_tiny_llama(num_hidden_layers=1)
     original_types = {name: type(module) for name, module in model.named_modules()}
-    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
-
-    with pytest.raises(RuntimeError, match="single-process only"):
+    with pytest.raises(ValueError, match="non-empty quantization_formats"):
         mtq.auto_quantize(
             model,
             {"effective_bits": 8.0, "cost_model": "kv_cache"},
             [],
             [],
-            lambda *_: pytest.fail("Distributed validation must fail before search."),
+            lambda *_: pytest.fail("Invalid formats must fail before search."),
         )
 
     assert not hasattr(model, "_modelopt_state")
     assert {name: type(module) for name, module in model.named_modules()} == original_types
+
+
+def test_gradient_then_kv_autoquant_resumes_without_forward(tmp_path, monkeypatch):
+    batches = [torch.arange(16).reshape(1, 16)]
+    states = []
+    for resume in (False, True):
+        model = get_tiny_llama(num_attention_heads=2)
+        if resume:
+            monkeypatch.setattr(
+                model, "forward", lambda *_a, **_kw: pytest.fail("Resume forwarded")
+            )
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=["FP8_DEFAULT_CFG"],
+            data_loader=batches,
+            forward_step=lambda m, x: m(input_ids=x, labels=x, use_cache=False),
+            loss_func=lambda output, _: output.loss,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="gradient",
+            checkpoint=str(tmp_path / "weights.pth"),
+            verbose=False,
+        )
+        _, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0, "cost_model": "kv_cache"},
+            quantization_formats=[_kv_config((4, 3), 8.0).model_dump(exclude_none=True)],
+            data_loader=batches,
+            forward_step=lambda m, x: m(input_ids=x, use_cache=False).logits,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+            checkpoint=str(tmp_path / "kv.pth"),
+            verbose=False,
+        )
+        states.append(state)
+    assert states[0]["search_signature"] == states[1]["search_signature"]
+    assert states[0]["layers"] == states[1]["layers"]
+    assert states[0]["best"] == states[1]["best"]
 
 
 def test_public_kv_autoquant_preserves_preceding_weight_quantization():

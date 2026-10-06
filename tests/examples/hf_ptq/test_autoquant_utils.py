@@ -214,41 +214,31 @@ def test_kl_padding_exclusion_is_scoped_to_kv_autoquant(
     assert observed["shape"] == expected_shape
 
 
-def test_kv_autoquant_rejects_fsdp2(autoquant_utils, monkeypatch):
-    monkeypatch.setattr(
-        autoquant_utils,
-        "_mtq_inputs_from_auto_quantize_config",
-        lambda *_args, **_kwargs: {"search_domain": "kv_cache"},
-    )
-    args = SimpleNamespace(
-        calib_with_images=False,
-        inference_pipeline_parallel=1,
-        use_fsdp2=True,
-    )
-
-    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
-        autoquant_utils.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
-
-
-def test_weight_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch):
+@pytest.mark.parametrize("domain", ["weight", "kv_cache"])
+def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
     model = torch.nn.Module()
     inputs = {
-        "search_domain": "weight",
+        "search_domain": domain,
         "constraints": {"effective_bits": 8.0},
         "quantization_formats": [],
         "fixed_quantization_config": None,
         "module_search_spaces": [],
         "disabled_layers": [],
         "kv_cache_quant_cfg": None,
-        "method": "gradient",
-        "score_size": 1,
+        "method": "gradient" if domain == "weight" else "kl_div",
+        "score_size": 8,
     }
     monkeypatch.setattr(
         autoquant_utils, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
     )
-    monkeypatch.setattr(
-        autoquant_utils.mtq, "auto_quantize", lambda search_model, **_kwargs: (search_model, {})
-    )
+    observed = {}
+
+    def search(search_model, **kwargs):
+        observed.update(kwargs)
+        return search_model, {}
+
+    monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", search)
+    monkeypatch.setattr(autoquant_utils, "world_size", lambda: 2)
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
@@ -258,10 +248,12 @@ def test_weight_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch):
     )
 
     with pytest.warns(UserWarning, match="use at your own risk"):
-        assert autoquant_utils.auto_quantize(args, model, [], SimpleNamespace()) is model
+        assert autoquant_utils.auto_quantize(args, model, [None] * 8, SimpleNamespace()) is model
+    assert observed["num_calib_steps"] == 8
+    assert observed["num_score_steps"] == 4
 
 
-def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(autoquant_utils):
+def test_recipe_distinguishes_weight_and_kv_autoquant(autoquant_utils):
 
     assert autoquant_utils._recipe_is_kv_auto_quantize(
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
