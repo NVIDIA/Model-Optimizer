@@ -489,7 +489,7 @@ class DecoderLayerConfig:
     attn_logit_softcapping: float = 0
     query_pre_attn_scalar: float = 0
 
-    # DBRX
+    # MPT
     clip_qkv: int = 0
 
     # T5, Mllama

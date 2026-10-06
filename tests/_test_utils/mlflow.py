@@ -42,6 +42,8 @@ class FakeMlflow:
         self.artifacts = {}
         # What the server says the run is called, which need not be what was requested.
         self.server_run_name = None
+        # The run id a resumed run re-attached to, if one did.
+        self.resumed = None
         # Runs the fluent API opened by itself, which is always a bug in the caller.
         self.strays = 0
         self._run = None
@@ -52,17 +54,28 @@ class FakeMlflow:
     def set_experiment(self, name):
         self.experiment = name
 
-    def start_run(self, run_name=None, tags=None, description=None):
-        self.run_name = run_name
-        # Replaced, not merged: a run starts with only the tags it was opened with, so an
-        # earlier run's cannot satisfy an assertion about this one. set_tags adds to these.
-        self.tags = dict(tags or {})
+    def start_run(self, run_name=None, tags=None, description=None, run_id=None):
+        self.resumed = run_id
+        if run_id is None:
+            self.run_name = run_name
+            # Replaced, not merged: a run starts with only the tags it was opened with, so an
+            # earlier run's cannot satisfy an assertion about this one. set_tags adds to these.
+            self.tags = dict(tags or {})
         self._run = SimpleNamespace(
             info=SimpleNamespace(
-                experiment_id="7", run_id="deadbeef", run_name=self.server_run_name or run_name
+                experiment_id="7",
+                run_id=run_id or "deadbeef",
+                run_name=self.server_run_name or self.run_name,
+                status="RUNNING",
             )
         )
         return self._run
+
+    def active_run(self):
+        return self._run
+
+    def get_run(self, run_id):
+        return SimpleNamespace(info=SimpleNamespace(run_id=run_id, status=self.status))
 
     def _get_or_start_run(self):
         """What every fluent call does first: with nothing active, it opens a run of its own."""

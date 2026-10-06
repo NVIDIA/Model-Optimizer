@@ -311,6 +311,23 @@ class ModelOptTrainerArguments(ModelOptHFArguments):
     )
 
 
+def _translate_warmup_keys(config: dict, actions) -> None:
+    """Accept either warmup spelling across transformers versions.
+
+    transformers 5.15 removed ``warmup_ratio``; from 5.0, a ``warmup_steps`` below 1 is a ratio.
+    """
+    types = {a.dest: a.type for a in actions}
+    if "warmup_steps" not in types:
+        return
+    if "warmup_ratio" in config and "warmup_ratio" not in types:
+        ratio = config.pop("warmup_ratio")
+        config.setdefault("warmup_steps", ratio)
+    elif "warmup_ratio" in types and types["warmup_steps"] is int:
+        steps = config.get("warmup_steps")
+        if isinstance(steps, float) and 0 < steps < 1:
+            config["warmup_ratio"] = config.pop("warmup_steps")
+
+
 class ModelOptArgParser(HfArgumentParser):
     """HfArgumentParser with ``--config`` YAML support and ``--generate_docs`` for ARGUMENTS.md."""
 
@@ -344,9 +361,10 @@ class ModelOptArgParser(HfArgumentParser):
             args = args[:idx] + args[idx + 2 :]  # strip --config <path> from argv
             import yaml
 
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 config = yaml.safe_load(f)
             if config:
+                _translate_warmup_keys(config, self._actions)
                 known_by_parser = {a.dest for a in self._actions}
                 all_modelopt_fields = self._all_modelopt_fields()
                 applicable = {}
@@ -676,7 +694,7 @@ class ModelOptHFTrainer(Trainer):
         """
         import yaml
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
             raise ValueError(f"lr_config must be a YAML mapping, got {type(cfg).__name__}")
@@ -791,6 +809,9 @@ class ModelOptHFTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute loss, patching lm_head to identity when using liger fused loss."""
         if self.use_liger_kernel:
+            # The fused loss is computed here from the hidden states, so drop the ``skip_logits``
+            # that transformers>=5.15 adds for eval: Liger would then need the popped labels.
+            inputs = {k: v for k, v in inputs.items() if k != "skip_logits"}
             with self._liger_identity_lm_head():
                 return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)

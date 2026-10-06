@@ -87,22 +87,34 @@ def iq1_s_grid(device: torch.device | str | None = None) -> torch.Tensor:
     return _GRID_CACHE[resolved_device]
 
 
-def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-    """Encode a moderate-size batch of flattened 256-value blocks."""
+def _predict_iq1_s_scales(blocks: torch.Tensor) -> torch.Tensor:
+    """Predict one FP16 super-block scale for each flattened block.
+
+    The fixed-scale search favors a compressed super-block scale, so this empirical anchor
+    puts d below the full-range value. The CUDA encoder computes the same quantity in its
+    own scale kernel; this is the reference the torch path uses.
+    """
     x = narrow_to_float32(blocks)
-    block_count = x.shape[0]
-    vectors = x.reshape(block_count, 32, 8)
+    amax = x.abs().amax(dim=1)
+    return ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
+
+
+def _search_shifted_grid(
+    vectors: torch.Tensor, d: torch.Tensor, grid: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Score every grid entry against each 8-value vector at every shift and local scale.
+
+    Returns the lowest error and the entry reaching it, both ``[blocks, 32, 16]`` and indexed
+    by choice ``shift * 8 + local``. IQ1_M runs the same search over the same grid and delta;
+    the two formats differ only in how they select among the choices afterwards.
+    """
+    block_count = vectors.shape[0]
     xnorm = vectors.square().sum(dim=-1)
     xsum = vectors.sum(dim=-1)
-
-    amax = x.abs().amax(dim=1)
-    # The fixed-scale search favors a compressed super-block scale. This
-    # empirical anchor initializes d below the full-range value.
-    d = ((amax / _IQ1_S_NATIVE_MAX) * _IQ1_S_SCALE_ANCHOR).clamp(max=65504.0).to(torch.float16)
-    d_float = d.float()
-
-    best_error = torch.full((block_count, 32, 16), torch.inf, dtype=torch.float32, device=x.device)
-    best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=x.device)
+    best_error = torch.full(
+        (block_count, 32, 16), torch.inf, dtype=torch.float32, device=vectors.device
+    )
+    best_entry = torch.zeros((block_count, 32, 16), dtype=torch.int64, device=vectors.device)
     grid_norm = grid.square().sum(dim=-1)
     grid_sum = grid.sum(dim=-1)
 
@@ -120,7 +132,7 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
             shifted_norm = tile_norm + 2 * delta * tile_sum + 8 * delta * delta
             for local in range(8):
                 choice = shift * 8 + local
-                scale = d_float.reshape(-1, 1, 1) * (2 * local + 1)
+                scale = d.reshape(-1, 1, 1) * (2 * local + 1)
                 error = (
                     xnorm.unsqueeze(-1) - 2 * scale * shifted_dot + scale.square() * shifted_norm
                 ).clamp_min_(0)
@@ -132,6 +144,16 @@ def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
                 best_entry[:, :, choice] = torch.where(
                     replace, tile_index + entry_start, best_entry[:, :, choice]
                 )
+    return best_error, best_entry
+
+
+def _encode_blocks(blocks: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    """Encode a moderate-size batch of flattened 256-value blocks."""
+    x = narrow_to_float32(blocks)
+    block_count = x.shape[0]
+    d = _predict_iq1_s_scales(x)
+    d_float = d.float()
+    best_error, best_entry = _search_shifted_grid(x.reshape(block_count, 32, 8), d_float, grid)
 
     group_error = best_error.reshape(block_count, 8, 4, 16).sum(dim=2)
     selected_choice = group_error.argmin(dim=-1)
@@ -213,6 +235,11 @@ def dequantize_iq1_s(
     validate_block_chunk_size(block_chunk_size)
 
     blocks = packed_weights.contiguous().reshape(-1, IQ1_S_BLOCK_BYTES)
+    if blocks.is_cuda:
+        extension = get_cuda_ext_ggml()
+        if extension is not None:
+            grid = iq1_s_grid(blocks.device)
+            return extension.iq1_s_unpack(blocks, grid, dtype).reshape(shape)
     shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=blocks.device)
     grid = iq1_s_grid(blocks.device)
     decoded = torch.empty((blocks.shape[0], IQ1_S_BLOCK_SIZE), dtype=dtype, device=blocks.device)
@@ -247,5 +274,5 @@ IQ1_S_FORMAT = IQFormat(
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq1_s and
 # dequantize_iq1_s when it was built, so patching those module functions changes neither backend
-# dispatch nor this alias; substitute a format's encoder or decoder in IQ_FORMAT_REGISTRY.
+# dispatch nor this alias; substitute a format's encoder or decoder in GGML_FORMAT_REGISTRY.
 iq1_s_fake_quant = IQ1_S_FORMAT.fake_quant

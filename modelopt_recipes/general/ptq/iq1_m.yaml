@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# IQ1_M weight-only PTQ.
 
-"""Per-model specs for HF model type ``dbrx``."""
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  preset: configs/ptq/presets/model/iq1_m
 
-from . import specs
+metadata:
+  description: >-
+    Applies uniform GGML-compatible IQ1_M weight-only quantization to eligible linear layers.
+    This is not a mixed per-tensor precision preset. No calibration data is required.
+quantize:
+  $import: preset

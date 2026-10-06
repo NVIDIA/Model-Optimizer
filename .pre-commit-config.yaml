@@ -108,6 +108,8 @@ repos:
               modelopt/onnx/quantization/ort_patching.py|
               modelopt/torch/_deploy/utils/onnx_utils.py|
               modelopt/torch/export/transformer_engine.py|
+              modelopt/torch/kernels/quantization/linear_attention/fla_chunk_delta_h.py|
+              modelopt/torch/kernels/quantization/linear_attention/fla_chunk_gated_delta_rule.py|
               modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
               modelopt/torch/quantization/export_onnx.py|
               modelopt/torch/quantization/plugins/attention.py|
@@ -117,6 +119,8 @@ repos:
               modelopt/torch/speculative/plugins/modeling_domino.py|
               modelopt/torch/speculative/plugins/hf_dflash.py|
               modelopt/torch/speculative/plugins/modeling_dflash.py|
+              modelopt/torch/speculative/plugins/hf_dflash2.py|
+              modelopt/torch/speculative/plugins/modeling_dflash2.py|
               modelopt/torch/speculative/plugins/hf_dspark.py|
               modelopt/torch/speculative/plugins/modeling_dspark.py|
               modelopt/torch/speculative/plugins/hf_lilicorr.py|
