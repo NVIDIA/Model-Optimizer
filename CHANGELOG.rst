@@ -117,6 +117,12 @@ Changelog
 
 **Bug Fixes**
 
+- Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
+  split and a smaller working batch size is already known: the slices stopped tiling the batch,
+  so the rows between the old and the new width never reached the model and the collected
+  statistics covered fewer samples than requested. Splitting a batch that holds a ``None`` entry
+  no longer raises ``TypeError`` either, and a batch holding a value under
+  ``allowed_non_tensor_keys`` now reports that its rows cannot be split instead.
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.
