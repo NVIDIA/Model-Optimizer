@@ -1449,12 +1449,18 @@ class GPTModelExporter:
         if qformat in IQ_FORMATS:
             self._state_dict.update(
                 self._get_iq_weight_state(
-                    gate_proj_prefix + "weight", gate_proj_weight, qformat, module.weight_quantizer
+                    gate_proj_prefix + "weight",
+                    gate_proj_weight,
+                    qformat,
+                    getattr(module, "weight_quantizer", None),
                 )
             )
             self._state_dict.update(
                 self._get_iq_weight_state(
-                    up_proj_prefix + "weight", up_proj_weight, qformat, module.weight_quantizer
+                    up_proj_prefix + "weight",
+                    up_proj_weight,
+                    qformat,
+                    getattr(module, "weight_quantizer", None),
                 )
             )
         elif weight_scale is None:
@@ -1662,7 +1668,7 @@ class GPTModelExporter:
                                 shard_prefix + "weight",
                                 shard_weight,
                                 qformat,
-                                module.weight_quantizer,
+                                getattr(module, "weight_quantizer", None),
                             )
                         )
                     elif shard_scale is None:
@@ -1837,7 +1843,9 @@ class GPTModelExporter:
         if qformat in IQ_FORMATS:
             for key, weight in zip(proj_keys, proj_weights):
                 self._state_dict.update(
-                    self._get_iq_weight_state(key, weight, qformat, module.weight_quantizer)
+                    self._get_iq_weight_state(
+                        key, weight, qformat, getattr(module, "weight_quantizer", None)
+                    )
                 )
         elif weight_scale is None:
             for key, weight in zip(proj_keys, proj_weights):
@@ -1961,7 +1969,10 @@ class GPTModelExporter:
                 else:
                     self._state_dict.update(
                         self._get_iq_weight_state(
-                            proj_prefix + "weight", proj_weight, qformat, module.weight_quantizer
+                            proj_prefix + "weight",
+                            proj_weight,
+                            qformat,
+                            getattr(in_proj, "weight_quantizer", None),
                         )
                     )
         elif weight_scale is None:
