@@ -1,0 +1,235 @@
+{
+  "date": "2026-10-06",
+  "scope": "Local kernel/cache parity and training smoke checks. No full serving engine, model quality, compression, or speed qualification.",
+  "runtime": {
+    "gpu": "NVIDIA RTX A6000",
+    "torch": "2.9.1+cu128",
+    "fla_core": "0.5.1",
+    "public_vllm": "0.15.1",
+    "public_vllm_commit": "1892993bc18e243e2c05841314c5e9c06a80c70d",
+    "bridge_commit": "056b78e0a96fb0f5b50a82d09d1ec456b073d1e0",
+    "bridge_megatron_commit": "e998be072d22ff57b4b49899819a1a153f4f3dc9",
+    "kda_megatron_commit": "ac100f773f9d8fac918ce3e64698be4ed84fa428",
+    "flags": {
+      "FLA_USE_FAST_OPS": "0",
+      "USE_DEFAULT_FLA_NORM": "0",
+      "FLA_GDN_FIX_BT": "0",
+      "FLA_USE_CUDA_GRAPH": "0",
+      "FLA_TRIL_PRECISION": "ieee"
+    }
+  },
+  "modelopt": {
+    "head": "c2a0172c596738c052973f9a42211622e9fb854a",
+    "working_tree_changes": true,
+    "source_sha256": {
+      "modelopt/torch/kernels/quantization/linear_attention/__init__.py": "f82bfddc929e210abf55a00bfef14350da15856275d0b04bb76a786d21cd2d33",
+      "modelopt/torch/kernels/quantization/linear_attention/fla_chunk_gated_delta_rule.py": "25b10d00855e9fef379b270c67ba61e6eaaf09d2e6af1cddaca58d3a313e2aad",
+      "modelopt/torch/quantization/linear_attention/config.py": "0fbf3f3b01b9994b5f19d528e8371f0e0e38d57ed2882775c9dd00bc61e455f3",
+      "modelopt/torch/quantization/linear_attention/decode.py": "e0ab1b5d243b65f988d6003bbcb9b52070f6bc07b37ba1dddf7872c380c4fb3a",
+      "modelopt/torch/quantization/linear_attention/prefill.py": "f9cd25abd79c146a2d403114d638ab95c2bd55a982d2237c195b4076b4c785ee",
+      "modelopt/torch/quantization/linear_attention/training.py": "65085025830bd1b9327876283a6be1dff196fa17ded2d3d1eab8fd0313b76cec",
+      "modelopt/torch/quantization/plugins/gdn.py": "ff45e68c9d5083a32e24551a5b84392fe4c06982a41403bfd6e410ea3ea858a2",
+      "modelopt/torch/quantization/plugins/kda.py": "19ebcd7549a1fc28183f43978ace4f526adb23297e80ba22f36bdae709e07102",
+      "modelopt/torch/quantization/plugins/megatron.py": "2dc9d0d19aa3052db872f43d8429539f067c4793658c0c924e36edd753d7d95a",
+      "modelopt_recipes/configs/ptq/units/README.md": "07e17880cd01336dbc1d5bc12379f90cedb44aba8ca7da58ae64e7330929e67b",
+      "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "62d4dafe5bba652203f815946f1200a21b9ae8a3d4933f0174a6b742b00a9f68",
+      "modelopt_recipes/general/ptq/linear_attention_state_int8_dynamic.yaml": "c5b82283bc215812cb1df76a380fb6f764b3ad1769fc2d18197c7b7ff0dc9d91",
+      "tests/gpu/torch/kernels/quantization/linear_attention/test_fla_chunk_gated_delta_rule.py": "a9a0c4977f347768cb2e5ad22dbb7b94f94f61a4fe89bb9d8db92623ecfa2c79",
+      "tests/gpu_megatron/torch/quantization/plugins/test_megatron_gated_delta_net.py": "53d407e419aa727e7c8357e4259f2bd046e548d700d87c92b8691d781e81a62e",
+      "tests/gpu_megatron/torch/quantization/plugins/test_megatron_kda.py": "34b2ab06cf4b9272d87d46a420c4f8fb54f6ba16983b91ce71395a7e0fe97684",
+      "tests/gpu_vllm/torch/quantization/test_linear_attention_training.py": "bcc8c15dac760faa9cf0dcffcc8da646304831cfd6d60d72d472efd99a88614c",
+      "tests/unit/torch/quantization/plugins/test_gdn.py": "b9d0424ed2b89d3ddab9422a3b80cccc97fe111b87262623dda952aaa3e8159f",
+      "modelopt/torch/kernels/quantization/linear_attention/serving/replay.py": "fb6d89b7d08eb8dc6f02ddf8e1eedfe2b507bec62667c7ae06deacdd7be8b095",
+      "tests/gpu_vllm/torch/quantization/test_linear_attention_replay.py": "28b6504533dda9c8cfa773c9a89d015f86011ea5cf87b4e9883b3c79b26c6f72"
+    }
+  },
+  "native_fork": {
+    "head": "29c355086070d2c7973550d3670171af53433533",
+    "working_tree_changes": true,
+    "source_sha256": {
+      "vllm/model_executor/layers/fla/ops/fused_recurrent_replayssm.py": "e829dd391c2afc8850a9a49b6edf90fadcef2bb6e98b5b7a9ccaf7b9313f6617",
+      "vllm/model_executor/layers/fla/ops/kda_replayssm.py": "e4501b5fcf42a4d581fb3bdcdca83bf5ccabf8f5823a8245f50225a67fb28c10",
+      "vllm/model_executor/layers/mamba/ops/replayssm_config.py": "fd4d408795e9b269fa0318e44eb322841db214c9782facd6bab320969ef088bf"
+    },
+    "integration": "Three local fork modules loaded into public vLLM 0.15.1. Existing local KDA extensions are required; commit alone does not identify the tested source. Exact files archived in local artifact directory."
+  },
+  "native_comparisons": {
+    "short_cases": 18,
+    "short_grid": {
+      "kind": [
+        "gdn",
+        "kda"
+      ],
+      "window": [
+        1,
+        4,
+        16
+      ],
+      "seed_prefix_qdq": [
+        [
+          179,
+          65,
+          true
+        ],
+        [
+          821,
+          0,
+          true
+        ],
+        [
+          173,
+          3,
+          false
+        ]
+      ],
+      "suffix": "2 * window + 3",
+      "heads": 1,
+      "K": 64,
+      "V": 64
+    },
+    "long_cases": 4,
+    "long_grid": {
+      "kind": [
+        "gdn",
+        "kda"
+      ],
+      "window": [
+        1,
+        16
+      ],
+      "seed": 991,
+      "prefix": 129,
+      "suffix": 259,
+      "heads": 2,
+      "K": 128,
+      "V": 128
+    },
+    "all_outputs_exact": true,
+    "all_checkpoint_values_scales_and_ring_entries_exact": true,
+    "all_gradients_finite_nonzero": true,
+    "all_nonempty_prefixes_receive_gradients": true,
+    "prefill_layout": "packed with explicit cu_seqlens"
+  },
+  "split_resume": {
+    "cases": 4,
+    "kind": [
+      "gdn",
+      "kda"
+    ],
+    "window": [
+      1,
+      4
+    ],
+    "qk_normalization": true,
+    "outputs_and_final_exact": true,
+    "gradient_max_abs": 0.0,
+    "empty_call_no_write": true
+  },
+  "training": {
+    "bridge_gdn": [
+      {
+        "window": 1,
+        "mode": "qat",
+        "weights_updated": true,
+        "teacher_frozen": false
+      },
+      {
+        "window": 1,
+        "mode": "qad",
+        "weights_updated": true,
+        "teacher_frozen": true
+      },
+      {
+        "window": 4,
+        "mode": "qat",
+        "weights_updated": true,
+        "teacher_frozen": false
+      },
+      {
+        "window": 4,
+        "mode": "qad",
+        "weights_updated": true,
+        "teacher_frozen": true
+      }
+    ],
+    "megatron_kda_layer": [
+      {
+        "kind": "kda",
+        "window": 1,
+        "mode": "qat",
+        "scope": "Megatron layer loss, not Bridge trainer",
+        "loss": 0.002342033665627241,
+        "finite_gradients": true,
+        "prefix_gradient": true,
+        "weights_updated": true,
+        "teacher_frozen": false
+      },
+      {
+        "kind": "kda",
+        "window": 1,
+        "mode": "qad",
+        "scope": "Megatron layer loss, not Bridge trainer",
+        "loss": 2.051116041457135e-07,
+        "finite_gradients": true,
+        "prefix_gradient": true,
+        "weights_updated": true,
+        "teacher_frozen": true
+      },
+      {
+        "kind": "kda",
+        "window": 4,
+        "mode": "qat",
+        "scope": "Megatron layer loss, not Bridge trainer",
+        "loss": 0.0016753488453105092,
+        "finite_gradients": true,
+        "prefix_gradient": true,
+        "weights_updated": true,
+        "teacher_frozen": false
+      },
+      {
+        "kind": "kda",
+        "window": 4,
+        "mode": "qad",
+        "scope": "Megatron layer loss, not Bridge trainer",
+        "loss": 1.1298590862907076e-07,
+        "finite_gradients": true,
+        "prefix_gradient": true,
+        "weights_updated": true,
+        "teacher_frozen": true
+      }
+    ],
+    "bridge_kda": "Not run: matched Bridge provider lacks KDA. Layer distillation checks are separate."
+  },
+  "regression_tests": {
+    "cpu": 43,
+    "native_public_and_replay_gpu": 4,
+    "w_qat_gpu": 2,
+    "megatron_sharded_restore": 3
+  },
+  "diagnostics": {
+    "initial_issue": "BF16 factors and weighted ring reconstruction differ from the prior sequential FP32 reference. Native forward and saved ring values resolve the reproduced mismatch.",
+    "prefill_oracle": "Fixed-length vs packed prefill differed by one BF16 output (6.103515625e-5). Matching the serving packed layout passed exactly without a tolerance change.",
+    "qad_example": "Updated removed skip_lm_loss option to kd_loss_alpha=1.0."
+  },
+  "local_artifact_directory": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/state-qat-consolidation-20261006",
+  "artifact_sha256": {
+    "load_native.py": "cf69f65deef3711ae8ef40b256ffe888c6d942f7a785370f8a5c77d473446e71",
+    "validate_replay.py": "76cace2da357199c77f99da23be0d3e7c585f7ba49ce63e5164888ae24af8189",
+    "check_bridge.py": "e73aba925a4e91792a6d71986d0ddc3cc57d3e640c6893f439e2a872b0ca643c",
+    "validate_long.py": "e2ace242a381c208b5be0c9172a0c615a5bf2d964fd75c94e8e5f919ae11f543",
+    "check_split.py": "28de29c128465187060ffc31925a4c85d09934806bf524de6ea73de69e937365",
+    "check_kda_layer.py": "752da64c52f378a064640e251fdbe625885793a5ec4cf18922dc0ad2e14099c9"
+  },
+  "example": {
+    "head": "0357915995f407eded55fc4caea5e2d13214debb",
+    "working_tree_changes": true,
+    "source_sha256": {
+      "examples/llm_qat/linear_attention/train.py": "400f3212229a03bf91a14244e4f940170146a3f95ab4d830e667811c5d3d5fc1",
+      "tests/examples/megatron_bridge/test_linear_attention.py": "60ee7909d179ff86bb65945b749547429056bcdab089d585377da36efcbc7397"
+    }
+  },
+  "validation_hooks": {
+    "source_pre_commit": "passed",
+    "example_pre_commit": "passed"
+  }
+}

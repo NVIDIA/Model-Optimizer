@@ -124,7 +124,8 @@ def compiled_state_training():
     """Compile one tiny GDN shape before timing the single-GPU training checks."""
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
-    recipe = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize
+    pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
+    recipe = load_recipe("general/ptq/linear_attention_state_int8_block32_dynamic").quantize
     try:
         _train(True, recipe)
     finally:
