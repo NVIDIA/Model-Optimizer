@@ -242,6 +242,11 @@ class HFDFlashModel(DFlashModel):
         return self.get_submodule(path) if path else None
 
     @property
+    def _needs_base_logits(self) -> bool:
+        """Whether the loss reads the target's logits; offline training then reconstructs them."""
+        return bool(self.dflash_self_logit_distillation)
+
+    @property
     def _base_llm_config(self):
         return (
             getattr(self.config, "text_config", None)
@@ -457,6 +462,11 @@ class HFDFlashModel(DFlashModel):
             elif hasattr(base_config, attr):
                 base_val = getattr(base_config, attr)
             else:
+                continue
+            # A NoPE target's config class can declare rope_theta without the checkpoint
+            # setting it. There is no target rotary to align to, so the draft keeps its own
+            # rather than inheriting None as the RoPE base.
+            if base_val is None:
                 continue
             user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
@@ -1027,14 +1037,14 @@ class HFDFlashModel(DFlashModel):
         # 1. Run base model → extract target hidden states
         if self.dflash_offline:
             assert "base_model_outputs" in kwargs
-            # For self-logit-distillation, from_offline_dict reconstructs base logits from the
-            # captured hidden (final norm re-applied as needed) when the producer didn't supply
+            # When the loss needs them (see _needs_base_logits), from_offline_dict reconstructs
+            # base logits from the captured hidden (final norm re-applied as needed) when the producer didn't supply
             # them, and raises if anything needed for that is missing.
             base_outputs = DFlashBaseModelOutput.from_offline_dict(
                 kwargs["base_model_outputs"],
                 self._base_model_norm,
                 self._base_model_lm_head,
-                need_logits=self.dflash_self_logit_distillation,
+                need_logits=self._needs_base_logits,
             )
             target_hidden = base_outputs.target_hidden
         else:
