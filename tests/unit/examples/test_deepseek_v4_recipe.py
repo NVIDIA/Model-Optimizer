@@ -207,16 +207,32 @@ def test_block_size_prefers_the_global_consistent_with_the_tensors(
     assert dsv4_ptq._ds_fp8_block_size(*_fp8_pair(256, 512, block)) == expected
 
 
-def test_block_size_falls_back_to_the_tensor_shapes(monkeypatch):
+@pytest.mark.parametrize(
+    ("shape", "block"),
+    [
+        ((256, 512), 32),
+        ((256, 512), 128),
+        ((100, 70), 32),
+        ((300, 70), 128),
+    ],
+)
+def test_block_size_without_globals_picks_the_unique_known_size(monkeypatch, shape, block):
     monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace())
-    assert dsv4_ptq._ds_fp8_block_size(*_fp8_pair(256, 512, 32)) == 32
+    assert dsv4_ptq._ds_fp8_block_size(*_fp8_pair(*shape, block)) == block
 
 
-def test_block_size_rejects_shapes_no_square_block_explains(monkeypatch):
+def test_block_size_rejects_shapes_no_known_block_explains(monkeypatch):
     monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(block_size=128))
     weight = torch.zeros(256, 256, dtype=torch.float8_e4m3fn)
     with pytest.raises(AssertionError, match="cannot infer FP8 block size"):
         dsv4_ptq._ds_fp8_block_size(weight, torch.zeros(3, 5, dtype=torch.uint8))
+
+
+def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):
+    """A 32x32 weight has a (1, 1) scale at both 32 and 128; refuse to guess."""
+    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace())
+    with pytest.raises(AssertionError, match=r"matching these shapes: \[32, 128\]"):
+        dsv4_ptq._ds_fp8_block_size(*_fp8_pair(32, 32, 32))
 
 
 def test_fp8_dequant_crops_partial_blocks():

@@ -115,26 +115,31 @@ def _inject_v4_module(v4_inference_dir: Path) -> None:
 deekseep_v4_model: Any = None
 
 
+_DS_FP8_BLOCK_SIZES = (32, 128)
+
+
 def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
     """Square FP8 block size of the injected DS-V4 ``model`` module.
 
     The release the module came from decides this: V4-Pro exposes it as the
     module global ``block_size`` (128), V4.1-Flash renamed it to
     ``fp8_block_size`` and shrank it to 32. Prefer whichever global is
-    consistent with the tensor shapes at hand, and only fall back to deriving
-    it from those shapes when neither is.
+    consistent with the tensor shapes at hand. Without one, pick among the
+    known DS-V4 block sizes, and only when exactly one reproduces the scale
+    shape: under ceil-div, a whole range of block sizes yields the same scale
+    shape once a block is partial, so the shapes alone cannot name it.
     """
     for attr in ("fp8_block_size", "block_size"):
         blk = getattr(deekseep_v4_model, attr, None)
         if isinstance(blk, int) and blk > 0 and scale.shape == _fp8_scale_shape(weight, blk):
             return blk
-    m, _n = weight.shape
-    blk = m // scale.shape[0]
-    assert blk > 0 and scale.shape == _fp8_scale_shape(weight, blk), (
+    fits = [b for b in _DS_FP8_BLOCK_SIZES if scale.shape == _fp8_scale_shape(weight, b)]
+    assert len(fits) == 1, (
         f"cannot infer FP8 block size from weight {tuple(weight.shape)} "
-        f"and scale {tuple(scale.shape)}"
+        f"and scale {tuple(scale.shape)}: known block sizes {_DS_FP8_BLOCK_SIZES} "
+        f"matching these shapes: {fits}"
     )
-    return blk
+    return fits[0]
 
 
 def _fp8_scale_shape(weight: torch.Tensor, block: int) -> tuple[int, int]:
