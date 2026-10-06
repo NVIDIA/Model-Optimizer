@@ -29,6 +29,21 @@ __all__ = []
 _STATE_FORMATS: dict[int | tuple[int, int], str] = {(4, 3): "fp8_e4m3", 8: "int8"}
 
 
+class _ForwardValue(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value, rounded):
+        return rounded.to(value.dtype)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
+def forward_value(value, rounded):
+    # Unlike value + (rounded - value).detach(), this cannot lose low bits by cancellation.
+    return _ForwardValue.apply(value, rounded)
+
+
 def validate_gdn_quantizer(
     quantizer: TensorQuantizer,
     *,
@@ -86,19 +101,34 @@ def state_quantizer_config(
     return _STATE_FORMATS[quantizer.num_bits], 0
 
 
-def _fp8_quantize(value: torch.Tensor, axis):
-    """Apply ModelOpt FP8 QDQ and return its detached dequantization scales."""
+def _make_state_quantizer(state_format):
+    """Build a standalone-call quantizer; converted modules supply their registered instance."""
     # QuantizeConfig imports this module before the quantizer classes are initialized.
     from ..config import QuantizerAttributeConfig
     from ..nn import TensorQuantizer
 
-    quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(num_bits=(4, 3), type="dynamic", axis=axis, pass_through_bwd=True)
+    if state_format not in _STATE_FORMATS.values():
+        raise ValueError("State format must be fp8_e4m3 or int8")
+    return TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(4, 3) if state_format == "fp8_e4m3" else 8,
+            type="dynamic",
+            axis=(0, 1),
+            narrow_range=True,
+            pass_through_bwd=True,
+        )
     )
-    quantized = quantizer(value)
-    amax = quantizer._get_amax(value).float()
-    safe_amax = torch.where(amax <= 2**-24, torch.ones_like(amax), amax)
-    return quantized, torch.div(448.0, safe_amax).reciprocal()
+
+
+def _resolve_state_quantizer(state_quantizer, state_qdq, state_format):
+    """Resolve legacy flags and registered quantizer settings at either training entry point."""
+    if state_quantizer is None and state_qdq:
+        state_quantizer = _make_state_quantizer(state_format)
+    if state_quantizer is not None:
+        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
+        if state_quantizer.is_enabled:
+            state_format, _ = state_quantizer_config(state_quantizer)
+    return state_quantizer, state_qdq, state_format
 
 
 def _state_qdq(
@@ -114,26 +144,27 @@ def _state_qdq(
         raise ValueError("State format must be fp8_e4m3 or int8")
     if block_v not in (16, 32, 64, 128):
         raise ValueError("block_v must be 16, 32, 64, or 128")
-    quantized, _ = _tile_qdq(state, block_v, state_format, state=True)
-    if state_format == "fp8_e4m3":
-        return quantized
-    return state + (quantized - state).detach()
+    quantized, _ = _tile_qdq(state, block_v, state_format, state_quantizer=state_quantizer)
+    return quantized
 
 
-def _tile_qdq(value, block_v, state_format, *, state=False):
-    """Return tile-rounded values and detached scales; INT8 callers supply their STE."""
+def _tile_qdq(value, block_v, state_format, *, state_quantizer=None):
+    """Return TensorQuantizer tile QDQ with identity STE and detached scales."""
+    quantizer = (
+        state_quantizer if state_quantizer is not None else _make_state_quantizer(state_format)
+    )
     rounded, scales = [], []
     for part in value.split(block_v, dim=-1):
-        tensor = part.flatten(-2) if state else part
-        if state_format == "fp8_e4m3":
-            axis = tuple(range(tensor.ndim - 1)) or None
-            decoded, scale = _fp8_quantize(tensor, axis)
+        # Canonical [N, H, K*BV] shape preserves per-head tile scales for both state ranks.
+        tensor = part.flatten(-2)
+        inputs = tensor.reshape(1, -1, tensor.shape[-1])
+        decoded = quantizer(inputs)
+        amax = quantizer._get_amax(inputs).float()
+        if quantizer.num_bits == 8:
+            scale = amax / quantizer.maxbound
         else:
-            with torch.no_grad():
-                tensor = tensor.float()
-                amax = tensor.abs().amax(dim=-1, keepdim=True)
-                scale = torch.where(amax > 0, amax / 127.0, torch.ones_like(amax))
-                decoded = (tensor / scale).round().clamp(-127, 127) * scale
+            safe_amax = torch.where(amax <= 2**-24, torch.ones_like(amax), amax)
+            scale = torch.div(quantizer.maxbound, safe_amax).reciprocal()
         rounded.append(decoded.reshape_as(part))
-        scales.append(scale.squeeze(-1))
+        scales.append(scale.reshape(tensor.shape[:-1]))
     return torch.cat(rounded, dim=-1).to(value.dtype), torch.stack(scales, dim=-1)

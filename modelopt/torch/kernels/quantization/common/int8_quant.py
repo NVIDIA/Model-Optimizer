@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Signed narrow-range INT8 QDQ for recurrent-state tiles."""
+"""Composable signed narrow-range INT8 QDQ matching CUDA TensorQuantizer."""
 
 import triton
 import triton.language as tl
@@ -23,23 +23,18 @@ __all__ = []
 
 
 @triton.jit
-def int8_scalar_qdq(value, scale):
-    codes = libdevice.nearbyint(tl.div_rn(value, scale))
-    return tl.minimum(tl.maximum(codes, -127.0), 127.0) * scale
+def int8_scalar_qdq(value, amax):
+    """QDQ with a scalar or broadcastable amax, using CUDA TensorQuantizer arithmetic."""
+    # Match gemm/tensor_quant_gpu.cu: tiny groups become zero; ties round to even.
+    tiny = amax < 2.0**-24
+    scale = tl.div_rn(127.0, tl.where(tiny, 1.0, amax))
+    codes = tl.clamp(libdevice.nearbyint(value * scale), -127.0, 127.0)
+    return tl.where(tiny, 0.0, tl.div_rn(codes, scale))
 
 
 @triton.jit
-def int8_block_qdq(value, GROUP_SIZE: tl.constexpr, STATE_V_FIRST: tl.constexpr):
-    """Match TensorQuantizer's dynamic INT8 QDQ per key row and value group."""
-    if STATE_V_FIRST:
-        value = tl.trans(value)
+def int8_block_qdq(value, GROUP_SIZE: tl.constexpr):
+    """Dynamic INT8 QDQ per row and last-axis group of a two-dimensional tile."""
     groups = tl.reshape(value, (value.shape[0], value.shape[1] // GROUP_SIZE, GROUP_SIZE))
     amax = tl.max(tl.abs(groups), axis=2, keep_dims=True)
-    # Match the CUDA TensorQuantizer's scale direction, ties-to-even, and tiny-group handling.
-    tiny = amax < 2.0**-24
-    scale = tl.div_rn(127.0, tl.where(tiny, 1.0, amax))
-    codes = tl.clamp(libdevice.nearbyint(groups * scale), -127.0, 127.0)
-    rounded = tl.reshape(tl.where(tiny, 0.0, tl.div_rn(codes, scale)), value.shape)
-    if STATE_V_FIRST:
-        rounded = tl.trans(rounded)
-    return rounded
+    return tl.reshape(int8_scalar_qdq(groups, amax), value.shape)

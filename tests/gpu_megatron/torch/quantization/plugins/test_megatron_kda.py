@@ -29,6 +29,7 @@ from megatron.core.transformer import TransformerConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
@@ -121,12 +122,13 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     assert model.gated_delta_rule is kernel
 
     policy = model.linear_attention_config
-    model.kda_state_quantizer.disable()
+    mtq.disable_quantizer(model, "*")
     model.linear_attention_config = LinearAttentionConfig()
     with torch.no_grad():
         torch.testing.assert_close(forward(model), baseline, rtol=0, atol=0)
-    model.kda_state_quantizer.enable()
     model.linear_attention_config = policy
+    mtq.enable_quantizer(model, "*kda_state_quantizer")
+    mtq.enable_quantizer(model, "*replay_*_quantizer")
 
     with torch.no_grad():
         expected = forward(model)
@@ -146,6 +148,7 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     assert not hasattr(restored, "kda_w_quantizer")
     assert restored._linear_attention_prefill_lengths is None
     assert restored.linear_attention_config == policy
+    assert restored.replay_key_quantizer.is_enabled and restored.replay_update_quantizer.is_enabled
     assert restored.gated_delta_rule is kernel
     assert torch.isfinite(hidden.grad).all()
     for parameter in restored.parameters():
@@ -162,6 +165,10 @@ def compiled_kda_workers(dist_workers_size_1):
     cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
     cfg["linear_attention"][0]["cfg"]["decode"].update(
         mode="replay", replay={"window": 5}, decay_log_step=1 / 256
+    )
+    cfg["quant_cfg"].extend(
+        entry.model_dump(exclude_unset=True)
+        for entry in load_config("configs/ptq/units/linear_attention_replay_fp8_dynamic")
     )
     dist_workers_size_1.run(_compile_kda, cfg)
     return dist_workers_size_1, cfg

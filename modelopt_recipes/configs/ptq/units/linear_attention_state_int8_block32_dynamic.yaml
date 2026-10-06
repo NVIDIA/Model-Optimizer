@@ -13,10 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
-
-from .config import *
-from .decode import *
-from .kda import *
-from .prefill import *
-from .training import *
+# Dynamic INT8 with one scale per key row and 32 value channels for training and serving.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*gdn_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      block_sizes: {-1: 32}
+      type: dynamic
+      pass_through_bwd: true
+  - quantizer_name: '*kda_state_quantizer'
+    cfg:
+      num_bits: 8
+      unsigned: false
+      narrow_range: true
+      block_sizes: {-1: 32}
+      type: dynamic
+      pass_through_bwd: true

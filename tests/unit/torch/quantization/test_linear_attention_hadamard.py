@@ -81,7 +81,7 @@ def test_hadamard_replay_matches_dense_oracle_and_split_carry():
     cfg = LinearAttentionDecodeConfig(
         mode="replay",
         state_codec="int8_hadamard32",
-        replay={"window": 3, "factor_qdq": False},
+        replay={"window": 3},
     )
     kwargs = {"config": cfg, "state_format": "int8", "state_qdq": True}
     output, carry = recurrent_decode(*args, initial_state=initial, **kwargs)

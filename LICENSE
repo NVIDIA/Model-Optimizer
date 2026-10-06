@@ -216,6 +216,7 @@ Portions of this repository were adapted from code originally authored by
 the following copyright holders, licensed under the Apache License, Version 2.0
 (see full license text above):
 
+  Copyright contributors to the vLLM project
   Copyright 2021 The HuggingFace Inc. team
   Copyright 2022 The HuggingFace Team
   Copyright 2022, Lefebvre Dalloz Services

@@ -13,10 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numerical policies and differentiable kernels for linear attention."""
-
-from .config import *
-from .decode import *
-from .kda import *
-from .prefill import *
-from .training import *
+# Replay factors for GDN/KDA; requires a linear_attention decode policy with mode: replay.
+# Keys use one scale per head; updates use one scale per head and 64 value channels.
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+  - quantizer_name: '*replay_key_quantizer'
+    cfg:
+      num_bits: e4m3
+      axis: [0]
+      type: dynamic
+  - quantizer_name: '*replay_update_quantizer'
+    cfg:
+      num_bits: e4m3
+      block_sizes: {-1: 64}
+      type: dynamic

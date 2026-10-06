@@ -23,6 +23,7 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins import gdn
 from modelopt.torch.quantization.plugins.gdn import GatedDeltaNetStateQuantMixin
@@ -84,8 +85,6 @@ def quant_cfg(state=True, w=False):
         {"num_bits": (4, 3), "axis": (0, 1)},  # static
         {"num_bits": (4, 3), "type": "dynamic"},  # per tensor
         {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},  # int8
-        {"num_bits": 4, "axis": (0, 1), "type": "dynamic"},  # unsupported format
-        {"num_bits": 8, "narrow_range": True, "type": "dynamic", "block_sizes": {-1: 8}},
         {"num_bits": (4, 3), "type": "dynamic", "block_sizes": {-1: 16}},  # blockwise
     ],
 )
@@ -110,6 +109,8 @@ def test_dynamic_export_removes_linear_attention_attributes():
     for name in (
         "gdn_state_quantizer",
         "gdn_w_quantizer",
+        "replay_key_quantizer",
+        "replay_update_quantizer",
         "linear_attention_config",
         "_linear_attention_prefill_lengths",
     ):
@@ -130,11 +131,8 @@ def test_disabled_state_quantizer_calls_original_kernel():
     assert model.gated_delta_rule is chunk_gated_delta_rule, "the kernel swap must be undone"
 
 
-@pytest.mark.parametrize(
-    ("partial_kernel", "num_bits"),
-    [(False, (4, 3)), (True, (4, 3)), (False, 8)],
-)
-def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel, num_bits):
+@pytest.mark.parametrize("partial_kernel", [False, True])
+def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kernel):
     calls = []
 
     def fake_state_qdq_kernel(*args, **kwargs):
@@ -146,9 +144,7 @@ def test_enabled_state_quantizer_uses_state_qdq_kernel(monkeypatch, partial_kern
     if partial_kernel:
         model.gated_delta_rule = partial(chunk_gated_delta_rule, output_final_state=True)
     x = torch.randn(2, 8, 3, 4)
-    cfg = deepcopy(quant_cfg())
-    cfg["quant_cfg"][-1]["cfg"].update(num_bits=num_bits, unsigned=False, narrow_range=True)
-    mtq.quantize(model, cfg, lambda m: m(x))
+    mtq.quantize(model, quant_cfg(), lambda m: m(x))
 
     model(x)
     assert calls and calls[-1] == {
@@ -313,6 +309,66 @@ def test_standard_projection_recipe_leaves_gdn_emulation_disabled():
     )
     assert not model.gdn_state_quantizer.is_enabled
     assert not model.gdn_w_quantizer.is_enabled
+    assert not model.replay_key_quantizer.is_enabled
+    assert not model.replay_update_quantizer.is_enabled
+
+
+def test_replay_quantizers_use_standard_controls_and_restore():
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*replay_key_quantizer",
+                "cfg": {"num_bits": (4, 3), "type": "dynamic", "axis": (0,)},
+            },
+            {
+                "quantizer_name": "*replay_update_quantizer",
+                "cfg": {"num_bits": (4, 3), "type": "dynamic", "block_sizes": {-1: 16}},
+            },
+        ],
+        "linear_attention": [
+            {
+                "module_name": "*",
+                "cfg": {
+                    "backend": "matmul",
+                    "state": {"block_v": 16},
+                    "decode": {"mode": "replay", "replay": {"window": 3}},
+                },
+            }
+        ],
+        "algorithm": None,
+    }
+    torch.manual_seed(53)
+    model = mtq.quantize(TinyGatedDeltaNet(), cfg)
+    x = torch.randn(1, 7, 1, 4) * 0.1
+    with linear_attention_training_phase(model, [2]):
+        quantized = model(x)
+    saved = deepcopy(mto.modelopt_state(model))
+    weights = deepcopy(model.state_dict())
+    mtq.disable_quantizer(model, "*")
+    with linear_attention_training_phase(model, [2]):
+        plain = model(x)
+    assert not torch.equal(plain, quantized)
+    # Current checkpoints and pre-handle replay checkpoints reproduce the same computation.
+    for legacy in (None, False, True):
+        checkpoint = deepcopy(saved)
+        if legacy is not None:
+            for _, mode_state in checkpoint["modelopt_state_dict"]:
+                policy = mode_state["metadata"]["linear_attention"][""]
+                policy["schema_version"] = 1
+                if not legacy:
+                    policy["decode"]["replay"]["factor_qdq"] = False
+                for name in model.replay_quantizer_names:
+                    mode_state["metadata"]["quantizer_state"].pop(name)
+        restored = mto.restore_from_modelopt_state(TinyGatedDeltaNet(), checkpoint)
+        restored.load_state_dict(weights)
+        assert restored.replay_key_quantizer.is_enabled == (legacy is not False)
+        assert restored.replay_update_quantizer.is_enabled == (legacy is not False)
+        assert "factor_qdq" not in restored.linear_attention_config.decode.replay.model_dump()
+        with linear_attention_training_phase(restored, [2]):
+            torch.testing.assert_close(
+                restored(x), plain if legacy is False else quantized, rtol=0, atol=0
+            )
 
 
 def test_policy_rejects_unmatched_and_unimplemented_modes():

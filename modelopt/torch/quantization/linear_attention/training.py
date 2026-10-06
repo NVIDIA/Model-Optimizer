@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Differentiable explicit per-sequence prefill/decode phase handoff."""
+"""Training forwards with a chunked prefill prefix and recurrent decode suffix."""
 
 from contextlib import contextmanager
 from itertools import pairwise
@@ -22,7 +22,7 @@ import torch
 
 from ._chunk_prefill import chunk_gdn, chunk_kda
 from .decode import recurrent_decode
-from .utils import state_quantizer_config
+from .utils import _resolve_state_quantizer, _state_qdq
 
 __all__ = ["linear_attention_training_phase"]
 
@@ -65,7 +65,23 @@ def linear_attention_training_phase(model, prefill_lengths):
             module._linear_attention_prefill_lengths = original
 
 
-def _decode_prefill(
+def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size, normalize):
+    """Validate the shared policy and prepare GDN/KDA working dtypes and Q/K normalization."""
+    if policy.backend != "matmul" or chunk_size != policy.chunk_size:
+        raise ValueError("Matmul prefill requires backend='matmul' and its configured chunk size")
+    if policy.decode is None:
+        raise ValueError("An explicit decode policy is required")
+    serving = policy.decode.precision == "vllm_0_15"
+    if serving and (q.device.type != "cuda" or any(x.dtype != torch.bfloat16 for x in (q, k, v))):
+        raise ValueError("precision='vllm_0_15' requires CUDA BF16 Q/K/V inputs")
+    dtype = torch.float64 if q.dtype == torch.float64 else torch.float32
+    q, k, v, g, beta = (x.to(dtype) for x in (q, k, v, g, beta))
+    if normalize and not serving:
+        q, k = (x * (x.square().sum(-1, keepdim=True) + 1e-6).rsqrt() for x in (q, k))
+    return q, k, v, g, beta, serving
+
+
+def _prefill_decode_forward(
     q,
     k,
     v,
@@ -76,6 +92,8 @@ def _decode_prefill(
     state_qdq,
     state_format,
     state_quantizer,
+    replay_key_quantizer,
+    replay_update_quantizer,
     scale,
     initial_state,
     output_final_state,
@@ -83,12 +101,22 @@ def _decode_prefill(
     cu_seqlens_cpu,
     state_v_first,
     output_dtype,
+    beta_dtype,
     prefill_lengths,
+    use_qk_l2norm_in_kernel=False,
 ):
-    if state_quantizer is not None:
-        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
-        if state_quantizer.is_enabled:
-            state_format, _ = state_quantizer_config(state_quantizer)
+    """Run both prefill and decode phases in one differentiable training forward.
+
+    Each sequence's chunked prefix produces the state for its token or ReplaySSM
+    suffix. Their outputs are joined in token order for the training loss.
+
+    Args:
+        prefill_lengths: Prefix token count per sequence. For 128 tokens, a value
+            of 64 selects 64 chunked prefill tokens followed by 64 recurrent tokens.
+    """
+    state_quantizer, state_qdq, state_format = _resolve_state_quantizer(
+        state_quantizer, state_qdq, state_format
+    )
     if prefill_lengths is None:
         raise ValueError("Decode-aware training requires explicit per-sequence prefill lengths")
     if q.ndim != 4 or k.shape != q.shape or v.ndim != 4 or v.shape[:2] != q.shape[:2]:
@@ -121,6 +149,15 @@ def _decode_prefill(
         p > end - start for p, (_, start, end) in zip(prefixes, sequences)
     ):
         raise ValueError("Supply one valid prefill length per sequence")
+    serving_precision = policy.decode.precision == "vllm_0_15"
+    if serving_precision and (
+        keys > 256
+        or (g.ndim == 4 and values != keys)
+        or (use_qk_l2norm_in_kernel and keys & (keys - 1))
+    ):
+        raise ValueError(
+            "vllm_0_15 requires K <= 256, KDA V=K, and power-of-two K for normalization"
+        )
     if initial_state is None:
         states = q.new_zeros(len(sequences), heads, keys, values)
     else:
@@ -135,25 +172,51 @@ def _decode_prefill(
         prefix, state = q.new_empty(0, heads, values), states[n]
         if prefixes[n]:
             with torch.autocast(device_type=q.device.type, enabled=False):
-                prefix, state = prefix_fn(
-                    *(x[b, start:split] for x in (q, k, v, g, beta)),
-                    state_qdq=state_qdq and policy.decode.prefill_state_qdq,
-                    state_format=state_format,
-                    state_quantizer=state_quantizer,
-                    scale=scale,
-                    initial_state=state,
-                    chunk_size=policy.chunk_size,
-                    state_qdq_block_v=policy.state.block_v,
-                )
+                if serving_precision:
+                    from ._vllm_autograd import prefix as serving_prefix
+
+                    # A continuation prefill consumes a stored cache just as native serving
+                    # does. A fresh zero-state prefix has no incoming cache to quantize.
+                    if initial_state is not None and state_qdq:
+                        state = _state_qdq(
+                            state, policy.state.block_v, state_format, state_quantizer
+                        )
+                    prefix, state = serving_prefix(
+                        q=q[b, start:split],
+                        k=k[b, start:split],
+                        v=v[b, start:split],
+                        g=g[b, start:split],
+                        beta=beta[b, start:split],
+                        state=state,
+                        scale=keys**-0.5 if scale is None else scale,
+                        beta_dtype=beta_dtype,
+                        normalize=use_qk_l2norm_in_kernel,
+                    )
+                else:
+                    prefix, state = prefix_fn(
+                        *(x[b, start:split] for x in (q, k, v, g, beta)),
+                        state_qdq=state_qdq and policy.decode.prefill_state_qdq,
+                        state_format=state_format,
+                        state_quantizer=state_quantizer,
+                        scale=scale,
+                        initial_state=state,
+                        chunk_size=policy.chunk_size,
+                        state_qdq_block_v=policy.state.block_v,
+                    )
+        # Keep the prefix state attached so suffix losses backpropagate through prefill.
+        # recurrent_decode applies configured state QDQ at the handoff and suffix writes.
         suffix, carry = recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy.decode,
+            replay_key_quantizer=replay_key_quantizer,
+            replay_update_quantizer=replay_update_quantizer,
             state_qdq=state_qdq,
             state_format=state_format,
             state_quantizer=state_quantizer,
             block_v=policy.state.block_v,
             initial_state=state,
             position=prefixes[n],
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             scale=scale,
         )
         outputs.append(torch.cat((prefix, suffix)))
