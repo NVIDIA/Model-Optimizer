@@ -46,7 +46,7 @@ TORCH_VERSIONS = {
 # Extra install pins applied per transformers matrix entry (installed after the base
 # ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": ("transformers~=5.14.0",),
+    "tf_latest": ("transformers~=5.18.0",),
     # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
     # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
     # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
