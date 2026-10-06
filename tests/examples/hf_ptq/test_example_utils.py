@@ -436,6 +436,35 @@ def test_get_model_deepseek_honors_trust_remote_code(
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
 
 
+# ---------- get_tokenizer ----------------------------------------------------
+
+
+class _StubTokenizer:
+    """Minimal stand-in for a PreTrainedTokenizer."""
+
+    def __init__(self, pad_token, eos_token="<|eos|>"):
+        self.pad_token = pad_token
+        self.eos_token = eos_token
+
+
+@pytest.mark.parametrize(
+    ("pad_token", "eos_token", "expected_pad"),
+    [
+        # Valid existing pad token must be preserved unchanged.
+        ("<|endoftext|>", "<|im_end|>", "<|endoftext|>"),
+        # <unk> as pad must also be preserved (only None triggers the fallback).
+        ("<unk>", "<|im_end|>", "<unk>"),
+        # Missing pad token falls back to eos_token.
+        (None, "<|im_end|>", "<|im_end|>"),
+    ],
+)
+def test_get_tokenizer_pad_token(monkeypatch, pad_token, eos_token, expected_pad):
+    stub = _StubTokenizer(pad_token=pad_token, eos_token=eos_token)
+    monkeypatch.setattr(example_utils.AutoTokenizer, "from_pretrained", lambda *a, **k: stub)
+    tok = example_utils.get_tokenizer("/fake/path")
+    assert tok.pad_token == expected_pad
+
+
 def _layerwise(**kwargs):
     return {"enable": True, **kwargs}
 

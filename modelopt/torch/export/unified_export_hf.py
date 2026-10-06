@@ -319,7 +319,6 @@ def collect_shared_input_modules(
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # TODO: Handle DBRX MoE case
             input_to_linear[input[0]].append(module)
 
     def _output_hook(module, input, output):
@@ -511,7 +510,6 @@ def _llm_dummy_forward(model: torch.nn.Module) -> None:
 
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
-    # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
     model_hf_type = hf_model_type(model)
     module_names = set()
@@ -866,10 +864,14 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
     if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
         return
     # Restore unpacked weight so the export path can read the live quantizer state.
-    if hasattr(sub_module, "weight_packed") or (
-        "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-    ):
+    if hasattr(sub_module, "weight_packed"):
         sub_module.unpack_weight()
+    elif "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1:
+        sub_module.unpack_weight()
+        # unpack_weight() dequantizes to torch's default dtype (fp32). A layer the recipe leaves
+        # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
+        if get_quantization_format(sub_module) == QUANTIZATION_NONE:
+            sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)

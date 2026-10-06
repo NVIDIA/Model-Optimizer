@@ -8,6 +8,11 @@ on:
         description: "Docker image to use for tests"
         required: true
         type: string
+      container_options:
+        description: "Docker options for the test container"
+        required: false
+        type: string
+        default: "--shm-size=2gb"
       example:
         description: "Example name to test (e.g. 'hf_ptq')"
         required: true
@@ -41,13 +46,16 @@ jobs:
       contents: read
     container:
       image: ${{ inputs.docker_image }}
-      options: --shm-size=2gb # TRT-LLM tests on 2-GPU runner needs more shared memory
+      options: ${{ inputs.container_options }} # TRT-LLM tests on 2-GPU runner need more shared memory
       env:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # Build CUDA kernels only for the runner's RTX PRO 6000 (sm_120), not the image's ~6 archs.
         TORCH_CUDA_ARCH_LIST: "12.0"
     steps:
+      - name: Install git for vLLM image
+        if: startsWith(inputs.docker_image, 'vllm/') || startsWith(inputs.docker_image, 'docker.io/vllm/')
+        run: apt-get update && apt-get install -y git
       - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - uses: ./.github/actions/cache-extensions
@@ -58,6 +66,7 @@ jobs:
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - name: Install dependencies
+        shell: bash
         run: |
           # Uninstall conflicting system-wide installed modelopt in nemo containers
           pip uninstall -y nvidia-modelopt || true
@@ -69,16 +78,16 @@ jobs:
             export PIP_CONSTRAINT=/tmp/pip-constraints.txt
           fi
 
-          # Use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          # Use `python3 -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
           # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
-          python -m pip install -e ".${{ inputs.pip_install_extras }}"
+          python3 -m pip install -e ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
             echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
-            python -m pip uninstall -y apex || true
+            python3 -m pip uninstall -y apex || true
           fi
 
-          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
+          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python3 -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
         id: run_tests
         continue-on-error: ${{ inputs.allow_failure }}
@@ -89,7 +98,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          python -m pytest tests/examples/${{ inputs.example }} --cov
+          python3 -m pytest tests/examples/${{ inputs.example }} --cov
       - name: Flag allowed failure
         if: ${{ inputs.allow_failure && steps.run_tests.outcome == 'failure' }}
         run: |
