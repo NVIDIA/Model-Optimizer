@@ -330,33 +330,17 @@ def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]
 
     if quant_config["recipe_path"]:
         recipe_path = Path(quant_config["recipe_path"])
-        raw_recipe = None
-        if recipe_path.is_file():
-            try:
-                with recipe_path.open() as file:
-                    raw_recipe = yaml.safe_load(file)
-            except yaml.YAMLError as exc:
-                raise ValueError(f"Invalid quantization recipe YAML: {recipe_path}") from exc
-            if not isinstance(raw_recipe, dict) or not raw_recipe:
-                raise ValueError(
-                    f"Quantization recipe must be a non-empty YAML mapping: {recipe_path}"
-                )
-        if raw_recipe and all(
-            isinstance(name, str) and "_quantizer" in name for name in raw_recipe
+        raw_recipe = yaml.safe_load(recipe_path.read_text()) if recipe_path.is_file() else None
+        if (
+            isinstance(raw_recipe, dict)
+            and raw_recipe
+            and all(isinstance(name, str) and "_quantizer" in name for name in raw_recipe)
         ):
             # Defer the serve dependency so standalone PTQ imports work.
             from vllm_reload_utils import quantizer_recipe_to_quant_cfg
 
             quant_cfg = quantizer_recipe_to_quant_cfg(raw_recipe, model)
         else:
-            if (
-                raw_recipe
-                and "quantize" not in raw_recipe
-                and any(not isinstance(state, dict) for state in raw_recipe.values())
-            ):
-                raise ValueError(
-                    f"Per-quantizer recipe entries must be YAML mappings: {recipe_path}"
-                )
             recipe = load_recipe(quant_config["recipe_path"])
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
