@@ -1,0 +1,85 @@
+# Default distillation config -- shared across all model backends.
+#
+# Model-specific configs should set `defaults: default.yaml` and override
+# only what differs (model section, validation dims, wandb tags, etc.).
+
+distillation:
+  teacher_model_path:            # null = same as model.model_path
+  teacher_dtype: "bfloat16"
+  distillation_alpha: 0.0        # 0 = pure distillation, 1 = pure task loss
+  distillation_loss_type: "mse"
+
+  # ModelOpt quantization (set to null to skip)
+  quant_cfg:                     # e.g. "NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"
+  calibration_size: 128
+  calibration_n_steps: 30
+  calibration_guidance_scale: 4.0
+  calibration_prompts_file:
+
+  restore_quantized_checkpoint:
+  save_quantized_checkpoint:
+
+  # Layer-wise distillation (disabled by default)
+  # Set layer_distillation_modules in model config to enable.
+  layer_distillation_weight: 0.0       # gamma: L_distill = (1-gamma)*L_output + gamma*L_layer
+  layer_distillation_loss_type: "mse"  # "mse" or "cosine"
+  layer_distillation_normalize: true   # L2-normalize features (scale-invariant)
+
+  resume_from_checkpoint:        # set to "latest" for auto-resume across Slurm jobs
+
+  # Audio-video joint training (LTX-2). Requires audio latents in dataset.
+  with_audio: false
+
+  use_mock_data: false
+  mock_data_samples: 100
+
+optimization:
+  learning_rate: 2.0e-6
+  steps: 10000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "cosine"
+  warmup_steps: 100
+
+data:
+  preprocessed_data_root:        # path to preprocessed latents (see preprocess.py)
+  num_dataloader_workers: 2
+
+validation:
+  prompts:
+    - "A beautiful sunset over the ocean with gentle waves"
+    - "A cat playing with a ball of yarn in a cozy living room"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  video_dims: [512, 320, 33]     # [width, height, num_frames]
+  frame_rate: 25.0
+  inference_steps: 30
+  guidance_scale: 4.0
+  interval: 500
+  seed: 42
+  skip_initial_validation: false
+
+flow_matching:
+  timestep_sampling_mode: "logit_normal"
+  mu: 0.0
+  sigma: 1.0
+  shift: 1.0  # Only used by shifted_logit_normal mode
+
+checkpoints:
+  interval: 1000
+  keep_last_n: 3
+  precision: "bfloat16"
+  must_save_by:                  # minutes; for Slurm time limits
+
+wandb:
+  enabled: true
+  project: "distillation"
+  entity:
+  tags:
+    - "distillation"
+    - "modelopt"
+  log_validation_videos: true
+
+seed: 42
+output_dir: "./outputs/distillation"
