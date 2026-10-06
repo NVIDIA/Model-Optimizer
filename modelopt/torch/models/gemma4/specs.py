@@ -41,7 +41,7 @@ _GEMMA4_MOE_SPEC = MoESpec(
 register(
     ModelSpec(
         model_type="gemma4",
-        min_transformers_version="5.5",
+        min_transformers_version="5.8",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=_GEMMA4_MOE_SPEC,
     )

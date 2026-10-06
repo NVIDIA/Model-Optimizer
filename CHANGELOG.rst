@@ -272,6 +272,7 @@ Changelog
 - Remove the deprecated ``examples/llm_qad`` Megatron-LM QAD example (deprecated in 0.45). Use the `megatron_bridge QAD example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#quantization-aware-distillation-qad>`_ instead, which provides a simpler Python-based interface and better model coverage.
 - Dropped VILA / NVILA vision-language model support in ``examples/hf_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
 - Dropped **Phi-4-multimodal** and **Phi-3-vision** PTQ support in ``examples/hf_ptq``. Phi-4-multimodal's bundled remote code needs ``transformers<4.52``, below ModelOpt's minimum of ``4.57``; Phi-3-vision, the superseded predecessor in the same family, is dropped alongside it and is likewise broken on Transformers 5.x. The support-matrix row, the ``phi4mm`` model type, the multimodal-detection heuristics that only ever matched these two, the ``Phi3Image`` / ``PhiImage`` embedding-export exclusions, and the ``modelopt_recipes/huggingface/phi4mm/`` recipes have been removed. Text-only Phi-3/Phi-4 and Phi-3.5-MoE are unaffected.
+- Bump minimum transformers version to ``5.8`` instead of ``4.57``; transformers 4.x is no longer supported. Upgrade with ``pip install -U "nvidia-modelopt[hf]"``.
 
 **Deprecations**
 
