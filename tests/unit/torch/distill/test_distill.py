@@ -15,6 +15,7 @@
 
 import inspect
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -24,6 +25,17 @@ from torchvision.models import alexnet
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+
+
+class LinearModel(nn.Module):
+    def __init__(self, scale):
+        super().__init__()
+        self.linear = nn.Linear(2, 2, bias=False) #Wx
+        with torch.no_grad():
+            self.linear.weight.copy_(scale * torch.eye(2))
+
+    def forward(self, inputs):
+        return self.linear(inputs)
 
 
 def get_input_tensor():
@@ -308,6 +320,63 @@ def test_student_fwd_only(distillation_model):
 
     assert distillation_model.teacher_model._intermediate_output is None
     assert distillation_model._intermediate_output is not None
+
+
+@pytest.mark.parametrize("context_name", ["only_student_forward", "only_teacher_forward"])
+@pytest.mark.parametrize("inner_enabled", [False, True])
+@pytest.mark.parametrize("raise_in_inner", [False, True])
+def test_nested_forward_contexts(context_name, inner_enabled, raise_in_inner):
+    student, teacher = LinearModel(1), LinearModel(2)
+    model = mtd.convert(
+        student, mode=[("kd_loss", {"teacher_model": teacher, "criterion": nn.MSELoss()})]
+    )
+    context = getattr(model, context_name)
+    inputs = torch.ones(1, 2)
+    calls = {"student": 0, "teacher": 0}
+
+    def count_student(module, inputs):
+        calls["student"] += 1
+
+    def count_teacher(module, inputs):
+        calls["teacher"] += 1
+
+    model.linear.register_forward_pre_hook(count_student)
+    teacher.linear.register_forward_pre_hook(count_teacher)
+    expected = inputs if context_name == "only_student_forward" else 2 * inputs
+
+    with context():
+        torch.testing.assert_close(model(inputs), expected)
+        with (
+            pytest.raises(RuntimeError, match="inner failure") if raise_in_inner else nullcontext(),
+            context(enable=inner_enabled),
+        ):
+            torch.testing.assert_close(model(inputs), expected)
+            if raise_in_inner:
+                raise RuntimeError("inner failure")
+        torch.testing.assert_close(model(inputs), expected)
+
+    assert calls["teacher"] == (0 if context_name == "only_student_forward" else 3)
+    assert calls["student"] == (3 if context_name == "only_student_forward" else 0)
+    torch.testing.assert_close(model(inputs), inputs)
+    assert calls["teacher"] == (1 if context_name == "only_student_forward" else 4)
+    assert calls["student"] == (4 if context_name == "only_student_forward" else 1)
+
+    with pytest.raises(RuntimeError, match="outer failure"), context():
+        raise RuntimeError("outer failure")
+    with context(enable=False):
+        torch.testing.assert_close(model(inputs), inputs)
+    assert calls["teacher"] == (2 if context_name == "only_student_forward" else 5)
+    assert calls["student"] == (5 if context_name == "only_student_forward" else 2)
+
+    other_context = (
+        model.only_teacher_forward
+        if context_name == "only_student_forward"
+        else model.only_student_forward
+    )
+    with context():
+        with other_context():
+            torch.testing.assert_close(model(inputs), inputs)
+        torch.testing.assert_close(model(inputs), expected)
 
 
 def test_train_eval_mode_switch(distillation_model):
