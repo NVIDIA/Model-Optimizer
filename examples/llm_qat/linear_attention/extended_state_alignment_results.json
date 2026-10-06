@@ -1,0 +1,778 @@
+{
+  "date": "2026-10-05",
+  "status": "FAIL: long-trajectory consumed-state parity is not established; no production candidate promoted",
+  "scope": "Native kernel trajectory validation and real tiny Megatron prepared-input audit; no matched full-model vLLM run, quality experiment, or performance qualification",
+  "recipe_contract": {
+    "num_bits": 8,
+    "unsigned": false,
+    "narrow_range": true,
+    "block_sizes": {
+      "-1": 32
+    },
+    "type": "dynamic",
+    "pass_through_bwd": true,
+    "mode": "token",
+    "state_codec": "tile",
+    "readout": "working",
+    "quantize_initial": true,
+    "prefill_state_qdq": false,
+    "prefill_precision": "vllm_0_15"
+  },
+  "fixture": {
+    "seed": 1701,
+    "batch": 1,
+    "heads": 2,
+    "keys": 64,
+    "gdn_values": 128,
+    "kda_values": 64,
+    "prefix": 257,
+    "suffix": 256,
+    "qkv": "bfloat16",
+    "gdn_beta": "bfloat16",
+    "kda_beta": "float32 generated directly",
+    "state_and_gate": "float32",
+    "rtol": 0.03,
+    "atol": 0.003
+  },
+  "interpretation": [
+    "All long independent-prefill suffix outputs pass, but consumed states fail; output agreement does not override the state gate.",
+    "Shared native handoff still fails, so prefill mismatch is not the only cause.",
+    "Disabling state QDQ makes both complete trajectories pass. This supports amplification of small arithmetic differences through quantization; it is not evidence of quality loss or a working quantized solution.",
+    "addcmul/query-scaling, exp2, and torch.compile candidates did not pass; none modifies production files.",
+    "Real Megatron GDN beta dtype and decode Q/K normalization differ from the pinned native preparation; matching prepared kernel inputs had hidden these differences."
+  ],
+  "experiments": {
+    "long": [
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 771,
+        "failed_comparisons": 242,
+        "first_failed_comparison": {
+          "event": "consumed_state_1",
+          "max_abs": 0.0038054604083299637,
+          "relative_rms": 0.0003952259139623493,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0015869140625,
+        "all_local_state_checks_pass": null,
+        "max_local_state_absolute_error": null,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.01419822871685028,
+          "relative_rms": 0.018141919746994972,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 771,
+        "failed_comparisons": 248,
+        "first_failed_comparison": {
+          "event": "consumed_state_8",
+          "max_abs": 0.004442088305950165,
+          "relative_rms": 0.0012351564364507794,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.001373291015625,
+        "all_local_state_checks_pass": null,
+        "max_local_state_absolute_error": null,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012665841728448868,
+          "relative_rms": 0.018530908972024918,
+          "close": false
+        }
+      }
+    ],
+    "diagnostic": [
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 227,
+        "first_failed_comparison": {
+          "event": "consumed_state_19",
+          "max_abs": 0.004956886172294617,
+          "relative_rms": 0.0003899938892573118,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0013427734375,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.003286100924015045,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.01275739073753357,
+          "relative_rms": 0.011857752688229084,
+          "close": false
+        }
+      },
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "qdq_disabled": true,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 0,
+        "first_failed_comparison": null,
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.000244140625,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 1.1920928955078125e-07,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 1.4603137969970703e-06,
+          "relative_rms": 7.597631679345795e-07,
+          "close": true
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 210,
+        "first_failed_comparison": {
+          "event": "consumed_state_43",
+          "max_abs": 0.003665353637188673,
+          "relative_rms": 0.0004257851105649024,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.00115966796875,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0028935670852661133,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012665841728448868,
+          "relative_rms": 0.018529238179326057,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "qdq_disabled": true,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 0,
+        "first_failed_comparison": null,
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0001220703125,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 1.1920928955078125e-07,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 5.662441253662109e-07,
+          "relative_rms": 7.296891908481484e-07,
+          "close": true
+        }
+      }
+    ],
+    "fma": [
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 227,
+        "first_failed_comparison": {
+          "event": "consumed_state_19",
+          "max_abs": 0.004956886172294617,
+          "relative_rms": 0.0003899938892573118,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0013427734375,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.003286100924015045,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.01275739073753357,
+          "relative_rms": 0.011857752688229084,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 210,
+        "first_failed_comparison": {
+          "event": "consumed_state_43",
+          "max_abs": 0.003665353637188673,
+          "relative_rms": 0.0004257851105649024,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.00115966796875,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0028935670852661133,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012665841728448868,
+          "relative_rms": 0.018529238179326057,
+          "close": false
+        }
+      }
+    ],
+    "fma_exp2": [
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 176,
+        "first_failed_comparison": {
+          "event": "consumed_state_65",
+          "max_abs": 0.0034463927149772644,
+          "relative_rms": 0.000402338890125975,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0015869140625,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0026664212346076965,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012786425650119781,
+          "relative_rms": 0.012174556963145733,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 210,
+        "first_failed_comparison": {
+          "event": "consumed_state_43",
+          "max_abs": 0.0036653541028499603,
+          "relative_rms": 0.00036442020791582763,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.0010986328125,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0020560771226882935,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012665708549320698,
+          "relative_rms": 0.014386216178536415,
+          "close": false
+        }
+      }
+    ],
+    "compiled": [
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 227,
+        "first_failed_comparison": {
+          "event": "consumed_state_19",
+          "max_abs": 0.004956886172294617,
+          "relative_rms": 0.000389994092984125,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.001251220703125,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.003286100924015045,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012768357992172241,
+          "relative_rms": 0.011959217488765717,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": true,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 210,
+        "first_failed_comparison": {
+          "event": "consumed_state_43",
+          "max_abs": 0.0036653524730354548,
+          "relative_rms": 0.000364419975085184,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.00115966796875,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0028935670852661133,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.012665843591094017,
+          "relative_rms": 0.018611961975693703,
+          "close": false
+        }
+      },
+      {
+        "kind": "gdn",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.bfloat16",
+        "K": 64,
+        "V": 128,
+        "comparisons": 1027,
+        "failed_comparisons": 242,
+        "first_failed_comparison": {
+          "event": "consumed_state_1",
+          "max_abs": 0.0038054604083299637,
+          "relative_rms": 0.0003952252445742488,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.00177001953125,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.003286100924015045,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.0001907350233523175,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00040931999683380127,
+            "relative_rms": 9.18356963666156e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.01419822871685028,
+          "relative_rms": 0.01808527112007141,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 257,
+        "shared_native_handoff": false,
+        "qdq_disabled": false,
+        "beta_dtype": "torch.float32",
+        "K": 64,
+        "V": 64,
+        "comparisons": 1027,
+        "failed_comparisons": 248,
+        "first_failed_comparison": {
+          "event": "consumed_state_8",
+          "max_abs": 0.004442088305950165,
+          "relative_rms": 0.0012351565528661013,
+          "close": false
+        },
+        "all_256_suffix_outputs_pass": true,
+        "max_suffix_output_absolute_error": 0.00140380859375,
+        "all_local_state_checks_pass": true,
+        "max_local_state_absolute_error": 0.0028935670852661133,
+        "prefill": [
+          {
+            "event": "prefill_output",
+            "max_abs": 0.000244140625,
+            "relative_rms": 0.00025116800679825246,
+            "close": true
+          },
+          {
+            "event": "prefill_state",
+            "max_abs": 0.00018675625324249268,
+            "relative_rms": 3.700263550854288e-05,
+            "close": true
+          }
+        ],
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.014832347631454468,
+          "relative_rms": 0.02118011564016342,
+          "close": false
+        }
+      }
+    ]
+  },
+  "prepared_input_audit": {
+    "scope": "Prepared-input audit from an actual one-layer Megatron GPT forward, compared to native vLLM helpers; not a complete vLLM model/checkpoint conversion test",
+    "tokens": 81,
+    "prefix": 73,
+    "seed": 73,
+    "full_megatron_forward_finite": true,
+    "shape": [
+      1,
+      81,
+      1,
+      32
+    ],
+    "records": {
+      "gdn_beta": {
+        "training_dtype": "torch.float32",
+        "native_dtype": "torch.bfloat16",
+        "max_abs": 0.0019458532333374023,
+        "relative_rms": 0.0021069454960525036,
+        "different_elements": 81,
+        "elements": 81,
+        "within_original_tolerance": true
+      },
+      "gdn_beta_after_bf16_cast": {
+        "training_dtype": "torch.bfloat16",
+        "native_dtype": "torch.bfloat16",
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "different_elements": 0,
+        "elements": 81,
+        "within_original_tolerance": true
+      },
+      "gdn_log_decay": {
+        "training_dtype": "torch.float32",
+        "native_dtype": "torch.float32",
+        "max_abs": 1.862645149230957e-09,
+        "relative_rms": 6.905841587467876e-08,
+        "different_elements": 43,
+        "elements": 81,
+        "within_original_tolerance": true
+      },
+      "query_prefill_norm": {
+        "training_dtype": "torch.bfloat16",
+        "native_dtype": "torch.bfloat16",
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "different_elements": 0,
+        "elements": 2592,
+        "within_original_tolerance": true
+      },
+      "key_prefill_norm": {
+        "training_dtype": "torch.bfloat16",
+        "native_dtype": "torch.bfloat16",
+        "max_abs": 0.0,
+        "relative_rms": 0.0,
+        "different_elements": 0,
+        "elements": 2592,
+        "within_original_tolerance": true
+      },
+      "decode_normalization_output": {
+        "training_dtype": "torch.bfloat16",
+        "native_dtype": "torch.bfloat16",
+        "max_abs": 0.0001220703125,
+        "relative_rms": 0.0027257411275058985,
+        "different_elements": 14,
+        "elements": 32,
+        "within_original_tolerance": true
+      },
+      "decode_normalization_state": {
+        "training_dtype": "torch.float32",
+        "native_dtype": "torch.float32",
+        "max_abs": 0.00017279386520385742,
+        "relative_rms": 0.00023647697526030242,
+        "different_elements": 1024,
+        "elements": 1024,
+        "within_original_tolerance": true
+      }
+    }
+  },
+  "training_source": {
+    "base_revision": "1da0f35a1584e9eccfcd14c50c706518ad1737b3",
+    "uncommitted_changes": true,
+    "sha256": {
+      "modelopt/torch/quantization/linear_attention/config.py": "95b7878da638392a0d97c578ceced5339f593ebff76e334087875ddaaa8891e3",
+      "modelopt/torch/quantization/linear_attention/_chunk_prefill.py": "873b4b833c4c5029da0d95f63c33224d96bd24c25ad654cf8b653d70b1d719ca",
+      "modelopt/torch/quantization/linear_attention/decode_prefill.py": "f103252a6a3f0300f86bb2cb08a4f15c51393711bd923ef3299ae78b3c9fb0dd",
+      "modelopt/torch/quantization/linear_attention/decode.py": "05632afa8d9fa5a6c511efe3e38b1488fa1b7206dc9ae98a6f3220f76ac1e237",
+      "modelopt/torch/quantization/linear_attention/prefill.py": "92e77ccda46f7aec36abb135ad16287ed701e1e654869ccb8686747ac4c973fa",
+      "modelopt/torch/quantization/linear_attention/kda.py": "3ae2f31903a7d45d7752adc84460dc164fce55622a8cecc71ad68cbbbf736046",
+      "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+      "modelopt/torch/quantization/plugins/linear_attention.py": "d2202a4525bf41673b98150554279b11433e537871a5896d3f11cc8b04055761",
+      "modelopt/torch/quantization/plugins/gdn.py": "df3d8950a9887bb855fa2c0689d9f8aa9431c56e91ab4ed29c66d54c290a1733",
+      "modelopt/torch/quantization/plugins/kda.py": "c2353650d8d65698763e029e6130e65f5125efc2bcb03e28c95bdf94a718c521",
+      "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "dfd34e7d49947d084f0bbb61f9c2879c7cee19b8e50ed03942ec3c042c7c09bc",
+      "modelopt/torch/quantization/tensor_quant.py": "995a7f0b7c105d1efb5c6e2e9b3c4efc4751ee435dcba9089732862b6a943e95",
+      "modelopt/torch/kernels/quantization/common/int8_quant.py": "e59fa2e2c85a1fce6f01467519b7be6556658bfc839814e8f9c9315a1dc98439",
+      "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "40bb28bdd73d11e1a6286363cc0e28ee9c1880dde4c8a3f59ddb95366be56975",
+      "modelopt_recipes/configs/ptq/units/linear_attention_state_int8_block32_dynamic.yaml": "8dcb6ce0f6dac2d8eb11886e136791fec4ca009fdffd7cd12b08acad6227b76f"
+    }
+  },
+  "serving_source": {
+    "base_revision": "864973e890b092216aa6094ae7ce9c5aa0083262",
+    "uncommitted_changes": true,
+    "adapter_loaded_from_serving_branch_into_training_runtime": true,
+    "sha256": {
+      "modelopt/torch/quantization/plugins/vllm_linear_attention.py": "7ab5e51df98a6e9bcc37d0ba0cba64eabc8996490840aefc20ab940c7624b2b8"
+    }
+  },
+  "additional_training_source_sha256": {
+    "tmp/megatron-only/Megatron-LM/megatron/core/ssm/gated_delta_net/common.py": "450d92aaed9626428c7e3ceae283c668f2ffcf6af631421614b64ed84a8f2aad",
+    "tmp/megatron-only/Megatron-LM/megatron/core/ssm/gated_delta_net/gdn.py": "a837450589a1c9d8daf0fe07737789b9a06a5c3afbf142cbbe77251b68740119",
+    "tests/gpu_megatron/torch/quantization/plugins/test_megatron_gated_delta_net.py": "a18cd994123fd9c695ccf01cd9f3c9f96322d47dfb0a58d8cb729ec778051014",
+    "tests/_test_utils/torch/megatron/models.py": "b4404f8516ed074fb8b0f69d412841af67f7745feb03e9d473f386d956fc4ccf"
+  },
+  "native_source_sha256": {
+    "tmp/vllm-runtime/vllm/model_executor/models/qwen3_next.py": "3b513d4611d5a306045380212d5f23f95b86ebbcfb3ddc1133af774fd08ce53b",
+    "tmp/vllm-runtime/vllm/model_executor/layers/fla/ops/fused_recurrent.py": "7a5f30be6172499a2147c4d367a76f2a6508b49d9c4fabbe81b8a891948ace28",
+    "tmp/vllm-runtime/vllm/model_executor/layers/fla/ops/kda.py": "ede46fdc7b3ca0e58cd7f9e7ac10b59044434948b169ac7ff911c32a3433e711",
+    "tmp/vllm-runtime/vllm/model_executor/layers/fla/ops/l2norm.py": "1df50a58a97512fad429ca306c3bb813940f4028196cf16e98ae377a58b443a4",
+    "tmp/vllm-runtime/vllm/model_executor/layers/fla/ops/op.py": "6ad9192acc939815136baf069d193455f1157ca01b991a052d8b5095ff3f2413"
+  },
+  "native_vllm_revision": "930288170c31e8568290fff407dca8caf17d16ad",
+  "megatron_revision": "ac100f773f9d8fac918ce3e64698be4ed84fa428",
+  "environment": {
+    "torch": "2.9.1+cu128",
+    "triton": "3.5.1",
+    "fla": "0.5.1",
+    "device": "NVIDIA RTX A6000"
+  },
+  "previous_short_results": {
+    "path": "prefill_alignment_results.json",
+    "sha256": "b5716f592817702b1edacaf9758eaa2ff548eced872854c654dc008cca83bc45",
+    "unchanged": true
+  },
+  "reproduction": {
+    "cwd": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase",
+    "raw_artifacts_directory": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/extended-state-alignment-20261005",
+    "environment": "source tmp/megatron-only/env.sh",
+    "python": "../linear-attention-ci-cleanup/tmp/keval-ci-validation/env/bin/python",
+    "native_pythonpath": "../linear-attention-vllm/tmp/vllm-runtime:.:tests",
+    "preparation_pythonpath": "tmp/megatron-only/Megatron-LM:../linear-attention-vllm/tmp/vllm-runtime:.:tests",
+    "device_selection": "Trajectory and arithmetic probes: CUDA_VISIBLE_DEVICES=0; preparation audit: CUDA_VISIBLE_DEVICES=1; both RTX A6000 and idle before launch",
+    "temporary_directory": "Fresh local /tmp directory for prepared-input audit",
+    "compiled_cache": "tmp/extended-state-alignment-20261005/inductor-cache",
+    "scripts_sha256": {
+      "long_check.py": "feb5da21b57f7c99546bc2d609009725eb8068e1e2d513c1889bd645a8ae191d",
+      "diagnostic_check.py": "fabf9c2333c0e8d1eff24af6709ead368d5cb89f30a1ff4293fa79a463c8e098",
+      "arithmetic_check.py": "4a649cdc74fc118e3a150c17c0c16e48cb6eddafa84e892546a9a154b80a7042",
+      "preparation_check.py": "7507a7aee6a7930244b88c9b1fad81998f57e1b9c24b46f50d81a0fd8f3b6e58",
+      "compiled_check.py": "5d7d9300b05b8b59002fd05fc92248a5ef8d5f63218af73cd23368dbc02b2c29"
+    },
+    "raw_results_sha256": {
+      "long-results.json": "bf66059a92929025330f1ee51a0cf0b2aaaa320d0e99429dc596afc91e5a4488",
+      "diagnostic-results.json": "16b351011efef986e9cc54d63ab66e60948fbf4dbbfe1a20947994a2c00a8948",
+      "fma-results.json": "ddc6273af776eab285de1ad08e34e077d2d2548bfe65ede06a6f16535a76c6da",
+      "fma_exp2-results.json": "d73a5ed10cd38dd04a1d3e463d2a96bc14a28f5118c9af6eca3107405ab12c6f",
+      "compiled-results.json": "a16faded25dabec6aad839e4b32cc055b5f7abc448ef2c03f05c937c1b5f6f01",
+      "preparation-results.json": "8d303cc9b675fd166dfb5799d9e918dd925ce37ed46e6648596b61f96ae3b993"
+    },
+    "failed_setup_attempt": "preparation-first-attempt.log: probe expected two return values from l2norm_fwd; corrected to its single-tensor return. No production fix involved."
+  }
+}

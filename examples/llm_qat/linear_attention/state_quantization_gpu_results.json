@@ -1,0 +1,460 @@
+{
+  "date": "2026-10-05",
+  "status": "Independent-prefill state parity failed; shared-handoff eight-token parity passed",
+  "recipe": "general/ptq/linear_attention_state_int8_block32_dynamic",
+  "recipe_contract": {
+    "num_bits": 8,
+    "unsigned": false,
+    "narrow_range": true,
+    "block_sizes": {
+      "-1": 32
+    },
+    "type": "dynamic",
+    "pass_through_bwd": true,
+    "mode": "token",
+    "state_codec": "tile",
+    "readout": "working",
+    "quantize_initial": true,
+    "prefill_state_qdq": false
+  },
+  "training_source": {
+    "base_revision": "1da0f35a1584e9eccfcd14c50c706518ad1737b3",
+    "uncommitted_changes": true,
+    "sha256": {
+      "modelopt/torch/quantization/linear_attention/config.py": "dd743944cd025268cd2c5fa7d81dcfc102b578ab4d4b70171125a83a44e94dbe",
+      "modelopt/torch/quantization/linear_attention/decode.py": "05632afa8d9fa5a6c511efe3e38b1488fa1b7206dc9ae98a6f3220f76ac1e237",
+      "modelopt/torch/quantization/linear_attention/decode_prefill.py": "cd761a9409577d3d3003a29d36015c14eff4b547cdde2adaccab6f8db35d055b",
+      "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+      "modelopt/torch/quantization/linear_attention/prefill.py": "937b42e4941e60a21aa57452e15646e2c248d73c31ed02982dd4fd82ba8ad120",
+      "modelopt/torch/quantization/linear_attention/kda.py": "354eff1d3bd5fc74021b78483b7828a38a1c840e141fca0b47b9a36999146b39",
+      "modelopt/torch/quantization/plugins/linear_attention.py": "d2202a4525bf41673b98150554279b11433e537871a5896d3f11cc8b04055761",
+      "modelopt/torch/quantization/plugins/gdn.py": "df3d8950a9887bb855fa2c0689d9f8aa9431c56e91ab4ed29c66d54c290a1733",
+      "modelopt/torch/quantization/plugins/kda.py": "c2353650d8d65698763e029e6130e65f5125efc2bcb03e28c95bdf94a718c521",
+      "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "dfd34e7d49947d084f0bbb61f9c2879c7cee19b8e50ed03942ec3c042c7c09bc",
+      "modelopt/torch/quantization/tensor_quant.py": "995a7f0b7c105d1efb5c6e2e9b3c4efc4751ee435dcba9089732862b6a943e95",
+      "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "ee4a05d0d5490a9d795555ef768361441a48e0a9e1675ff3c4e7995892bc3743",
+      "modelopt_recipes/configs/ptq/units/linear_attention_state_int8_block32_dynamic.yaml": "8dcb6ce0f6dac2d8eb11886e136791fec4ca009fdffd7cd12b08acad6227b76f"
+    }
+  },
+  "serving_source": {
+    "base_revision": "864973e890b092216aa6094ae7ce9c5aa0083262",
+    "uncommitted_changes": true,
+    "sha256": {
+      "modelopt/torch/quantization/plugins/vllm_linear_attention.py": "7ab5e51df98a6e9bcc37d0ba0cba64eabc8996490840aefc20ab940c7624b2b8",
+      "modelopt/torch/quantization/linear_attention/utils.py": "5a4f946bda960c40ef3f5a7875d7099281a4cf44abad39694672103586c17ce1",
+      "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "1e8f3f0815a0e9500745f71e21aa4dbbe64dd86dffcca46cbe202b45e8853b3f",
+      "examples/vllm_serve/linear_attention_state_int8_block32.yaml": "e50a936c3a77890a4878388a4d936fc2ef6cb6621baffc6efa5e005d353990d5"
+    }
+  },
+  "native_vllm_revision": "930288170c31e8568290fff407dca8caf17d16ad",
+  "megatron_revision": "ac100f773f9d8fac918ce3e64698be4ed84fa428",
+  "device": "NVIDIA RTX A6000",
+  "native_fixture": {
+    "seed": 514,
+    "batch": 1,
+    "heads": 2,
+    "decode_tokens": 8,
+    "state_dtype": "float32",
+    "gates_dtype": "float32",
+    "qkv_beta_dtype": "bfloat16"
+  },
+  "native": {
+    "vllm": "0.15.2.dev16+g930288170.d20260409",
+    "torch": "2.9.1+cu128",
+    "dtype": "bfloat16",
+    "rtol": 0.03,
+    "atol": 0.003,
+    "scope": "Production adapter calls real native vLLM kernels; no engine scheduler or model quality test",
+    "cases": [
+      {
+        "kind": "gdn",
+        "prefix": 73,
+        "shared_native_handoff": false,
+        "K": 64,
+        "V": 128,
+        "comparisons": 27,
+        "failed_events": [
+          "consumed_state_0",
+          "consumed_state_1",
+          "consumed_state_2",
+          "consumed_state_3",
+          "consumed_state_4",
+          "consumed_state_5",
+          "consumed_state_6",
+          "consumed_state_7",
+          "final_state"
+        ],
+        "groups": {
+          "prefill": {
+            "max_abs": 0.002327561378479004,
+            "max_relative_rms": 0.003724147565662861,
+            "all_close": true
+          },
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.000518798828125,
+            "max_relative_rms": 0.00946520734578371,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 0.0079222172498703,
+            "max_relative_rms": 0.008714603260159492,
+            "all_close": false
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.007308688014745712,
+          "relative_rms": 0.008714603260159492,
+          "close": false
+        }
+      },
+      {
+        "kind": "gdn",
+        "prefix": 0,
+        "shared_native_handoff": false,
+        "K": 64,
+        "V": 128,
+        "comparisons": 25,
+        "failed_events": [],
+        "groups": {
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.0001220703125,
+            "max_relative_rms": 0.0005332727450877428,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 0.0022382065653800964,
+            "max_relative_rms": 0.0004325925838202238,
+            "all_close": true
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.002156883478164673,
+          "relative_rms": 0.0004325925838202238,
+          "close": true
+        }
+      },
+      {
+        "kind": "gdn",
+        "prefix": 73,
+        "shared_native_handoff": true,
+        "K": 64,
+        "V": 128,
+        "comparisons": 27,
+        "failed_events": [],
+        "groups": {
+          "prefill": {
+            "max_abs": 0.002327561378479004,
+            "max_relative_rms": 0.003724147565662861,
+            "all_close": true
+          },
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 2.086162567138672e-07,
+            "max_relative_rms": 1.751668179394983e-07,
+            "all_close": true
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 1.7881393432617188e-07,
+          "relative_rms": 1.751668179394983e-07,
+          "close": true
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 73,
+        "shared_native_handoff": false,
+        "K": 64,
+        "V": 64,
+        "comparisons": 27,
+        "failed_events": [
+          "consumed_state_0",
+          "consumed_state_1",
+          "consumed_state_2",
+          "consumed_state_3",
+          "consumed_state_4",
+          "consumed_state_5",
+          "consumed_state_6",
+          "consumed_state_7",
+          "final_state"
+        ],
+        "groups": {
+          "prefill": {
+            "max_abs": 0.001668974757194519,
+            "max_relative_rms": 0.0038239986170083284,
+            "all_close": true
+          },
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.0003662109375,
+            "max_relative_rms": 0.009565739892423153,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 0.00943833589553833,
+            "max_relative_rms": 0.008782842196524143,
+            "all_close": false
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 0.009287461638450623,
+          "relative_rms": 0.008782842196524143,
+          "close": false
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 0,
+        "shared_native_handoff": false,
+        "K": 64,
+        "V": 64,
+        "comparisons": 25,
+        "failed_events": [],
+        "groups": {
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 1.7881393432617188e-07,
+            "max_relative_rms": 1.9054274957852613e-07,
+            "all_close": true
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 1.7881393432617188e-07,
+          "relative_rms": 1.9054274957852613e-07,
+          "close": true
+        }
+      },
+      {
+        "kind": "kda",
+        "prefix": 73,
+        "shared_native_handoff": true,
+        "K": 64,
+        "V": 64,
+        "comparisons": 27,
+        "failed_events": [],
+        "groups": {
+          "prefill": {
+            "max_abs": 0.001668974757194519,
+            "max_relative_rms": 0.0038239986170083284,
+            "all_close": true
+          },
+          "local_decode": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "trajectory_output": {
+            "max_abs": 0.0,
+            "max_relative_rms": 0.0,
+            "all_close": true
+          },
+          "consumed_state": {
+            "max_abs": 1.7881393432617188e-07,
+            "max_relative_rms": 2.0641861908643477e-07,
+            "all_close": true
+          }
+        },
+        "final_state": {
+          "event": "final_state",
+          "max_abs": 1.7881393432617188e-07,
+          "relative_rms": 2.0641861908643477e-07,
+          "close": true
+        }
+      }
+    ]
+  },
+  "training": {
+    "scope": "Single Megatron attention layer; no full model trainer or quality evaluation",
+    "torch": "2.9.1+cu128",
+    "device": "NVIDIA RTX A6000",
+    "tokens": 128,
+    "batch": 1,
+    "hidden_size": 64,
+    "warmups": 2,
+    "iterations": 5,
+    "results": [
+      {
+        "kind": "gdn",
+        "loss": 1.8561833712738007e-05,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": [
+          {
+            "suffix": null,
+            "median_step_ms": 13.716219924390316,
+            "samples_ms": [
+              17.010150011628866,
+              16.9876660220325,
+              12.427815236151218,
+              13.716219924390316,
+              11.617720127105713
+            ],
+            "peak_allocated_mib": 20.5908203125,
+            "peak_increment_mib": 0.20556640625
+          },
+          {
+            "suffix": 8,
+            "median_step_ms": 49.15456613525748,
+            "samples_ms": [
+              49.15456613525748,
+              65.62862498685718,
+              40.597469080239534,
+              63.28356033191085,
+              41.69480316340923
+            ],
+            "peak_allocated_mib": 20.998046875,
+            "peak_increment_mib": 0.61279296875
+          },
+          {
+            "suffix": 16,
+            "median_step_ms": 53.46838617697358,
+            "samples_ms": [
+              36.847432143986225,
+              37.224770057946444,
+              57.16648977249861,
+              53.46838617697358,
+              66.90465984866023
+            ],
+            "peak_allocated_mib": 21.0751953125,
+            "peak_increment_mib": 0.68994140625
+          },
+          {
+            "suffix": 32,
+            "median_step_ms": 79.85410885885358,
+            "samples_ms": [
+              80.39600402116776,
+              137.17836420983076,
+              63.83822578936815,
+              79.85410885885358,
+              64.47027390822768
+            ],
+            "peak_allocated_mib": 21.24169921875,
+            "peak_increment_mib": 0.8564453125
+          }
+        ]
+      },
+      {
+        "kind": "kda",
+        "loss": 0.0031984627712517977,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": [
+          {
+            "suffix": null,
+            "median_step_ms": 18.65849131718278,
+            "samples_ms": [
+              25.197729002684355,
+              16.93497598171234,
+              18.44696467742324,
+              19.318857695907354,
+              18.65849131718278
+            ],
+            "peak_allocated_mib": 21.4052734375,
+            "peak_increment_mib": 0.6826171875
+          },
+          {
+            "suffix": 8,
+            "median_step_ms": 161.33521404117346,
+            "samples_ms": [
+              176.2542137876153,
+              156.83401888236403,
+              146.25620003789663,
+              165.48887873068452,
+              161.33521404117346
+            ],
+            "peak_allocated_mib": 23.884765625,
+            "peak_increment_mib": 3.162109375
+          },
+          {
+            "suffix": 16,
+            "median_step_ms": 160.9656480140984,
+            "samples_ms": [
+              160.9656480140984,
+              152.60202810168266,
+              163.09773735702038,
+              158.89582503587008,
+              176.5526100061834
+            ],
+            "peak_allocated_mib": 23.83056640625,
+            "peak_increment_mib": 3.10791015625
+          },
+          {
+            "suffix": 32,
+            "median_step_ms": 218.53553224354982,
+            "samples_ms": [
+              215.877550188452,
+              218.53553224354982,
+              245.35569408908486,
+              244.70162438228726,
+              203.03151523694396
+            ],
+            "peak_allocated_mib": 23.82470703125,
+            "peak_increment_mib": 3.10205078125
+          }
+        ]
+      }
+    ]
+  },
+  "training_run_note": "Parent exited 0; both checkpoint comparisons passed. At shutdown, a multiprocessing helper reported an NFS temporary-directory cleanup OSError. Full log retained in train-final.log.",
+  "focused_tests": {
+    "cpu_passed": 45,
+    "serving_boundary_passed": 2
+  },
+  "reproduction": {
+    "cwd": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase",
+    "environment": "source tmp/megatron-only/env.sh",
+    "python": "../linear-attention-ci-cleanup/tmp/keval-ci-validation/env/bin/python",
+    "native_pythonpath": "../linear-attention-vllm/tmp/vllm-runtime:.:tests",
+    "training_pythonpath": "tmp/megatron-only/Megatron-LM:.:tests",
+    "scripts_sha256": {
+      "tmp/native-state-alignment-20261005/native_check.py": "09723c17a40a7a53cfef5afd5b5a91f90ef22c00f0fc2af0aa7bff08a7f6e543",
+      "tmp/native-state-alignment-20261005/train_check.py": "1b426edcea7884b0972bbb48bf0c2e12c0af37d571fc18a0c820d2df77aa0569"
+    },
+    "raw_artifacts_directory": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/native-state-alignment-20261005",
+    "earlier_attempts": [
+      "train-first-attempt.log: experiment lacked multiprocessing main guard",
+      "native-first-results.json: original failed independent-prefill comparisons retained",
+      "train-before-shape-fix.json: preliminary timing before dynamic layout fix",
+      "native-before-shape-fix.json: native comparisons before dynamic layout fix"
+    ]
+  }
+}

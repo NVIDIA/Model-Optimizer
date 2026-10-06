@@ -8,6 +8,14 @@ gradient accumulation, logging, and checkpoints. Training adapters support Megat
 Runtime support includes token writes, ReplaySSM, KDA decay approximation, and
 FP8 or INT8 state QDQ. The INT8 recipe enables Hadamard rotation by default.
 
+See [State quantization alignment](STATE_QUANTIZATION.md) for the training/serving
+numerical mismatch, the explicit blockwise INT8 recipe, and CPU/native GPU results.
+The measurements isolate ordinary blockwise INT8 state QDQ. The opt-in
+`decode.precision="vllm_0_15"` profile matches native outputs and consumed states
+bitwise through the formerly failing 256-token continuation and a new-seed
+512-token continuation for both architectures. These kernel/layer checks do not
+validate the default Hadamard recipe or model-quality recovery.
+
 ## Run the example
 
 Use the [Megatron Bridge environment](../../megatron_bridge/README.md#pre-requisites)
@@ -32,6 +40,50 @@ torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train
   --recipe general/ptq/linear_attention_state_int8_dynamic \
   --train-steps 1 --length 128 --prefill-tokens 64
 ```
+
+The opt-in `decode.precision="vllm_0_15"` profile imports kernels directly from
+[vLLM 0.15.1](https://github.com/vllm-project/vllm/tree/v0.15.1).
+Install its optional dependency in an environment compatible with that release:
+
+```bash
+pip install -r examples/llm_qat/linear_attention/requirements-vllm.txt
+```
+
+This optional package supplies forward kernels;
+training uses ModelOpt's Torch adjoint and does not launch a vLLM server. The example
+requirements own the version pin. Other precision profiles do not require vLLM.
+The block32 recipe
+`general/ptq/linear_attention_state_int8_block32_dynamic` selects this profile;
+the default Hadamard recipe shown above does not.
+
+For this profile, launch both training and vLLM evaluation with
+[`with_vllm_defaults.sh`](with_vllm_defaults.sh). It explicitly sets
+`FLA_USE_FAST_OPS=0`, `USE_DEFAULT_FLA_NORM=0`, `FLA_GDN_FIX_BT=0`,
+`FLA_USE_CUDA_GRAPH=0`, and `FLA_TRIL_PRECISION=ieee`, replacing inherited overrides
+before Python imports vLLM. The library does not enforce these flags at import.
+For example, prepend the wrapper to the training command above and select the
+block32 recipe:
+
+```bash
+bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
+  torchrun --standalone --nproc-per-node=1 examples/llm_qat/linear_attention/train.py \
+  --model /path/to/local-model \
+  --train-data /path/to/tokenized/train_text_document \
+  --output /path/to/megatron-qat-checkpoint \
+  --recipe general/ptq/linear_attention_state_int8_block32_dynamic \
+  --train-steps 1 --length 128 --prefill-tokens 64
+
+# Use the same launch settings for the native-kernel training checks.
+bash examples/llm_qat/linear_attention/with_vllm_defaults.sh \
+  python -m pytest tests/gpu_vllm/torch/quantization/test_linear_attention_training.py
+```
+
+Prefix the vLLM server or offline evaluation command with the same wrapper;
+wrapping only a client of an already-running server does not configure its
+workers. For multiple nodes, apply it to the worker launch on each node.
+The wrapper prints the five settings to stderr; save that log with evaluation
+results. Matching settings still requires numerical checks on each GPU/runtime
+combination because Triton autotuning can select different configurations.
 
 `--recipe` accepts a built-in recipe name or a custom YAML path. The shared
 INT8 state recipe shown above is the default.

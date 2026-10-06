@@ -1,0 +1,1873 @@
+{
+  "timestamp_utc": "2026-10-06T06:31:43.840839+00:00",
+  "conclusion": "FLA imports replace four copied Triton kernels while all saved independent native trajectory and Megatron-layer comparisons remain bitwise equal.",
+  "scope": "Kernel/adapter and converted Megatron-layer validation for the pinned runtime and INT8 block32 recipe on RTX A6000. No full-model quality, scheduler equivalence, or speed claim.",
+  "implementation": {
+    "head": "1da0f35a1584e9eccfcd14c50c706518ad1737b3",
+    "uncommitted": true,
+    "worktree": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase",
+    "fla_core": "0.5.1",
+    "version_pin_changed": false,
+    "training_vllm_dependency_added": false,
+    "imported": [
+      "GDN scalar cumulative sum",
+      "GDN WY construction with natural-log to log2 conversion",
+      "KDA output with BF16 query pre-scaling",
+      "Shared GDN/KDA recurrent update with serving launch dimensions"
+    ],
+    "retained": [
+      "KDA vector cumulative sum",
+      "KDA intra-chunk matrices and decay-weighted keys",
+      "GDN key-product matrix",
+      "GDN output",
+      "Shared chunk state update with FP32 saved intermediates",
+      "Prefill normalization",
+      "GDN/KDA gates"
+    ],
+    "source_files_before": 12,
+    "source_files_after": 9,
+    "lines_before": 2448,
+    "lines_after": 1797,
+    "removed_files": [
+      "fused_recurrent.py",
+      "utils.py",
+      "wy_fast.py"
+    ]
+  },
+  "trajectories": {
+    "long-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 1701,
+      "suffix": 256,
+      "scope": "Production adapter calls real native vLLM kernels; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 257,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    },
+    "holdout-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 2903,
+      "suffix": 512,
+      "scope": "Production adapter calls real native vLLM kernels; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1539,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "gdn",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 64,
+          "V": 128,
+          "comparisons": 1537,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1539,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 0,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 64,
+          "V": 64,
+          "comparisons": 1537,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    },
+    "wide-results.json": {
+      "vllm": "0.15.2.dev16+g930288170.d20260409",
+      "torch": "2.9.1+cu128",
+      "dtype": "bfloat16",
+      "rtol": 0.03,
+      "atol": 0.003,
+      "seed": 3871,
+      "suffix": 256,
+      "initial_state": "nonzero, QDQ before continuation prefill",
+      "scope": "Independent native-prefix and token trajectories, raw QK with native normalization; no engine scheduler or model quality test",
+      "cases": [
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "gdn",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.bfloat16",
+          "K": 256,
+          "V": 128,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 128,
+          "V": 128,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        },
+        {
+          "kind": "kda",
+          "prefix": 129,
+          "shared_native_handoff": false,
+          "beta_dtype": "torch.float32",
+          "K": 256,
+          "V": 256,
+          "comparisons": 771,
+          "all_bitwise_equal": true,
+          "max_absolute_error": 0.0
+        }
+      ]
+    }
+  },
+  "megatron_preparation": {
+    "scope": "Real Megatron layer preparation and ModelOpt kernel output versus pinned native vLLM attention kernels; not full-model or engine parity",
+    "seed": 2903,
+    "cases": [
+      {
+        "kind": "gdn",
+        "prefix": 73,
+        "suffix": 64,
+        "qdq_calls": 65,
+        "comparisons": 133,
+        "all_bitwise_equal": true,
+        "max_absolute_error": 0.0
+      },
+      {
+        "kind": "kda",
+        "prefix": 73,
+        "suffix": 64,
+        "qdq_calls": 65,
+        "comparisons": 131,
+        "all_bitwise_equal": true,
+        "max_absolute_error": 0.0
+      }
+    ]
+  },
+  "gradients": {
+    "scope": "Directional derivatives of the identity-STE surrogate with fixed forward-rounding offsets, not derivatives of discontinuous rounding",
+    "rtol": 1e-05,
+    "atol": 1e-07,
+    "cases": [
+      {
+        "kind": "gdn",
+        "phase": "prefix",
+        "offset_count": 33,
+        "directions": [
+          {
+            "autograd": 0.04684418707704012,
+            "finite_difference": 0.04684418724032468,
+            "error": 1.6328455948455556e-10
+          },
+          {
+            "autograd": 0.21522499010816826,
+            "finite_difference": 0.215224990451901,
+            "error": 3.43732736718394e-10
+          },
+          {
+            "autograd": -0.0632317310473668,
+            "finite_difference": -0.06323173096234312,
+            "error": 8.502368253893167e-11
+          }
+        ]
+      },
+      {
+        "kind": "gdn",
+        "phase": "step",
+        "offset_count": 2,
+        "directions": [
+          {
+            "autograd": 1.6802465173791628,
+            "finite_difference": 1.6802465172993661,
+            "error": 7.979661376111835e-11
+          },
+          {
+            "autograd": -0.8126685675013869,
+            "finite_difference": -0.8126685674403332,
+            "error": 6.1053717637094e-11
+          },
+          {
+            "autograd": -0.24179189873244322,
+            "finite_difference": -0.24179189882511662,
+            "error": 9.267339673435515e-11
+          }
+        ]
+      },
+      {
+        "kind": "kda",
+        "phase": "prefix",
+        "offset_count": 41,
+        "directions": [
+          {
+            "autograd": 0.10891344775053216,
+            "finite_difference": 0.10891344794927703,
+            "error": 1.9874486778537204e-10
+          },
+          {
+            "autograd": 0.0501927879240015,
+            "finite_difference": 0.050192787792724396,
+            "error": 1.3127710724036845e-10
+          },
+          {
+            "autograd": -0.29538208983393055,
+            "finite_difference": -0.2953820902096282,
+            "error": 3.7569763966516234e-10
+          }
+        ]
+      },
+      {
+        "kind": "kda",
+        "phase": "step",
+        "offset_count": 2,
+        "directions": [
+          {
+            "autograd": 1.485777717879285,
+            "finite_difference": 1.4857777179355656,
+            "error": 5.628053578732306e-11
+          },
+          {
+            "autograd": -0.9844175685123819,
+            "finite_difference": -0.9844175686168909,
+            "error": 1.0450895704394725e-10
+          },
+          {
+            "autograd": -0.09717582363208943,
+            "finite_difference": -0.09717582357682274,
+            "error": 5.5266693999023175e-11
+          }
+        ]
+      }
+    ]
+  },
+  "training": {
+    "scope": "Single Megatron attention layer; no full model trainer or quality evaluation",
+    "torch": "2.9.1+cu128",
+    "device": "NVIDIA RTX A6000",
+    "tokens": 128,
+    "batch": 1,
+    "hidden_size": 64,
+    "results": [
+      {
+        "kind": "gdn",
+        "loss": 1.8592974811326712e-05,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      },
+      {
+        "kind": "kda",
+        "loss": 0.0031944913789629936,
+        "finite_gradients": true,
+        "parameter_updated": true,
+        "checkpoint_exact": true,
+        "timing": []
+      }
+    ]
+  },
+  "regression_tests": {
+    "cpu_passed": 43,
+    "gpu_passed": 2,
+    "permanent_tests_added": 0,
+    "compilation": "Existing module fixture; excluded from test-call timeout"
+  },
+  "static_checks": {
+    "precommit": "Passed",
+    "diff_check": "Passed"
+  },
+  "compatibility_probes": {
+    "initial": [
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.4901161193847656e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 64,
+        "V": 128,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          4.76837158203125e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 64,
+        "V": 128,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.1920928955078125e-07
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.4901161193847656e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 256,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 256,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          4.172325134277344e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.1920928955078125e-07
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 256,
+        "V": 256,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 256,
+        "V": 256,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.682209014892578e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "norm",
+        "K": 32,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 32,
+        "channel": false,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 32,
+        "channel": true,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          4.76837158203125e-07
+        ]
+      },
+      {
+        "name": "norm",
+        "K": 64,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 64,
+        "channel": false,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 64,
+        "channel": true,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          4.76837158203125e-07
+        ]
+      },
+      {
+        "name": "norm",
+        "K": 128,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          0.00048828125
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 128,
+        "channel": false,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 128,
+        "channel": true,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          7.152557373046875e-07
+        ]
+      },
+      {
+        "name": "norm",
+        "K": 256,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 256,
+        "channel": false,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "cumsum",
+        "K": 256,
+        "channel": true,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          7.152557373046875e-07
+        ]
+      }
+    ],
+    "shared_decode": [
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.4901161193847656e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 64,
+        "V": 128,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          4.76837158203125e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 64,
+        "V": 128,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          1.4901161193847656e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 256,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 256,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "gdn",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          4.172325134277344e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "gdn",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 32,
+        "V": 32,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 64,
+        "V": 64,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 128,
+        "V": 128,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 256,
+        "V": 256,
+        "norm": true,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.9802322387695312e-08
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 256,
+        "V": 256,
+        "norm": true,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "step_wrapper",
+        "kind": "kda",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          2.682209014892578e-07
+        ]
+      },
+      {
+        "name": "step_launch",
+        "kind": "kda",
+        "K": 96,
+        "V": 96,
+        "norm": false,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "kda_gate",
+        "K": 32,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "kda_gate",
+        "K": 64,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "kda_gate",
+        "K": 128,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "kda_gate",
+        "K": 256,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          2.384185791015625e-07
+        ]
+      },
+      {
+        "name": "gdn_gate",
+        "exact": [
+          false,
+          false
+        ],
+        "max_abs": [
+          5.960464477539063e-08,
+          0.0019428730010986328
+        ]
+      },
+      {
+        "name": "gdn_gate_via_kda",
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          5.960464477539063e-08
+        ]
+      }
+    ],
+    "prefill": [
+      {
+        "name": "wu",
+        "kind": "gdn",
+        "K": 64,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "gdn",
+        "K": 64,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "gdn",
+        "K": 64,
+        "exact": [
+          true,
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          3.0919909477233887e-07
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "gdn",
+        "K": 128,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "gdn",
+        "K": 128,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          5.960464477539063e-08
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "gdn",
+        "K": 128,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "gdn",
+        "K": 256,
+        "exact": [
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "gdn",
+        "K": 256,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "gdn",
+        "K": 256,
+        "exact": [
+          false,
+          false,
+          false
+        ],
+        "max_abs": [
+          0.0009765625,
+          2.288818359375e-05,
+          9.635090827941895e-05
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 64,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 64,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "kda",
+        "K": 64,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 128,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 128,
+        "exact": [
+          false
+        ],
+        "max_abs": [
+          0.000244140625
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "kda",
+        "K": 128,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 256,
+        "exact": [
+          true,
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.000244140625
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 256,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "state",
+        "kind": "kda",
+        "K": 256,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "kda_output_adapter": [
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 64,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 64,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 128,
+        "exact": [
+          true,
+          true,
+          true
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 128,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      },
+      {
+        "name": "wu",
+        "kind": "kda",
+        "K": 256,
+        "exact": [
+          true,
+          true,
+          false
+        ],
+        "max_abs": [
+          0.0,
+          0.0,
+          0.000244140625
+        ]
+      },
+      {
+        "name": "output",
+        "kind": "kda",
+        "K": 256,
+        "exact": [
+          true
+        ],
+        "max_abs": [
+          0.0
+        ]
+      }
+    ],
+    "version_audit": [
+      {
+        "tag": "v0.4.0",
+        "revision": "2e0f6c31f9db50f010cb157c712c048b8a3a89d2",
+        "date": "2025-10-27",
+        "context_parallel_api": false,
+        "fused_gdn_intra": false,
+        "kkt_exp2": false,
+        "kkt_beta_after_dot": true,
+        "vector_scan": false
+      },
+      {
+        "tag": "v0.4.1",
+        "revision": "3a904f021583b5d5cd77165de3501edcf9d445f5",
+        "date": "2025-12-25",
+        "context_parallel_api": false,
+        "fused_gdn_intra": false,
+        "kkt_exp2": false,
+        "kkt_beta_after_dot": true,
+        "vector_scan": true
+      },
+      {
+        "tag": "v0.4.2",
+        "revision": "ca910f88529565b28b6e16465258f2e239a02dc7",
+        "date": "2026-03-12",
+        "context_parallel_api": true,
+        "fused_gdn_intra": false,
+        "kkt_exp2": false,
+        "kkt_beta_after_dot": true,
+        "vector_scan": true
+      },
+      {
+        "tag": "v0.5.0",
+        "revision": "3a9ce1c83a13994d824dbb3421e2989d330bb38b",
+        "date": "2026-04-21",
+        "context_parallel_api": true,
+        "fused_gdn_intra": true,
+        "kkt_exp2": false,
+        "kkt_beta_after_dot": true,
+        "vector_scan": true
+      },
+      {
+        "tag": "v0.5.1",
+        "revision": "2e38c1fab332174d056928feaf29f8c5fd5ac550",
+        "date": "2026-06-19",
+        "context_parallel_api": true,
+        "fused_gdn_intra": true,
+        "kkt_exp2": true,
+        "kkt_beta_after_dot": true,
+        "vector_scan": true
+      }
+    ],
+    "notes": [
+      "Rejected rows were not promoted to production replacements.",
+      "The initial primitive script failed in its gate-call setup after completing decode, normalization, and cumulative-sum measurements; corrected gate calls are in shared-results.json.",
+      "The GDN beta-only comparison used differing result dtypes; the gate difference independently rejects that combined helper.",
+      "An initial gradient command disabled CUDA; the GPU rerun supplies the final gradient result."
+    ]
+  },
+  "source_sha256": {
+    "modelopt/torch/kernels/quantization/linear_attention/serving/__init__.py": "d59ce9ba24b9d5884b0de7fc01c84d077e5bb477ad4c0d5d97723c23e22525cb",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/cumsum.py": "410333696204ab9c19b7a1af19842b3169a5ef847a81a268757a1b52767b24ed",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_delta_h.py": "eccb2c6cbcc6808f207d38f82e54cacabb109eee751e9727fd72103fd325ea0c",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_o.py": "3e90d2bb9574113bdc96d33dcae25069739423121f1b6ccfe445011cf617112f",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_scaled_dot_kkt.py": "664194a50be1f7a8caf5201ddc290716eb0df2e4b8f2b08c48946eb7be8f4bf5",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/kda.py": "0a1765c5037f3171629ebe8983a034835613016755eada095638774c8f719db7",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/l2norm.py": "107d472ad4aa4e3581936691b883ab187ec1d22bfeb2b86293e119f18203e9ef",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/forward.py": "d162f82733967c8a30249de05e122a07e9a8c3b2851ed48a53e725cfab272447",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/gate.py": "cbf01acd980f93e277f2c55744a02c9c2f8af0df7202e3b6d640215cbb60f52d",
+    "modelopt/torch/quantization/linear_attention/__init__.py": "cb03f576820338eeabce6f424adb9b1fc289ff13f94319fcb0e2701959ae7d38",
+    "modelopt/torch/quantization/linear_attention/utils.py": "7524ebc5c9161f23975a40b48af423b3855a3567f00a92cb558f2fbf901e7e8d",
+    "modelopt/torch/quantization/linear_attention/_chunk_prefill.py": "1fcebf6b8374ff2be81710105bb348812b63f23cc962432db94237522655529b",
+    "modelopt/torch/quantization/linear_attention/config.py": "8a684183c0106f17e1ce6b2368cdca180276c74f40f3a1c8179554c1997e3e49",
+    "modelopt/torch/quantization/linear_attention/decode.py": "a668d1db05082d545717d0cea8f0ebb1ec5efb95a3969bb740b0c5f9b1286839",
+    "modelopt/torch/quantization/linear_attention/decode_prefill.py": "75925e5643df825becfd6b43d420ba02fd533e05091306a10c71e20c961ab76f",
+    "modelopt/torch/quantization/linear_attention/kda.py": "6e317d30df8ce9659d20841f5051f15435091929354a18590075e32d7560a99d",
+    "modelopt/torch/quantization/linear_attention/prefill.py": "bfa45263685c243468118e61c479e48d1c6bd8849cae8e7bc0da8993cd263aab",
+    "modelopt/torch/quantization/linear_attention/_serving.py": "efd8ee9b107f18400c84bf872431099996486a915215481e36481879937f0fc4",
+    "modelopt/torch/quantization/nn/modules/tensor_quantizer.py": "dfd34e7d49947d084f0bbb61f9c2879c7cee19b8e50ed03942ec3c042c7c09bc",
+    "modelopt/torch/quantization/plugins/megatron.py": "e099126d94a993f02ceb3e2b572c812cbef97ba7e73be04805d3eead4bd46eda",
+    "modelopt_recipes/general/ptq/linear_attention_state_int8_block32_dynamic.yaml": "997aefd34057587ef926598e6af1cb92f421a71c7584159e5f8a692b552aae55",
+    "tests/gpu/torch/kernels/quantization/linear_attention/test_serving.py": "7c3e77aac0e05323fd2aeb888dc46e6d1bb9e16df16bbe7c249d00d235c5815b"
+  },
+  "before_source_sha256": {
+    "modelopt/torch/kernels/quantization/linear_attention/serving/__init__.py": "d59ce9ba24b9d5884b0de7fc01c84d077e5bb477ad4c0d5d97723c23e22525cb",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/cumsum.py": "981ba54fa565453c0a97d1511653344d2f79ef76b4067ded67a25d3bdf08bbb6",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_delta_h.py": "eccb2c6cbcc6808f207d38f82e54cacabb109eee751e9727fd72103fd325ea0c",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_o.py": "ca46ac4f273db71605b2f4c8bccd379e6a78e0e6e09df31bae7a9243a2ef23c5",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/chunk_scaled_dot_kkt.py": "664194a50be1f7a8caf5201ddc290716eb0df2e4b8f2b08c48946eb7be8f4bf5",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/wy_fast.py": "277619412b5ea77998e0fad28ce8a25b7e253c97f6073a9dffd275b47ed20ff8",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/kda.py": "3b18fe50bcfa5a13b2fff7c17450eb214ad0aa6a1b1988cbad6d4d5047099a58",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/fused_recurrent.py": "9ee3755277767d27fd47288dbd0b383219466954d7a1543637b4b474afa5649a",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/l2norm.py": "107d472ad4aa4e3581936691b883ab187ec1d22bfeb2b86293e119f18203e9ef",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/utils.py": "981995e3d119be87802dbe0095cc69aef45d7564f9f22525072db4e91c705d05",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/forward.py": "e56e30605614a5f7cbe3df954dc1519186f69c10987328e8140604f24a81bf17",
+    "modelopt/torch/kernels/quantization/linear_attention/serving/gate.py": "cbf01acd980f93e277f2c55744a02c9c2f8af0df7202e3b6d640215cbb60f52d"
+  },
+  "fla_source_sha256": {
+    "ops/kda/fused_recurrent.py": "d2d44359655433bf80cd5068191359ae8be85952c01b47d76097d254cd3bf151",
+    "ops/gated_delta_rule/wy_fast.py": "8f268a6030eb94dbf6d0a0a2fc196d9396ce9f24c62fc27dde8654a8881cfb1c",
+    "ops/gla/chunk.py": "51dcd37f907d41f42e30b9840de1f96c62ddd38bc1b9b432b141333399461324",
+    "ops/utils/cumsum.py": "b9ac755573e6d61f15d03446ce8da4d9cfcd5d47d5508f028adda6b1b02097f3",
+    "ops/utils/solve_tril.py": "e3012a7343885d9d58cb8f14942c3fac038df70b1418fda735b852b087d79b09",
+    "ops/utils/index.py": "b679166f8259224f1e7c42c7c238086544f1da1385863b57251bd663bfe47507",
+    "ops/utils/constant.py": "b952bdcf039dee433f0cf49093c725971e6791878ad0afca655c82bb464574f8",
+    "ops/utils/op.py": "99a0d6d10c506e104b57be49719cf5cc48bfcacdf2746f0a3b4dc19459dd319b"
+  },
+  "serving_adapter_sha256": "7ab5e51df98a6e9bcc37d0ba0cba64eabc8996490840aefc20ab940c7624b2b8",
+  "native_vllm_commit": "930288170c31e8568290fff407dca8caf17d16ad",
+  "megatron_commit": "ac100f773f9d8fac918ce3e64698be4ed84fa428",
+  "artifacts": {
+    "before-hashes.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/before-hashes.json",
+      "sha256": "ba1d3ab0a4d8575ccd05489b54f70c804c1ae3b06b2fce46b938c4ada0ee2a1e"
+    },
+    "clone.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/clone.log",
+      "sha256": "64e0d8486444576d9cd8b3305c50b106609d13f1ef659e7f7ae6c2f3d152856f"
+    },
+    "cpu-tests.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/cpu-tests.log",
+      "sha256": "17449b9b22dc6a160ff64f69f735943114dc696c703b18807f4d89e9803955e9"
+    },
+    "doc-hooks.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/doc-hooks.log",
+      "sha256": "0c9ce92532e9667207210606ec76846ca7e294040481f2eb22c6d9d0a55bf317"
+    },
+    "gpu-tests.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gpu-tests.log",
+      "sha256": "3c02975bf7ca036d9df35fb879d4027072767128769556965b5295c6bc6af169"
+    },
+    "gradient-no-cuda.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gradient-no-cuda.log",
+      "sha256": "7d2652414ab75c24cd28083156b8a94d911e2132ea850931b8762e640d43b1a3"
+    },
+    "gradient-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gradient-results.json",
+      "sha256": "ae1b4efcee4091cc2ed149c24d4abdef19866bec4e7e3f88f7abe55a69a41e4f"
+    },
+    "gradient.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gradient.log",
+      "sha256": "7d2652414ab75c24cd28083156b8a94d911e2132ea850931b8762e640d43b1a3"
+    },
+    "gradient_check.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gradient_check.log",
+      "sha256": "db71e5bf0546af431842b48d1dfd92585b940abc2936f15cf62934a3f190b406"
+    },
+    "gradient_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/gradient_check.py",
+      "sha256": "fb0155ced63bc1c544be60282f112e7d350e7e930540f949ae16a4436bfded3a"
+    },
+    "holdout-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/holdout-results.json",
+      "sha256": "a7b76baf243db0efe49f2f27fd022bb423d089732788ef20d4b9a037751ad611"
+    },
+    "holdout.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/holdout.log",
+      "sha256": "525bddfa2d9219ff9aac87eaf566e01284a6deca262da593fd0d4b13c9c87fb8"
+    },
+    "holdout_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/holdout_check.py",
+      "sha256": "e5a6a576066d5a82e1eaac6616c57f99573e611cf04cc4eefb218fff76d29417"
+    },
+    "kda-output-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/kda-output-results.json",
+      "sha256": "9a4ac27ef8913c4e86ad7d330bb88337d95fb1a171f77377741ec1bbba635e9a"
+    },
+    "kda-output.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/kda-output.log",
+      "sha256": "27856f4ee3f1cba2c1bbf32cb239306cd58bbc97ab040fcb5d1d4243572b2b01"
+    },
+    "kda_output_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/kda_output_probe.py",
+      "sha256": "5dc33651e829dc1b725a78ad321e70d11e93ce7a83785d56f449cbdc567f4b87"
+    },
+    "long-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/long-results.json",
+      "sha256": "ac85229843a9ebc572e657c55eb5cb0c892678d61406edee2ba53c61a3f8da2d"
+    },
+    "long.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/long.log",
+      "sha256": "f1b9987497fb4cf59aadf7ee1e75183a245610a9c6023904c79a128dcd0006c8"
+    },
+    "long_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/long_check.py",
+      "sha256": "d344aa4e40f24ae93dabc97b3775c9d8b878c05e1ffc8df5d1a7d583498fb4db"
+    },
+    "megatron-parity-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/megatron-parity-results.json",
+      "sha256": "e68af5867d20777c7496388ef1e904784609246b9be3aabb5cd6a4fc80fa27c2"
+    },
+    "megatron_parity.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/megatron_parity.log",
+      "sha256": "df90d13e9ae09d92537b0c40fd85b7db0d62f5939e50cb8e776093406576c223"
+    },
+    "megatron_parity.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/megatron_parity.py",
+      "sha256": "dd6534befdafb822ecfbe9bf611edc11ebc132c35a3abc292be1c1a27cec8d02"
+    },
+    "precommit-final.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/precommit-final.log",
+      "sha256": "3daa850e3ee662580c4a43c959cea609cef2bad1b36a6dff47b8e06a55801483"
+    },
+    "precommit.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/precommit.log",
+      "sha256": "ef1fcbf90bd0183254bb0c15a0eb346b5bfde8700204566977c984fe087cc14e"
+    },
+    "prefill-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/prefill-results.json",
+      "sha256": "0c46621c47f087a690d2d8eec257239b1b49f0a360e407bae9aa11140f267e9c"
+    },
+    "prefill.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/prefill.log",
+      "sha256": "1ba90eea187100ed185365d19c7cca717b04648d92a09751141521543f5ec810"
+    },
+    "prefill_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/prefill_probe.py",
+      "sha256": "3b25bb830eb6c5192065553cde708f8a8011664c1338643a22507b6725cabaa3"
+    },
+    "probe-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/probe-results.json",
+      "sha256": "736892658ff3713d3f87181c04249fc8f9b102048cadb57a57fa8e4434758e29"
+    },
+    "probe.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/probe.log",
+      "sha256": "645fec5f0147cc0f55a894a86fe64dc2d3d40dd89166133fc6fdfdc7b02f2d11"
+    },
+    "probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/probe.py",
+      "sha256": "46413487cfeb81760731bda5a7f42fd9c1ebce67ce9a44d9105107342de204a1"
+    },
+    "save_report.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/save_report.py",
+      "sha256": "93ad2f1de20fd9fd32edfdf046bebfe6b359944440d30db610e1e6f13cc26e11"
+    },
+    "shared-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/shared-results.json",
+      "sha256": "adb58c4753b13f634f5232272929a7ab99a2e18e7ecb2084315b2bbc8e6c3257"
+    },
+    "shared.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/shared.log",
+      "sha256": "16ddd7ea88b3f680c965c23c5b0349ca54f8ba47e5eeb41f900a64e6afac0a4c"
+    },
+    "shared_probe.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/shared_probe.py",
+      "sha256": "1e9c9ff81f3e8759c3f985d7894bedcd224891a8f0d54abfc52fc9e8177d232a"
+    },
+    "stage1-long-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/stage1-long-results.json",
+      "sha256": "ac85229843a9ebc572e657c55eb5cb0c892678d61406edee2ba53c61a3f8da2d"
+    },
+    "stage1-long.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/stage1-long.log",
+      "sha256": "5b781a20a6f6f670408e334b7fce1036b1dbcbea3fd2ffbe60956d4db67b9bd6"
+    },
+    "train-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/train-results.json",
+      "sha256": "b4ad91db5ac47d28df735ec0eafe594bd489ce4df602e789c7331e2f1981edf7"
+    },
+    "train_check.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/train_check.log",
+      "sha256": "a0adef2f537bedc7e9166c35a58c8f0a89500a23e161a794f237ac87e14bd19a"
+    },
+    "train_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/train_check.py",
+      "sha256": "5c63b44cb672d8d0562a3be9f6195fad37287dd993f33a2e187eaa02487b94a6"
+    },
+    "version-audit.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/version-audit.json",
+      "sha256": "e6312b928c5ac49b935062e20e437fabc196a86a42e7a5ed797251fc45bd143d"
+    },
+    "wide-results.json": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/wide-results.json",
+      "sha256": "673b839cfa9b28b703599000c80916ed7c163b2ff3d52849fd220b5dc3e80c55"
+    },
+    "wide.log": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/wide.log",
+      "sha256": "ff3567333e2c4e61f7476459f3aeb5b00bfbdf97e15a2456f15abadf7026f777"
+    },
+    "wide_check.py": {
+      "path": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-2519-rebase/tmp/fla-reuse-20261005/wide_check.py",
+      "sha256": "6598f691b250b57c262f10a90be91e7451970350bbe900ba979ae8ac888f3103"
+    }
+  },
+  "reproduction": {
+    "python": "/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/linear-attention-ci-cleanup/tmp/keval-ci-validation/env/bin/python",
+    "setup": "source tmp/megatron-only/env.sh; add the pinned vLLM source and tests to PYTHONPATH; add tmp/megatron-only/Megatron-LM for layer checks; use a local /tmp directory for distributed checkpoints",
+    "scripts": [
+      "long_check.py",
+      "holdout_check.py",
+      "wide_check.py",
+      "megatron_parity.py",
+      "gradient_check.py",
+      "train_check.py"
+    ]
+  },
+  "total_native_comparisons": 11042
+}
