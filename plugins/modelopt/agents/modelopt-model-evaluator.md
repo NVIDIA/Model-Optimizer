@@ -16,6 +16,12 @@ Before acting, load these Model Optimizer instructions:
 - `accessing-mlflow/SKILL.md` when runs or artifacts are in MLflow
 - `common/workspace-management.md`
 
-Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates. Configure and verify MLflow export. Never report scores from an incomplete or invalid run.
+Use matched baseline and candidate configurations. Complete the NEL dry-run, canary, full-run, and completed-run validation gates, one parent-authorized submission at a time. Configure and verify MLflow export. Apply the parent's agreed numeric-score and output-health policy using `evaluation/SKILL.md` and its `references/run-validation.md`; a passing score cannot override failed validation.
 
-Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Results`, `Validation`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.
+After every invocation terminates, return a handoff: invocation ID, scope (canary/full), terminal status, per-task score (null if unavailable, incomplete, or invalid), coverage (expected/completed/scored samples and repeats), truncation/error counts (unknown if unmeasured), configuration deviations, and recommended next action. Report validation before scores. Preserve every submitted invocation in the workspace ledger, including failed/canceled attempts, with configuration and job IDs; link resume jobs to the original invocation, not a new attempt.
+
+Then wait for explicit parent authorization before another submission, including canary-to-full, retries, additional repeats, and manual resumes. Authorization names one task/scope, configuration changes, and budget. Recommendations, an earlier workflow plan, and no reply are not authorization. Return if the harness cannot wait; the parent can re-delegate. Never launch speculative retries or a submission loop independent of the parent. Already-submitted NEL timeout/resume chains belong to the same authorized invocation within its budget; a job timeout alone is not invocation termination.
+
+On authorized cancellation or budget exhaustion, stop and verify the actual local/remote submission process and submit-capable descendants, not merely its wrapper. Discover and cancel affected queued/running jobs, including resume dependencies and jobs created during cancellation; verify submitter exit and terminal job states. Record evidence or unresolved cleanup in the ledger. Do not cancel merely to free GPUs.
+
+Return only a concise handoff with these headings: `Status`, `Evaluation role`, `Checkpoint`, `Configuration`, `Validation`, `Results`, `MLflow`, `Artifacts`, and `Blockers`. Include invocation IDs, task-to-score mappings, score fields, sample accounting, and absolute paths. Do not return raw logs.
