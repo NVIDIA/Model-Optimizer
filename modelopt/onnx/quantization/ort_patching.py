@@ -83,6 +83,21 @@ from tqdm import tqdm
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.logging_config import logger
 
+_ort_make_scale_zp_initializers = QDQQuantizer._make_scale_zp_initializers
+
+
+def _make_scale_zp_initializers(quantizer, param_name, quant_params, init_name_suffix=""):
+    """Keep generated quantization parameters separate from existing graph tensors."""
+    graph = quantizer.model.model.graph
+    tensor_names = {tensor.name for tensor in (*graph.initializer, *graph.input, *graph.output)}
+    tensor_names.update(name for node in graph.node for name in node.output)
+    suffix = init_name_suffix
+    index = 0
+    while any(f"{param_name}_{kind}{suffix}" in tensor_names for kind in ("scale", "zero_point")):
+        index += 1
+        suffix = f"{init_name_suffix}_{index}"
+    return _ort_make_scale_zp_initializers(quantizer, param_name, quant_params, suffix)
+
 
 def load_model_with_shape_infer(model_path: Path) -> onnx.ModelProto:
     """Load model while performing symbolic shape infer and ONNX shape inference."""
@@ -1840,6 +1855,7 @@ def patch_ort_modules(calibrate_per_node: bool = False):
     CalibraterBase.create_inference_session = _create_inference_session_with_ep_config
     CalibraterBase.select_tensors_to_calibrate = _select_tensors_to_calibrate
     QDQQuantizer.check_opset_version = _check_opset_version
+    QDQQuantizer._make_scale_zp_initializers = _make_scale_zp_initializers
     BaseQuantizer.adjust_tensor_ranges = _adjust_tensor_ranges
     qdq_quantizer.compute_scale_zp = _compute_scale_zp
     CalibraterBase.__init__ = _init_calibrater_base

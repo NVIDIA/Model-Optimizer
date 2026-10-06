@@ -484,22 +484,33 @@ def replace_scale_values(graph: onnx.GraphProto, act_scales_dict: dict[str, floa
 
     Args:
         graph: ONNX graph to modify
-        act_scales_dict: Dictionary mapping scale tensor names to their new values
+        act_scales_dict: Dictionary mapping original tensor names plus '_scale' to new values
     """
     logger.debug(f"Replacing scale values for {len(act_scales_dict)} tensors")
     initializer_indices = {init.name: idx for idx, init in enumerate(graph.initializer)}
+    graph_outputs = {output.name for output in graph.output}
+    output_scale_names = {
+        node.input[0]: node.output[0] + "_scale"
+        for node in graph.node
+        if node.op_type == "DequantizeLinear" and node.output[0] in graph_outputs
+    }
 
     for node in graph.node:
         if node.op_type != "QuantizeLinear":
             continue
 
         scale_name = node.input[1]
-        if scale_name in act_scales_dict:
+        # Recover the cached tensor identity when generated parameter names collide.
+        # ORT also renames the Q input when DQ restores an original graph output.
+        cache_scale_name = scale_name
+        if cache_scale_name not in act_scales_dict:
+            cache_scale_name = output_scale_names.get(node.output[0], node.input[0] + "_scale")
+        if cache_scale_name in act_scales_dict:
             if scale_name not in initializer_indices:
                 raise ValueError(f"Scale tensor '{scale_name}' not found in graph initializers")
 
             scale = onnx.numpy_helper.from_array(
-                np.float32(act_scales_dict[scale_name]), scale_name
+                np.float32(act_scales_dict[cache_scale_name]), scale_name
             )
             graph.initializer[initializer_indices[scale_name]].CopyFrom(scale)
             logger.debug(f"Updated scale value for {scale_name}")
