@@ -111,6 +111,19 @@ class TestDFlashConvert:
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
 
+    def test_convert_nope_target_keeps_the_draft_rope_theta(self):
+        """A target config that declares rope_theta but leaves it unset is not inherited."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.rope_theta = None
+        if isinstance(getattr(model.config, "rope_parameters", None), dict):
+            model.config.rope_parameters.pop("rope_theta", None)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        draft = model.dflash_config
+        draft_rope_params = getattr(draft, "rope_parameters", None) or {}
+        assert draft_rope_params.get("rope_theta", getattr(draft, "rope_theta", None)) is not None
+        model.train()
+        assert torch.isfinite(model(**_dflash_batch(model.config.vocab_size)).loss)
+
 
 def test_qwen3_vl_transformers_530_position_ids_expand_video_grid(monkeypatch):
     """Only mRoPE receives a per-frame video grid on Transformers 5.3.0."""

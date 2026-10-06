@@ -486,26 +486,43 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
     shard = None
 
     def _setup(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        # transformers<5.0 and >=5.16 keep the sharded weight as a DTensor
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
             device_mesh = self.weight.device_mesh
-        else:  # transformers>=5.0: weights are plain Parameters, mesh is on the module
+            # transformers>=5.16: keep HF's TP wrapper on its local-tensor path (also in training),
+            # so the quantized linear sees this rank's plain weight shard.
+            self._hf_quantized_needs_local_tp = True
+        else:  # transformers 5.0-5.15: weights are plain Parameters, mesh is on the module
             device_mesh = self._hf_device_mesh
         tp_group = device_mesh.get_group()
         self._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
 
     @classmethod
-    def is_compatible(cls, linear) -> bool:
+    def is_compatible(cls, linear, tp_mesh=None) -> bool:
         if not isinstance(linear, torch.nn.Linear):
             return False
-        if not hasattr(linear, "_hf_tp_plan"):
-            return False
-        return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        if hasattr(linear, "_hf_tp_plan"):  # transformers<5.16
+            return linear._hf_tp_plan in cls.supported_hf_tp_plans
+        # transformers>=5.16 marks nothing on the module: the weight is a DTensor on the model's TP
+        # mesh, sharded along the TP style's dim. Matching the mesh keeps FSDP2 shards out.
+        weight = linear.weight
+        return (
+            tp_mesh is not None
+            and isinstance(weight, torch.distributed.tensor.DTensor)
+            and weight.device_mesh == tp_mesh
+            and tuple(weight.placements) == cls.shard
+        )
 
-    # This is hack for now, otherwise DMRegistry treats this class same as nn.Linear
+    # Defined so DMRegistry does not treat this class the same as nn.Linear.
     def forward(self, x):
+        # transformers>=5.16 installs its TP input/output transforms as an instance forward, which
+        # DynamicModule.convert keeps as _forward_pre_dm; it wraps the unconverted nn.Linear.forward.
+        pre_fwd = getattr(self, "_forward_pre_dm", None)
+        if pre_fwd is not None:
+            return pre_fwd(x)
         return super().forward(x)
 
 
@@ -528,7 +545,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
-        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0, >=5.16
             assert self.weight.placements == self.shard, (
                 f"Received unexpected shard {self.weight.placements} for {self}"
             )
@@ -539,7 +556,7 @@ class _QuantHFParallelLinear(_ParallelLinear):
                 yield
             finally:
                 self.weight = weight
-        else:  # transformers>=5.0: weights are already plain Parameters
+        else:  # transformers 5.0-5.15: weights are already plain Parameters
             yield
 
 
@@ -560,11 +577,24 @@ def convert_hf_parallel_linears_on_the_fly(model):
     This method converts them to `HFColumnParallelLinear` and `HFRowParallelLinear` so that they
     can be treated as TP sharded layers and not like regular nn.Linear layers.
     """
-    for name, module in model.named_modules():
-        if HFColumnParallelLinear.is_compatible(module):
+    # transformers>=5.16 keeps the TP mesh on the PreTrainedModel, which may sit inside a wrapper.
+    tp_mesh = next(
+        (m._device_mesh for m in model.modules() if getattr(m, "_device_mesh", None) is not None),
+        None,
+    )
+    converted = False
+    for module in model.modules():
+        if HFColumnParallelLinear.is_compatible(module, tp_mesh):
             HFColumnParallelLinear.convert(module)
-        elif HFRowParallelLinear.is_compatible(module):
+            converted = True
+        elif HFRowParallelLinear.is_compatible(module, tp_mesh):
             HFRowParallelLinear.convert(module)
+            converted = True
+    if tp_mesh is not None and not converted:
+        warnings.warn(
+            "Found a transformers tensor-parallel mesh but no TP-sharded linear layer; they will be"
+            " quantized as unsharded layers."
+        )
 
 
 if transformers.pytorch_utils.Conv1D not in QuantModuleRegistry:
@@ -781,108 +811,6 @@ class _QuantLlama4TextExperts(_TransposedExpertsCalibMixin, QuantModule):
         )
         next_states = next_states.view(-1, self.hidden_size)
         return next_states
-
-
-# For more information on DbrxExpert, see https://github.com/huggingface/transformers/blob/dcdda532/src/transformers/models/dbrx/modeling_dbrx.py#L756
-class _QuantDbrxExperts(QuantModule):
-    def _setup(self):
-        """Modify the DbrxExpert."""
-        # No setup is needed for DbrxExpert, we only need to update DbrxExpertGLU
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        top_experts: torch.LongTensor,
-        top_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        bsz, q_len, hidden_size = x.shape
-        x = x.view(-1, hidden_size)
-        out = torch.zeros_like(x)
-
-        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.num_experts).permute(
-            2, 1, 0
-        )
-        for expert_idx in range(self.num_experts):
-            topk_idx, token_idx = torch.where(expert_mask[expert_idx])
-            if token_idx.shape[0] == 0:
-                continue
-
-            token_list = token_idx.tolist()
-            topk_list = topk_idx.tolist()
-
-            expert_tokens = x[None, token_list].reshape(-1, hidden_size)
-            expert_out = (
-                self.mlp(expert_tokens, expert_idx) * top_weights[token_list, topk_list, None]
-            )
-
-            out.index_add_(0, token_idx, expert_out)
-
-        out = out.reshape(bsz, q_len, hidden_size)
-        return out
-
-
-class _QuantDbrxExpertGLU(QuantModule):
-    def _setup(self):
-        """Modify the DbrxExpertGLU by using nn.Linear layers."""
-        dtype, device = self.w1.dtype, self.w1.device
-
-        def _copy_weights(modules, weights):
-            modules.to(dtype=dtype, device=device)
-            for expert_idx, module in enumerate(modules):
-                with torch.no_grad():
-                    module.weight.copy_(weights[expert_idx].detach())
-
-        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
-        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
-        # computes x @ W.T), we store weights transposed: W = w1[i].T.
-        self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
-        delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
-                1, 2
-            ),
-        )
-        delattr(self, "v1")
-
-        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
-        # so W = w2[i] directly (no extra transpose needed).
-        self.w2_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "w2")
-
-    def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
-        x1 = self.w1_linear[expert_idx](x)
-        x2 = self.v1_linear[expert_idx](x)
-        x1 = self.activation_fn(x1)
-        x1 = x1 * x2
-        return self.w2_linear[expert_idx](x1)
 
 
 class _QuantQwen3VLMoeTextExperts(QuantModule):
@@ -1171,27 +1099,6 @@ def _is_quant_fused_experts_module(module):
     return isinstance(module, _QuantFusedExperts)
 
 
-class _QuantDbrxFFN(_QuantSparseSequentialMoe):
-    @property
-    def num_experts(self):
-        return self.router.moe_num_experts
-
-    @property
-    def top_k(self):
-        # In older transformers, top_k was stored on DbrxRouter as moe_top_k.
-        # In transformers 5.0, DbrxFFN stores it as a plain attribute (top_k).
-        if hasattr(self.router, "moe_top_k"):
-            return self.router.moe_top_k
-        return self.__dict__.get("top_k", 1)
-
-    @top_k.setter
-    def top_k(self, value):
-        if hasattr(self.router, "moe_top_k"):
-            self.router.moe_top_k = value
-        else:
-            self.__dict__["top_k"] = value
-
-
 @contextmanager
 def patch_compressed_linear_loading():
     """Context manager that patches CompressedLinear to survive custom ``_init_weights`` calls.
@@ -1429,20 +1336,6 @@ except ImportError:
     pass
 
 try:
-    from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
-
-    if DbrxExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxExperts: "hf.DbrxExperts"})(_QuantDbrxExperts)
-
-    if DbrxExpertGLU not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxExpertGLU: "hf.DbrxExpertGLU"})(_QuantDbrxExpertGLU)
-
-    if DbrxFFN not in QuantModuleRegistry:
-        QuantModuleRegistry.register({DbrxFFN: "hf.DbrxFFN"})(_QuantDbrxFFN)
-except ImportError:
-    pass
-
-try:
     from transformers.models.falcon.modeling_falcon import FalconLinear
 
     if FalconLinear not in QuantModuleRegistry:
@@ -1588,18 +1481,6 @@ except ImportError:
     pass
 
 
-def register_dbrx_moe_on_the_fly(model):
-    """Register DBRX MoE modules as QUANT_MODULE.
-
-    The MoE class in DBRX is `transformers_modules.modeling_dbrx.DbrxExpertGLU`, which loads dynamically.
-    """
-    if type(model).__name__ == "DbrxForCausalLM":
-        moe_type = type(model.transformer.blocks[0].ffn.experts.mlp)
-        # Create a QuantDbrxExpertGLU class on the fly
-        if QuantModuleRegistry.get(moe_type) is None:
-            QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantDbrxExpertGLU)
-
-
 def register_falcon_linears_on_the_fly(model):
     """Register Falcon linear modules as a QUANT_MODULE.
 
@@ -1691,7 +1572,7 @@ def _fused_experts_wrapper_class(module):
     * non-gated (``_QuantNonGatedFusedExperts``): a 3-D ``up_proj`` with no
       ``gate_proj`` and no ``gate_up_proj``. Matches NemotronH ``NemotronHExperts``.
 
-    Returns ``None`` for non-standard layouts (DBRX, GptOss, GraniteMoE,
+    Returns ``None`` for non-standard layouts (GptOss, GraniteMoE,
     Llama4TextExperts) which have their own explicit registrations.
 
     ``act_fn`` is not required: these wrappers only intercept the two ``F.linear``
@@ -2134,7 +2015,6 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
-        register_dbrx_moe_on_the_fly,
         register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
         force_eager_experts_impl_on_the_fly,
