@@ -183,7 +183,7 @@ def _add_fakequant_args(parser) -> None:
     g.add_argument(
         "--modelopt-recipe-path",
         default=os.environ.get("RECIPE_PATH"),
-        help="Path to a ModelOpt PTQ recipe YAML [env: RECIPE_PATH]",
+        help="Path to a PTQ recipe YAML or exported quant_recipe.yaml [env: RECIPE_PATH]",
     )
     g.add_argument(
         "--modelopt-quant-dataset",

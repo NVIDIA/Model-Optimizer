@@ -333,6 +333,31 @@ def convert_modelopt_state_to_vllm(
     return modelopt_state
 
 
+def quantizer_recipe_to_quant_cfg(recipe: dict[str, Any], model: Any) -> dict[str, Any]:
+    """Map an exported quantizer recipe to vLLM quantization configuration."""
+    if any(
+        not isinstance(state, dict) or not isinstance(state.get("_disabled"), bool)
+        for state in recipe.values()
+    ):
+        raise ValueError("Exported quantizer recipe entries must include a boolean _disabled")
+    map_fun = model.hf_to_vllm_mapper.apply_dict if hasattr(model, "hf_to_vllm_mapper") else None
+    mapped_recipe = convert_dict_to_vllm(recipe, max_or_concat=False, map_fun=map_fun)
+
+    # Uncaptured quantizers stay disabled; exported weights are already folded.
+    entries = [{"quantizer_name": "*", "enable": False}]
+    for name, state in mapped_recipe.items():
+        entry = {"quantizer_name": name, "enable": not state["_disabled"]}
+        cfg = {
+            key[1:]: value
+            for key, value in state.items()
+            if key in ("_num_bits", "_axis", "_block_sizes")
+        }
+        if cfg:
+            entry["cfg"] = cfg
+        entries.append(entry)
+    return {"quant_cfg": entries, "algorithm": "max"}
+
+
 def filter_modelopt_state_quantizer_state_for_model(
     modelopt_state: dict[str, Any], model: torch.nn.Module
 ) -> None:
