@@ -5,8 +5,6 @@ diffusion-transformer call to predict several consecutive rectified-flow interva
 uses a 128-interval shifted-flow grid and a Qwen-Image student with 128 output heads. A block
 schedule such as `[32, 32, 32, 32]` therefore generates with four transformer calls.
 
-This implementation is based on [NVIDIA FastGen](https://github.com/NVlabs/FastGen).
-
 The frozen Qwen-Image teacher constructs the PDD target using Qwen's native packed, per-token CFG
 rescale. The checked-in configuration adapts the paper's data-free Midpoint algorithm: it trains the
 full student from on-policy trajectories carried from fresh noise, using a constant `1e-5` learning

@@ -8,3 +8,8 @@ This directory contains training and inference examples for diffusion distillati
 
 The `fastgen_data/` and `preprocess/` packages are shared utilities. Algorithm-specific entrypoints,
 configs, checkpoint helpers, and documentation live in their corresponding subdirectory.
+
+## References
+
+- Upstream FastGen: [NVlabs/FastGen](https://github.com/NVlabs/FastGen)
+- ModelOpt implementation: [`modelopt/torch/fastgen/`](../../../modelopt/torch/fastgen/)

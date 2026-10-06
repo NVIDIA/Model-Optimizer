@@ -211,7 +211,7 @@ or set `dmd2.guidance_scale: null` to disable CFG.
 
 ## Reference
 
-- Fastgen library: [`modelopt/torch/fastgen/`](../../../../modelopt/torch/fastgen/)
+- ModelOpt implementation: [`modelopt/torch/fastgen/`](../../../../modelopt/torch/fastgen/)
 - Built-in recipe: [`modelopt_recipes/general/distillation/dmd2_qwen_image.yaml`](../../../../modelopt_recipes/general/distillation/dmd2_qwen_image.yaml)
 - AutoModel recipe this example subclasses:
   [`nemo_automodel/recipes/diffusion/train.py`](https://github.com/NVIDIA-NeMo/Automodel/blob/main/nemo_automodel/recipes/diffusion/train.py)
