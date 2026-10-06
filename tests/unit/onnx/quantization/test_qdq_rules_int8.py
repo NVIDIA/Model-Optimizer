@@ -277,7 +277,7 @@ def test_conv_layernorm_quantization(tmp_path):
     )
 
 
-@pytest.mark.parametrize("target_dla", [False, True])
+@pytest.mark.parametrize("target_dla", [None, False, True, "iq", "eq"])
 def test_target_dla_conv(tmp_path, target_dla):
     model = build_small_grouped_conv_model()
     onnx_path = os.path.join(tmp_path, "model.onnx")
@@ -307,7 +307,7 @@ def test_target_dla_conv(tmp_path, target_dla):
         assert assert_nodes_are_not_quantized(mul_nodes)
 
 
-@pytest.mark.parametrize("target_dla", [False, True])
+@pytest.mark.parametrize("target_dla", [None, False, True, "iq", "eq"])
 def test_target_dla_matmul(tmp_path, target_dla):
     model = build_matmul_1xn_model()
     onnx_path = os.path.join(tmp_path, "model.onnx")

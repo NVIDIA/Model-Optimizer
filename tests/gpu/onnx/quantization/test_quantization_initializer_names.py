@@ -25,7 +25,7 @@ import modelopt.onnx.quantization as moq
 
 @pytest.mark.parametrize("use_calibration_cache", [False, True])
 @pytest.mark.parametrize("high_precision_dtype", ["fp32", "fp16"])
-@pytest.mark.parametrize("target_dla", [False, True])
+@pytest.mark.parametrize("target_dla", [None, "iq", "eq"])
 @pytest.mark.parametrize("colliding_parameter", ["scale", "zero_point"])
 @pytest.mark.parametrize("collision_shape", ["scalar", "vector"])
 def test_quantization_preserves_existing_parameter_initializers(

@@ -109,7 +109,7 @@ def test_dla_quantizes_adjacent_layers(tmp_path, op_type):
             op=op_type, name="middle", inputs=inputs, outputs=["middle"], attrs=attrs
         )[0]
     graph.outputs = [_conv(graph, "last", middle)]
-    quantized = _quantize(tmp_path, graph, target_dla=True)
+    quantized = _quantize(tmp_path, graph, target_dla="eq")
     nodes = {node.name: node for node in quantized.nodes}
     middle_node = nodes["scale" if op_type == "BatchNormalization" else "middle"]
     assert _assert_qdq(middle_node.inputs[0]) is nodes["first"].outputs[0]
@@ -151,7 +151,7 @@ def test_dla_preserves_selected_fusion_boundaries(tmp_path, pattern):
     graph.outputs = [output]
     # Select the fusion boundaries explicitly; this validates export, not compiler fusion.
     selected = ["conv"] if pattern == "conv_scale" else ["conv", "tail"]
-    quantized = _quantize(tmp_path, graph, target_dla=True, nodes_to_quantize=selected)
+    quantized = _quantize(tmp_path, graph, target_dla="eq", nodes_to_quantize=selected)
     nodes = {node.name: node for node in quantized.nodes}
     fused_node = nodes["activation" if pattern == "conv_relu_conv" else "scale"]
     assert fused_node.inputs[0] is nodes["conv"].outputs[0]

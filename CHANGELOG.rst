@@ -113,7 +113,7 @@ Changelog
 
 **Bug Fixes**
 
-- Fix ONNX quantization reusing existing tensor names for scale and zero-point parameters, while preserving INT8 calibration-cache lookup. INT8 DLA exports also preserve scalar multiplication and division coefficients and padding fill values as constants to avoid compilation failures.
+- Fix ONNX quantization reusing existing tensor names for scale and zero-point parameters, while preserving INT8 calibration-cache lookup. Add ``--target_dla iq|eq``: ``iq`` retains legacy Q/DQ placement for the separate Q/DQ Translator, while ``eq`` preserves scalar multiplication/division operands and padding fill values as constants for direct strongly typed DLA deployment with an enabled TensorRT 11.4+ build.
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.

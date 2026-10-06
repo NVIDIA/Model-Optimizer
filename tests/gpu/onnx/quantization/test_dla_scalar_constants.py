@@ -22,7 +22,10 @@ import modelopt.onnx.quantization as moq
 
 
 @pytest.mark.parametrize("high_precision_dtype", ["fp32", "fp16"])
-@pytest.mark.parametrize(("target_dla", "dq_only"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    ("target_dla", "dq_only"),
+    [(None, False), (False, False), ("iq", False), (True, False), ("eq", False), ("eq", True)],
+)
 @pytest.mark.parametrize(
     ("op_type", "scalar_shape", "constant_node"),
     [("Mul", [], False), ("Mul", [1, 1, 1, 1], False), ("Div", [1], True), ("Pad", [], True)],
@@ -30,7 +33,7 @@ import modelopt.onnx.quantization as moq
 def test_dla_preserves_scalar_operator_constants(
     tmp_path, target_dla, op_type, scalar_shape, constant_node, dq_only, high_precision_dtype
 ):
-    """Preserve scalar values and shared quantized weights in Q/DQ and DQ-only exports."""
+    """Keep legacy scalar Q/DQ for IQ and constant operands for EQ deployment."""
     data = np.linspace(-1, 1, 8, dtype=np.float32).reshape(1, 1, 2, 4)
     value = np.full(scalar_shape, 0.0 if op_type == "Pad" else 2.0, dtype=np.float32)
     scalar = onnx.numpy_helper.from_array(value, "scalar")
@@ -98,7 +101,7 @@ def test_dla_preserves_scalar_operator_constants(
             )
     operation = next(node for node in quantized.graph.node if node.name == "scalar_operator")
     scalar_input = operation.input[2 if op_type == "Pad" else 1]
-    if target_dla:
+    if target_dla == "eq":
         assert scalar_input in constants, "DLA scalar operands must stay compile-time constants"
         scalar_dtype = np.float16 if high_precision_dtype == "fp16" else np.float32
         assert constants[scalar_input].dtype == scalar_dtype

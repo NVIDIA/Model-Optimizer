@@ -110,37 +110,67 @@ Deploy Quantized ONNX Model
 Deploy on DLA
 -------------
 
-Use ``--target_dla`` (or ``target_dla=True`` in Python) to expand INT8 Q/DQ coverage
-when quantizing a floating-point ONNX model for DLA. The exported model retains explicit
-Q/DQ nodes; the flag controls ModelOpt quantization placement.
+Choose ``--target_dla iq`` or ``--target_dla eq`` to expand INT8 Q/DQ coverage
+when quantizing a floating-point ONNX model for DLA. In Python, use
+``target_dla="iq"`` or ``target_dla="eq"``. Both modes export an explicit Q/DQ
+model; the choice controls quantization placement for the intended deployment workflow.
 
-.. important::
+Legacy implicit quantization (IQ)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    The direct deployment workflow described here requires **TensorRT 11.4 or later**
-    with strongly typed DLA support enabled. Validation used a pre-release TensorRT
-    11.4.1.22 build. Confirm DLA availability for your TensorRT platform and package;
-    the version number alone does not establish support.
+Use ``iq`` to retain the existing DLA Q/DQ placement, including Q/DQ on scalar
+operands. Export with FP32 high-precision tensors and leave ``dq_only=False``
+(the default) for the legacy translator workflow:
 
 .. code-block:: bash
 
     python -m modelopt.onnx.quantization \
         --onnx_path=model.onnx \
-        --output_path=model.int8.dla.onnx \
+        --output_path=model.int8.dla-iq.onnx \
+        --quantize_mode=int8 \
+        --high_precision_dtype=fp32 \
+        --calibration_data_path=calib.npy \
+        --target_dla iq
+
+Pass the exported model through
+`NVIDIA's Q/DQ Translator <https://github.com/NVIDIA/Deep-Learning-Accelerator-SW/tree/main/tools/qdq-translator>`_.
+It produces an ONNX model without Q/DQ nodes, a calibration cache, and layer
+precision settings for a TensorRT release that supports legacy implicit-quantization
+DLA deployment. The translator remains a separate step; ``iq`` does not emit an
+implicit-quantization model itself.
+
+Direct explicit quantization (EQ)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use ``eq`` to retain scalar multiplication coefficients, division denominators,
+and padding fill values as constants while preserving activation and weight
+quantization for direct strongly typed DLA deployment.
+
+.. important::
+
+    The direct EQ workflow requires **TensorRT 11.4 or later** with strongly typed
+    DLA support enabled. Validation used a pre-release TensorRT 11.4.1.22 build.
+    Confirm DLA availability for your TensorRT platform and package; the version
+    number alone does not establish support. This requirement does not apply to
+    the legacy IQ workflow above.
+
+.. code-block:: bash
+
+    python -m modelopt.onnx.quantization \
+        --onnx_path=model.onnx \
+        --output_path=model.int8.dla-eq.onnx \
         --quantize_mode=int8 \
         --high_precision_dtype=fp16 \
         --calibration_data_path=calib.npy \
-        --target_dla
+        --target_dla eq
 
-Deploy this explicit Q/DQ model directly with the DLA-enabled TensorRT build.
-No Q/DQ Translator is needed for this workflow. The flag does not perform TensorRT
-implicit-to-explicit quantization or weak-to-strong typing conversion.
+Deploy this explicit Q/DQ model directly with the DLA-enabled TensorRT build;
+no Q/DQ Translator is needed.
 
-For older TensorRT releases that support legacy implicit-quantization DLA deployment,
-the existing workflow remains separate: ModelOpt generates the Q/DQ model, then
-`NVIDIA's Q/DQ Translator <https://github.com/NVIDIA/Deep-Learning-Accelerator-SW/tree/main/tools/qdq-translator>`_
-extracts calibration scales and layer precision settings for the legacy build.
-The TensorRT 11.4 requirement above applies to direct strongly typed DLA deployment,
-not to this legacy use of ``target_dla``. Check accuracy after changing Q/DQ placement.
+For compatibility, bare ``--target_dla`` and Python ``target_dla=True`` select
+``iq``. Omitting the option, or passing ``None`` or ``False`` in Python, disables
+DLA targeting. Neither mode performs TensorRT implicit-to-explicit quantization
+or weak-to-strong typing conversion. Check accuracy after changing Q/DQ placement.
 
 Compare the performance
 =======================

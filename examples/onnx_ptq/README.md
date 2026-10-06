@@ -176,11 +176,13 @@ The [PETR example](./petr/) exports and quantizes the PETRv1 and PETRv2 ONNX bac
 
 ### INT8 quantization for DLA
 
-Use `--target_dla` (Python: `target_dla=True`) to expand INT8 Q/DQ coverage for DLA.
-Direct deployment of the explicit Q/DQ model requires **TensorRT 11.4 or later with strongly typed DLA support enabled**.
-Validation used a pre-release 11.4.1.22 build; confirm support for your platform and package.
-The older workflow through the separate Q/DQ Translator remains available for supported legacy DLA releases.
-See the [DLA deployment guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#deploy-on-dla) for the version requirement and workflow distinction.
+Choose the deployment workflow with `--target_dla iq` or `--target_dla eq` (Python: `target_dla="iq"` or `target_dla="eq"`). Both modes export explicit Q/DQ models.
+
+- `iq` retains legacy DLA Q/DQ placement, including quantized scalar operands. Use `--high_precision_dtype=fp32` and the default `dq_only=False`, then run the separate Q/DQ Translator for a supported legacy TensorRT/DLA release.
+- `eq` preserves scalar multiplication/division operands and padding fill values as constants for direct deployment. It requires **TensorRT 11.4 or later with strongly typed DLA support enabled**. Validation used a pre-release 11.4.1.22 build; confirm support for your platform and package.
+
+Bare `--target_dla` and Python `target_dla=True` remain aliases for `iq`. Omitting the option, or passing `None` or `False` in Python, disables DLA targeting.
+See the [DLA deployment guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#deploy-on-dla) for both export commands and deployment steps.
 
 ### Per node calibration of ONNX models
 
