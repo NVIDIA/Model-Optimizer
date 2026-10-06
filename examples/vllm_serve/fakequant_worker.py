@@ -26,7 +26,6 @@ from vllm_ptq_utils import calibrate_fun, get_quant_config
 from vllm_reload_utils import (
     convert_dict_to_vllm,
     convert_modelopt_state_to_vllm,
-    is_nemotron_mtp,
     load_state_dict_from_path,
     restore_from_modelopt_state_vllm,
     shard_pre_quant_scale_for_tp,
@@ -66,7 +65,6 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
-    quantizer_file_path = quant_config["quant_file_path"]
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
         # Load on CPU to avoid failures when the checkpoint was saved from a different GPU mapping.
@@ -112,6 +110,7 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             shard_pre_quant_scale_for_tp(model)
 
     else:
+        quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
             print("Will load quant, so only do a single sample calibration")
             quant_config["calib_size"] = 1
@@ -151,28 +150,6 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
         mlflow_tracker.log_quant_summary(model)
-
-    # vLLM exposes the draft runner as drafter in V1 and speculator in V2.
-    draft_runner = getattr(self.model_runner, "drafter", None) or getattr(
-        self.model_runner, "speculator", None
-    )
-    draft_model = getattr(draft_runner, "model", None)
-    if (
-        quantizer_file_path
-        and quant_config["recipe_path"]
-        and draft_model is not None
-        and is_nemotron_mtp(draft_model)
-    ):
-        draft_cfg = get_quant_config(quant_config, draft_model)
-        # The dummy pass creates quantizer buffers; saved ranges replace its calibration.
-        with disable_compilation(draft_model):
-            mtq.quantize(
-                draft_model,
-                draft_cfg,
-                forward_loop=lambda _: self.model_runner._dummy_run(1),
-            )
-        draft_model.load_state_dict(load_state_dict_from_path(quantizer_file_path, draft_model))
-        mtq.fold_weight(draft_model)
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():

@@ -256,7 +256,7 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
-- **MCore export**: Megatron-LM export/reload is currently supported for Nemotron-H models, including MTP. Pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled.
+- **MCore export**: Megatron-LM export/reload is currently supported for Nemotron-H models. Pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled.
 
 ```bash
 # MCore
@@ -266,9 +266,12 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
-For Nemotron-H MTP, add `--speculative-config '{"method":"mtp","num_speculative_tokens":1}'`.
-The same files restore both target and MTP quantizers. Enable MTP quantizers during
-Megatron calibration if your preset excludes them.
+Megatron-LM fakequant export rejects MTP quantization and effective activation pre-quantization
+scales, including SmoothQuant/AWQ smoothing scales. Weight-quantizer transforms are folded into
+backbone weights; MTP weights remain unquantized.
+
+For Nemotron-H with BF16 MTP, add
+`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` and keep MTP quantizers disabled.
 
 ## Fake-quantize the sparse-attention indexer query and K cache
 
