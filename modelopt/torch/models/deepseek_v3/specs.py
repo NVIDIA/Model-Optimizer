@@ -35,7 +35,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="deepseek_v3",
-        min_transformers_version="5.8",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
             block_names=("DeepseekV3MoE",),

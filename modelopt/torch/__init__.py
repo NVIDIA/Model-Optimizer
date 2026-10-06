@@ -48,7 +48,7 @@ if _Version(_torch_version) < _Version("2.9"):
 try:
     from transformers import __version__ as _transformers_version
 
-    if _Version(_transformers_version) < _Version("5.8") or _Version(
+    if _Version(_transformers_version) < _Version("5.5") or _Version(
         _transformers_version
     ) >= _Version("5.19"):
         _warnings.warn(

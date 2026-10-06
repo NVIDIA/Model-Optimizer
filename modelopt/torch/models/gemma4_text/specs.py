@@ -29,7 +29,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="gemma4_text",
-        min_transformers_version="5.8",
+        min_transformers_version="5.5",
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=_GEMMA4_MOE_SPEC,
     )
