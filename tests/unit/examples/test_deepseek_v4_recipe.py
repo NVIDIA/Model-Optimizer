@@ -15,8 +15,9 @@
 
 
 """Tests for ``examples/deepseek/deepseek_v4/ptq.py``: the DeepSeek-V4-Pro-0813 PTQ
-recipe and its guard, and the FP8 block-size handling that lets the script load both
-V4-Pro (128x128 blocks) and V4.1-Flash (32x32).
+recipe and its guard, and the V4-Pro / V4.1-Flash compatibility shims: FP8 block size
+(128x128 vs 32x32), the tokenizer-aware ``Transformer`` constructor, and the tuple
+returned by V4.1's ``forward``.
 
 ``examples/deepseek/deepseek_v4/ptq.py`` keeps ``_build_nvfp4_experts_cfg()`` as its
 default, so the recipe and that builder can drift apart without anything failing --
@@ -28,6 +29,7 @@ lanes cover a fixed allowlist that has no deepseek entry.
 import copy
 import fnmatch
 import importlib.util
+import json
 import types
 from pathlib import Path
 
@@ -250,3 +252,105 @@ def test_fp8_dequant_crops_partial_blocks():
     )
     assert got.shape == (m, n)
     assert torch.equal(got, want)
+
+
+# --- Transformer constructor: V4-Pro's ``(args)`` vs V4.1-Flash's ``(args, tokenizer)`` --
+
+
+class _ModelArgs:
+    def __init__(self, **kwargs):
+        self.max_batch_size = 1
+        self.__dict__.update(kwargs)
+
+
+class _LegacyTransformer:
+    def __init__(self, args):
+        self.args, self.tokenizer = args, None
+
+
+class _TokenizerAwareTransformer:
+    def __init__(self, args, tokenizer):
+        self.args, self.tokenizer = args, tokenizer
+
+
+@pytest.fixture
+def load_with(monkeypatch, tmp_path):
+    """Call ``load_deepseek_v4`` on CPU against a stub reference module."""
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"max_batch_size": 1}))
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    # Both are process-global; the real calls would leak bf16 / CUDA defaults into later tests.
+    monkeypatch.setattr(torch, "set_default_dtype", lambda _dtype: None)
+    monkeypatch.setattr(torch, "set_default_device", lambda _device: None)
+
+    def _load(transformer_cls, tokenizer):
+        monkeypatch.setattr(
+            dsv4_ptq,
+            "deekseep_v4_model",
+            types.SimpleNamespace(ModelArgs=_ModelArgs, Transformer=transformer_cls),
+        )
+        return dsv4_ptq.load_deepseek_v4(
+            str(config), "unused", batch_size=4, dummy_weights=True, tokenizer=tokenizer
+        )
+
+    return _load
+
+
+def test_legacy_transformer_is_built_from_args_only(load_with):
+    model = load_with(_LegacyTransformer, tokenizer=object())
+    assert model.tokenizer is None
+    assert model.args.max_batch_size == 4
+
+
+def test_tokenizer_aware_transformer_receives_the_tokenizer(load_with):
+    tokenizer = object()
+    model = load_with(_TokenizerAwareTransformer, tokenizer=tokenizer)
+    assert model.tokenizer is tokenizer
+
+
+def test_tokenizer_aware_transformer_requires_a_tokenizer(load_with):
+    with pytest.raises(AssertionError, match="requires a tokenizer"):
+        load_with(_TokenizerAwareTransformer, tokenizer=None)
+
+
+# --- forward output: V4-Pro's logits vs V4.1-Flash's ``(output_ids, logits, main_hidden)`` --
+
+_VOCAB = 16
+
+
+class _Tokenizer:
+    def __init__(self):
+        self.decoded = None
+
+    def __call__(self, prompt, return_tensors):
+        return types.SimpleNamespace(input_ids=torch.tensor([[1, 2, 3]]))
+
+    def decode(self, ids, skip_special_tokens):
+        self.decoded = ids
+        return ""
+
+
+class _CountingModel:
+    """Emits token ``10 + step``. In the tuple form, the other two entries point at a
+    different token, so taking the wrong element changes the completion."""
+
+    def __init__(self, returns_tuple):
+        self.returns_tuple, self.step = returns_tuple, 0
+
+    def forward(self, tokens, start_pos):
+        logits = torch.nn.functional.one_hot(torch.tensor([10 + self.step]), _VOCAB).float()
+        self.step += 1
+        if not self.returns_tuple:
+            return logits
+        decoy = torch.nn.functional.one_hot(torch.tensor([0]), _VOCAB).float()
+        return decoy, logits, decoy
+
+
+@pytest.mark.parametrize("returns_tuple", [False, True], ids=["v4-pro-logits", "v4.1-tuple"])
+def test_generate_takes_the_logits_from_either_forward_output(monkeypatch, returns_tuple):
+    monkeypatch.setenv("RANK", "0")
+    tokenizer = _Tokenizer()
+    dsv4_ptq._run_quantized_generate(
+        _CountingModel(returns_tuple), tokenizer, "prompt", max_new_tokens=3, device="cpu"
+    )
+    assert tokenizer.decoded == [10, 11, 12]

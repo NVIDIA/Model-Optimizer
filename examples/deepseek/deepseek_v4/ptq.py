@@ -676,15 +676,17 @@ def main():
         _run_quantized_generate(model, tokenizer, args.run_generate, args.max_new_tokens)
 
 
-def _run_quantized_generate(model, tokenizer, prompt: str, max_new_tokens: int):
+def _run_quantized_generate(
+    model, tokenizer, prompt: str, max_new_tokens: int, device: str = "cuda"
+):
     """Smoke-test: generate tokens from a prompt through the calibrated+quantized
     model. If the output decodes to coherent text, the quantized forward works
     end-to-end."""
     rank = int(os.getenv("RANK", "0"))
 
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     tokens = torch.full(
-        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device="cuda"
+        (1, input_ids.shape[1] + max_new_tokens), -1, dtype=torch.long, device=device
     )
     tokens[0, : input_ids.shape[1]] = input_ids[0]
     prev_pos = 0
