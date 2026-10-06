@@ -8,7 +8,7 @@ license: Apache-2.0
 
 ## NeMo Evaluator Launcher Assistant
 
-Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for evaluation canaries and full runs. External model-under-test endpoints require explicit user authorization; record their lifetime/availability as an external dependency. This restriction does not apply to judge/user-simulator endpoints or temporary serving diagnostics.
+Guide the user through creating NEL YAML configs, running evaluations, and monitoring progress. NEL manages serving for canaries and full runs; see [Step 3's serving-handoff check](references/launcher-workflow.md#step-3--configure-deployment) for external endpoints.
 
 ### Completed-run analysis
 

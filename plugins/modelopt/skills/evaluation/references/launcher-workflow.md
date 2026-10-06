@@ -1,7 +1,6 @@
 # NEL 0.2.6 Launcher Workflow
 
-Read the sections needed for the current stage; existing configs must pass
-Step 3's serving-handoff check before Step 8. nel-next uses its own workflow, but shares the deployment guidance in
+Read the sections needed for the current stage. nel-next uses its own workflow, but shares the deployment guidance in
 Step 3 and registry authentication in Step 7.5. All file paths below are relative
 to the evaluation skill root, and step numbers match `SKILL.md`.
 
@@ -29,7 +28,7 @@ to the evaluation skill root, and step numbers match `SKILL.md`.
 > needs `registry#path:tag` for non-DockerHub images or it prepends `docker.io` and 404s; NEL rejects
 > **file** mounts ("Mount paths must be directories") — put file overrides in `pre_cmd`.
 
-Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. For an existing config, apply Step 3's serving-handoff check, then proceed to Step 8.
+Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
 **Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
 
@@ -65,7 +64,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 Ask the 5 questions via AskUserQuestion (categories must match `nel skills build-config --help` — **run that first** to confirm the current option names; CLI options override this list).
 
 1. **Execution:** Local / SLURM
-2. **Deployment:** NEL-managed vLLM / SGLang / NIM / TRT-LLM for canary and full runs. Prefer vLLM unless the user/card says otherwise. None (External) requires explicit authorization for the model-under-test endpoint; PTQ smoke-test servers are not evaluation targets.
+2. **Deployment:** NEL-managed vLLM / SGLang / NIM / TRT-LLM (prefer vLLM unless the user/card says otherwise). None (External) only per [Step 3's serving-handoff check](#step-3--configure-deployment).
 3. **Auto-export:** None / MLflow / wandb
 4. **Model type:** Base / Chat / Reasoning
 5. **Benchmarks** (multi-select): standard / code / math_reasoning / safety / multilingual
