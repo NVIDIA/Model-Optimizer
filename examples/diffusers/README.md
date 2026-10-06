@@ -1,5 +1,9 @@
 # Diffusers Model Optimizations
 
+> [!WARNING]
+> The Diffusers ONNX export and TensorRT engine deployment workflow is deprecated in ModelOpt 0.48.0 and will be removed no earlier than 0.49.0, after the one-release migration period described in the [Deprecation Policy](../../README.md#deprecation-policy) section of the main README. The legacy workflow remains available during this period.
+> Export a unified Hugging Face checkpoint with `--hf-ckpt-dir` for deployment with a compatible diffusion backend. Diffusers quantization, HF export, and PyTorch workflows remain supported.
+
 Model Optimizer supports techniques like Cache Diffusion and Quantization for Diffusion models.
 
 Post-training quantization (PTQ) is an effective model optimization technique that compresses your models to lower precision like INT8, FP8, NVFP4, etc. Quantization with Model Optimizer can compress model size by 2x-4x, speeding up inference while preserving model quality. Quantization-Aware Training (QAT) is a powerful technique for optimizing your models, particularly when PTQ methods fail to meet the requirements for your tasks.
@@ -18,7 +22,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Distillation (QAD) | Example scripts on how to run QAD on diffusion models | \[[Link](#quantization-aware-distillation-qad)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| Build and Run with TensorRT | How to build and run your quantized model with TensorRT | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
+| Build and Run with TensorRT (Deprecated) | Legacy ONNX export and TensorRT engine deployment | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
 | LoRA | Fuse your LoRA weights prior to quantization | \[[Link](#lora)\] | |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
@@ -68,6 +72,9 @@ mtq.quantize(model=transformer, config=quant_config, forward_func=forward_pass)
 
 ### TensorRT Compiler Framework
 
+> [!WARNING]
+> This ONNX/TensorRT deployment path is deprecated in 0.48.0, with removal no earlier than 0.49.0. This matrix describes the legacy path; it does not establish compatibility with HF checkpoint deployment backends.
+
 | Model | fp8 | int8_sq | int4_awq | w4a8_awq<sup>1</sup> | nvfp4<sup>2</sup> | nvfp4_svdquant<sup>3</sup> | Cache Diffusion |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | [FLUX](https://huggingface.co/black-forest-labs/FLUX.1-dev) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | - |
@@ -89,7 +96,7 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. ONNX export and TensorRT engine instructions live in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. Deprecated ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### Quantize scripts
 
@@ -175,7 +182,7 @@ To additionally apply NVFP4 scale swizzle and padding , add:
 - `calib-size`: For SDXL INT8, we recommend 32 or 64, for SDXL FP8, 128 is recommended.
 - `n_steps`: Recommendation: SD/SDXL 20 or 30, SDXL-Turbo 4.
 
-**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
+Use the generated checkpoint directly in PyTorch or export a unified Hugging Face checkpoint with `--hf-ckpt-dir`. Choose a diffusion deployment backend that supports your model, quantization format, and hardware; compatibility must be checked for each backend. The deprecated [ONNX/TensorRT workflow](./quantization/ONNX-TRT-Deployment.md) remains available during the migration period.
 
 ## Quantization Aware Training (QAT)
 
@@ -262,7 +269,7 @@ transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 
 ## Build and Run with TensorRT Compiler Framework
 
-ONNX export and TensorRT engine instructions are documented in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
+This workflow is deprecated in 0.48.0, with removal no earlier than 0.49.0. Legacy ONNX export and TensorRT engine instructions remain available in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### LoRA
 
@@ -415,7 +422,10 @@ Please refer to [example.ipynb](./cache_diffusion/example.ipynb) for more detail
 
 ### TensorRT Compiler Framework
 
-To execute cache diffusion in TensorRT, follow these steps:
+> [!WARNING]
+> The ONNX/TensorRT deployment instructions below are part of the deprecated workflow (0.48.0; removal no earlier than 0.49.0). PyTorch Cache Diffusion remains supported.
+
+During the migration period, the legacy TensorRT instructions remain available:
 
 ```python
 # Load the model
