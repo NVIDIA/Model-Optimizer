@@ -89,6 +89,32 @@ class TestMaxCalibrator:
 
 
 class TestHistogramCalibrator:
+    @pytest.mark.parametrize("torch_hist", [False, True])
+    def test_entropy_preserves_collected_histogram(self, torch_hist):
+        calibrator = calib.HistogramCalibrator(4, None, False, num_bins=32, torch_hist=torch_hist)
+        reference = calib.HistogramCalibrator(4, None, False, num_bins=32, torch_hist=torch_hist)
+        first_batch = torch.cat((torch.zeros(100), torch.arange(1, 33).float()))
+        calibrator.collect(first_batch)
+        reference.collect(first_batch)
+        expected_hist = np.asarray(calibrator._calib_hist).copy()
+        expected_edges = np.asarray(calibrator._calib_bin_edges).copy()
+        percentile = calibrator.compute_amax("percentile", percentile=50)
+
+        first_entropy = calibrator.compute_amax("entropy", start_bin=16)
+        second_entropy = calibrator.compute_amax("entropy", start_bin=16)
+
+        np.testing.assert_array_equal(calibrator._calib_hist, expected_hist)
+        np.testing.assert_array_equal(calibrator._calib_bin_edges, expected_edges)
+        assert calibrator.compute_amax("percentile", percentile=50) == percentile
+        assert first_entropy == second_entropy
+        next_batch = torch.tensor([0.0, 2.0, 4.0, 64.0])
+        calibrator.collect(next_batch)
+        reference.collect(next_batch)
+        np.testing.assert_array_equal(calibrator._calib_hist, reference._calib_hist)
+        assert calibrator.compute_amax("percentile", percentile=50) == reference.compute_amax(
+            "percentile", percentile=50
+        )
+
     @pytest.mark.skip(reason="TODO: Fix assertions in test_grow")
     def test_grow(self, verbose):
         x_1 = torch.tensor([0, 255, 255, 255, 255, 255])
