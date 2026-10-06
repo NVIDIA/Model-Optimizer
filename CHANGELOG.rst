@@ -115,6 +115,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix FP8 per-tensor real quantization (``mtq.compress`` with ``FP8_DEFAULT_CFG``) never using the FP8 GEMM and silently falling back to slower fake quantization. Layers whose weight dimensions are not multiples of 16 still fall back.
 - Fix Megatron unified HF export of MoE models with grouped-GEMM experts when only the experts are quantized (e.g. ``nvfp4_experts_only-*`` recipes): ``hf_quant_config.json`` and the ``quantization_config`` in ``config.json`` were not written, so the quantized experts were served as unquantized weights. Re-export such checkpoints.
 - Fix DFlash conversion on NoPE targets whose config leaves ``rope_theta`` unset.
 - Fix offline DFlash training failing to reconstruct the target logits when the captured hidden states are stored in a different dtype than the target's weights.

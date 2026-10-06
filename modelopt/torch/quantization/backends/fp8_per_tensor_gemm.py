@@ -138,7 +138,8 @@ def _fp8_availability_check(module, input, args, kwargs):
         ):
             return False
 
-    return True
+    # torch._scaled_mm requires both dimensions of the weight to be multiples of 16.
+    return all(dim % 16 == 0 for dim in module.weight.shape)
 
 
 class Fp8PerTensorLinear(Function):
