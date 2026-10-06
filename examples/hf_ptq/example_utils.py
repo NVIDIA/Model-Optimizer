@@ -54,7 +54,7 @@ from modelopt.torch.models.hf import (
 )
 from modelopt.torch.utils import distributed as dist_utils
 from modelopt.torch.utils.mlflow import Tool, resolved_recipe_texts, tracked_run
-from modelopt.torch.utils.plugins.model_load_utils import load_pretrained
+from modelopt.torch.utils.plugins.model_load_utils import is_fsdp2_text_only_vlm, load_pretrained
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,15 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.local_checkpoint_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_nemotron_vl(config) or _is_multimodal_config(config):
+    if is_fsdp2_text_only_vlm(config):
+        if getattr(args, "calib_with_images", False):
+            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
+    elif is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
-    if getattr(config, "quantization_config", None) is not None:
+    if any(
+        getattr(cfg, "quantization_config", None) is not None
+        for cfg in (config, getattr(config, "text_config", None))
+    ):
         issues.append("pack-quantized / compressed-tensors checkpoints")
     if getattr(args, "specdec_offline_dataset", None) is not None:
         issues.append("speculative decoding (--specdec_offline_dataset)")
