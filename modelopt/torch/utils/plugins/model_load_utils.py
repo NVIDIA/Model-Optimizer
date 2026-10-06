@@ -51,6 +51,11 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 logger = logging.getLogger(__name__)
 
 
+def is_fsdp2_text_only_vlm(config) -> bool:
+    """Whether the VLM has a supported text-only FSDP2 decoder layout."""
+    return getattr(config, "model_type", None) in {"qwen3_5", "qwen3_5_moe"}
+
+
 def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
     """Local dir for ``ckpt_path``; resolves an HF Hub ID (rank 0 downloads, others wait)."""
     if os.path.isdir(ckpt_path):
@@ -175,8 +180,14 @@ def build_meta_causal_lm(
     dtype = getattr(hf_config, "torch_dtype", None) or torch.bfloat16
     from accelerate import init_empty_weights  # only real callers of this function need it
 
+    model_factory = AutoModelForCausalLM
+    if is_fsdp2_text_only_vlm(hf_config):
+        # Only newer Transformers versions supporting these models expose this factory.
+        from transformers import AutoModelForImageTextToText
+
+        model_factory = AutoModelForImageTextToText
     with init_empty_weights(include_buffers=False):
-        model = AutoModelForCausalLM.from_config(
+        model = model_factory.from_config(
             hf_config, torch_dtype=dtype, trust_remote_code=trust_remote_code
         )
     model.eval()

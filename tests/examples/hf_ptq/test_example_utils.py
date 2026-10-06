@@ -30,6 +30,20 @@ from _test_utils.examples.hf_ptq_example_utils import example_utils
 from safetensors.torch import save_file
 
 
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize("calib_with_images", [False, True])
+def test_fsdp2_qwen_vlm_requires_text_only_calibration(model_type, calib_with_images):
+    args = SimpleNamespace(pyt_ckpt_path="local-model", calib_with_images=calib_with_images)
+    config = SimpleNamespace(model_type=model_type, vision_config={})
+    expected = (
+        pytest.raises(NotImplementedError, match="text-only inputs")
+        if calib_with_images
+        else nullcontext()
+    )
+    with expected:
+        example_utils.validate_fsdp2_supported(args, config)
+
+
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 

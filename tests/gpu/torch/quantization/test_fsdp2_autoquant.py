@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
+from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
@@ -64,4 +65,43 @@ def test_fsdp2_gradient_autoquant(dist_workers, tmp_path):
     search_dir.mkdir()
     dist_workers.run(
         partial(_run_gradient_autoquant, checkpoint_dir=str(checkpoint), search_dir=str(search_dir))
+    )
+
+
+def test_fsdp2_gradient_qwen_moe_autoquant(dist_workers, tmp_path):
+    try:
+        AutoConfig.for_model("qwen3_5_moe_text")
+    except ValueError:
+        pytest.skip("Qwen3.5 requires a recent Transformers")
+    config = AutoConfig.for_model(
+        "qwen3_5_moe_text",
+        hidden_size=128,
+        intermediate_size=256,
+        moe_intermediate_size=64,
+        shared_expert_intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=32,
+        linear_key_head_dim=32,
+        linear_value_head_dim=32,
+        linear_num_key_heads=4,
+        linear_num_value_heads=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        layer_types=["linear_attention", "full_attention"],
+        vocab_size=128,
+        max_position_embeddings=128,
+    )
+    model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+    checkpoint = tmp_path / "qwen_moe"
+    model.save_pretrained(checkpoint)
+    search_dir = tmp_path / "search"
+    search_dir.mkdir()
+    dist_workers.run(
+        partial(
+            _run_gradient_autoquant,
+            checkpoint_dir=str(checkpoint),
+            search_dir=str(search_dir),
+        )
     )
