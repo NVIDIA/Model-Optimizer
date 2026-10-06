@@ -22,6 +22,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Quantization Aware Distillation (QAD) | Example scripts on how to run QAD on diffusion models | \[[Link](#quantization-aware-distillation-qad)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| HF Checkpoint Deployment | Migrate to diffusion backends using unified HF checkpoints | \[[Link](#hf-checkpoint-deployment)\] | |
 | Build and Run with TensorRT (Deprecated) | Legacy ONNX export and TensorRT engine deployment | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
 | LoRA | Fuse your LoRA weights prior to quantization | \[[Link](#lora)\] | |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
@@ -266,6 +267,46 @@ transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 + ...
 
 ```
+
+## HF Checkpoint Deployment
+
+Replace `--onnx-dir` with `--hf-ckpt-dir` in the [quantization commands](#quantize-scripts). For example, from `examples/diffusers/quantization`:
+
+```bash
+python quantize.py \
+    --model flux-schnell --model-dtype BFloat16 \
+    --format fp8 --collect-method default \
+    --batch-size 1 --calib-size 128 --n-steps 4 \
+    --hf-ckpt-dir ./flux-schnell-fp8
+```
+
+To reuse a ModelOpt PyTorch checkpoint, add `--restore-from /path/to/checkpoint.pt` to the matching model's command. Keep the original model selection and any model-specific options. An ONNX file or TensorRT engine cannot be restored this way; use the saved ModelOpt checkpoint or quantize the original model again.
+
+The export contains weights and configuration for downstream loading. Preserve the complete export directory, including component configuration and quantization metadata. See the [unified HF export guide](../../docs/source/deployment/3_unified_hf.rst) for the artifact format.
+
+Select a backend using its diffusion-specific model and quantization support guide:
+
+| Backend | Deployment guidance | Compatibility considerations |
+| --- | --- | --- |
+| vLLM-Omni | [ModelOpt quantization guide](https://docs.vllm.ai/projects/vllm-omni/en/stable/user_guide/quantization/modelopt/) | Documents FP8 and mixed FP8/NVFP4 diffusion checkpoints. Check the model-specific recipe; its NVFP4 recipes are validated on Blackwell. |
+| SGLang Diffusion | [Diffusion quantization guide](https://github.com/sgl-project/sglang/blob/main/docs/docs/sglang-diffusion/quantization.mdx) | Distinguishes full Diffusers repos from converted transformer components. Some exports need backend-specific conversion or component overrides. |
+| TensorRT-LLM VisualGen | [Visual generation guide](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/visual-generation.md) and [serving examples](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/visual_gen/serve) | Supports pre-quantized checkpoints with ModelOpt metadata. Consult the model/precision matrix and model-specific configuration; VisualGen is beta. |
+
+Install the backend separately using its installation instructions and use documentation matching that backend version. The following command forms illustrate loading a **full pipeline checkpoint supported by the selected backend**; they do not establish support for every export produced above:
+
+```bash
+# vLLM-Omni: follow the model recipe for parallelism and kernel options.
+vllm serve /path/to/supported-hf-checkpoint --omni
+
+# SGLang Diffusion: full pipeline checkpoint, including model_index.json.
+sglang generate --model-path /path/to/supported-hf-checkpoint \
+    --prompt "A red ceramic teapot on a wooden table" --save-output
+
+# TensorRT-LLM VisualGen: use the model's serving configuration as needed.
+trtllm-serve /path/to/supported-hf-checkpoint
+```
+
+If no backend supports your model and precision yet, keep using the [legacy workflow](./quantization/ONNX-TRT-Deployment.md) during the migration period and report the gap to the maintainers.
 
 ## Build and Run with TensorRT Compiler Framework
 

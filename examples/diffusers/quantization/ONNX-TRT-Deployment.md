@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > This Diffusers ONNX export and TensorRT engine deployment workflow is deprecated in ModelOpt 0.48.0 and will be removed no earlier than 0.49.0, after the one-release migration period described in the [Deprecation Policy](../../../README.md#deprecation-policy) section of the main README. The commands below remain available during this period.
-> Use `quantize.py --hf-ckpt-dir` to export a unified Hugging Face checkpoint and select a compatible diffusion deployment backend. See the [Diffusers quantization instructions](../README.md#post-training-quantization-ptq).
+> Use `quantize.py --hf-ckpt-dir` to export a unified Hugging Face checkpoint and select a compatible diffusion deployment backend. See the [HF checkpoint migration and deployment instructions](../README.md#hf-checkpoint-deployment).
 
 The deprecation covers `quantize.py --onnx-dir`, `build_sdxl_8bit_engine.sh`, and the TensorRT execution path in `diffusion_trt.py`, including loading existing engines. Quantization, HF export, and the `--torch` / `--torch-compile` inference modes remain supported.
 
