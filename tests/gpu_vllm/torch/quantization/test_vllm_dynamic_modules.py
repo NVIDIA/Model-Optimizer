@@ -497,7 +497,7 @@ def test_kv_nvfp4_mla_quantizer_replays_in_cuda_graph(name, shape):
     assert torch.equal(static_out, quantizer(new_in))
 
 
-def _quantize_and_summarize(self, recipe_path=None):
+def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     """Run on the worker via ``LLM.collective_rpc``.
 
     Module-level so it survives pickle over engine-core IPC. ``self`` is the
@@ -517,6 +517,16 @@ def _quantize_and_summarize(self, recipe_path=None):
         )
     with disable_compilation(model):
         mtq.quantize(model, quant_cfg, forward_loop=_forward_loop)
+
+    restored_amaxes = {}
+    if quantizer_path is not None:
+        reload_utils = _load_example_module("vllm_reload_utils")
+        model.load_state_dict(reload_utils.load_state_dict_from_path(quantizer_path, model))
+        restored_amaxes = {
+            name: q.amax.detach().cpu()
+            for name, q in model.named_modules()
+            if isinstance(q, TensorQuantizer) and q.is_enabled
+        }
 
     parallel_linear_counts: dict[str, int] = {}
     moe_count = 0
@@ -576,6 +586,7 @@ def _quantize_and_summarize(self, recipe_path=None):
                 quantizers_without_amax.append(name)
 
     return {
+        "restored_amaxes": restored_amaxes,
         "parallel_linear_counts": parallel_linear_counts,
         "moe_count": moe_count,
         "attention_count": attention_count,
@@ -839,7 +850,7 @@ def test_tiny_llama_quantize(tiny_llama_llm):
 
 
 def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
-    """Load an exported recipe on real Qwen3-MoE linears and fused experts."""
+    """Restore exported recipes and ranges on real Qwen3-MoE linears and fused experts."""
     active = {"_disabled": False, "_num_bits": [4, 3], "_axis": None, "_block_sizes": None}
     recipe = {}
     for layer in range(2):
@@ -852,7 +863,14 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
                 recipe[f"{prefix}.weight_quantizer"] = {"_disabled": True}
     path = tmp_path / "quant_recipe.yaml"
     path.write_text(yaml.safe_dump(recipe))
-    summaries = tiny_qwen3_moe_llm.collective_rpc(_quantize_and_summarize, args=(str(path),))
+    state_path = tmp_path / "quantizer_state.pth"
+    amax = torch.tensor(4.5, dtype=torch.bfloat16)
+    torch.save(
+        {name + "._amax": amax for name, cfg in recipe.items() if not cfg["_disabled"]}, state_path
+    )
+    summaries = tiny_qwen3_moe_llm.collective_rpc(
+        _quantize_and_summarize, args=(str(path), str(state_path))
+    )
     summary = summaries[0]
 
     assert summary["missing_quantizers"] == [], summary["missing_quantizers"]
@@ -868,6 +886,8 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm, tmp_path):
     _assert_quantizer_amax_is_static(summary)
     enabled = summary["enabled_quantizers"]
     assert len(enabled) == 6  # One fused QKV and two expert projections per layer.
+    assert summary["restored_amaxes"].keys() == enabled.keys()
+    assert all(torch.equal(value, amax) for value in summary["restored_amaxes"].values())
     assert all("weight_quantizer" not in name for name in enabled)
     assert all(
         cfg == {"num_bits": (4, 3), "axis": None, "block_sizes": None} for cfg in enabled.values()
