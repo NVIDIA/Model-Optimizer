@@ -52,7 +52,10 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     copy_off_index_safetensors,
 )
-from modelopt.torch.utils.plugins.model_load_utils import record_unplaced_source_keys
+from modelopt.torch.utils.plugins.model_load_utils import (
+    is_fsdp2_text_only_vlm,
+    record_unplaced_source_keys,
+)
 
 try:
     from huggingface_hub import snapshot_download
@@ -152,7 +155,10 @@ def validate_fsdp2_supported(args, config):
     issues = []
     if "vila" in args.pyt_ckpt_path.lower():
         issues.append("VILA (custom builder + non-standard layer layout)")
-    if is_nemotron_vl(config) or _is_multimodal_config(config):
+    if is_fsdp2_text_only_vlm(config):
+        if getattr(args, "calib_with_images", False):
+            issues.append("image-text calibration (Qwen FSDP2 currently supports text-only inputs)")
+    elif is_nemotron_vl(config) or _is_multimodal_config(config):
         issues.append("multimodal / VL models (decoder layers not auto-detectable)")
     if getattr(config, "quantization_config", None) is not None:
         issues.append("pack-quantized / compressed-tensors checkpoints")

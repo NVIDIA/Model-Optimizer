@@ -67,6 +67,10 @@ except ImportError:
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
+from modelopt.torch.quantization.algorithms import (
+    _linear_attn_ba_group_key,
+    _linear_attn_qkvz_group_key,
+)
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
@@ -364,6 +368,18 @@ def collect_shared_input_modules(
     return input_to_linear, output_to_layernorm
 
 
+def _shared_input_fusion_groups(model, input_to_linear):
+    """Keep Qwen's QKVZ and BA runtime groups separate despite their shared input."""
+    for tensor, modules in input_to_linear.items():
+        groups = defaultdict(list)
+        for module in modules:
+            name = getattr(module, "name", "")
+            key = _linear_attn_qkvz_group_key(model, name) or _linear_attn_ba_group_key(model, name)
+            groups[key].append(module)
+        for group in groups.values():
+            yield tensor, group, len(groups) == 1
+
+
 def _fuse_shared_input_modules(
     model: nn.Module,
     input_to_linear: dict,
@@ -393,7 +409,7 @@ def _fuse_shared_input_modules(
     fused_linears = {}
     fused_count = 0
 
-    for tensor, modules in input_to_linear.items():
+    for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(model, input_to_linear):
         # Get quantization format for this group of modules
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
@@ -427,6 +443,7 @@ def _fuse_shared_input_modules(
             # Fuse layernorms (for AWQ)
             if (
                 fuse_layernorms
+                and can_fuse_layernorm
                 and output_to_layernorm is not None
                 and group_quant_format is not None
                 and group_quant_format != QUANTIZATION_NONE
