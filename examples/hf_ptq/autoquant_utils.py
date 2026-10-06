@@ -27,19 +27,45 @@ from torch.utils.data import DataLoader
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.quantization.kv_cache_auto_quant import _forward_kl
 from modelopt.torch.utils.dataset_utils import create_forward_loop
+from modelopt.torch.utils.distributed import size as world_size
 
 __all__ = ["auto_quantize"]
 
-_FSDP2_KV_AUTOQUANT_ERROR = (
-    "KV-cache AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
-    "selection, and checkpoint writes are synchronized across ranks."
-)
 _FSDP2_AUTOQUANT_WARNING = (
-    "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-    "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-    "synchronization across ranks); use at your own risk."
+    "AutoQuantize with --use_fsdp2 is experimental; use at your own risk. "
+    "Resume with the same world size, model, recipe, and calibration data."
 )
+
+
+def _get_autoquant_memory_probe(recipe: ModelOptAutoQuantizeRecipe, lm_head=None):
+    """Include retained reference logits and KL intermediates in batch-size probing."""
+    stages = (recipe.auto_quantize, recipe.kv_auto_quantize)
+    if not any(stage is not None and stage.auto_quantize_method == "kl_div" for stage in stages):
+        return None
+
+    def probe(model, inputs):
+        # Composed searches must still budget for the gradient stage's activations.
+        if torch.is_grad_enabled():
+            model(inputs)
+
+        def get_logits():
+            output = model(inputs)
+            logits = (
+                output.logits if hasattr(output, "logits") else lm_head(output.last_hidden_state)
+            )
+            return _select_unpadded_logits(logits, {"attention_mask": torch.ones_like(inputs)})
+
+        with torch.no_grad():
+            logits_ref = get_logits()
+            log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
+            # Keep the previous candidate alive during the next forward, as the scorer does.
+            for _ in range(2):
+                logits_quant = get_logits()
+                _forward_kl(logits_quant, log_prob_ref)
+
+    return probe
 
 
 # Presets safe to mix into an AutoQuantize search *and* write via the unified HF checkpoint
@@ -99,8 +125,6 @@ def auto_quantize(
         allow_uniform_kv=allow_uniform_kv,
     )
     if args.use_fsdp2:
-        if inputs["search_domain"] == "kv_cache":
-            raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
         warnings.warn(_FSDP2_AUTOQUANT_WARNING)
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -151,6 +175,7 @@ def auto_quantize(
             f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
         )
 
+    score_batch_size = args.batch_size * (world_size() if args.use_fsdp2 else 1)
     auto_quantize_kwargs: dict[str, Any] = {
         "constraints": inputs["constraints"],
         "data_loader": calib_dataloader,
@@ -158,7 +183,7 @@ def auto_quantize(
         "quantization_formats": inputs["quantization_formats"],
         "num_calib_steps": len(calib_dataloader),
         "num_score_steps": min(
-            len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+            len(calib_dataloader), max(inputs["score_size"] // score_batch_size, 1)
         ),
         "verbose": True,
         "disabled_layers": inputs["disabled_layers"],

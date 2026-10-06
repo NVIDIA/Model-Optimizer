@@ -999,8 +999,13 @@ def get_max_batch_size(
     sample_memory_usage_ratio: float = 1.0,
     sample_input_single_batch: torch.Tensor | None = None,
     enable_grad: bool = False,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None = None,
 ):
-    """Get the maximum batch size that can be used for the model."""
+    """Get the maximum batch size that can be used for the model.
+
+    ``forward_step(model, inputs)`` optionally probes a custom workload, including during
+    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+    """
 
     def _get_free_gpu_mem():
         min_gpu_free_mem = torch.cuda.get_device_properties(0).total_memory
@@ -1018,7 +1023,12 @@ def get_max_batch_size(
     is_enc_dec = model_type_is_enc_dec(model)
     # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
     # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
-    infer_method = model.generate if is_enc_dec else model
+    if forward_step is None:
+        infer_method = model.generate if is_enc_dec else model
+    else:
+
+        def infer_method(inputs):
+            return forward_step(model, inputs)
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (

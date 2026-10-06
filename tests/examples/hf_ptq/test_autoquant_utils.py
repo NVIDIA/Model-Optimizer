@@ -21,11 +21,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.transformers_models import get_tiny_llama
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.utils.dataset_utils import get_max_batch_size
 
 
 @pytest.fixture
@@ -33,6 +35,70 @@ def autoquant_utils(monkeypatch):
     examples_dir = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
     monkeypatch.syspath_prepend(str(examples_dir))
     return importlib.import_module("autoquant_utils")
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "has_kl", "has_gradient"),
+    [
+        ("nvfp4_fp8_at_5p4bits", False, True),
+        ("kv_fp8_nvfp4_cast_kl_div_at_5p4bits", True, False),
+        ("nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits", True, True),
+    ],
+)
+def test_autoquant_memory_probe_and_oom_retry(
+    autoquant_utils, monkeypatch, recipe_name, has_kl, has_gradient
+):
+    model = get_tiny_llama()
+    model.config.use_cache = True
+    recipe = load_recipe("general/auto_quantize/" + recipe_name)
+    probe = autoquant_utils._get_autoquant_memory_probe(recipe)
+    assert (probe is not None) == has_kl
+    forwards, kl_tokens = [], []
+
+    def record_forward(module, inputs):
+        assert not module.config.use_cache
+        forwards.append((inputs[0].shape[0], torch.is_grad_enabled()))
+
+    model.register_forward_pre_hook(record_forward)
+    real_kl = autoquant_utils._forward_kl
+
+    def limited_kl(logits, log_prob_ref):
+        score = real_kl(logits, log_prob_ref)
+        assert not logits.requires_grad and not log_prob_ref.requires_grad
+        assert log_prob_ref.dtype == torch.float32
+        kl_tokens.append(logits.shape[0])
+        # Simulate a GPU limit reached only by scoring, not by the model forward.
+        if logits.shape[0] > 4 * 8:
+            raise torch.cuda.OutOfMemoryError
+        return score
+
+    monkeypatch.setattr(autoquant_utils, "_forward_kl", limited_kl)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda _: SimpleNamespace(total_memory=1000)
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    free_memory = iter((1000, 900))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (next(free_memory), 1000))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _: 0)
+
+    result = get_max_batch_size(
+        model,
+        sample_input_single_batch=torch.ones((1, 8), dtype=torch.long),
+        enable_grad=has_gradient,
+        forward_step=probe,
+    )
+    assert model.config.use_cache
+    if has_kl:
+        assert result == 2
+        assert kl_tokens == [8, 8, 80, 40, 16, 16]
+        assert [batch for batch, grad in forwards if grad] == (
+            [1, 10, 5, 2] if has_gradient else []
+        )
+    else:
+        assert result == 8
+        assert forwards == [(1, True), (10, True)]
+        assert not kl_tokens
 
 
 def test_autoquant_recipe_builds_mtq_inputs(autoquant_utils):
@@ -214,41 +280,31 @@ def test_kl_padding_exclusion_is_scoped_to_kv_autoquant(
     assert observed["shape"] == expected_shape
 
 
-def test_kv_autoquant_rejects_fsdp2(autoquant_utils, monkeypatch):
-    monkeypatch.setattr(
-        autoquant_utils,
-        "_mtq_inputs_from_auto_quantize_config",
-        lambda *_args, **_kwargs: {"search_domain": "kv_cache"},
-    )
-    args = SimpleNamespace(
-        calib_with_images=False,
-        inference_pipeline_parallel=1,
-        use_fsdp2=True,
-    )
-
-    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
-        autoquant_utils.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
-
-
-def test_weight_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch):
+@pytest.mark.parametrize("domain", ["weight", "kv_cache"])
+def test_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch, domain):
     model = torch.nn.Module()
     inputs = {
-        "search_domain": "weight",
+        "search_domain": domain,
         "constraints": {"effective_bits": 8.0},
         "quantization_formats": [],
         "fixed_quantization_config": None,
         "module_search_spaces": [],
         "disabled_layers": [],
         "kv_cache_quant_cfg": None,
-        "method": "gradient",
-        "score_size": 1,
+        "method": "gradient" if domain == "weight" else "kl_div",
+        "score_size": 8,
     }
     monkeypatch.setattr(
         autoquant_utils, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
     )
-    monkeypatch.setattr(
-        autoquant_utils.mtq, "auto_quantize", lambda search_model, **_kwargs: (search_model, {})
-    )
+    observed = {}
+
+    def search(search_model, **kwargs):
+        observed.update(kwargs)
+        return search_model, {}
+
+    monkeypatch.setattr(autoquant_utils.mtq, "auto_quantize", search)
+    monkeypatch.setattr(autoquant_utils, "world_size", lambda: 2)
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
@@ -258,10 +314,12 @@ def test_weight_autoquant_retains_fsdp2_warning(autoquant_utils, monkeypatch):
     )
 
     with pytest.warns(UserWarning, match="use at your own risk"):
-        assert autoquant_utils.auto_quantize(args, model, [], SimpleNamespace()) is model
+        assert autoquant_utils.auto_quantize(args, model, [None] * 8, SimpleNamespace()) is model
+    assert observed["num_calib_steps"] == 8
+    assert observed["num_score_steps"] == 4
 
 
-def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(autoquant_utils):
+def test_recipe_distinguishes_weight_and_kv_autoquant(autoquant_utils):
 
     assert autoquant_utils._recipe_is_kv_auto_quantize(
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"

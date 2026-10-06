@@ -480,15 +480,8 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
-    if (
-        torch.distributed.is_available()
-        and torch.distributed.is_initialized()
-        and torch.distributed.get_world_size() > 1
-    ):
-        raise RuntimeError(
-            "KV-cache AutoQuantize is single-process only; distributed scoring, selection, "
-            "and checkpoint writes are not synchronized."
-        )
+    if dist.size() > 1 and dist.is_dtensor_sharded(model) and not dist.is_fsdp2_model(model):
+        raise NotImplementedError("Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP.")
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
     if fixed_quantization_config is not None or module_search_spaces:
@@ -609,8 +602,10 @@ def auto_quantize(
             used for the effective-bits constraint and supports ``"weight"`` (default),
             ``"active_moe"``, and ``"kv_cache"``. The KV-cache cost model dispatches to isolated
             forward-KL scoring over paired K/V formats; BF16/no-quant is its scoring reference but
-            is never solver-selectable. Additional cost-model parameters are provided through the
-            nested ``cost`` dict.
+            is never solver-selectable. Distributed KV search supports data parallelism and FSDP2:
+            all ranks must use the same candidates and forward-pass count. KL is reduced over all
+            scored tokens, and rank 0 selects the shared recipe. Additional cost-model parameters
+            are provided through the nested ``cost`` dict.
 
             Here is an example for valid ``effective_bits`` argument:
 

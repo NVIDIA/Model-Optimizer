@@ -271,13 +271,13 @@ class BaseSearcher(ABC):
         if checkpoint is None:
             return False
         # Backward compat: fall back to the original single-file path
-        if not os.path.exists(checkpoint):
+        if not os.path.isfile(checkpoint) and os.path.isfile(self.config["checkpoint"]):
             warn_rank_0(
                 f"Per-rank checkpoint {checkpoint} not found, falling back to "
                 f"{self.config['checkpoint']}. Ensure world size matches the original run."
             )
             checkpoint = self.config["checkpoint"]
-        if not os.path.exists(checkpoint):
+        if not os.path.isfile(checkpoint):
             warn_rank_0(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
             return False
 
