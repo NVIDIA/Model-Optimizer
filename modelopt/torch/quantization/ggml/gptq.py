@@ -76,7 +76,8 @@ class GGMLGPTQHelper(GPTQHelper):
     def update_weights(self, block_size, perc_damp):
         """Run the GPTQ update, then pin the chosen payload to the weight quantizer."""
         super().update_weights(block_size, perc_damp)
-        pin_packed_weight(self.module.weight_quantizer, self._packed)
+        quantizer = self.module.weight_quantizer
+        pin_packed_weight(quantizer, quantizer.num_bits, self._packed)
         self._packed = None
 
     def _blockwise_update(self, block_size):

@@ -21,7 +21,7 @@ import torch
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import PINNED_PAYLOAD
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 
 
 def _iq1_s_config(algorithm):
@@ -65,7 +65,7 @@ def test_gptq_on_a_ggml_format_pins_the_payload_it_chose():
     )
 
     iq1_s = GGML_FORMAT_REGISTRY["iq1_s"]
-    packed = getattr(model.weight_quantizer, PINNED_PAYLOAD)
+    packed = pinned_packed_weight(model.weight_quantizer, "iq1_s")
     decoded = iq1_s.dequantize(packed, torch.tensor(model.weight.shape), dtype=torch.float32)
     torch.testing.assert_close(model.weight.detach(), decoded)
     torch.testing.assert_close(model(inputs), inputs @ decoded.T)
