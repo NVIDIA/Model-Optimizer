@@ -23,8 +23,6 @@ from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
-from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.errors import HFValidationError
 
 from modelopt.torch.utils import print_rank_0
 
@@ -65,6 +63,10 @@ def _get_modelopt_state_path(model_name_or_path: str) -> str:
     """
     if os.path.isdir(model_name_or_path):
         return os.path.join(model_name_or_path, _MODELOPT_STATE_SAVE_NAME)
+    # Optional [hf] dependency: this module is imported even when huggingface_hub is not installed.
+    from huggingface_hub import try_to_load_from_cache
+    from huggingface_hub.errors import HFValidationError
+
     try:
         return try_to_load_from_cache(model_name_or_path, _MODELOPT_STATE_SAVE_NAME) or ""
     except HFValidationError:

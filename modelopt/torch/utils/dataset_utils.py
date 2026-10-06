@@ -25,7 +25,6 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import requests
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -1292,6 +1291,7 @@ def download_hf_dataset_as_jsonl(
     Returns:
         List of paths to downloaded JSONL files.
     """
+    import requests
     from datasets import load_dataset
     from huggingface_hub.utils import build_hf_headers
 
