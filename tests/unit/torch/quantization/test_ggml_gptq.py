@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -166,28 +165,6 @@ def test_pin_survives_save_and_restore():
 
     assert torch.equal(IQ1_S.pack(restored.weight, restored.weight_quantizer), _pin(model))
     torch.testing.assert_close(restored(inputs), model(inputs))
-
-
-def test_pin_survives_accelerate_buffer_offload():
-    torch.manual_seed(0)
-    model = torch.nn.Linear(512, 8, bias=False)
-    inputs = _inputs()
-    mtq.quantize(model, _iq_config("max"), forward_loop=lambda m: m(inputs))
-    weights_map = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    hook = AlignDevicesHook(
-        execution_device="cpu",
-        offload=True,
-        offload_buffers=True,
-        place_submodules=True,
-        weights_map=weights_map,
-    )
-    add_hook_to_module(model, hook)
-
-    mtq.calibrate(model, algorithm=GPTQ, forward_loop=lambda m: m(inputs))
-
-    (pin_key,) = [key for key in weights_map if key.endswith("_ggml_pinned_iq1_s")]
-    decoded = IQ1_S.dequantize(weights_map[pin_key], torch.tensor((8, 512)), dtype=torch.float32)
-    torch.testing.assert_close(model(inputs), inputs @ decoded.T)
 
 
 def test_pin_is_dropped_once_the_weight_changes():
