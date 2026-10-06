@@ -460,9 +460,7 @@ class _StubTokenizer:
 )
 def test_get_tokenizer_pad_token(monkeypatch, pad_token, eos_token, expected_pad):
     stub = _StubTokenizer(pad_token=pad_token, eos_token=eos_token)
-    monkeypatch.setattr(
-        example_utils.AutoTokenizer, "from_pretrained", lambda *a, **k: stub
-    )
+    monkeypatch.setattr(example_utils.AutoTokenizer, "from_pretrained", lambda *a, **k: stub)
     tok = example_utils.get_tokenizer("/fake/path")
     assert tok.pad_token == expected_pad
 
