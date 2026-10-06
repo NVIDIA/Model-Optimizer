@@ -165,8 +165,8 @@ class _NemotronHMTP(torch.nn.Module):
 
 
 @contextmanager
-def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool):
-    """Scope MTP construction to a checkpoint load, before its weights are placed."""
+def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_class=None):
+    """Scope MTP construction to the selected class, or resolve the default AutoModel class."""
     local_path = _resolve_checkpoint_path(checkpoint_path)
     layout = _get_mtp_layout(local_path)
     config_path = local_path / "config.json"
@@ -183,19 +183,25 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool):
         return
 
     prefix, num_blocks = layout
-    class_ref = config.get("auto_map", {}).get("AutoModelForCausalLM")
-    if class_ref is None and prefix:
-        class_ref = "modeling_nemotron_h_omni.NemotronH_Omni_Reasoning_V3"
-    if class_ref is not None:
-        if not trust_remote_code:
-            raise ValueError("Loading Nemotron-H MTP remote code requires trust_remote_code=True")
-        # Keep the original Hub ID so Transformers resolves the same dynamic class as the loader.
-        model_class = get_class_from_dynamic_module(class_ref, checkpoint_path)
-    else:
-        # The native class is optional for unrelated models and remote-code checkpoints.
-        from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
+    if model_class is None:
+        class_ref = config.get("auto_map", {}).get("AutoModelForCausalLM")
+        if class_ref is None and prefix:
+            class_ref = "modeling_nemotron_h_omni.NemotronH_Omni_Reasoning_V3"
+        # AutoModel can use native Nemotron-H without consenting to the optional remote class.
+        if not trust_remote_code and not prefix and config.get("model_type") == "nemotron_h":
+            class_ref = None
+        if class_ref is not None:
+            if not trust_remote_code:
+                raise ValueError(
+                    "Loading Nemotron-H MTP remote code requires trust_remote_code=True"
+                )
+            # Preserve Hub IDs so the dynamic class has the same identity as in the loader.
+            model_class = get_class_from_dynamic_module(class_ref, checkpoint_path)
+        else:
+            # The native class is optional for unrelated models and remote-code checkpoints.
+            from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHForCausalLM
 
-        model_class = NemotronHForCausalLM
+            model_class = NemotronHForCausalLM
     original_init = model_class.__init__
     constructed = False
 
@@ -224,7 +230,7 @@ def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool):
 
 
 def prepare_for_calibration(full_model) -> bool:
-    """Install an MTP forward for recipes with calibrated MTP activation quantizers."""
+    """Install an MTP forward for activation statistics and activation-dependent AWQ search."""
     language_model = getattr(full_model, "language_model", full_model)
 
     mtp = getattr(language_model, "mtp", None)
@@ -238,7 +244,10 @@ def prepare_for_calibration(full_model) -> bool:
 
     @wraps(original_forward)
     def forward_with_mtp(*args, **kwargs):
-        if not _needs_activation_forward_for_max_calib(mtp):
+        # AWQ needs inputs even while activation quantizers are disabled; its wrapper is scoped.
+        if not _needs_activation_forward_for_max_calib(mtp) and not any(
+            hasattr(module, "_forward_no_awq") for module in mtp.modules()
+        ):
             return original_forward(*args, **kwargs)
         captured = []
         handle = language_model.model.norm_f.register_forward_pre_hook(

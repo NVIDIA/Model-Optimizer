@@ -34,6 +34,7 @@ from modelopt.torch.models.nemotron_h import mtp as adapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
+    awq,
     max_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -150,11 +151,15 @@ def test_remote_consent_and_constructor_cleanup(tiny_checkpoint):
     (checkpoint / "config.json").write_text(json.dumps(config))
     loader = adapter.get_class_from_dynamic_module
     original_init = cls.__init__
-    with (
-        pytest.raises(ValueError, match="trust_remote_code=True"),
-        adapter.prepare_for_loading(checkpoint, False),
-    ):
-        pytest.fail("Remote MTP class was loaded without consent")
+    if hasattr(source, "language_model"):
+        with (
+            pytest.raises(ValueError, match="trust_remote_code=True"),
+            adapter.prepare_for_loading(checkpoint, False),
+        ):
+            pytest.fail("Remote MTP class was loaded without consent")
+    else:
+        with adapter.prepare_for_loading(checkpoint, False):
+            assert hasattr(cls(source.config), "mtp")
     loader.assert_not_called()
     with adapter.prepare_for_loading(checkpoint, True):
         with adapter.prepare_for_loading(checkpoint, True):
@@ -343,6 +348,54 @@ def test_loading_calibration_and_export(
         _process_quantized_modules(model, torch.bfloat16)
         exported = postprocess_state_dict(model.state_dict(), maxbound=448, quantization=None)
         torch.testing.assert_close(exported[f"{projection_name}.input_scale"], expected_scale)
+
+
+@pytest.mark.parametrize("algorithm", ["awq_lite", "awq_clip", "awq_full"])
+@pytest.mark.parametrize("activation", [False, True])
+def test_awq_runs_mtp_with_disabled_activation_quantizers(tiny_checkpoint, algorithm, activation):
+    """AWQ must exercise MTP even while it disables the input quantizers for its search."""
+    _, model, _ = tiny_checkpoint
+    language_model = getattr(model, "language_model", model)
+    mtp = language_model.mtp
+    cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)
+    cfg["quant_cfg"].extend(
+        [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": f"{_PROJECTION}.weight_quantizer",
+                "enable": True,
+                "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+            },
+            {"quantizer_name": f"{_PROJECTION}.input_quantizer", "enable": activation},
+        ]
+    )
+    mtq.quantize(mtp, {**cfg, "algorithm": None})
+    hf.prepare_model_for_calibration(model)
+    inputs = torch.tensor([[1, 2, 3, 4]])
+    calls = []
+    handle = mtp.register_forward_hook(lambda *_: calls.append(True))
+    try:
+        awq(model, lambda calibrated: calibrated(inputs, use_cache=False), algorithm, debug=True)
+        projection = mtp.get_submodule(_PROJECTION)
+        if algorithm != "awq_clip":
+            assert projection.awq_lite.num_cache_steps > 0
+            assert projection.awq_lite.num_search_steps > 0
+            assert torch.isfinite(projection.input_quantizer.pre_quant_scale).all()
+        if algorithm != "awq_lite":
+            assert projection.awq_clip.num_tokens > 0
+        assert torch.isfinite(projection.weight_quantizer.amax).all()
+        if activation:
+            assert projection.input_quantizer.amax is not None
+            assert torch.isfinite(projection.input_quantizer.amax).all()
+        assert projection.input_quantizer.is_enabled == activation
+        assert calls
+        assert not hasattr(projection, "_forward_no_awq")
+        if not activation:
+            calls.clear()
+            model(inputs, use_cache=False)
+            assert not calls  # Retained debug helpers must not keep MTP execution enabled.
+    finally:
+        handle.remove()
 
 
 def test_lifecycle_dispatch_ignores_unsupported_models():

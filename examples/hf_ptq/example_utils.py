@@ -627,7 +627,12 @@ def _from_pretrained_recording(auto_class, ckpt_path, *, model_type=None, **kwar
     accounts for on-the-fly key conversion, which a set re-derived afterwards would have to
     replay to avoid mistaking a renamed key for an unplaced one.
     """
-    with prepare_model_for_loading(model_type, ckpt_path, kwargs.get("trust_remote_code", False)):
+    with prepare_model_for_loading(
+        model_type,
+        ckpt_path,
+        kwargs.get("trust_remote_code", False),
+        model_class=None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class,
+    ):
         model, loading_info = auto_class.from_pretrained(
             ckpt_path, output_loading_info=True, **kwargs
         )
@@ -828,7 +833,16 @@ def get_model(
         )
 
         with (
-            prepare_model_for_loading(hf_config.model_type, ckpt_path, trust_remote_code),
+            prepare_model_for_loading(
+                hf_config.model_type,
+                ckpt_path,
+                trust_remote_code,
+                model_class=(
+                    None
+                    if auto_model_module in (AutoModel, AutoModelForCausalLM)
+                    else auto_model_module
+                ),
+            ),
             init_empty_weights(include_buffers=True),
         ):
             # When computing the device_map, assuming bfloat16 precision by default,

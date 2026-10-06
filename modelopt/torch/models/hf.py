@@ -37,12 +37,14 @@ def _get_plugin(model_type):
     return None if name is None else importlib.import_module(f".{name}", __package__)
 
 
-def prepare_model_for_loading(model_type, checkpoint_path: str, trust_remote_code: bool):
-    """Return a context that prepares checkpoint-only modules during model construction."""
+def prepare_model_for_loading(
+    model_type, checkpoint_path: str, trust_remote_code: bool, *, model_class=None
+):
+    """Prepare checkpoint-only modules, optionally on the loader's selected concrete class."""
     plugin = _get_plugin(model_type)
     if plugin is None:
         return nullcontext()
-    return plugin.prepare_for_loading(checkpoint_path, trust_remote_code)
+    return plugin.prepare_for_loading(checkpoint_path, trust_remote_code, model_class=model_class)
 
 
 def checkpoint_has_mtp(model_type, checkpoint_path: str) -> bool:
