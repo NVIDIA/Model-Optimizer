@@ -114,7 +114,7 @@ def run_training(config, quant_config, prefill_tokens, teacher_provider=None):
         config.model.register_pre_wrap_hook(prepare_student)
         if teacher_provider is not None:
             config.model = convert_to_distillation_provider(
-                config.model, teacher_provider, ModelOptDistillConfig(skip_lm_loss=True)
+                config.model, teacher_provider, ModelOptDistillConfig(kd_loss_alpha=1.0)
             )
             distill(config, forward_step)
         else:
@@ -151,7 +151,7 @@ def main():
     )
     parser.add_argument(
         "--recipe",
-        default="general/ptq/linear_attention_state_int8_dynamic",
+        default="general/ptq/linear_attention_state_int8_block32_dynamic",
         help="Path to a quantization recipe YAML (built-in or custom)",
     )
     parser.add_argument("--output", type=Path, required=True)

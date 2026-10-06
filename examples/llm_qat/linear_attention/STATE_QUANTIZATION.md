@@ -10,16 +10,17 @@ recurrent suffix matching serving decode. Matching the QDQ schedule alone was
 insufficient: small differences in prefill and token-update arithmetic crossed
 INT8 rounding thresholds and accumulated into different states.
 
-The opt-in `decode.precision="vllm_0_15"` profile in #2519 now uses pinned native
-forward kernels imported from the pinned vLLM dependency, with a differentiable
-Torch adjoint. No server is needed. Independent training and
-serving executions match bitwise for GDN and KDA in the previously failing
-257-token-prefix/256-token-suffix cases and a new-seed 129/512 check. Nonzero-state
-512-token decode also matches exactly. These results resolve the reproduced
-kernel/state-quantization mismatch for the pinned runtime and tested settings;
-they do not establish full-model checkpoint equivalence or QAT/QAD quality recovery.
-See [the native-arithmetic validation](#native-arithmetic-fix-in-2519-on-2026-10-05)
-and [the direct-import rerun](#direct-vllm-imports) below.
+State QAT now selects `backend="serving"`: imported serving forward kernels plus
+an explicit differentiable Torch adjoint. Plain TensorQuantizer state QDQ targets
+public vLLM 0.15.1; INT8/Hadamard and ReplaySSM target a compatible
+quantized-ReplaySSM fork. Neither training path needs a running server.
+Chunk-only state QAT is retired; W-only QAT continues to use FLA.
+
+The latest validation covers both GDN and KDA, including native checkpoint scales,
+BF16 replay rings, prefix-to-suffix gradients, and short training runs. See
+[current Hadamard and ReplaySSM results](#hadamard-and-replayssm-validation-on-2026-10-06).
+The reproduced kernel/cache mismatches are resolved for the tested runtime and
+settings. Full-model serving equivalence and quality recovery remain separate work.
 
 ## Why the mismatch happens
 
@@ -69,8 +70,9 @@ tokens 1–128                       tokens 129–160
                            handoff
 ```
 
-The prefix follows serving prefill. The suffix performs a recurrent update and
-state QDQ for every token, with the same format, grouping, and readout as serving.
+The prefix follows serving prefill. The suffix follows the chosen serving cache policy: token mode quantizes each
+write; ReplaySSM quantizes checkpoint refreshes and retains BF16 updates between
+refreshes. Format, grouping, arithmetic, and readout match the target kernel.
 No text-generation loop is needed. Labels remain teacher-forced; this example's
 QAT/QAD loss mask selects the suffix. Gradients flow through the suffix and the
 state handoff into the prefix. State QDQ uses identity STE.
@@ -93,14 +95,14 @@ introduce boundaries absent from this serving path.
 
 A prompt split across multiple native prefill calls, or resumed from nonzero
 state, requires QDQ at each actual incoming-state boundary. A prefix length by
-itself does not describe that schedule. These cases need additional integration
-and parity validation.
+itself does not describe that schedule. Explicit continuation states are tested below. Engine-managed multi-call prefill
+and scheduling still need integration validation.
 
 ## How the decode states align
 
 The following contract covers ordinary token-mode state QDQ. It assumes identical
-quantizer behavior, inputs, initial state, and update/readout arithmetic. It does
-not establish equivalence for the Hadamard or ReplaySSM policies.
+quantizer behavior, inputs, initial state, and update/readout arithmetic. Hadamard and ReplaySSM
+use the separate cache contract below.
 
 | Event | Training | State-only serving |
 | --- | --- | --- |
@@ -140,89 +142,93 @@ represent different points in the computation. Different native arithmetic can
 still introduce rounding differences; runtime parity must use appropriate
 tolerances and sufficiently long trajectories.
 
-## Shared recipe and remaining gaps
+## Serving policies and backward
 
-The alignment target for a fresh, single-call prefill followed by plain token
-decode is `quantize_initial=True`, `prefill_state_qdq=False`,
-`readout="working"`, and matching state quantizer settings. Additional replay,
-Hadamard, and gate-rounding policies must remain disabled for this comparison.
-The opt-in recipes below implement this contract using standard TensorQuantizer
-`block_sizes={-1: 32}`: one dynamic INT8 scale per 32 value channels of each key
-row. The same grouping applies to training's `[H, K, V]` and serving's
-`[N, H, K, V]` state tensors. Both use signed narrow-range INT8 and identity STE.
+Both policies use working-state readout, initial-state quantization, and no
+internal prefix QDQ. TensorQuantizer selects the state format and enablement;
+the execution policy selects the serving arithmetic and state-write schedule.
 
-Training uses `general/ptq/linear_attention_state_int8_block32_dynamic`:
+| Recipe | Forward target | State writes |
+| --- | --- | --- |
+| `linear_attention_state_int8_block32_dynamic` | Public vLLM 0.15.1, `precision="vllm_0_15"` | Handoff and every decode token, dynamic INT8 per 32 values |
+| `linear_attention_state_int8_dynamic` | Compatible native fork, `precision="replayssm"` | H32 + INT8 checkpoint at handoff and every token (`window=1`) |
+| Hadamard recipe with `mode="replay"` | Same native fork | H32 + INT8 at handoff/refresh; BF16 key/update ring between refreshes |
 
 ```python
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.linear_attention import linear_attention_training_phase
 
-recipe = load_recipe("general/ptq/linear_attention_state_int8_block32_dynamic")
-mtq.quantize(model, recipe.quantize.model_dump())
+cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
+# Omit this update for Hadamard token mode.
+cfg["linear_attention"][0]["cfg"]["decode"].update(mode="replay", replay={"window": 8})
+mtq.quantize(model, cfg)
 with linear_attention_training_phase(model, prefill_lengths):
     loss = compute_suffix_loss(model, batch)
     loss.backward()
 ```
 
-On the vLLM branch, select
-`examples/vllm_serve/linear_attention_state_int8_block32.yaml` with the existing
-fake-quant worker. That adapter still applies only TensorQuantizer before native
-prefill/decode; native kernels are unchanged. These additions are local changes
-on the separate training and serving branches; downstream rebases remain deferred.
+Hadamard transforms groups of 32 value channels; it is distinct from INT8
+scale/round/dequantize. The checkpoint uses a scale per key row and 32-value group,
+with FP16 scale metadata. Replay preserves the quantized checkpoint until refresh
+and stores each computed key/update once in BF16. Scalar GDN gates weight updates;
+KDA channel gates weight keys. Replacing that reconstruction with a sequential
+FP32 recurrence changes the states consumed by later tokens, even with the same
+refresh schedule.
 
-The training recipe selects `decode.precision: vllm_0_15`. This CUDA BF16 profile
-covers both phases. It uses the pinned prefill and token-update arithmetic,
-including reductions and exponentials, instead of approximating it with Torch
-casts. The native FLA kernels are adapted into ModelOpt; training does not import
-vLLM. FLA 0.5.1 supplies the compatible triangular solve and indexing helpers.
-No state QDQ occurs inside the fresh prefill. A continuation prefill with an
-incoming state quantizes that state once at entry, matching the serving adapter.
+The adapter imports the native checkpoint encoder and recurrent forward kernel.
+Its private scratch cache prevents in-place mutation of tensors needed by
+backward; the persistent ModelOpt carry remains floating fake-QDQ data. The
+Torch adjoint uses the saved checkpoint/ring values and identity STE through
+rounding. Gradients remain connected across prefill, handoff, and refresh. This is
+a training surrogate, not the derivative of a discontinuous quantizer.
 
-The Megatron adapter retains raw Q/K so prefill can normalize into BF16 while
-decode normalizes inside the FP32 update. It also matches GDN's BF16 beta and
-native gate activation; KDA retains FP32 beta and its native channelwise gate.
-This profile requires Megatron's unfused input-preparation hook. Context
-parallelism and fused Megatron input preparation remain unsupported. The kernel
-envelope is `K <= 256`, equal K/V dimensions for KDA, and power-of-two K when
-normalization is enabled.
+The prefix uses vLLM's packed-sequence arithmetic. Matching tensor values but
+calling the fixed-length specialization is not the same comparison: a longer
+case differed by one BF16 output element (`6.1035e-5`). Matching the packed layout
+removed that discrepancy without changing the implementation or tolerance.
 
-Backward uses Torch operations evaluated along the actual rounded state
-trajectory, with identity STE at operand-rounding and TensorQuantizer boundaries.
-The prefix preserves its native cumulative gates, inverse, WY factors, incoming
-chunk states, and updated values. The suffix differentiates its update at the
-actual incoming rounded state and uses the native working state for readout.
-This is an explicit training surrogate, not a native vLLM backward kernel.
+Public vLLM 0.15.1 does not contain the ReplaySSM/Hadamard kernels. The native fork
+must provide `vllm.model_executor.layers.fla.ops.fused_recurrent_replayssm`,
+including its KDA vector-gate support. The state-only plugin in #2541 continues
+to target ordinary TensorQuantizer state QDQ; these results do not add ReplaySSM
+to that plugin. `backend="reference"` retains mathematical experiments and makes
+no serving-equivalence claim. Legacy `backend="matmul"` loads without changing its
+saved precision; enabled chunk-only state QAT raises a migration error.
 
-`precision: full` retains the FP32/FP64 Torch reference. Other existing recipes
-and default policies retain their behavior:
+### Hadamard and ReplaySSM validation on 2026-10-06
 
-- **Readout:** training defaults to `readout="stored"`, which reads
-  after state QDQ. The state-only serving schedule above needs working-state
-  readout, selected explicitly by the new recipe.
-- **Scale grouping:** the legacy training path applies the quantizer separately
-  to `[K, block_v]` tiles. Serving calls it directly on `[N, H, K, V]`. With
-  `axis=(0, 1)`, serving uses one scale per entire head state, whereas training
-  uses multiple scales if `V > block_v`. The settings must describe the same
-  logical groups; using the same quantizer class alone is insufficient. The new
-  recipe supplies explicit value blocks and bypasses this legacy tile grouping.
-- **Prefill and arithmetic:** the opt-in profile passes the native comparisons
-  recorded below; the original full-precision prefix retains its measured
-  discrepancy. Multi-call prefill still needs matching incoming-state boundaries.
-  Matching an arithmetic profile does not imply bitwise agreement across all
-  kernels, shapes, hardware, or versions.
-- **Other codecs:** the default INT8 training recipe includes Hadamard rotation;
-  the current state-only vLLM adapter does not implement that policy or ReplaySSM.
-  The ordinary INT8 results below do not validate that default recipe.
+The [validation receipt](replay_state_alignment_results.json) records
+source hashes, runtime, cases, and evidence boundaries. Validation ran on RTX
+A6000 with PyTorch 2.9.1+cu128, public vLLM 0.15.1 prefill, and the local native
+ReplaySSM sources. The native fork had existing local changes, including KDA
+support; its commit ID alone does not identify the tested source. Its exact
+kernel hashes are included in the receipt. No full serving process was launched.
 
-The relevant training code is
-[decode.py](../../../modelopt/torch/quantization/linear_attention/decode.py),
-[training.py in #2519](https://github.com/NVIDIA/Model-Optimizer/pull/2519),
-and [utils.py](../../../modelopt/torch/quantization/linear_attention/utils.py).
-The serving adapter is on the separate
-[vLLM PR](https://github.com/NVIDIA/Model-Optimizer/pull/2541).
+| Check | Result |
+| --- | --- |
+| 18 GDN/KDA cases: windows 1/4/16, quantization on/off, nonzero incoming states, prefixes 0/3/65 | Exact outputs, checkpoint values/scales, and stored replay entries; finite nonzero gradients |
+| 4 longer cases: GDN/KDA, windows 1/16, prefix 129 + suffix 259, two heads, K=V=128 | Same exact cache/output gates; gradients reach the prefix |
+| 4 split/resume cases with Q/K normalization: GDN/KDA, windows 1/4 | Exact outputs, final states, and gradients; empty calls perform no write |
+| Actual Bridge example: GDN, Hadamard token and replay window 4, QAT and QAD | All four one-step runs update student weights; QAD teachers remain unquantized and frozen |
+| Megatron KDA layer: same two policies, training and distillation losses | All four updates pass; finite gradients reach the prefix and teacher weights stay frozen |
+
+The Bridge smoke runs use the example's `run_training` and Bridge
+`pretrain`/`distill`, including activation recomputation and the distributed
+optimizer. They use a tiny random model and mock data, not a quality benchmark.
+The KDA runs use direct Megatron layer losses, not the Bridge trainer: the matched
+Bridge environment used here has GDN support only. KDA trainer integration needs
+a compatible Bridge provider.
+
+Permanent coverage stays small: two native ReplaySSM cases, plus the existing two
+public-vLLM prefix/suffix checks. Compilation runs in fixtures. The broader matrix
+is a local validation artifact, not a large CI test matrix.
 
 ## Recorded numerical results
+
+The sections below retain earlier successes and failures for provenance. Their
+implementation descriptions and limitations describe those historical snapshots;
+the current policy and results are above.
 
 ### CPU state schedule check on 2026-10-05
 
@@ -663,10 +669,10 @@ The earlier receipts remain unchanged and describe their earlier implementations
 2. Exercise engine-managed multi-call prefill, cache-slot reuse, and production
    batching. Explicit continuation states exercise the numerical boundary but
    do not test vLLM's scheduler.
-3. Run the Bridge QAT/QAD example on a fixed model and dataset, then compare
+3. Extend the completed tiny Bridge smoke runs to a fixed pretrained model and dataset, then compare
    generation quality with the unquantized baseline.
 4. Optimize forward/backward in #2562 against the same numerical gates. Preserve
-   QDQ at every decode token and gradients through the prefill handoff. No training
+   the selected token/replay QDQ schedule and gradients through the prefill handoff. No training
    speedup follows from this correctness result; old timing tables measure the
    replaced implementation.
 
