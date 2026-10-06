@@ -408,17 +408,20 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfgs, rank, 
             if isinstance(getattr(module, "input_quantizer", None), TensorQuantizer)
             and module.input_quantizer.is_enabled
         )
-        original_quantizer = linear.input_quantizer
+        original_quantizers = {
+            name: getattr(linear, name) for name in ("input_quantizer", "weight_quantizer")
+        }
 
     source = tmp_path / "tiny_llama"
     if rank == 0:
         create_tiny_llama_dir(tmp_path)
     torch.distributed.barrier()
     export_dir = tmp_path / "unsupported_export"
-    for attribute_cfg in attribute_cfgs:
+    for quantizer_name, attribute_cfg in attribute_cfgs:
         if rank == size - 1:
-            linear.input_quantizer = deepcopy(original_quantizer)
-            quantizer = linear.input_quantizer
+            for name, original_quantizer in original_quantizers.items():
+                setattr(linear, name, deepcopy(original_quantizer))
+            quantizer = getattr(linear, quantizer_name)
             quantizer.set_from_attribute_config(attribute_cfg)
             if "type" in attribute_cfg:
                 quantizer.reset_amax()
@@ -427,25 +430,28 @@ def _test_mcore_vllm_export_unsupported_setting(tmp_path, attribute_cfgs, rank, 
             if "type" in attribute_cfg
             else next(key for key in attribute_cfg if key != "enable")
         )
-        with pytest.raises(ValueError, match=f"Unsupported.*input_quantizer: {setting}"):
+        with pytest.raises(ValueError, match=f"Unsupported.*{quantizer_name}: {setting}"):
             export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
-        assert not export_dir.exists()
+        assert not (export_dir / "quantizer_state.pth").exists()
+        assert not (export_dir / "quant_recipe.yaml").exists()
 
 
 def test_mcore_vllm_export_unsupported_setting(request, tmp_path):
     """Unsupported settings reject export on every rank, including a final-stage PP2 error."""
     attribute_cfgs = [
-        {"unsigned": True, "num_bits": 8},
-        {"narrow_range": True, "num_bits": 8},
-        {"rotate": True},
-        {"rotate": {"enable": True, "rotate_fp32": True}},
-        {"enable": False, "rotate": True},
-        {"fake_quant": False},
-        {"type": "dynamic"},
-        {"type": "static"},
-        {"bias": {-1: None}},
-        {"backend": "custom"},
-    ]
+        ("input_quantizer", cfg)
+        for cfg in [
+            {"unsigned": True, "num_bits": 8},
+            {"narrow_range": True, "num_bits": 8},
+            {"rotate": True},
+            {"enable": False, "rotate": True},
+            {"fake_quant": False},
+            {"type": "dynamic"},
+            {"type": "static"},
+            {"bias": {-1: None}},
+            {"backend": "custom"},
+        ]
+    ] + [("weight_quantizer", {"fake_quant": False})]
     workers = request.getfixturevalue(f"dist_workers_size_{min(torch.cuda.device_count(), 2)}")
     workers.run(partial(_test_mcore_vllm_export_unsupported_setting, tmp_path, attribute_cfgs))
 

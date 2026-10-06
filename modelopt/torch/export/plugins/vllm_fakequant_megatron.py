@@ -198,19 +198,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self._quantizer_state_for_recipe: dict[str, dict] = {}
         self._quantizer_recipe_markers: list[tuple[str, dict]] = []
         self._quantizer_tensor_states: list[dict[str, torch.Tensor]] = []
-        failure = ""
-        try:
-            _quantizer_configs(self.model)
-        except ValueError as exc:
-            failure = str(exc)
-        # Reject on every rank before any stage starts the export collectives.
-        failure = DistributedProcessGroup.get_dist_syncd_obj(
-            failure,
-            DistributedProcessGroup(None),
-            lambda failures: next((message for message in failures if message), ""),
-        )
-        if failure:
-            raise ValueError(failure)
+        self._quantizer_validation_failure = ""
 
     def _store_quantizer_recipe(self, name: str, recipe: dict) -> None:
         """Store one resolved recipe, requiring repeated routes to agree."""
@@ -223,6 +211,14 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self, layer_state_dicts: Mapping[Any, dict[str, torch.Tensor]]
     ) -> None:
         """Resolve temporary recipe markers after the normal export mapping has routed them."""
+        # Module checks run during export; defer rejection until all ranks finish its collectives.
+        failure = DistributedProcessGroup.get_dist_syncd_obj(
+            self._quantizer_validation_failure,
+            DistributedProcessGroup(None),
+            lambda failures: next((message for message in failures if message), ""),
+        )
+        if failure:
+            raise ValueError(failure)
         routed_marker_ids: set[int] = set()
         for state_dict in layer_state_dicts.values():
             for key in list(state_dict):
@@ -324,15 +320,22 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             Tuple: state_dict, quantization format, and block_size of the module.
         """
         name_to_value = {}
+        qformat: str = self._get_quantization_format(module)
+        try:
+            quantizer_configs = _quantizer_configs(module)
+        except ValueError as exc:
+            if not self._quantizer_validation_failure:
+                self._quantizer_validation_failure = str(exc)
+            # Skip unsupported kernels while peers complete the export collectives.
+            return self._get_weight_bias(module, dtype), qformat, 0
         source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
-        for qname, qstate in _quantizer_configs(module).items():
+        for qname, qstate in quantizer_configs.items():
             marker_id = len(self._quantizer_recipe_markers)
             self._quantizer_recipe_markers.append((source_prefix + qname, qstate))
             name_to_value[qname + self._QUANT_RECIPE_MARKER_SUFFIX] = torch.tensor(
                 marker_id, dtype=torch.int64
             )
 
-        qformat: str = self._get_quantization_format(module)
         if qformat is None and "norm" not in prefix:
             # Add exclude layers for vllm fakequant config. Note that if the prefix is not an empty
             # string then it usually ends with "." which needs to be removed.
