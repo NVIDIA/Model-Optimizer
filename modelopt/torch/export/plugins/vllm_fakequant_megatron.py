@@ -32,45 +32,41 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
 
-def _quantizer_configs(module: torch.nn.Module, *, is_mtp: bool = False) -> dict[str, dict]:
-    """Return quantizer recipes, rejecting settings that cannot be restored."""
+def _quantizer_configs(module: torch.nn.Module) -> tuple[dict[str, dict], str]:
+    """Return quantizer recipes and an unsupported-settings error, if any."""
     configs = {}
     for name, quantizer in module.named_modules():
         if not isinstance(quantizer, TensorQuantizer):
             continue
         is_weight_quantizer = "weight_quantizer" in name
         is_quantizing = quantizer.is_enabled and quantizer._if_quant
-        if is_mtp and (
-            is_quantizing or quantizer.rotate_is_enabled or quantizer.pre_quant_scale is not None
-        ):
-            raise ValueError(
-                f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
-            )
+        is_activation_quantizing = is_quantizing and not is_weight_quantizer
+        is_integer_quantizing = is_activation_quantizing and isinstance(quantizer.num_bits, int)
         # Weight transforms are folded; activation transforms also run when quantization is off.
-        settings = {
-            "rotate": not is_weight_quantizer and quantizer.rotate_is_enabled,
-            "pre_quant_scale": not is_weight_quantizer and quantizer.pre_quant_scale is not None,
-            "fake_quant": is_quantizing and not quantizer.fake_quant,
-        }
-        if is_quantizing and not is_weight_quantizer:
-            settings.update(
-                {
-                    "unsigned": isinstance(quantizer.num_bits, int) and quantizer.unsigned,
-                    "narrow_range": isinstance(quantizer.num_bits, int) and quantizer.narrow_range,
-                    "dynamic_amax": not (
-                        quantizer.is_mx_format
-                        or quantizer._use_constant_amax
-                        or getattr(quantizer, "_amax", None) is not None
-                    ),
-                    "bias": quantizer.bias is not None,
-                    "backend": quantizer.backend is not None,
-                }
-            )
-        unsupported = [setting for setting, active in settings.items() if active]
+        unsupported = [
+            setting
+            for setting, invalid in {
+                "rotate": not is_weight_quantizer and quantizer.rotate_is_enabled,
+                "pre_quant_scale": not is_weight_quantizer
+                and quantizer.pre_quant_scale is not None,
+                "fake_quant": is_quantizing and not quantizer.fake_quant,
+                "unsigned": is_integer_quantizing and quantizer.unsigned,
+                "narrow_range": is_integer_quantizing and quantizer.narrow_range,
+                "dynamic_amax": is_activation_quantizing
+                and not (
+                    quantizer.is_mx_format
+                    or quantizer._use_constant_amax
+                    or getattr(quantizer, "_amax", None) is not None
+                ),
+                "bias": is_activation_quantizing and quantizer.bias is not None,
+                "backend": is_activation_quantizing and quantizer.backend is not None,
+            }.items()
+            if invalid
+        ]
         if unsupported:
-            raise ValueError(
+            return {}, (
                 f"Unsupported vLLM fakequant quantizer settings for {name or '<root>'}: "
-                f"{', '.join(unsupported)}. These settings are not supported by vLLM fakequant export/reload."
+                f"{', '.join(unsupported)}"
             )
         recipe = {"_disabled": is_weight_quantizer or not is_quantizing}
         if not recipe["_disabled"]:
@@ -82,7 +78,7 @@ def _quantizer_configs(module: torch.nn.Module, *, is_mtp: bool = False) -> dict
                 }
             )
         configs[get_unwrapped_name(name, module)] = recipe
-    return configs
+    return configs, ""
 
 
 def _save_quantizer_state(path: Path, save: Callable[[Path], None]) -> None:
@@ -102,6 +98,33 @@ def _save_quantizer_state(path: Path, save: Callable[[Path], None]) -> None:
         raise RuntimeError(f"Failed to save {path.name}: {failure}")
 
 
+def _merge_quantizer_states(objs: list[dict | None]) -> dict:
+    """Merge replicated recipes or tensors, requiring duplicate keys to agree."""
+    merged = {}
+    first_rank_by_name = {}
+    for rank, state in enumerate(objs):
+        if state is None:
+            continue
+        for name, value in state.items():
+            if name in merged:
+                previous = merged[name]
+                if isinstance(value, torch.Tensor):
+                    matches = previous.dtype == value.dtype and torch.equal(previous, value)
+                    kind = "tensors"
+                else:
+                    matches = previous == value
+                    kind = "recipes"
+                if not matches:
+                    raise ValueError(
+                        f"Conflicting quantizer {kind} for {name} between ranks "
+                        f"{first_rank_by_name[name]} and {rank}"
+                    )
+            else:
+                merged[name] = value
+                first_rank_by_name[name] = rank
+    return merged
+
+
 def gather_mcore_vllm_fq_quantizer_recipe(
     quantizer_state_by_name: dict[str, dict],
     save_directory: str | os.PathLike,
@@ -113,21 +136,6 @@ def gather_mcore_vllm_fq_quantizer_recipe(
             ``VllmFqGPTModelExporter._get_quantized_state``.
         save_directory: Directory for ``quant_recipe.yaml``.
     """
-
-    def _merge_quantizer_states(objs: list) -> dict:
-        merged: dict = {}
-        for rank, recipes in enumerate(objs):
-            if recipes is None:
-                continue
-            for name, recipe in recipes.items():
-                if name in merged and merged[name] != recipe:
-                    raise ValueError(
-                        f"Conflicting quantizer recipes for {name} across ranks "
-                        f"(including rank {rank})"
-                    )
-                merged[name] = recipe
-        return merged
-
     merged = DistributedProcessGroup.get_dist_syncd_obj(
         quantizer_state_by_name,
         DistributedProcessGroup(None),
@@ -163,26 +171,6 @@ def gather_mcore_vllm_fq_quantized_state_dict(
             if "quantizer" in k:
                 quantizer_state_dict[k] = v.detach().clone().cpu()
 
-    def _merge_quantizer_states(objs: list) -> dict:
-        merged: dict[str, torch.Tensor] = {}
-        first_rank_by_name: dict[str, int] = {}
-        for rank, state in enumerate(objs):
-            if state is None:
-                continue
-            for name, tensor in state.items():
-                # Replicated keys must match instead of silently overwriting an earlier rank.
-                if name in merged:
-                    previous = merged[name]
-                    if previous.dtype != tensor.dtype or not torch.equal(previous, tensor):
-                        raise ValueError(
-                            f"Conflicting quantizer tensors for {name} between ranks "
-                            f"{first_rank_by_name[name]} and {rank}"
-                        )
-                else:
-                    merged[name] = tensor
-                    first_rank_by_name[name] = rank
-        return merged
-
     merged_quantizer_state_dict = DistributedProcessGroup.get_dist_syncd_obj(
         quantizer_state_dict,
         DistributedProcessGroup(None),
@@ -197,7 +185,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 class VllmFqGPTModelExporter(GPTModelExporter):
     """VLLM fakequant GPTModel exporter."""
 
-    _QUANT_RECIPE_MARKER_SUFFIX = "._quant_recipe_marker"
+    _QUANT_RECIPE_MARKER_SUFFIX = "._vllm_fakequant_recipe_marker"
 
     def __init__(self, *args, **kwargs):
         """Initialize recipe capture before lazy export shards are built."""
@@ -322,15 +310,22 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
-        is_mtp = prefix.startswith("mtp.")
-        try:
-            quantizer_configs = _quantizer_configs(module, is_mtp=is_mtp)
-        except ValueError as exc:
-            if not self._quantizer_validation_failure:
-                self._quantizer_validation_failure = str(exc)
-            # Skip unsupported kernels while peers complete the export collectives.
+        if prefix.startswith("mtp."):
+            for name, quantizer in module.named_modules():
+                if isinstance(quantizer, TensorQuantizer) and (
+                    (quantizer.is_enabled and quantizer._if_quant)
+                    or quantizer.rotate_is_enabled
+                    or quantizer.pre_quant_scale is not None
+                ):
+                    self._quantizer_validation_failure = self._quantizer_validation_failure or (
+                        f"MTP quantization is not supported by vLLM fakequant export/reload: {name}"
+                    )
+                    break
             return self._get_weight_bias(module, dtype), qformat, 0
-        if is_mtp:
+        quantizer_configs, error = _quantizer_configs(module)
+        if error:
+            self._quantizer_validation_failure = self._quantizer_validation_failure or error
+            # Skip unsupported kernels while peers complete the export collectives.
             return self._get_weight_bias(module, dtype), qformat, 0
         source_prefix = prefix if not prefix or prefix.endswith(".") else prefix + "."
         for qname, qstate in quantizer_configs.items():
@@ -384,19 +379,17 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         else:
             return name_to_value, qformat, block_size
 
-        # Only save input/output quantizer state; weight_quantizer amax is not exported
-        # since it has been folded into the weight above.
+        # Save activation ranges; weight quantizers are folded into the weights above.
         for name, quantizer in module.named_modules():
             if not isinstance(quantizer, TensorQuantizer) or "weight_quantizer" in name:
                 continue
-            param = quantizer.state_dict()
+            amax = getattr(quantizer, "_amax", None)
             # The constant amax takes precedence over any stored calibration buffer.
             if quantizer._use_constant_amax and not quantizer.is_mx_format:
-                param["_amax"] = quantizer._get_amax(module.weight)
-            param.pop("_pre_quant_scale", None)
-            name = get_unwrapped_name(name, module)
-            for key, value in param.items():
-                name_to_value[name + "." + key] = value.detach().cpu().clone()
+                amax = quantizer._get_amax(module.weight)
+            if amax is not None:
+                name = get_unwrapped_name(name, module)
+                name_to_value[name + "._amax"] = amax.detach().cpu().clone()
         return name_to_value, qformat, block_size
 
 
