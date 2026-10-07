@@ -18,6 +18,7 @@ import asyncio
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
+from specdec_bench.mlflow_tracking import add_mlflow_args, mlflow_run, resolve_mlflow_args
 from specdec_bench.utils import (
     decode_chat,
     dump_env,
@@ -402,6 +403,7 @@ if __name__ == "__main__":
         default=None,
         help="Directory to save the results",
     )
+    add_mlflow_args(parser)
     args = parser.parse_args()
 
     if args.runtime_params is not None:
@@ -425,4 +427,9 @@ if __name__ == "__main__":
             "Warning: Ignore EOS should only be used in certain cases, do no activate unless necessary"
         )
 
-    run_simple(args)
+    # Resolved after the dataset/algorithm defaults above, since the
+    # experiment name is derived from them.
+    resolve_mlflow_args(args, parser)
+
+    with mlflow_run(args):
+        run_simple(args)
