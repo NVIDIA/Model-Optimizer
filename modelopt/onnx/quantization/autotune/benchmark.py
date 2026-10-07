@@ -130,7 +130,7 @@ def _parse_remote_benchmark_config(
             )
 
     remote_exec_path = query["remote_exec_path"][0].rstrip("/") or "/"
-    if posixpath.basename(remote_exec_path) in {"trtexec", "trtexec_safe"}:
+    if posixpath.basename(remote_exec_path) == "timing_server":
         remote_exec_path = posixpath.dirname(remote_exec_path)
     trtexec_safe_path = posixpath.join(remote_exec_path, "trtexec_safe")
 
