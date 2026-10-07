@@ -383,19 +383,7 @@ class FakeTensorQuantFunction(Function):
             # The LegacyFakeTensorQuantFunction support cpu and amax with any shape that can be broadcasted to inputs.
             return _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
 
-        if torch.compiler.is_exporting():
-            outputs = quantize_op(
-                inputs,
-                amax,
-                num_bits=num_bits,
-                exponent_bits=0,
-                unsigned=unsigned,
-                narrow_range=narrow_range,
-                trt_high_precision_dtype=trt_high_precision_dtype,
-                block_size=block_size,
-                axis=axis,
-            )
-        elif not inputs.is_cuda:
+        if not inputs.is_cuda:
             outputs = legacy_quant_func()
         else:
             try:

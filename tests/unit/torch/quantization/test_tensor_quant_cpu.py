@@ -47,9 +47,25 @@ def test_custom_op_schemas_keep_legacy_positional_calls():
     assert (mxfp8.shape, mxfp8.dtype) == (inputs.shape, inputs.dtype)
 
 
-@pytest.mark.parametrize("num_bits", [8, (4, 3)])
-def test_cpu_quantizer_strict_capture_preserves_custom_op(num_bits):
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, narrow_range=False))
+@pytest.mark.parametrize("num_bits", [8, 4])
+def test_cpu_integer_carrier_strict_capture_preserves_custom_op(num_bits):
+    class QuantizeCarrier(torch.nn.Module):
+        def forward(self, inputs, amax):
+            return torch.ops.tensorrt.quantize_op(inputs, amax, num_bits, 0, False, False, "Float")
+
+    inputs = torch.randn(4, 32)
+    amax = torch.tensor(1.0)
+    exported = torch.export.export(QuantizeCarrier(), (inputs, amax), strict=True)
+
+    assert any(
+        node.target == torch.ops.tensorrt.quantize_op.default for node in exported.graph.nodes
+    )
+    expected = tensor_quant.fake_tensor_quant(inputs, amax, None, num_bits, False, False)
+    torch.testing.assert_close(exported.module()(inputs, amax), expected)
+
+
+def test_cpu_fp8_quantizer_strict_capture_preserves_custom_op():
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), narrow_range=False))
     quantizer.amax = torch.tensor(1.0)
     inputs = (torch.randn(4, 32),)
 
