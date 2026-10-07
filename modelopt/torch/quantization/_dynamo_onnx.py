@@ -167,7 +167,10 @@ def _validate_dynamo_quantization(model: nn.Module):
         weight_format = _classify_quantizer(weight_quantizer, f"{module_name}.weight_quantizer")
         if input_format is None and weight_format is None:
             continue
-        if weight_format == "int4" and input_format is None:
+        is_conv = isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+        if input_format is None and (
+            weight_format == "int4" or (is_conv and weight_format == "fp8")
+        ):
             module_format = weight_format
         elif input_format == weight_format and input_format in {
             "fp8",
@@ -182,7 +185,6 @@ def _validate_dynamo_quantization(model: nn.Module):
                 f"input={input_format}, weight={weight_format}."
             )
 
-        is_conv = isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
         if module_format in block_formats and is_conv:
             raise NotImplementedError("Dynamo ONNX export does not support block-quantized Conv.")
         weight = getattr(module, "weight", None)

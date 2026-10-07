@@ -25,6 +25,7 @@ import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
+import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -70,6 +71,45 @@ def test_export_to_onnx_defers_default_opset_to_modelopt(monkeypatch, tmp_path, 
 
     assert export_call["dynamo_export"] is dynamo_export
     assert export_call["onnx_opset"] is None
+
+
+@pytest.mark.parametrize("num_convs", [1, 2])
+def test_dynamo_fp8_export_with_unquantized_rgb_input(tmp_path, num_convs):
+    torch_quant_to_onnx = _load_example_module(
+        "torch_quant_to_onnx_for_test", "examples/torch_onnx/torch_quant_to_onnx.py"
+    )
+    inputs = torch.randn(1, 3, 4, 4)
+    model = torch.nn.Sequential(
+        *(torch.nn.Conv2d(3 if index == 0 else 8, 8, 1) for index in range(num_convs))
+    ).eval()
+    model = mtq.quantize(
+        model,
+        torch_quant_to_onnx.get_quant_config("fp8"),
+        forward_loop=lambda candidate: candidate(inputs),
+    )
+    torch_quant_to_onnx._disable_low_channel_fp8_conv_input_quantizers(model)
+    onnx_path = tmp_path / "rgb_conv.onnx"
+
+    torch_quant_to_onnx.export_to_onnx(
+        model,
+        inputs.shape,
+        onnx_path,
+        torch.device("cpu"),
+        weights_dtype="fp16",
+        dynamo_export=True,
+    )
+
+    exported = onnx.load(onnx_path)
+    onnx.checker.check_model(exported, full_check=True)
+    initializers = {tensor.name: tensor for tensor in exported.graph.initializer}
+    producers = {output: node for node in exported.graph.node for output in node.output}
+    convs = [node for node in exported.graph.node if node.op_type == "Conv"]
+    assert len(convs) == num_convs
+    assert convs[0].input[0] == exported.graph.input[0].name
+    for conv in convs:
+        weight_dq = producers[conv.input[1]]
+        assert (weight_dq.domain, weight_dq.op_type) == ("", "DequantizeLinear")
+        assert initializers[weight_dq.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
 
 
 def test_cli_rejects_dynamo_opset_below_23(monkeypatch, capsys, tmp_path):

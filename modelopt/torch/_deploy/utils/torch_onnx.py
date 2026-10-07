@@ -399,7 +399,10 @@ def is_fp8_quantized(model: nn.Module) -> bool:
             hasattr(module, "weight_quantizer")
             and hasattr(module, "input_quantizer")
             and module.weight_quantizer.is_enabled
-            and module.input_quantizer.is_enabled
+            and (
+                module.input_quantizer.is_enabled
+                or isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+            )
             and module.weight_quantizer._num_bits == (4, 3)
             and module.input_quantizer._num_bits == (4, 3)
             # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits
