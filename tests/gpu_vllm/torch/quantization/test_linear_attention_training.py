@@ -39,9 +39,7 @@ def compiled_serving_case(request):
         torch.rand(1, 73, 1, device="cuda") * 0.4,
     ]
     args = [x.requires_grad_() for x in args]
-    policy = LinearAttentionConfig(
-        backend="serving", decode={"precision": "vllm_0_15", "readout": "working"}
-    )
+    policy = LinearAttentionConfig(backend="serving", precision="vllm_0_15")
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
             num_bits=8,

@@ -14,12 +14,8 @@
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F
 
-from modelopt.torch.quantization.linear_attention import (
-    LinearAttentionDecodeConfig,
-    recurrent_decode,
-)
+from modelopt.torch.quantization.linear_attention.decode import _encode, _hadamard32
 
 
 def _rotate(value):
@@ -38,62 +34,22 @@ def _qdq(value):
     return (value - value.detach()) + rounded
 
 
-def _inputs(length=11):
+def test_hadamard_codec_matches_dense_oracle_and_identity_ste():
     torch.manual_seed(321)
-    q, k = [F.normalize(torch.randn(length, 2, 4, dtype=torch.float64), dim=-1) for _ in range(2)]
-    v = torch.randn(length, 2, 64, dtype=torch.float64)
-    g = -torch.rand(k.shape, dtype=torch.float64) * 0.05
-    beta = torch.rand(length, 2, dtype=torch.float64) * 0.4
-    initial = torch.randn(2, 4, 64, dtype=torch.float64) * 0.1
-    return tuple(x.requires_grad_() for x in (q, k, v, g, beta)), initial.requires_grad_()
-
-
-def _oracle(args, initial):
-    q, k, v, g, beta = args
-    state = _rotate(initial)
-    state = _qdq(state)
-    outputs = []
-    for t in range(len(q)):
-        decay = g[t].exp().reshape(2, -1, 1)
-        decayed = state * decay
-        correction = beta[t, :, None] * (_rotate(v[t]) - torch.einsum("hk,hkv->hv", k[t], decayed))
-        working = decayed + k[t, :, :, None] * correction[:, None, :]
-        state = _qdq(working) if (t + 1) % 3 == 0 else working
-        outputs.append(_rotate(torch.einsum("hk,hkv->hv", q[t], state)) / q.shape[-1] ** 0.5)
-    return torch.stack(outputs), _rotate(state)
-
-
-def _check_with_grads(actual, expected, args, initial, tolerance=2e-10):
-    for a, e in zip(actual, expected):
-        torch.testing.assert_close(a, e, rtol=tolerance, atol=tolerance)
-    gradients = [
-        torch.autograd.grad(
-            sum(x.square().sum() for x in result), (*args, initial), retain_graph=True
-        )
-        for result in (actual, expected)
-    ]
-    for a, e in zip(*gradients):
-        torch.testing.assert_close(a, e, rtol=tolerance, atol=tolerance)
-
-
-def test_hadamard_replay_matches_dense_oracle_and_split_carry():
-    args, initial = _inputs()
-    cfg = LinearAttentionDecodeConfig(
-        mode="replay",
+    state = torch.randn(2, 4, 64, dtype=torch.float64, requires_grad=True)
+    encoded = _encode(
+        _hadamard32(state),
+        True,
+        64,
+        state=True,
+        state_format="int8",
         state_codec="int8_hadamard32",
-        replay={"window": 3},
     )
-    kwargs = {"config": cfg, "state_format": "int8", "state_qdq": True}
-    output, carry = recurrent_decode(*args, initial_state=initial, **kwargs)
-    _check_with_grads((output, carry.reconstruct()), _oracle(args, initial), args, initial)
-    assert carry.value_basis == "hadamard32" and carry.anchor.block_v == 32
-    assert carry.anchor.scales.shape == (2, 4, 2)
-    first, split_carry = recurrent_decode(*(x[:2] for x in args), initial_state=initial, **kwargs)
-    second, split_carry = recurrent_decode(*(x[2:] for x in args), carry=split_carry, **kwargs)
-    _check_with_grads(
-        (torch.cat((first, second)), split_carry.reconstruct()),
-        (output, carry.reconstruct()),
-        args,
-        initial,
-        0,
-    )
+    actual = _hadamard32(encoded.values)
+    expected = _rotate(_qdq(_rotate(state)))
+    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
+    assert encoded.scales.shape == (2, 4, 2)
+    assert encoded.scales.dtype == torch.float16
+    probe = torch.randn_like(state)
+    (gradient,) = torch.autograd.grad((actual * probe).sum(), state)
+    torch.testing.assert_close(gradient, probe, rtol=1e-10, atol=1e-10)

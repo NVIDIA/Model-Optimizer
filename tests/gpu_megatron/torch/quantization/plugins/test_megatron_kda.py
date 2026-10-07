@@ -29,7 +29,6 @@ from megatron.core.transformer import TransformerConfig
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
-from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
@@ -42,6 +41,7 @@ from modelopt.torch.quantization.linear_attention import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 KimiDeltaAttention = pytest.importorskip("megatron.core.ssm.gated_delta_net.kda").KimiDeltaAttention
+pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
 
 
 def _layer():
@@ -92,7 +92,7 @@ def _case(cfg):
         policy = getattr(layer, "linear_attention_config", None)
         phase = (
             linear_attention_training_phase(layer, [31])
-            if policy is not None and policy.decode is not None
+            if policy is not None and policy.backend == "serving"
             else nullcontext()
         )
         with phase, torch.autocast("cuda", dtype=torch.bfloat16):
@@ -115,7 +115,8 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     model, hidden, forward, baseline = _case(cfg)
     assert model.kda_state_quantizer.is_enabled
     assert model.kda_state_quantizer.num_bits == 8
-    assert model.linear_attention_config.decode.state_codec == "int8_hadamard32"
+    assert model.linear_attention_config.precision == "vllm_0_15"
+    assert model.kda_state_quantizer.block_sizes == {-1: 32}
     kernel = model.gated_delta_rule
     with torch.no_grad():
         assert not torch.equal(forward(model), baseline)
@@ -128,7 +129,6 @@ def _test_kda(rank, size, cfg, checkpoint_path):
         torch.testing.assert_close(forward(model), baseline, rtol=0, atol=0)
     model.linear_attention_config = policy
     mtq.enable_quantizer(model, "*kda_state_quantizer")
-    mtq.enable_quantizer(model, "*replay_*_quantizer")
 
     with torch.no_grad():
         expected = forward(model)
@@ -148,7 +148,8 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     assert not hasattr(restored, "kda_w_quantizer")
     assert restored._linear_attention_prefill_lengths is None
     assert restored.linear_attention_config == policy
-    assert restored.replay_key_quantizer.is_enabled and restored.replay_update_quantizer.is_enabled
+    assert not restored.replay_key_quantizer.is_enabled
+    assert not restored.replay_update_quantizer.is_enabled
     assert restored.gated_delta_rule is kernel
     assert torch.isfinite(hidden.grad).all()
     for parameter in restored.parameters():
@@ -162,16 +163,9 @@ def _test_kda(rank, size, cfg, checkpoint_path):
 @pytest.fixture(scope="module")
 def compiled_kda_workers(dist_workers_size_1):
     """Warm one KDA shape outside the functional test timer."""
-    cfg = load_recipe("general/ptq/linear_attention_state_int8_dynamic").quantize.model_dump()
-    # Exercise mathematical replay/checkpointing without the optional serving fork.
-    cfg["linear_attention"][0]["cfg"]["backend"] = "reference"
-    cfg["linear_attention"][0]["cfg"]["decode"].update(
-        precision="full", mode="replay", replay={"window": 5}, decay_log_step=1 / 256
-    )
-    cfg["quant_cfg"].extend(
-        entry.model_dump(exclude_unset=True)
-        for entry in load_config("configs/ptq/units/linear_attention_replay_fp8_dynamic")
-    )
+    cfg = load_recipe(
+        "general/ptq/linear_attention_state_int8_block32_dynamic"
+    ).quantize.model_dump()
     dist_workers_size_1.run(_compile_kda, cfg)
     return dist_workers_size_1, cfg
 

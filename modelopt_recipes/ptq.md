@@ -69,7 +69,7 @@ supported combinations.
 
 </details>
 
-The block32 linear-attention recipe selects `decode.precision="vllm_0_15"`
+The block32 linear-attention recipe selects `precision="vllm_0_15"`
 and working-state readout. It applies fake QDQ with floating-point state storage.
 
 ---

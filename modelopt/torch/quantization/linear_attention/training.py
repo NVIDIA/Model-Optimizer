@@ -20,7 +20,6 @@ from itertools import pairwise
 
 import torch
 
-from ._chunk_prefill import chunk_gdn, chunk_kda
 from .decode import recurrent_decode
 from .utils import _resolve_state_quantizer, _state_qdq, forward_value
 
@@ -51,7 +50,7 @@ def linear_attention_training_phase(model, prefill_lengths):
         m
         for m in model.modules()
         if isinstance(m, _LinearAttentionQuantMixin)
-        and m.linear_attention_config.decode is not None
+        and m.linear_attention_config.backend == "serving"
     ]
     if not layers:
         raise ValueError("The model has no converted decode-aware linear-attention layers")
@@ -65,22 +64,13 @@ def linear_attention_training_phase(model, prefill_lengths):
             module._linear_attention_prefill_lengths = original
 
 
-def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size, normalize):
-    """Validate the shared policy and prepare GDN/KDA working dtypes and Q/K normalization."""
-    if policy.backend not in ("serving", "reference") or chunk_size != policy.chunk_size:
-        raise ValueError(
-            "State training requires backend='serving' or 'reference' and its configured chunk size"
-        )
-    if policy.decode is None:
-        raise ValueError("An explicit decode policy is required")
-    serving = policy.decode.precision != "full"
-    if serving and (q.device.type != "cuda" or any(x.dtype != torch.bfloat16 for x in (q, k, v))):
+def _prepare_prefill_inputs(q, k, v, g, beta, *, policy, chunk_size):
+    """Validate the native policy and prepare FP32 values for the training adjoint."""
+    if policy.backend != "serving" or chunk_size != 64:
+        raise ValueError("State training requires backend='serving' and chunk_size=64")
+    if q.device.type != "cuda" or any(x.dtype != torch.bfloat16 for x in (q, k, v)):
         raise ValueError("Serving arithmetic requires CUDA BF16 Q/K/V inputs")
-    dtype = torch.float64 if q.dtype == torch.float64 else torch.float32
-    q, k, v, g, beta = (x.to(dtype) for x in (q, k, v, g, beta))
-    if normalize and not serving:
-        q, k = (x * (x.square().sum(-1, keepdim=True) + 1e-6).rsqrt() for x in (q, k))
-    return q, k, v, g, beta, serving
+    return tuple(x.float() for x in (q, k, v, g, beta))
 
 
 def _prefill_decode_forward(
@@ -152,8 +142,7 @@ def _prefill_decode_forward(
         p > end - start for p, (_, start, end) in zip(prefixes, sequences)
     ):
         raise ValueError("Supply one valid prefill length per sequence")
-    serving_precision = policy.decode.precision != "full"
-    if serving_precision and (
+    if (
         keys > 256
         or (g.ndim == 4 and values != keys)
         or (use_qk_l2norm_in_kernel and keys & (keys - 1))
@@ -168,66 +157,52 @@ def _prefill_decode_forward(
         states = states.to(q.dtype)
         if states.shape != (len(sequences), heads, keys, values):
             raise ValueError("Initial state shape does not match sequence/head dimensions")
-    prefix_fn = chunk_kda if g.ndim == 4 else chunk_gdn
     outputs, finals = [], []
     for n, (b, start, end) in enumerate(sequences):
         split = start + prefixes[n]
         prefix, state = q.new_empty(0, heads, values), states[n]
         if prefixes[n]:
             with torch.autocast(device_type=q.device.type, enabled=False):
-                if serving_precision:
-                    from ._vllm_autograd import prefix as serving_prefix
+                from ._vllm_autograd import prefix as serving_prefix
 
-                    # A continuation prefill consumes a stored cache just as native serving
-                    # does. A fresh zero-state prefix has no incoming cache to quantize.
-                    if initial_state is not None and state_qdq:
-                        if policy.decode.precision == "replayssm":
-                            from ...kernels.quantization.linear_attention.serving.replay import (
-                                checkpoint,
-                                original_basis,
-                            )
+                # A continuation prefill consumes a stored cache just as native serving
+                # does. A fresh zero-state prefix has no incoming cache to quantize.
+                if initial_state is not None and state_qdq:
+                    if policy.precision == "replayssm":
+                        from ...kernels.quantization.linear_attention.serving.replay import (
+                            checkpoint,
+                            original_basis,
+                        )
 
-                            with torch.no_grad():
-                                decoded, _ = checkpoint(state, True)
-                                decoded = original_basis(decoded)
-                            state = forward_value(state, decoded)
-                        else:
-                            state = _state_qdq(
-                                state, policy.state.block_v, state_format, state_quantizer
-                            )
-                    prefix, state = serving_prefix(
-                        q=q[b, start:split],
-                        k=k[b, start:split],
-                        v=v[b, start:split],
-                        g=g[b, start:split],
-                        beta=beta[b, start:split],
-                        state=state,
-                        scale=keys**-0.5 if scale is None else scale,
-                        beta_dtype=beta_dtype,
-                        normalize=use_qk_l2norm_in_kernel,
-                    )
-                else:
-                    prefix, state = prefix_fn(
-                        *(x[b, start:split] for x in (q, k, v, g, beta)),
-                        state_qdq=state_qdq and policy.decode.prefill_state_qdq,
-                        state_format=state_format,
-                        state_quantizer=state_quantizer,
-                        scale=scale,
-                        initial_state=state,
-                        chunk_size=policy.chunk_size,
-                        state_qdq_block_v=policy.state.block_v,
-                    )
+                        with torch.no_grad():
+                            decoded, _ = checkpoint(state, True)
+                            decoded = original_basis(decoded)
+                        state = forward_value(state, decoded)
+                    else:
+                        state = _state_qdq(
+                            state, policy.state_block_v, state_format, state_quantizer
+                        )
+                prefix, state = serving_prefix(
+                    q=q[b, start:split],
+                    k=k[b, start:split],
+                    v=v[b, start:split],
+                    g=g[b, start:split],
+                    beta=beta[b, start:split],
+                    state=state,
+                    scale=keys**-0.5 if scale is None else scale,
+                    beta_dtype=beta_dtype,
+                    normalize=use_qk_l2norm_in_kernel,
+                )
         # Keep the prefix state attached so suffix losses backpropagate through prefill.
         # recurrent_decode applies configured state QDQ at the handoff and suffix writes.
         suffix, carry = recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
-            config=policy.decode,
+            config=policy,
             replay_key_quantizer=replay_key_quantizer,
             replay_update_quantizer=replay_update_quantizer,
             state_qdq=state_qdq,
             state_format=state_format,
             state_quantizer=state_quantizer,
-            block_v=policy.state.block_v,
             initial_state=state,
             position=prefixes[n],
             replay_gate_inputs=(

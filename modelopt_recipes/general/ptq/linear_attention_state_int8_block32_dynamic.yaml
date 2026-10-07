@@ -33,10 +33,4 @@ quantize:
     - module_name: '*'
       cfg:
         backend: serving
-        decode:
-          mode: token
-          state_codec: tile
-          readout: working
-          quantize_initial: true
-          prefill_state_qdq: false
-          precision: vllm_0_15
+        precision: vllm_0_15

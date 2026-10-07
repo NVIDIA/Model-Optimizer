@@ -1134,10 +1134,7 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
 
     @property
     def _serving_arithmetic(self):
-        decode = self.linear_attention_config.decode
-        return (
-            self.linear_attention_is_enabled and decode is not None and decode.precision != "full"
-        )
+        return self.linear_attention_config.backend == "serving"
 
     def _prepare_input_for_gated_delta_rule(self, *args, **kwargs):
         # Preserve raw BF16 Q/K: prefill stores normalized BF16 operands, whereas
@@ -1159,7 +1156,7 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
             from ..linear_attention.utils import forward_value
 
             raw_beta, raw_gate = gate_feats
-            if self.linear_attention_config.decode.precision == "replayssm":
+            if self.linear_attention_config.precision == "replayssm":
                 self._linear_attention_replay_gate_inputs = (raw_gate, raw_beta, a_log, dt_bias)
             with torch.no_grad():
                 native_gate, native_beta = fused_gdn_gating(

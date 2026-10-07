@@ -20,13 +20,12 @@ natural logarithms; inputs are already normalized/activated. Packed sequence bou
 are read on the CPU. Accumulation follows the input dtype (use float64 for algebra tests).
 """
 
-from collections.abc import Callable
 from itertools import pairwise
 
 import torch
 
 __all__ = [
-    "chunk_gdn_reference",
+    "chunk_delta_rule_reference",
     "recurrent_delta_rule_reference",
     "state_qdq_reference",
 ]
@@ -139,7 +138,7 @@ def recurrent_delta_rule_reference(
     return output, final.transpose(-1, -2) if state_v_first else final
 
 
-def chunk_gdn_reference(
+def chunk_gdn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -148,80 +147,114 @@ def chunk_gdn_reference(
     *,
     chunk_size: int = 64,
     scale: float | None = None,
-    initial_state: torch.Tensor | None = None,
-    cu_seqlens: torch.Tensor | None = None,
-    state_v_first: bool = False,
+    initial_state: torch.Tensor,
     state_qdq: bool = False,
     state_qdq_block_v: int = 64,
     state_format: str = "fp8_e4m3",
-    w_quantizer: Callable[[torch.Tensor], torch.Tensor] | None = None,
-    state_quantizer=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Exact GDN chunk algebra with optional state/W fake quantization.
-
-    The solve is a unit-lower triangular solve. ``w_quantizer`` sees the complete
-    materialized ``[B,T,Hv,Dk]`` WY operand once, with its own autograd semantics.
-    State QDQ occurs on the initial state and each chunk's final state, after readout.
-    """
-    if state_quantizer is not None:
-        state_qdq = state_quantizer.is_enabled and state_quantizer._if_quant
-        state_format = "int8" if state_quantizer.num_bits == 8 else "fp8_e4m3"
-
-    def quantize_state(state):
-        if state_quantizer is not None and state_quantizer.block_sizes is not None:
-            return state_quantizer(state)
-        return state_qdq_reference(state, state_qdq_block_v, state_format)
-
-    if g.ndim != 3 or chunk_size <= 0:
-        raise ValueError("chunk_gdn_reference requires scalar GDN gates and positive chunk_size")
-    q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
+    """Compute one prepared, nonempty GDN prefix [T,H,D] with a key-first state."""
     scale = q.shape[-1] ** -0.5 if scale is None else scale
-    chunks, all_w = [], []
-    for n, (b, start, end) in enumerate(sequences):
-        for lo in range(start, end, chunk_size):
-            hi = min(lo + chunk_size, end)
-            qc, kc, vc = (x[b, lo:hi].transpose(0, 1) for x in (q, k, v))
-            gc = g[b, lo:hi].transpose(0, 1).cumsum(-1)
-            bc = beta[b, lo:hi].transpose(0, 1).unsqueeze(-1)
-            # Mask before exp: upper-triangle positive differences can overflow for long decay.
-            causal = torch.ones(hi - lo, hi - lo, device=q.device, dtype=torch.bool).tril()
-            decay = (gc.unsqueeze(-1) - gc.unsqueeze(-2)).masked_fill(~causal, 0).exp()
-            gram = kc @ kc.transpose(-1, -2)
-            lower = (bc * gram * decay).tril(-1)
-            matrix = lower + torch.eye(hi - lo, device=q.device, dtype=q.dtype)
-            rhs = torch.cat((bc * vc, bc * kc * gc.exp().unsqueeze(-1)), dim=-1)
-            solved = torch.linalg.solve_triangular(matrix, rhs, upper=False, unitriangular=True)
-            u, w = solved.split((v.shape[-1], k.shape[-1]), dim=-1)
-            chunks.append((n, qc, kc, gc, decay, u))
-            all_w.append(w.transpose(0, 1))
-    w = torch.cat(all_w).reshape(q.shape)
-    if w_quantizer is not None:
-        w = w_quantizer(w)
-    w = w.reshape(-1, *w.shape[2:])
-    outputs, finals, offset, previous_n = [], [], 0, -1
-    for n, qc, kc, gc, decay, u in chunks:
-        if n != previous_n:
-            state = states[n]
-            if state_qdq:
-                state = quantize_state(state)
-            previous_n = n
-        length = qc.shape[1]
-        wc = w[offset : offset + length].transpose(0, 1)
-        offset += length
-        updated_values = u - wc @ state  # state_read
-        local_scores = ((qc * scale) @ kc.transpose(-1, -2) * decay).tril()
+    state = initial_state
+    if state_qdq:
+        state = state_qdq_reference(state, state_qdq_block_v, state_format)
+    pieces = []
+    for lo in range(0, len(q), chunk_size):
+        hi = min(lo + chunk_size, len(q))
+        qc, kc, vc = (x[lo:hi].transpose(0, 1) for x in (q, k, v))
+        gc = g[lo:hi].transpose(0, 1).cumsum(-1)
+        bc = beta[lo:hi].transpose(0, 1).unsqueeze(-1)
+        # Mask before exp: upper-triangle positive differences can overflow for long decay.
+        causal = torch.ones(hi - lo, hi - lo, device=q.device, dtype=torch.bool).tril()
+        decay = (gc.unsqueeze(-1) - gc.unsqueeze(-2)).masked_fill(~causal, 0).exp()
+        lower = (bc * (kc @ kc.transpose(-1, -2)) * decay).tril(-1)
+        matrix = lower + torch.eye(hi - lo, device=q.device, dtype=q.dtype)
+        gate = gc.exp().unsqueeze(-1)
+        rhs = torch.cat((bc * vc, bc * kc * gate), dim=-1)
+        solved = torch.linalg.solve_triangular(matrix, rhs, upper=False, unitriangular=True)
+        u, w = solved.split((v.shape[-1], k.shape[-1]), dim=-1)
+        updated_values = u - w @ state
+        local_scores = ((qc * scale @ kc.transpose(-1, -2)) * decay).tril()
         output = (qc * (scale * gc.exp()).unsqueeze(-1)) @ state
-        output = output + local_scores @ updated_values  # local_readout
-        outputs.append(output.transpose(0, 1))
+        pieces.append((output + local_scores @ updated_values).transpose(0, 1))
         weighted_keys = kc * (gc[..., -1:] - gc).exp().unsqueeze(-1)
         state = state * gc[..., -1].exp()[:, None, None]
-        state = state + weighted_keys.transpose(-1, -2) @ updated_values  # state_update
+        state = state + weighted_keys.transpose(-1, -2) @ updated_values
         if state_qdq:
-            state = quantize_state(state)
-        if len(finals) <= n:
-            finals.append(state)
-        else:
-            finals[n] = state
-    output = torch.cat(outputs).reshape(*v.shape)
+            state = state_qdq_reference(state, state_qdq_block_v, state_format)
+    return torch.cat(pieces), state
+
+
+def chunk_kda(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    *,
+    chunk_size=64,
+    scale=None,
+    initial_state,
+    state_qdq=False,
+    state_qdq_block_v=64,
+    state_format="fp8_e4m3",
+):
+    """Compute one prepared, nonempty KDA prefix [T,H,D] with a key-first state."""
+    scale = q.shape[-1] ** -0.5 if scale is None else scale
+    state = initial_state
+    if state_qdq:
+        state = state_qdq_reference(state, state_qdq_block_v, state_format)
+    pieces = []
+    for lo in range(0, len(q), chunk_size):
+        hi = min(lo + chunk_size, len(q))
+        qc, kc, vc = (x[lo:hi].transpose(0, 1) for x in (q, k, v))
+        prefix = g[lo:hi].transpose(0, 1).cumsum(-2)
+        bc = beta[lo:hi].transpose(0, 1).unsqueeze(-1)
+        gate = prefix.exp()
+        lower_rows, score_rows = [], []
+        for row in range(hi - lo):
+            decayed_keys = (
+                kc[..., : row + 1, :]
+                * (prefix[..., row : row + 1, :] - prefix[..., : row + 1, :]).exp()
+            )
+            right = decayed_keys.transpose(-1, -2)
+            left = kc[..., row : row + 1, :] * bc[..., row : row + 1, :]
+            interaction = left @ right
+            score = qc[..., row : row + 1, :] * scale @ right
+            padding = hi - lo - row - 1
+            lower_rows.append(torch.nn.functional.pad(interaction, (0, padding)))
+            score_rows.append(torch.nn.functional.pad(score, (0, padding)))
+        lower = torch.cat(lower_rows, dim=-2).tril(-1)
+        scores = torch.cat(score_rows, dim=-2)
+        identity = torch.eye(hi - lo, device=q.device, dtype=q.dtype).expand_as(lower)
+        inverse = torch.linalg.solve_triangular(
+            identity + lower, identity, upper=False, unitriangular=True
+        )
+        u = inverse @ (bc * vc)
+        w = inverse @ (bc * kc * gate)
+        updated = u - w @ state
+        pieces.append(((qc * scale * gate) @ state + scores @ updated).transpose(0, 1))
+        weighted_keys = kc * (prefix[..., -1:, :] - prefix).exp()
+        state = state * gate[..., -1, :, None] + weighted_keys.transpose(-1, -2) @ updated
+        if state_qdq:
+            state = state_qdq_reference(state, state_qdq_block_v, state_format)
+    return torch.cat(pieces), state
+
+
+def chunk_delta_rule_reference(
+    q, k, v, g, beta, *, initial_state=None, cu_seqlens=None, state_v_first=False, chunk_size=64
+):
+    """Evaluate GDN/KDA chunk algebra independently for each packed or batched sequence."""
+    q, k, states, sequences = _prepare(q, k, v, g, beta, initial_state, cu_seqlens, state_v_first)
+    chunk = chunk_kda if g.ndim == 4 else chunk_gdn
+    outputs, finals = [], []
+    for n, (b, start, end) in enumerate(sequences):
+        output, state = chunk(
+            *(x[b, start:end] for x in (q, k, v, g, beta)),
+            initial_state=states[n],
+            chunk_size=chunk_size,
+        )
+        outputs.append(output)
+        finals.append(state)
+    output = torch.stack(outputs) if cu_seqlens is None else torch.cat(outputs).unsqueeze(0)
     final = torch.stack(finals)
     return output, final.transpose(-1, -2) if state_v_first else final

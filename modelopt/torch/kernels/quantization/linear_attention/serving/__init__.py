@@ -19,6 +19,6 @@ try:
     import vllm
 except ImportError as error:
     raise ImportError(
-        "decode.precision='vllm_0_15' requires the optional vLLM dependency; "
+        "precision='vllm_0_15' requires the optional vLLM dependency; "
         "install the dependencies in the linear-attention QAT example's requirements-vllm.txt."
     ) from error

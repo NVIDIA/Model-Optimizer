@@ -329,15 +329,6 @@ disable_error_code = ["attr-defined"]
 module = ["examples.diffusers.fastgen.preprocess.*"]
 ignore_errors = true
 
-# Vendored from fla-org/flash-linear-attention (MIT); kept faithful to upstream rather than
-# annotated to modelopt's strict mypy (Triton loop indices, ``*tensor.shape`` unpacking).
-[[tool.mypy.overrides]]
-module = [
-    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_delta_h",
-    "modelopt.torch.kernels.quantization.linear_attention.fla_chunk_gated_delta_rule",
-]
-ignore_errors = true
-
 [tool.bandit]
 exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.

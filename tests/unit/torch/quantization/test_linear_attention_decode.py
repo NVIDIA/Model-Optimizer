@@ -15,17 +15,9 @@
 
 import pytest
 import torch
-import torch.nn.functional as F
 
-from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.linear_attention import (
-    LinearAttentionConfig,
-    LinearAttentionDecodeConfig,
-    matmul_gdn,
-    matmul_kda,
-    recurrent_decode,
-)
+from modelopt.torch.quantization.linear_attention import LinearAttentionConfig
 from modelopt.torch.quantization.linear_attention.decode import _encode
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -53,88 +45,57 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
     assert not encoded.scales.requires_grad
 
 
-def _inputs(kda=True, length=11):
-    torch.manual_seed(193)
-    q, k = [
-        F.normalize(torch.randn(length, 2, 16, dtype=torch.float64), dim=-1).requires_grad_()
-        for _ in range(2)
-    ]
-    v = torch.randn(length, 2, 11, dtype=torch.float64, requires_grad=True)
-    g = (
-        -torch.rand((length, 2, 16) if kda else (length, 2), dtype=torch.float64) * 0.03
-    ).requires_grad_()
-    beta = (torch.rand(length, 2, dtype=torch.float64) * 0.4).requires_grad_()
-    state = (torch.randn(2, 16, 11, dtype=torch.float64) * 0.1).requires_grad_()
-    return (q, k, v, g, beta), state
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"backend": "reference", "decode": {}},
+        {"backend": "matmul", "decode": {}},
+        {"backend": "serving", "decode": {"precision": "full"}},
+    ],
+)
+def test_reference_training_is_rejected(config):
+    with pytest.raises(ValueError, match="Reference training is retired"):
+        LinearAttentionConfig(**config)
 
 
-def _values_and_grads(output, state, args, initial):
-    loss = output.square().sum() + state.square().sum()
-    return output, state, *torch.autograd.grad(loss, (*args, initial), retain_graph=True)
-
-
-@pytest.mark.parametrize(("kda", "block_size"), [(False, 32), (True, 64)])
-def test_block_state_quantizer_prefill_decode_and_gradients(kda, block_size):
-    args, initial = _inputs(kda, length=5)
-    # Partial value groups exercise TensorQuantizer padding as well as per-key scales.
-    recipe = load_recipe(
-        "general/ptq/linear_attention_state_int8_block32_dynamic"
-    ).quantize.model_dump()
-    cfg = recipe["quant_cfg"][2 if kda else 1]["cfg"]
-    cfg["block_sizes"] = {-1: block_size}
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(**cfg))
-    policy = LinearAttentionConfig(**recipe["linear_attention"][0]["cfg"])
-    policy.decode.precision = "full"  # Double-precision recurrence/gradient oracle.
-    policy.state.block_v = 16
-    if kda:
-        policy.decode.prefill_state_qdq = True
-        policy.decode.readout = "stored"
-    function = matmul_kda if kda else matmul_gdn
-    output, final = function(
-        *(x.unsqueeze(0) for x in args),
-        policy=policy,
-        state_quantizer=quantizer,
-        prefill_lengths=[3],
-        initial_state=initial.unsqueeze(0),
-        output_final_state=True,
+@pytest.mark.parametrize(("precision", "window"), [("vllm_0_15", 1), ("replayssm", 4)])
+def test_native_legacy_policy_preserves_precision(precision, window, tmp_path):
+    decode = {"precision": precision, "readout": "working"}
+    if precision == "replayssm":
+        decode.update(state_codec="int8_hadamard32", mode="replay", replay={"window": window})
+    policy = LinearAttentionConfig(schema_version=2, backend="matmul", decode=decode)
+    assert policy == LinearAttentionConfig(
+        backend="serving", precision=precision, replay_window=window
     )
-    # GDN exercises the serving-aligned recipe; KDA retains prefix-QDQ/stored-read coverage.
-    state = quantizer(initial) if policy.decode.prefill_state_qdq else initial
-    expected = []
-    q, k, v, g, beta = args
-    for t in range(len(q)):
-        if t == 3:
-            state = quantizer(state)
-        decay = g[t].exp().unsqueeze(-1) if kda else g[t].exp()[:, None, None]
-        decayed = state * decay
-        residual = v[t] - (k[t].unsqueeze(-1) * decayed).sum(-2)
-        state = decayed + k[t].unsqueeze(-1) * (beta[t].unsqueeze(-1) * residual).unsqueeze(-2)
-        stored = quantizer(state) if t >= 3 else state
-        read = stored if t >= 3 and policy.decode.readout == "stored" else state
-        expected.append((q[t].unsqueeze(-1) * read).sum(-2) / q.shape[-1] ** 0.5)
-        state = stored
-        if t == 2 and policy.decode.prefill_state_qdq:
-            state = quantizer(state)
-    for actual, expected in zip(
-        _values_and_grads(output[0], final[0], args, initial),
-        _values_and_grads(torch.stack(expected), state, args, initial),
-    ):
-        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+    assert "decode" not in policy.model_dump()
+    assert "state_codec" not in policy.model_dump()
+    # Reproduce the field layout saved by the old class, bypassing new validation.
+    legacy = LinearAttentionConfig()
+    legacy.__dict__.clear()
+    legacy.__dict__.update(schema_version=2, backend="matmul", decode=decode)
+    path = tmp_path / "legacy-policy.pt"
+    torch.save(legacy, path)
+    assert torch.load(path, weights_only=True) == policy
 
 
-def test_serving_precision_requires_native_schedule():
-    with pytest.raises(ValueError, match="working readout"):
-        LinearAttentionDecodeConfig(precision="vllm_0_15")
+@pytest.mark.parametrize(
+    "settings", [{"readout": "stored"}, {"prefill_state_qdq": True}, {"decay_log_step": 0.02}]
+)
+def test_serving_precision_requires_native_schedule(settings):
+    with pytest.raises(ValueError, match="Native state QAT requires"):
+        LinearAttentionConfig(backend="serving", decode=settings)
 
 
-def test_grid_gate_ste_keeps_gate_gradients_and_changes_trajectory():
-    args, state = _inputs()
-    output, carry = recurrent_decode(
-        *args, config=LinearAttentionDecodeConfig(decay_log_step=0.02), initial_state=state
-    )
-    grad = torch.autograd.grad(output.square().sum() + carry.reconstruct().square().sum(), args[3])[
-        0
-    ]
-    assert torch.isfinite(grad).all() and torch.count_nonzero(grad) > 0
-    exact, _ = recurrent_decode(*args, config=LinearAttentionDecodeConfig(), initial_state=state)
-    assert not torch.equal(output, exact)
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"replay_window": 4},
+        {"precision": "replayssm", "replay_window": 0},
+        {"precision": "replayssm", "replay_window": 65},
+        {"precision": "replayssm", "state_block_v": 16},
+        {"decode": {}, "precision": "replayssm"},
+    ],
+)
+def test_unified_policy_rejects_incompatible_settings(settings):
+    with pytest.raises(ValueError):
+        LinearAttentionConfig(backend="serving", **settings)

@@ -60,7 +60,7 @@ def matmul_kda(
     """Normalize KDA inputs and run a chunked prefix plus configured suffix recurrence.
 
     Gates follow FLA's kernel activation formula and per-key log retention.
-    The optional serving precision profile supplies matching native forward values
+    The serving precision profile supplies matching native forward values
     and a Torch adjoint through the rounded state trajectory.
     """
     if cp_context is not None or disable_recompute or return_intermediate_states:
@@ -69,14 +69,12 @@ def matmul_kda(
         )
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("allow_neg_eigval requires use_beta_sigmoid_in_kernel")
-    if safe_gate and use_gate_in_kernel and (lower_bound is None or not -5 <= lower_bound < 0):
-        raise ValueError("safe_gate requires a lower_bound in [-5, 0)")
-    if lower_bound is not None and lower_bound >= 0:
-        raise ValueError("lower_bound must be negative")
+    if lower_bound is not None or safe_gate:
+        raise ValueError("Serving arithmetic uses the native softplus KDA gate")
     output_dtype = q.dtype
     beta_dtype = beta.dtype
-    q, k, v, g, beta, serving = _prepare_prefill_inputs(
-        q, k, v, g, beta, policy=policy, chunk_size=chunk_size, normalize=use_qk_l2norm_in_kernel
+    q, k, v, g, beta = _prepare_prefill_inputs(
+        q, k, v, g, beta, policy=policy, chunk_size=chunk_size
     )
     dtype = q.dtype
     if g.ndim != 4:
@@ -88,18 +86,15 @@ def matmul_kda(
         if dt_bias is not None:
             g = g + dt_bias.to(dtype).reshape(g.shape[-2:])
         rate = A_log.to(dtype).exp().reshape(g.shape[-2], 1)
-        g = -rate * F.softplus(g) if lower_bound is None else lower_bound * (rate * g).sigmoid()
-        if serving:
-            if lower_bound is not None or safe_gate:
-                raise ValueError("vllm_0_15 uses the native softplus KDA gate")
-            # Import the optional vLLM backend only for the native precision profile.
-            from ...kernels.quantization.linear_attention.serving.forward import fused_kda_gate
+        g = -rate * F.softplus(g)
+        # Import the optional vLLM backend only for the native precision profile.
+        from ...kernels.quantization.linear_attention.serving.forward import fused_kda_gate
 
-            with torch.no_grad():
-                native_gate = fused_kda_gate(
-                    raw_gate.flatten(-2).contiguous(), A_log, raw_gate.shape[-1], g_bias=dt_bias
-                )
-            g = forward_value(g, native_gate)
+        with torch.no_grad():
+            native_gate = fused_kda_gate(
+                raw_gate.flatten(-2).contiguous(), A_log, raw_gate.shape[-1], g_bias=dt_bias
+            )
+        g = forward_value(g, native_gate)
     if use_beta_sigmoid_in_kernel:
         beta = beta.sigmoid() * (2.0 if allow_neg_eigval else 1.0)
     return _prefill_decode_forward(
@@ -123,5 +118,5 @@ def matmul_kda(
         output_dtype=output_dtype,
         beta_dtype=beta_dtype,
         prefill_lengths=prefill_lengths,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel if serving else False,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )

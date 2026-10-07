@@ -97,7 +97,7 @@ def state_quantizer_config(
     if quantizer.block_sizes is not None:
         return _STATE_FORMATS[quantizer.num_bits], quantizer.block_sizes[-1]
     if quantizer.axis != (0, 1):
-        raise ValueError(f"{name} supports only axis=(0, 1) with state.block_v tiling")
+        raise ValueError(f"{name} supports only axis=(0, 1) with state_block_v tiling")
     return _STATE_FORMATS[quantizer.num_bits], 0
 
 
