@@ -124,6 +124,10 @@ class GPTModelExporter:
             pretrained model hosted inside a model repo on huggingface.co; or
             a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+            The source's non-model files (tokenizer, processor, generation config, remote code)
+            are copied into the export from a local directory only; for a model ID they are
+            skipped with a warning. Get a local copy first with
+            `modelopt.torch.export.ensure_local_checkpoint` to include them.
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
@@ -2286,6 +2290,10 @@ def export_mcore_gpt_to_hf(
             pretrained model hosted inside a model repo on huggingface.co; or
             a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+            The source's non-model files (tokenizer, processor, generation config, remote code)
+            are copied into the export from a local directory only; for a model ID they are
+            skipped with a warning. Get a local copy first with
+            `modelopt.torch.export.ensure_local_checkpoint` to include them.
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
