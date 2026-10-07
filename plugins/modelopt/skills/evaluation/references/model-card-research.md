@@ -48,8 +48,8 @@ Present findings, explain each setting, ask user to confirm or adjust. If no mod
 
 **For `max_new_tokens`, only settings explicitly tied to the applicable evaluation override the 65536 / 16384 fallback below; generic recommendations and same-family rows do not.**
 
-1. **Fetch the HF model card before writing the value.** Not optional.
-2. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the applicable evaluation. Annotate with a citing comment. Do not select the highest number mentioned, another benchmark's budget, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
+1. **Fetch the HF model card before writing the value.** Not optional. Consult its linked evaluation recipes for applicable settings.
+2. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the applicable evaluation. A published evaluation recipe linked from the card may set a shared default: use it for tasks covered by that recipe unless a task-specific override applies. Annotate with a citing comment. Do not select the highest number mentioned, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
 3. **Consult `nvfp4-modelcard-sampling.md` as a reference.** Use an output budget only when its source explicitly covers the evaluated model and applicable evaluation. Re-read the card and surface discrepancies; do not infer output budgets from same-family rows or recommended sampling.
 4. If no applicable evaluation-specific output budget is disclosed after checking the card and reference, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the missing evaluation guidance to the user.
 5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply evaluation-specific guidance, or fetch and confirm none is disclosed.
