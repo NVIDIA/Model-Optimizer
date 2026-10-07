@@ -31,6 +31,7 @@ from modelopt.torch.quantization.qtensor import FP8QTensor
 )
 def test_fp8_quantize_all_zero_block(quant_kwargs, dequant_kwargs):
     """A block, channel or tensor that is all zeros must dequantize to zeros, not NaN."""
+    torch.manual_seed(0)
     weight = torch.randn(4, 16)
     weight[0] = 0
     if not quant_kwargs:
@@ -41,4 +42,5 @@ def test_fp8_quantize_all_zero_block(quant_kwargs, dequant_kwargs):
 
     assert not torch.isnan(dequantized).any()
     assert torch.equal(dequantized[0], torch.zeros(16))
-    torch.testing.assert_close(dequantized, weight, rtol=0.07, atol=0)
+    # Small values can underflow to FP8 subnormals or zero, so allow a small absolute error.
+    torch.testing.assert_close(dequantized, weight, rtol=0.07, atol=1e-3)
