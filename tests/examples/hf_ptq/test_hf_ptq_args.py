@@ -377,6 +377,7 @@ def test_fsdp2_rejects_mtp_before_distributed_loading(monkeypatch, tmp_path, has
     monkeypatch.setenv("RANK", "0")
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", str(tmp_path), "--use_fsdp2")
     args.dist_state = SimpleNamespace(device="cpu", rank=0, world_size=1)
+    args.hub_model_id, args.local_checkpoint_path = None, str(tmp_path)  # as main() sets them
     keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if has_mtp else []
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": dict.fromkeys(keys, "model-00001.safetensors")})
