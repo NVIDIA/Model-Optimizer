@@ -214,6 +214,8 @@ Silence is not contradiction. Drop/override only when the recipe sets a differen
 
 #### Evaluation params template (top-level params)
 
+**Before choosing sampling values or an output budget, read [Model Card Research](model-card-research.md), including its [token-budget rule](model-card-research.md#max_new_tokens--mandatory-model-card-lookup).**
+
 The top-level `nemo_evaluator_config.config.params` must contain **exactly these six fields** — no `top_k` / `presence_penalty` / `repetition_penalty` / `min_p`:
 
 ```yaml
@@ -223,16 +225,12 @@ nemo_evaluator_config:
       parallelism: ???    # Required — size per references/parallelism.md (bounded by total request count vs GPU serving capacity); ask user in Step 4 if still unclear
       request_timeout: 3600
       max_retries: 10
-      max_new_tokens: 65536  # see rule below
+      max_new_tokens: 65536  # see model-card-research.md's token-budget rule
       temperature: 1.0    # from model card (reasoning); adjust
       top_p: 0.95         # from model card (reasoning); adjust
 ```
 
 Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
-
-**For `max_new_tokens`, only settings explicitly tied to the applicable evaluation override the 65536 / 16384 fallback below; generic recommendations and same-family rows do not.**
-
-**Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
 
 **`temperature` / `top_p` are different: per-task overrides ARE allowed and often required.** Cards often specify sampling per scenario — DeepSeek-V4-Pro-0813 gives `top_p = 0.95` for agentic scenarios and `1.0` otherwise, so a single top-level `0.95` is wrong for every non-agentic task.
 Set the top-level value for the majority case, override only the tasks the card calls out, and apply
@@ -240,15 +238,11 @@ the split identically to baseline and candidate. **The `export.mlflow` tags reco
 top-level values**, so note any per-task override in the run `description` — otherwise the
 overridden task is reported under sampling params it did not use.
 
-#### `max_new_tokens` — mandatory model-card lookup
+#### Output-context checks
 
-1. **Fetch the HF model card before writing the value.** Not optional.
-2. Look for `max_tokens` / `max_new_tokens` / "output length" explicitly used for the applicable evaluation. Annotate with a citing comment. Do not select the highest number mentioned, another benchmark's budget, quickstart/OpenCode examples, generic output-length recommendations, or `generation_config.json` defaults.
-   **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
-3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Use an output budget only when its source explicitly covers the evaluated model and applicable evaluation. Re-read the card and surface discrepancies; do not infer output budgets from same-family rows or recommended sampling.
-4. If no applicable evaluation-specific output budget is disclosed after checking the card and reference, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the missing evaluation guidance to the user.
-5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply evaluation-specific guidance, or fetch and confirm none is disclosed.
-6. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
+**Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
+
+**A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
 
 #### Quantization-aware benchmark defaults
 
