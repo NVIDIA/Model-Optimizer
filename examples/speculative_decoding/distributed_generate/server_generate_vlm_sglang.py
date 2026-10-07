@@ -14,11 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate multimodal SFT data from video prompts using SGLang native video input."""
+"""Generate multimodal SFT data from image/video prompts against a served VLM.
+
+Two client modes:
+
+* ``--api_mode native`` (default) drives SGLang's native DSL client and needs ``sglang``
+  installed locally.
+* ``--api_mode openai`` speaks the OpenAI chat API over plain HTTP and imports no engine,
+  so it works against **any** OpenAI-compatible server -- SGLang or vLLM. Media travels
+  as standard ``image_url`` / ``video_url`` content parts.
+
+Media delivery in ``openai`` mode (``--media_url_base``, ``--media_inline``, or neither)
+decides whether a given server can fetch the media at all; see
+``_as_openai_media_value``.
+"""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import json
 import os
@@ -130,11 +144,55 @@ def _resolve_media_path(
     return None
 
 
+_MEDIA_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+}
+
+_WARNED_LOCAL_MEDIA = False
+
+
+def _as_data_uri(path: str) -> str:
+    """Inline a local media file as a base64 ``data:`` URI."""
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"cannot inline missing media file: {path}")
+    mime = _MEDIA_MIME.get(file_path.suffix.lower(), "application/octet-stream")
+    return f"data:{mime};base64," + base64.b64encode(file_path.read_bytes()).decode()
+
+
 def _as_openai_media_value(
-    path: str, media_url_base: str | None, media_root: str | None, input_root: str | None
+    path: str,
+    media_url_base: str | None,
+    media_root: str | None,
+    input_root: str | None,
+    media_inline: bool = False,
 ) -> str:
+    """Render one media reference as a value an OpenAI-compatible server can fetch.
+
+    Delivery depends on which option was given, and the choice is server-visible:
+
+    * ``--media_url_base`` -- an HTTP URL. Works with any server, and is the only
+      practical option for video, which base64 inflates badly.
+    * ``--media_inline`` -- a base64 ``data:`` URI. Self-contained, no side server, but
+      it grows every request body.
+    * neither -- the local path is passed through unchanged, which only works on servers
+      that resolve paths off their own filesystem. SGLang native does; vLLM does not
+      unless started with ``--allowed-local-media-path``. Warned about once, rather than
+      raising, so existing SGLang workflows keep working.
+    """
+    global _WARNED_LOCAL_MEDIA
+
     if path.startswith(("http://", "https://", "data:")):
         return path
+    if media_inline:
+        return _as_data_uri(path)
     if media_url_base:
         candidate = Path(path)
         if candidate.is_absolute():
@@ -143,13 +201,21 @@ def _as_openai_media_value(
                     path = str(candidate.relative_to(media_root))
                 except ValueError:
                     # The local HTTP server deliberately exposes only media_root.
-                    # Leave paths outside it local for SGLang to resolve directly.
+                    # Leave paths outside it local for the server to resolve directly.
                     return path
             else:
                 return f"{media_url_base.rstrip('/')}{quote(path, safe='/')}"
         return f"{media_url_base.rstrip('/')}/{quote(path, safe='/')}"
-    # Do not convert local paths to file://. This SGLang build falls through to
-    # the base64 loader for file:// videos and raises "Incorrect padding".
+    # Do not convert local paths to file://. SGLang falls through to its base64 loader
+    # for file:// videos and raises "Incorrect padding".
+    if not _WARNED_LOCAL_MEDIA:
+        _WARNED_LOCAL_MEDIA = True
+        print(
+            "WARNING: sending media as a local path because neither --media_url_base nor "
+            "--media_inline was given. Only a server that reads its own filesystem will "
+            "resolve it (SGLang native does; vLLM needs --allowed-local-media-path). "
+            "Pass --media_url_base or --media_inline for an OpenAI-compatible server."
+        )
     return path
 
 
@@ -294,6 +360,7 @@ def _openai_generate_one(
     media_url_base: str | None,
     media_root: str | None,
     input_root: str | None,
+    media_inline: bool = False,
 ) -> tuple[str, str | None]:
     try:
         import requests
@@ -307,7 +374,11 @@ def _openai_generate_one(
                 "type": "image_url",
                 "image_url": {
                     "url": _as_openai_media_value(
-                        request["image_path"], media_url_base, media_root, input_root
+                        request["image_path"],
+                        media_url_base,
+                        media_root,
+                        input_root,
+                        media_inline,
                     )
                 },
             }
@@ -318,7 +389,11 @@ def _openai_generate_one(
                 "type": "video_url",
                 "video_url": {
                     "url": _as_openai_media_value(
-                        request["video_path"], media_url_base, media_root, input_root
+                        request["video_path"],
+                        media_url_base,
+                        media_root,
+                        input_root,
+                        media_inline,
                     )
                 },
             }
@@ -420,10 +495,17 @@ def main() -> None:
         help="HTTP base URL serving media_root/input_root for OpenAI multimodal requests.",
     )
     parser.add_argument(
+        "--media_inline",
+        action="store_true",
+        help="Send media as base64 data: URIs instead of paths/URLs. Self-contained, but "
+        "inflates every request body -- prefer --media_url_base for video.",
+    )
+    parser.add_argument(
         "--api_mode",
         choices=("openai", "native"),
         default="native",
-        help="Use SGLang's OpenAI-compatible API or SGLang native DSL client.",
+        help="openai: plain HTTP to any OpenAI-compatible server (SGLang or vLLM). "
+        "native: SGLang's DSL client, which requires sglang locally.",
     )
     parser.add_argument("--model_name", default="model")
     parser.add_argument("--request_timeout", type=int, default=1800)
@@ -512,6 +594,7 @@ def main() -> None:
                         args.media_url_base,
                         args.media_root,
                         args.input_root,
+                        args.media_inline,
                     ): meta
                     for request_args, meta in zip(batch_args, batch_meta)
                 }

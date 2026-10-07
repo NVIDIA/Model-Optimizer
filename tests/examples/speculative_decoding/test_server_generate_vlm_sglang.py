@@ -15,8 +15,11 @@
 
 """Tests for the multimodal SGLang generation client."""
 
+import base64
 import importlib.util
 from pathlib import Path
+
+import pytest
 
 _SCRIPT_PATH = (
     Path(__file__).parents[3]
@@ -75,3 +78,55 @@ def test_openai_media_value_is_relative_to_the_media_root(tmp_path):
     assert server_generate_vlm_sglang._as_openai_media_value(
         str(input_path), "http://127.0.0.1:18080", str(media_root), None
     ) == str(input_path)
+
+
+def test_openai_media_value_inlines_local_media_as_a_data_uri(tmp_path):
+    """--media_inline makes a request self-contained, with no media server."""
+
+    media = tmp_path / "frame.png"
+    media.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    value = server_generate_vlm_sglang._as_openai_media_value(
+        str(media), None, None, None, media_inline=True
+    )
+
+    assert value.startswith("data:image/png;base64,")
+    assert base64.b64decode(value.split(",", 1)[1]) == b"\x89PNG\r\n\x1a\n"
+
+
+def test_openai_media_value_inline_rejects_missing_media(tmp_path):
+    """Inlining a file that is not there must fail loudly, not send an empty payload."""
+
+    with pytest.raises(FileNotFoundError):
+        server_generate_vlm_sglang._as_openai_media_value(
+            str(tmp_path / "gone.png"), None, None, None, media_inline=True
+        )
+
+
+def test_openai_media_value_warns_once_when_passing_a_bare_local_path(monkeypatch, capsys):
+    """Without a delivery option the path only resolves on servers that read local files.
+
+    SGLang native does; vLLM does not unless started with --allowed-local-media-path. The
+    behavior is kept for backward compatibility, so the warning is what makes an
+    unfetchable request diagnosable instead of a confusing server-side error.
+    """
+
+    monkeypatch.setattr(server_generate_vlm_sglang, "_WARNED_LOCAL_MEDIA", False)
+
+    assert server_generate_vlm_sglang._as_openai_media_value("/data/a.mp4", None, None, None) == (
+        "/data/a.mp4"
+    )
+    assert server_generate_vlm_sglang._as_openai_media_value("/data/b.mp4", None, None, None) == (
+        "/data/b.mp4"
+    )
+
+    assert capsys.readouterr().out.count("WARNING:") == 1
+
+
+def test_openai_media_value_prefers_remote_urls_over_inlining(tmp_path):
+    """An http(s)/data value is already fetchable and must pass through untouched."""
+
+    remote = "https://example.com/clip.mp4"
+    assert (
+        server_generate_vlm_sglang._as_openai_media_value(remote, None, None, None, True) == remote
+    )
