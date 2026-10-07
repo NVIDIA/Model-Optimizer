@@ -214,7 +214,7 @@ class LayerwiseExporter:
             return
         model = self._model
         assert_layerwise_export_supported(model)
-        # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
+        # Tensor transforms regroup state across keys; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
         model_type = hf_model_type(model)
@@ -262,8 +262,10 @@ class LayerwiseExporter:
         self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
 
         self._name_mapper = None
+        self._tensor_name_mapper = None
         try:
             self._name_mapper = build_reverse_name_mapper(model)
+            self._tensor_name_mapper = build_reverse_name_mapper(model, tensor_keys=True)
         except Exception as exc:
             warnings.warn(
                 f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
@@ -380,7 +382,11 @@ class LayerwiseExporter:
         # Names must match the tensors', or a loader reads an excluded BF16 layer as quantized.
         if self._name_mapper is not None and quant_config:
             with contextlib.suppress(Exception):
-                revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
+                revert_quant_config_names(
+                    quant_config.get("quantization", {}),
+                    self._name_mapper,
+                    module_names=(name for name, _ in model.named_modules()),
+                )
         # After the reversal, not before: carried names are source-checkpoint names already, so
         # passing them through the mapper would rewrite names that are correct as they stand.
         # bind() snapshotted this config during calibration, so the carried set -- which
@@ -439,7 +445,7 @@ class LayerwiseExporter:
             self._collect(tail, name, tensor)
 
         for name, tensor in (extra_state_dict or {}).items():
-            key = self._name_mapper(name) if self._name_mapper is not None else name
+            key = self._tensor_name_mapper(name) if self._tensor_name_mapper is not None else name
             tail[key] = tensor.detach().contiguous().cpu()
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
@@ -499,8 +505,8 @@ class LayerwiseExporter:
         )
         if new_key is None or new_value is None:
             return
-        if self._name_mapper is not None:
-            new_key = self._name_mapper(new_key)
+        if self._tensor_name_mapper is not None:
+            new_key = self._tensor_name_mapper(new_key)
         out[new_key] = new_value.detach().contiguous().cpu()
 
     def _write_index(self) -> None:

@@ -82,3 +82,11 @@ longer matches reality.
 See [`specs.py`](specs.py) — each field is documented on its declaration, and those
 docstrings are what the API reference renders. Specs hold data and trivial accessors
 only; subsystem logic stays in the subsystem.
+
+## Model-specific behavior
+
+Keep architecture-specific loading and calibration helpers alongside the model's
+`specs.py` (for example, `nemotron_h/mtp.py`). The `hf.py` dispatcher loads these
+helpers on demand; examples call its loading context and calibration hook.
+Do not import runtime helpers from a model package's `__init__.py`: registering
+specs must remain independent of optional Transformers and calibration imports.
