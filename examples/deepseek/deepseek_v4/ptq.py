@@ -119,15 +119,12 @@ _DS_FP8_BLOCK_SIZES = (32, 128)
 
 
 def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
-    """Square FP8 block size of the injected DS-V4 ``model`` module.
+    """Detect the FP8 quantization block size used by the loaded DeepSeek V4 module.
 
-    The release the module came from decides this: V4-Pro exposes it as the
-    module global ``block_size`` (128), V4.1-Flash renamed it to
-    ``fp8_block_size`` and shrank it to 32. Prefer whichever global is
-    consistent with the tensor shapes at hand. Without one, pick among the
-    known DS-V4 block sizes, and only when exactly one reproduces the scale
-    shape: under ceil-div, a whole range of block sizes yields the same scale
-    shape once a block is partial, so the shapes alone cannot name it.
+    Prefers an explicit module attribute (``fp8_block_size`` on V4.1-Flash,
+    ``block_size`` on V4-Pro), falling back to the one known DS-V4 block size
+    whose scale shape matches the tensors. Shapes alone cannot name a block size:
+    once a block is partial, a whole range of sizes gives the same scale shape.
     """
     for attr in ("fp8_block_size", "block_size"):
         blk = getattr(deekseep_v4_model, attr, None)
