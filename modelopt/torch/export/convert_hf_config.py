@@ -52,13 +52,14 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "strategy": "channel"},
         }
     elif quant_algo == "FP8_PB_WO":
+        block_size = group_size or 128
         return {
             "weights": {
                 "dynamic": False,
                 "num_bits": 8,
                 "type": "float",
                 "strategy": "block",
-                "block_structure": [128, 128],
+                "block_structure": [block_size, block_size],
             },
         }
     elif quant_algo == "NVFP4":

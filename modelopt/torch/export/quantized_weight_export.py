@@ -732,7 +732,7 @@ def export_quantized_weight_tensors(
         weight_scale = MXFP8QTensor.get_weights_scaling_factor(packed_weight)
     elif state.quantization_format in _MXFP4_EXPORT_FORMATS:
         quantized_weight, weight_scale = MXFP4QTensor.quantize(
-            packed_weight.to(dtype), block_size=state.block_size
+            packed_weight.to(dtype).contiguous(), block_size=state.block_size
         )
         quantized_weight = quantized_weight._quantized_data
     else:

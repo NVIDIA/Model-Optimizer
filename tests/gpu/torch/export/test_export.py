@@ -570,6 +570,65 @@ def test_mxfp4_offline_export_activation_schema(tmp_path, activation):
             assert group["input_activations"]["num_bits"] == (8 if activation == "fp8" else 4)
 
 
+@pytest.mark.parametrize("block_size", [64, 128, "mixed"])
+def test_fp8_block_offline_export_preserves_block_structure(tmp_path, block_size):
+    model = get_tiny_llama(hidden_size=128, intermediate_size=128).to("cuda")
+    model.config.architectures = ["LlamaForCausalLM"]
+    layer_blocks = [64, 128] if block_size == "mixed" else [block_size, block_size]
+    config = {
+        "algorithm": "max",
+        "quant_cfg": [{"quantizer_name": "*", "enable": False}],
+    }
+    for layer, size in enumerate(layer_blocks):
+        config["quant_cfg"].append(
+            {
+                "quantizer_name": f"*layers.{layer}.mlp*weight_quantizer",
+                "enable": True,
+                "cfg": {"num_bits": (4, 3), "block_sizes": {-2: size, -1: size}},
+            }
+        )
+    inputs = torch.randint(model.config.vocab_size, (1, 8), device="cuda")
+    mtq.quantize(model, config, lambda m: m(inputs))
+    export_hf_checkpoint(model, export_dir=tmp_path)
+    with open(tmp_path / "config.json") as file:
+        exported = json.load(file)["quantization_config"]
+    tensors = load_file(next(tmp_path.glob("*.safetensors")))
+
+    assert exported["quant_algo"] == ("MIXED_PRECISION" if block_size == "mixed" else "FP8_PB_WO")
+    groups = exported["config_groups"].values()
+    assert {tuple(group["weights"]["block_structure"]) for group in groups} == {
+        (size, size) for size in layer_blocks
+    }
+    if block_size == "mixed":
+        for group in groups:
+            for target in group["targets"]:
+                layer = 0 if "layers.0." in target else 1
+                assert group["weights"]["block_structure"] == [layer_blocks[layer]] * 2
+    for layer, size in enumerate(layer_blocks):
+        name = f"model.layers.{layer}.mlp.gate_proj"
+        assert tensors[f"{name}.weight"].dtype == torch.float8_e4m3fn
+        assert tensors[f"{name}.weight_scale"].numel() == (128 // size) ** 2
+
+
+@pytest.mark.parametrize("block_sizes", [{-2: 64, -1: 128}, {-2: 128, -1: 64}, {-1: 64}])
+def test_offline_fp8_block_export_rejects_unsupported_layout(block_sizes):
+    model = torch.nn.Linear(128, 128, bias=False, device="cuda")
+    config = {
+        "algorithm": "max",
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "enable": True,
+                "cfg": {"num_bits": (4, 3), "block_sizes": block_sizes},
+            },
+        ],
+    }
+    mtq.quantize(model, config, lambda m: m(torch.randn(2, 128, device="cuda")))
+    with pytest.raises(NotImplementedError, match="square blocks over the last two dimensions"):
+        get_quant_config(model)
+
+
 def test_qwen3_moe_nvfp4_experts_only_export_exclude_modules(tmp_path):
     """Test that NVFP4_EXPERTS_ONLY_CFG correctly excludes non-expert modules in HF export.
 

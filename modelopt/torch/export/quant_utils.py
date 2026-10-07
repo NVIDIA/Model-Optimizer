@@ -1828,6 +1828,20 @@ def get_quant_config(
 
             for weight_name in weight_names:
                 weight_block_size = get_weight_block_size(module, weight_name)
+                if quantization_format == QUANTIZATION_FP8_PB_WO:
+                    # One group size can describe only square two-dimensional blocks.
+                    weight_quantizer = representative_weight_quantizer(module, weight_name)
+                    if weight_quantizer is not None and weight_quantizer.is_enabled:
+                        block_axes = {
+                            axis: size
+                            for axis, size in weight_quantizer.block_sizes.items()
+                            if isinstance(axis, int)
+                        }
+                        if block_axes != {-2: weight_block_size, -1: weight_block_size}:
+                            raise NotImplementedError(
+                                "Offline FP8 block export requires square blocks over "
+                                f"the last two dimensions, got {block_axes} for {name}"
+                            )
                 if weight_block_size > 0:
                     block_size = weight_block_size
                     break

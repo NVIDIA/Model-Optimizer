@@ -41,8 +41,10 @@ from modelopt.torch.export.quantized_weight_export import (
     select_quantized_weight_export_state,
 )
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 from modelopt.torch.quantization.tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
@@ -236,6 +238,34 @@ def test_functional_export_matches_existing_noninteger_helpers(quant_cfg):
     if quantization_format == QUANTIZATION_MXFP8:
         assert hasattr(module, "weight_scale")
         assert not hasattr(module.weight_quantizer, "_scale")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_functional_mxfp4_packs_transposed_experts(dtype):
+    class TransposedExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(2, 32, 64, device="cuda", dtype=torch.bfloat16))
+            cfg = QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            )
+            self.weight_quantizer = TensorQuantizer(cfg)
+            self.input_quantizer = TensorQuantizer(cfg)
+
+        def iter_weights_for_calibration(self):
+            yield self.weight.transpose(-1, -2), self.weight_quantizer
+
+    module = TransposedExperts()
+    state = capture_quantized_weight_export_state(module)
+    assert state.packing_permutation == (0, 2, 1)
+    exported = export_quantized_weight_tensors(module.weight, state, dtype)
+    packed, scales = MXFP4QTensor.quantize(
+        module.weight.transpose(-1, -2).to(dtype).contiguous(), block_size=32
+    )
+
+    torch.testing.assert_close(exported["weight"], packed._quantized_data.transpose(-1, -2))
+    torch.testing.assert_close(exported["weight_scale"], scales.reshape(2, 64, 1).transpose(-1, -2))
 
 
 def test_functional_mxfp8_preserves_cached_scale_during_selection():
