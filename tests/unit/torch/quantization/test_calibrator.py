@@ -180,6 +180,23 @@ class TestHistogramCalibrator:
                 == calibrator_torch._calib_bin_edges.numel() - 1
             )
 
+    @pytest.mark.parametrize("torch_hist", [False, True])
+    def test_later_batch_below_first_batch_min(self, torch_hist):
+        # The second batch only has values below the first batch's minimum. They must still
+        # be counted, so the bins have to start at 0 for both histogram backends.
+        x_1 = torch.linspace(0.5, 1.0, 1000)
+        x_2 = torch.linspace(0.0, 0.5, 1000)[:-1]
+
+        calibrator = calib.HistogramCalibrator(8, None, False, num_bins=100, torch_hist=torch_hist)
+        calibrator.collect(x_1)
+        calibrator.collect(x_2)
+
+        assert calibrator._calib_bin_edges[0] == 0
+        assert calibrator._calib_hist.sum() == x_1.numel() + x_2.numel()
+
+        amax = calibrator.compute_amax("percentile", percentile=50)
+        assert (amax - 0.5).abs() < 0.02
+
 
 class TestEntropyCalibrator:
     # ``num_bins=512`` (down from 2048) keeps the entropy KL-search ~8x cheaper while
