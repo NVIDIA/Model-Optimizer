@@ -51,8 +51,8 @@ Step 1: Configure quantization with the ModelOpt CLI flags below. Each flag fall
 
 CLI values take precedence over their environment fallbacks. `--modelopt-quant-cfg` /
 `--modelopt-kv-quant-cfg` and `--modelopt-recipe-path` are mutually exclusive because a
-recipe already carries its quantization configuration. For a local model directory, HF full
-state auto-detection takes precedence over Megatron quantizer-state/recipe sidecars.
+recipe already carries its quantization configuration. With no explicit ModelOpt quantization
+settings, HF full state takes precedence over Megatron sidecars in a local model directory.
 
 `QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
 release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or

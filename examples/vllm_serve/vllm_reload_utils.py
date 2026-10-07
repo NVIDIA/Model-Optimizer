@@ -122,8 +122,8 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         )
         return ("group", group_key, value)
 
-    # Fused HF experts keep quantizers beside packed expert weights. Gate/up
-    # map to w13; down maps to w2.
+    # HF fused experts store quantizers beside packed weights: Nemotron-H uses
+    # up_proj, gated models use gate_up_proj; both map to w13, and down maps to w2.
     fused_expert_match = re.search(
         r"(.*\.experts)\.(gate_up|up|down)_proj_([^.]+_quantizer)(\..+)?$", key
     )
@@ -655,17 +655,11 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
             f"{sample}{' ... (+{rest} more)' if rest > 0 else ''}"
         )
 
-    disabled_weight_quantizers = 0
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and is_weight_quantizer_state_key(
             get_unwrapped_name(name, model)
         ):
             module.disable()
-            disabled_weight_quantizers += 1
-    print(
-        f"[load_state_dict_from_path] {len(checkpoint_quant_keys)} checkpoint quantizer keys, "
-        f"{disabled_weight_quantizers} weight quantizers disabled"
-    )
 
     # Update quant values
     saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
