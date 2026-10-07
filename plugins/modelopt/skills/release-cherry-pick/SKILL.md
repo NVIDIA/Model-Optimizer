@@ -9,7 +9,7 @@ Cherry-pick all merged `main` PRs labeled `cherry-pick-<version>` (but not `cher
 
 ## Step 1 — Identify the target version
 
-Ask the user for the release version (e.g. `0.44.0`) and target release candidate (e.g. `rc2`) if not already provided. Confirm whether this is the final RC (generally rc2). Use the candidate being prepared, not the latest existing RC tag.
+Ask the user for the release version (e.g. `0.44.0`) and target release candidate (e.g. `rc2`) if not already provided. Confirm whether this is the final RC.
 
 Set `VERSION=<version>` for use in subsequent steps.
 
@@ -17,20 +17,18 @@ Set `VERSION=<version>` for use in subsequent steps.
 
 Before fetching the labeled queue, audit for missing bug fixes:
 
-- **Non-final rc1:** audit release NVBugs and recent merged PRs.
-- **Final RC, or rc2 and later:** audit only fixes tied to NVBugs with the exact keyword `Committed_ModelOpt_<VERSION>`. Skip the general recent-PR audit; do not introduce general bug-fix PRs or fixes tied only to NVBugs committed for another release.
-
-If the target candidate or final-RC status is unknown, ask before auditing. This restriction governs audit additions, not PRs already labeled for cherry-picking.
+- **Non-final RC:** audit release NVBugs and recent merged PRs.
+- **Final RC:** audit only fixes tied to NVBugs with the exact keyword `Committed_ModelOpt_<VERSION>`. Skip the general recent-PR audit; do not introduce general bug-fix PRs or fixes tied only to NVBugs committed for another release.
 
 ### Audit release NVBugs
 
 Use the NVBugs MCP to search for every NVBug whose **Keywords** field contains the exact keyword `Committed_ModelOpt_<VERSION>`. Follow pagination until no next token is returned.
 
-Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Keep only PRs that are merged into `main`, lack `cherry-pick-<VERSION>`, and are not already included in the release branch. Verify each remaining PR is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked. For the final RC or rc2+, also verify from NVBug comments or QA evidence that the fix passed QA validation. If validation is missing or unclear, mark it **Unknown** and ask the user; do not recommend it for labeling as a verified fix.
+Fetch each matching NVBug with its comments. Extract every Model-Optimizer PR link or unambiguous `PR #<NUM>` reference from the comments, not only the latest comment. Keep only PRs that are merged into `main`, lack `cherry-pick-<VERSION>`, and are not already included in the release branch. Verify each remaining PR is a bug fix. The NVBug keyword is evidence for review, not by itself proof that every linked PR should be picked.
 
 ### Audit recent merged PRs
 
-**For non-final rc1 only; skip this section for the final RC and rc2 onward.** Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
+For non-final RCs only: Audit PRs merged into `main` since the latest release candidate. Exclude PRs that already have `cherry-pick-<VERSION>` and changes already present on the release branch:
 
 ```bash
 git fetch origin main "release/$VERSION" --tags
@@ -91,11 +89,11 @@ Present the complete audit before changing GitHub labels:
 
 Use these recommendation values and sort the table in this order:
 
-1. **Needs label** — confirmed release-relevant bug fix; for the final RC or rc2+, it must be QA-validated and tied to a verified `Committed_ModelOpt_<VERSION>` NVBug.
+1. **Needs label** — confirmed release-relevant bug fix.
 2. **Unknown** — requires user judgment.
 3. **No action needed** — not a release-relevant bug fix.
 
-For non-final rc1, use `—` when no NVBug is known. For the final RC or rc2+, include only PRs tied to a verified target-release committed NVBug. Also list committed NVBugs with no linked PR. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
+Use `—` when no NVBug is known. Also list NVBugs with no linked PR. Ask the user to confirm which recommended PRs should receive the missing label. After confirmation, apply it:
 
 ```bash
 for pr in <APPROVED_NUMBERS>; do
