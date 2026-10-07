@@ -20,6 +20,7 @@ storage layouts, so there is no convention matrix left to enumerate. What remain
 recording path, checkpoint-path resolution, and the sidecar copy.
 """
 
+import warnings
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,100 +28,86 @@ from unittest.mock import patch
 import pytest
 import torch
 from _test_utils.examples.hf_ptq_example_utils import example_utils
+from _test_utils.torch.transformers_models import get_tiny_nemotron_h
 from safetensors.torch import save_file
+from transformers import AutoModelForCausalLM, LlamaConfig
 
 
 def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
-def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
-    source_dir = tmp_path / "source"
-    export_dir = tmp_path / "export"
-    source_dir.mkdir()
-    export_dir.mkdir()
-
-    source_files = {
-        "super_v3_reasoning_parser.py": "class Parser: pass\n",
-        "modeling_custom.py": "class Model: pass\n",
-        "README.md": "# Source model\n",
-        "LICENSE": "license text\n",
-        "chat_template.jinja": "{{ messages }}\n",
-        "tokenizer_config.json": '{"chat_template": "source"}\n',
-        "generation_config.json": '{"source": "generation"}\n',
-        "config.json": '{"source": "config"}\n',
-        "hf_quant_config.json": '{"source": "quant"}\n',
-        "quant_config.json": '{"source": "stale quant"}\n',
-        "quantize_config.json": '{"source": "stale quant"}\n',
-        "recipe.yaml": "quantize: {}\n",
-        "model.safetensors.index.json": '{"weight_map": {}}\n',
-        "model-00001-of-00001.safetensors": "source weights\n",
-        "model.gguf": "source weights\n",
-    }
-    for file_name, contents in source_files.items():
-        (source_dir / file_name).write_text(contents)
-
-    (export_dir / "config.json").write_text('{"export": "config"}\n')
-    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
-    (export_dir / "hf_quant_config.json").write_text('{"export": "quant"}\n')
-    (export_dir / "chat_template.jinja").write_text("{{ exported_messages }}\n")
-    (export_dir / "tokenizer_config.json").write_text('{"chat_template": "export"}\n')
-
-    example_utils.copy_custom_model_files(str(source_dir), str(export_dir), trust_remote_code=False)
-
-    for file_name in [
-        "super_v3_reasoning_parser.py",
-        "modeling_custom.py",
-        "README.md",
-        "LICENSE",
-        "chat_template.jinja",
-        "generation_config.json",
-    ]:
-        assert (export_dir / file_name).read_text() == source_files[file_name]
-
-    assert (export_dir / "config.json").read_text() == '{"export": "config"}\n'
-    assert (export_dir / "hf_quant_config.json").read_text() == '{"export": "quant"}\n'
-    assert (export_dir / "tokenizer_config.json").read_text() == '{"chat_template": "export"}\n'
-    assert not (export_dir / "quant_config.json").exists()
-    assert not (export_dir / "quantize_config.json").exists()
-    assert not (export_dir / "recipe.yaml").exists()
-    assert not (export_dir / "model.safetensors.index.json").exists()
-    assert not (export_dir / "model-00001-of-00001.safetensors").exists()
-    assert not (export_dir / "model.gguf").exists()
-
-    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
-    example_utils.copy_custom_model_files(
-        str(source_dir),
-        str(export_dir),
-        exclude_files={"generation_config.json"},
+@pytest.mark.parametrize("loader", ["native", "auto"])
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_mtp_preparation_matches_loader(tmp_path, loader, trust_remote_code):
+    """A native architecture and a remote auto_map must prepare the class actually loaded."""
+    native = pytest.importorskip("transformers.models.nemotron_h.modeling_nemotron_h")
+    mtp_adapter = pytest.importorskip("modelopt.torch.models.nemotron_h.mtp")
+    source = get_tiny_nemotron_h(
+        layers_block_type=["attention" if "attention" in native.MIXER_TYPES else "full_attention"],
+        num_hidden_layers=1,
+        hybrid_override_pattern="*",
+        use_mamba_kernels=False,
+        attn_implementation="eager",
+        dtype=torch.float32,
+        num_nextn_predict_layers=1,
+        mtp_layers_block_type=["attention", "moe"],
     )
-    assert (export_dir / "generation_config.json").read_text() == '{"export": "generation"}\n'
-
-
-def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp_path):
-    snapshot_dir = tmp_path / "snapshot"
-
-    def fake_snapshot_download(**kwargs):
-        assert kwargs == {
-            "repo_id": "org/model",
-            "allow_patterns": example_utils._HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
-        }
-        return str(snapshot_dir)
-
-    def fake_from_pretrained(*args, **kwargs):
-        assert (args, kwargs) == (("org/model",), {"trust_remote_code": False})
-        return SimpleNamespace(_name_or_path="org/model")
-
-    monkeypatch.setattr(
-        example_utils.AutoConfig,
-        "from_pretrained",
-        fake_from_pretrained,
+    source.mtp = mtp_adapter._NemotronHMTP(source.config)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    source.config.architectures = ["NemotronHForCausalLM"]
+    source.config.auto_map = {"AutoModelForCausalLM": "modeling_remote.RemoteNemotronH"}
+    source.config.save_pretrained(tmp_path)
+    _write_safetensors(tmp_path / "model.safetensors", source.state_dict())
+    (tmp_path / "modeling_remote.py").write_text(
+        "from transformers import NemotronHForCausalLM\n"
+        "class RemoteNemotronH(NemotronHForCausalLM):\n"
+        "    pass\n"
     )
-    monkeypatch.setattr(example_utils, "snapshot_download", fake_snapshot_download)
-
-    assert example_utils._resolve_model_path("org/model", trust_remote_code=False) == str(
-        snapshot_dir
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if loader == "native":
+            model = example_utils.get_model(
+                str(tmp_path), device="cpu", trust_remote_code=trust_remote_code
+            )
+        else:
+            model = example_utils._from_pretrained_recording(
+                AutoModelForCausalLM,
+                str(tmp_path),
+                model_type=source.config.model_type,
+                trust_remote_code=trust_remote_code,
+            )
+    expected_class = (
+        "RemoteNemotronH" if loader == "auto" and trust_remote_code else "NemotronHForCausalLM"
     )
+    assert type(model).__name__ == expected_class
+    assert model.state_dict().keys() == source.state_dict().keys()
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[name], value, rtol=0, atol=0)
+    assert not any("MTP weights may remain unquantized" in str(w.message) for w in caught)
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_get_model_preserves_preparation_error(monkeypatch, tmp_path, failure_at):
+    config = LlamaConfig(architectures=["LlamaForCausalLM"])
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: config)
+    calls = 0
+
+    def prepare(*args, model_class):
+        nonlocal calls
+        calls += 1
+        assert args == (config.model_type, str(tmp_path), False)
+        assert model_class.__name__ == "LlamaForCausalLM"
+        if calls == failure_at:
+            raise ValueError("MTP preparation failed")
+        return nullcontext()
+
+    monkeypatch.setattr(example_utils, "prepare_model_for_loading", prepare)
+    with pytest.raises(ValueError, match="MTP preparation failed"):
+        example_utils.get_model(str(tmp_path), device="cpu")
+    assert calls == failure_at
 
 
 # ---------- get_original_hf_quant_method -------------------------------------

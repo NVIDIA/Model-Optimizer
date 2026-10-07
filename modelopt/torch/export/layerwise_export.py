@@ -98,7 +98,7 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
 
     Grouped by name, which survives offload: a ``data_ptr`` grouping sees nothing when the
     weights are on meta and would pass vacuously. Falls back to ``data_ptr`` when the model
-    publishes no map (transformers < 5).
+    publishes no map (e.g. not a ``PreTrainedModel``).
     """
     tied_map = TiedWeightMap(model)
     groups: dict[str, list[str]] = {}
