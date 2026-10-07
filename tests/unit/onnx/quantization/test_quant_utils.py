@@ -193,6 +193,7 @@ def test_pack_float32_to_4bit_utils():
     ("weight", "weight_axis", "block_size", "expected_amax"),
     [
         (np.array([[1, 2], [-3, 4]]), 0, 2, np.array([3, 4])),
+        (np.array([[1, 2], [-3, 4], [5, -6], [7, 8]]), 0, 2, np.array([3, 4, 7, 8])),
         (np.array([[1, 2], [-3, 4]]), 1, 2, np.array([2, 4])),
         (
             np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]),
