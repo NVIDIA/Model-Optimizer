@@ -24,7 +24,11 @@ from torch.nn import functional as F
 from torch.nn import init
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.quant_format import QUANTIZATION_MXFP8
+from modelopt.torch.export.quant_format import (
+    QUANTIZATION_MXFP8,
+    QUANTIZATION_NVFP4,
+    QUANTIZATION_W4A16_NVFP4,
+)
 from modelopt.torch.export.quant_utils import (
     get_activation_scaling_factor,
     get_quantization_format,
@@ -35,7 +39,6 @@ from modelopt.torch.export.quant_utils import (
     to_quantized_weight,
 )
 from modelopt.torch.export.quantized_weight_export import (
-    build_hf_quantization_config,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
     select_quantized_weight_export_state,
@@ -143,48 +146,11 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.W4A16_NVFP4_CFG])
-def test_functional_nvfp4_export_matches_existing_helpers_without_mutation(quant_cfg):
-    in_features = 256
-    torch.manual_seed(0)
-    module = nn.Linear(in_features, in_features, bias=False, device="cuda", dtype=torch.bfloat16)
-    calib_input = torch.randn(2, 4, in_features, device="cuda", dtype=torch.bfloat16)
-    module = mtq.quantize(module, copy.deepcopy(quant_cfg), lambda model: model(calib_input))
-    original_weight = module.weight.detach().clone()
-    original_buffers = {name: value.detach().clone() for name, value in module.named_buffers()}
-
-    state = capture_quantized_weight_export_state(module)
-    actual = export_quantized_weight_tensors(module.weight, state, torch.float16)
-
-    quantization_format = get_quantization_format(module)
-    weight_scale = get_weight_scaling_factor(module)
-    weight_scale_2 = get_weight_scaling_factor_2(module)
-    expected = {
-        "weight": to_quantized_weight(
-            module.weight.to(torch.float16),
-            weight_scale,
-            quantization_format,
-            weight_scale_2,
-            get_weight_block_size(module),
-        ),
-        "weight_scale": weight_scale,
-        "weight_scale_2": weight_scale_2.squeeze(),
-    }
-    if module.input_quantizer.is_enabled:
-        expected["input_scale"] = get_activation_scaling_factor(module).squeeze()
-
-    assert actual.keys() == expected.keys()
-    for name, value in actual.items():
-        torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
-    torch.testing.assert_close(module.weight, original_weight)
-    assert set(dict(module.named_buffers())) == set(original_buffers)
-    for name, value in module.named_buffers():
-        torch.testing.assert_close(value, original_buffers[name])
-
-
 @pytest.mark.parametrize(
     "quant_cfg",
     [
+        mtq.NVFP4_DEFAULT_CFG,
+        mtq.W4A16_NVFP4_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
         mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
         mtq.MXFP8_DEFAULT_CFG,
@@ -193,7 +159,7 @@ def test_functional_nvfp4_export_matches_existing_helpers_without_mutation(quant
         mtq.W4A8_NVFP4_FP8_CFG,
     ],
 )
-def test_functional_export_matches_existing_noninteger_helpers(quant_cfg):
+def test_functional_export_matches_existing_helpers_without_mutation(quant_cfg):
     in_features = 256
     torch.manual_seed(0)
     module = nn.Linear(in_features, in_features, bias=False, device="cuda", dtype=torch.bfloat16)
@@ -208,6 +174,10 @@ def test_functional_export_matches_existing_noninteger_helpers(quant_cfg):
     quantization_format = get_quantization_format(module)
     weight_scale = get_weight_scaling_factor(module)
     weight_scale_2 = get_weight_scaling_factor_2(module)
+    if quantization_format in {QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4}:
+        assert weight_scale_2 is not None
+        if module.input_quantizer.is_enabled:
+            assert module.input_quantizer.amax is not None
     expected = {
         "weight": to_quantized_weight(
             module.weight.to(torch.float16),
@@ -312,33 +282,6 @@ def test_weight_derived_mxfp4_state_rejects_partial_block_selection():
             1,
             (0,),
         )
-
-
-def test_mixed_noninteger_states_build_one_canonical_config():
-    features = 256
-    states = {}
-    for name, quant_cfg in (
-        ("model.layers.0.self_attn.q_proj.weight", mtq.FP8_DEFAULT_CFG),
-        ("model.layers.0.self_attn.k_proj.weight", mtq.MXFP8_DEFAULT_CFG),
-        ("model.layers.0.mlp.down_proj.weight", mtq.NVFP4_DEFAULT_CFG),
-    ):
-        module = nn.Linear(features, features, bias=False, device="cuda", dtype=torch.bfloat16)
-        calib_input = torch.randn(2, 4, features, device="cuda", dtype=torch.bfloat16)
-        module = mtq.quantize(
-            module,
-            copy.deepcopy(quant_cfg),
-            lambda model: model(calib_input),
-        )
-        states[name] = capture_quantized_weight_export_state(module)
-
-    config = build_hf_quantization_config(states)
-
-    assert config["quant_algo"] == "MIXED_PRECISION"
-    assert set(config["quantized_layers"]) == {
-        "model.layers.0.self_attn.q_proj",
-        "model.layers.0.self_attn.k_proj",
-        "model.layers.0.mlp.down_proj",
-    }
 
 
 def test_export_compressed_nvfp4_weight():

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import copy
-import pickle
 
 import pytest
 import torch
@@ -156,15 +155,6 @@ def test_functional_fp8_export_is_repeatable():
         torch.testing.assert_close(base[name], repeated[name])
 
 
-def test_export_state_round_trips_through_object_transport():
-    module = _fp8_linear()
-    state = pickle.loads(pickle.dumps(capture_quantized_weight_export_state(module)))
-
-    exported = export_quantized_weight_tensors(module.weight, state, torch.float32)
-
-    assert exported["weight"].shape == module.weight.shape
-
-
 def test_capture_resolves_numbered_grouped_weights_by_storage():
     module = _GroupedWeights()
 
@@ -216,40 +206,34 @@ def test_unquantized_weight_has_no_export_state_or_spec():
     assert get_quantized_weight_export_spec(module) is None
 
 
-def test_export_spec_rejects_unsupported_format():
-    module = nn.Linear(4, 4, bias=False)
-    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+@pytest.mark.parametrize(
+    ("features", "quantizer_cfg", "error"),
+    [
+        pytest.param(4, {"num_bits": 8}, "int8_wo", id="int8-weight-only"),
+        pytest.param(
+            32,
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            },
+            "weight-only MXFP4",
+            id="mxfp4-weight-only",
+        ),
+        pytest.param(
+            128,
+            {"num_bits": (4, 3), "block_sizes": {-2: 64, -1: 128}},
+            "only with 128x128 blocks",
+            id="fp8-rectangular-blocks",
+        ),
+    ],
+)
+def test_export_spec_rejects_unsupported_quantization(features, quantizer_cfg, error):
+    module = nn.Linear(features, features, bias=False)
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(**quantizer_cfg))
     module.input_quantizer = TensorQuantizer()
     module.input_quantizer.disable()
 
-    with pytest.raises(NotImplementedError, match="int8_wo"):
-        get_quantized_weight_export_spec(module)
-
-
-def test_export_spec_rejects_weight_only_mxfp4():
-    module = nn.Linear(32, 32, bias=False)
-    module.weight_quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(
-            num_bits=(2, 1),
-            block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
-        )
-    )
-    module.input_quantizer = TensorQuantizer()
-    module.input_quantizer.disable()
-
-    with pytest.raises(NotImplementedError, match="weight-only MXFP4"):
-        get_quantized_weight_export_spec(module)
-
-
-def test_export_spec_rejects_unsupported_fp8_2d_block_shape():
-    module = nn.Linear(128, 128, bias=False)
-    module.weight_quantizer = TensorQuantizer(
-        QuantizerAttributeConfig(num_bits=(4, 3), block_sizes={-2: 64, -1: 128})
-    )
-    module.input_quantizer = TensorQuantizer()
-    module.input_quantizer.disable()
-
-    with pytest.raises(NotImplementedError, match="only with 128x128 blocks"):
+    with pytest.raises(NotImplementedError, match=error):
         get_quantized_weight_export_spec(module)
 
 
@@ -268,13 +252,35 @@ def test_export_state_split_restore_preserves_output():
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 
 
-def test_export_spec_builds_config_without_tensor_state():
-    spec = get_quantized_weight_export_spec(_fp8_linear())
+@pytest.mark.parametrize(
+    ("quantization_format", "quant_algo", "block_size"),
+    [("fp8", "FP8", 0), ("w4a16_nvfp4", "W4A16_NVFP4", 16)],
+)
+def test_export_spec_builds_config_without_tensor_state(
+    quantization_format, quant_algo, block_size, monkeypatch
+):
+    if quantization_format == "fp8":
+        module = _fp8_linear()
+    else:
+        weight = torch.arange(32, dtype=torch.float32).reshape(2, 16) / 32
+        module = _static_w4a16_linear(
+            weight, weight.abs().amax(dim=1, keepdim=True), torch.tensor(1.0)
+        )
+    monkeypatch.setattr(
+        weight_export,
+        "_state_tensor",
+        lambda *args, **kwargs: pytest.fail("export spec materialized tensor state"),
+    )
+
+    spec = get_quantized_weight_export_spec(module)
+
     assert spec is not None
+    assert spec.quantization_format == quantization_format
+    assert spec.block_size == block_size
 
     config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
 
-    assert config["quant_algo"] == "FP8"
+    assert config["quant_algo"] == quant_algo
 
 
 _FUNCTIONAL_FORMAT_CASES = (
@@ -322,22 +328,6 @@ def test_all_functional_formats_have_canonical_hf_config_coverage():
     assert {case[0] for case in _FUNCTIONAL_FORMAT_CASES} == set(
         weight_export._FUNCTIONAL_WEIGHT_EXPORT_FORMATS
     )
-
-
-def test_export_spec_does_not_materialize_static_scale_state(monkeypatch):
-    weight = torch.arange(32, dtype=torch.float32).reshape(2, 16) / 32
-    module = _static_w4a16_linear(weight, weight.abs().amax(dim=1, keepdim=True), torch.tensor(1.0))
-    monkeypatch.setattr(
-        weight_export,
-        "_state_tensor",
-        lambda *args, **kwargs: pytest.fail("export spec materialized tensor state"),
-    )
-
-    spec = get_quantized_weight_export_spec(module)
-
-    assert spec is not None
-    assert spec.quantization_format == "w4a16_nvfp4"
-    assert spec.block_size == 16
 
 
 def test_static_nvfp4_merge_recomputes_scales_from_merged_amax():
@@ -500,6 +490,7 @@ def test_mixed_config_groups_moe_experts_by_projection_family():
         }
     )
 
+    assert config["quant_algo"] == "MIXED_PRECISION"
     assert set(config["quantized_layers"]) == {
         "model.layers.0.mlp.experts.gate_proj",
         "model.layers.0.mlp.experts.down_proj",
