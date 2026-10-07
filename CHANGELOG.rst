@@ -121,6 +121,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``FP8QTensor.quantize`` (used for FP8 real quantization and FP8 per-block export) turning an all-zero block, channel or tensor into NaN: its zero scale was used as a divisor. The fake-quant path already treated a zero amax as a scale of one.
 - Fix calibration silently dropping samples when an out-of-memory error forces the batch to be
   split and a smaller working batch size is already known: the slices stopped tiling the batch,
   so the rows between the old and the new width never reached the model and the collected

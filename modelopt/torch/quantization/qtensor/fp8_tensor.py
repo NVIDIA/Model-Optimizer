@@ -103,7 +103,11 @@ class FP8QTensor(BaseQuantizedTensor):
             for dim, block_size in block_sizes.items():
                 expanded_scales = expanded_scales.repeat_interleave(block_size, dim=dim)
 
-        # Perform quantization using FP8 (E4M3) format.
+        # Perform quantization using FP8 (E4M3) format. A zero scale means an all-zero block,
+        # channel or tensor; divide it by one so it stays zero instead of becoming NaN.
+        expanded_scales = torch.where(
+            expanded_scales == 0, torch.ones_like(expanded_scales), expanded_scales
+        )
         quantized_data = (input / expanded_scales).to(torch.float8_e4m3fn)
 
         # Crop quantized_data back to the original shape (if padding was added).
