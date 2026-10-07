@@ -16,6 +16,7 @@
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from _test_utils.torch.transformers_models import (
 )
 from transformers import AutoModelForImageTextToText
 
+import modelopt.torch.export
 from modelopt.torch.puzzletron.anymodel import convert_model
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
@@ -154,6 +156,57 @@ def test_distill_validate_only(tmp_path, num_gpus):
     assert "iteration 0 on validation set" in output
     assert not (output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert not (hf_export_path / "config.json").exists()
+
+
+@pytest.mark.parametrize("model", ["llm", "vlm"])
+@pytest.mark.timeout(420)
+def test_distill_hf_export_reads_the_resolved_local_checkpoint(tmp_path, monkeypatch, model):
+    """The inline HF export reads the student from the copy ensure_local_checkpoint resolved.
+
+    A Hub ID cannot run end to end here (get_args() loads the tokenizers from --student_hf_path),
+    so the resolver reports a Hub ID and returns a different local copy holding a marker file: the
+    marker reaching the export shows which copy the export read. One rank, so the step runs in
+    this process and sees the patch.
+    """
+    if model == "llm":
+        student_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    else:
+        student_hf_path = create_tiny_qwen3_5_vl_dir(
+            tmp_path, with_tokenizer=True, num_hidden_layers=2, intermediate_size=128
+        )
+    resolved = tmp_path / "resolved"
+    shutil.copytree(student_hf_path, resolved)
+    (resolved / "resolved_only.md").write_text("from the resolved copy\n")
+    resolved_from = []
+
+    def ensure_local_checkpoint(model_name_or_path, group=None):
+        resolved_from.append(str(model_name_or_path))
+        return "org/tiny-student", str(resolved)
+
+    monkeypatch.setattr(modelopt.torch.export, "ensure_local_checkpoint", ensure_local_checkpoint)
+    distilled_hf_path = tmp_path / "distilled_hf"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "distill.py", "--use_mock_data"],
+        student_hf_path=student_hf_path,
+        teacher_hf_path=student_hf_path,
+        output_dir=tmp_path / "distill_output",
+        tp_size=1,
+        pp_size=1,
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        train_iters=1,
+        lr_warmup_iters=1,
+        eval_interval=1,
+        eval_iters=1,
+        log_interval=1,
+        hf_export_path=distilled_hf_path,
+    )
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+
+    assert resolved_from == [str(student_hf_path)]
+    assert (distilled_hf_path / "config.json").exists()
+    assert (distilled_hf_path / "resolved_only.md").read_text() == "from the resolved copy\n"
 
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
