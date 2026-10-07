@@ -116,6 +116,7 @@ class _QuantizedWeightExportSpec:
 
     quantization_format: str
     block_size: int
+    input_quantizer_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -465,10 +466,14 @@ def get_quantized_weight_export_spec(
     resolved = _resolve_quantized_weight_export_inputs(module, weight_name)
     if resolved is None:
         return None
-    _, _, weight_quantizer, _, quantization_format = resolved
+    _, _, weight_quantizer, input_quantizer, quantization_format = resolved
     block_config = getattr(weight_quantizer, "block_sizes", None) or {}
     block_size = int(block_config.get(-1, 0)) if isinstance(block_config, dict) else 0
-    return _QuantizedWeightExportSpec(quantization_format, block_size)
+    return _QuantizedWeightExportSpec(
+        quantization_format,
+        block_size,
+        input_quantizer is not None and input_quantizer.is_enabled,
+    )
 
 
 def split_quantized_weight_export_state(

@@ -253,11 +253,11 @@ def test_export_state_split_restore_preserves_output():
 
 
 @pytest.mark.parametrize(
-    ("quantization_format", "quant_algo", "block_size"),
-    [("fp8", "FP8", 0), ("w4a16_nvfp4", "W4A16_NVFP4", 16)],
+    ("quantization_format", "quant_algo", "block_size", "input_enabled"),
+    [("fp8", "FP8", 0, True), ("fp8", "FP8", 0, False), ("w4a16_nvfp4", "W4A16_NVFP4", 16, False)],
 )
 def test_export_spec_builds_config_without_tensor_state(
-    quantization_format, quant_algo, block_size, monkeypatch
+    quantization_format, quant_algo, block_size, input_enabled, monkeypatch
 ):
     if quantization_format == "fp8":
         module = _fp8_linear()
@@ -277,6 +277,14 @@ def test_export_spec_builds_config_without_tensor_state(
     assert spec is not None
     assert spec.quantization_format == quantization_format
     assert spec.block_size == block_size
+    if not input_enabled and module.input_quantizer.is_enabled:
+        module.input_quantizer.disable()
+        updated_spec = get_quantized_weight_export_spec(module)
+        assert updated_spec != spec
+        assert updated_spec.quantization_format == spec.quantization_format
+        assert updated_spec.block_size == spec.block_size
+        spec = updated_spec
+    assert spec.input_quantizer_enabled is input_enabled
 
     config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
 
@@ -303,7 +311,7 @@ _FUNCTIONAL_FORMAT_CASES = (
 def test_functional_format_builds_canonical_hf_config(
     quantization_format, quant_algo, block_size, weight_bits, has_input
 ):
-    spec = weight_export._QuantizedWeightExportSpec(quantization_format, block_size)
+    spec = weight_export._QuantizedWeightExportSpec(quantization_format, block_size, has_input)
 
     config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
 
