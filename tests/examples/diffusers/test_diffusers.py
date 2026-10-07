@@ -22,6 +22,72 @@ from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
 
 
+class DiffuserModel(NamedTuple):
+    dtype: str
+    name: str
+    path: str
+    format_type: str
+    quant_algo: str
+    collect_method: str
+
+    def _run_cmd(self, script: str, *args: str) -> str:
+        cmd_args = [
+            "python",
+            script,
+            "--model",
+            self.name,
+            "--override-model-path",
+            self.path,
+        ]
+        cmd_args.extend(args)
+        return run_example_command(cmd_args, "diffusers/quantization")
+
+    def _format_args(self) -> list[str]:
+        return [
+            "--calib-size",
+            "4",
+            "--percentile",
+            "1.0",
+            "--alpha",
+            "0.8",
+            "--n-steps",
+            "2",
+            "--batch-size",
+            "2",
+            "--format",
+            self.format_type,
+            "--collect-method",
+            self.collect_method,
+            "--quant-algo",
+            self.quant_algo,
+        ]
+
+    def quantize(self, tmp_path: Path, *export_args: str) -> None:
+        self._run_cmd(
+            "quantize.py",
+            *self._format_args(),
+            "--trt-high-precision-dtype",
+            self.dtype,
+            "--quantized-torch-ckpt-save-path",
+            str(tmp_path / f"{self.name}_{self.format_type}.pt"),
+            *export_args,
+        )
+
+        assert any((tmp_path / f"{self.name}_{self.format_type}.pt").glob("*.pt"))
+
+    def restore(self, tmp_path: Path, *export_args: str) -> None:
+        output = self._run_cmd(
+            "quantize.py",
+            *self._format_args(),
+            "--trt-high-precision-dtype",
+            self.dtype,
+            "--restore-from",
+            str(tmp_path / f"{self.name}_{self.format_type}.pt"),
+            *export_args,
+        )
+        assert f"Detected restored quantization format: {self.format_type}" in output
+
+
 class Wan22Model(NamedTuple):
     model: str
     backbone: str | None
@@ -87,49 +153,128 @@ class Wan22Model(NamedTuple):
         )
 
 
+DIFFUSER_MODELS = [
+    pytest.param(
+        DiffuserModel(
+            name="flux-schnell",
+            path=FLUX_SCHNELL_PATH,
+            dtype="BFloat16",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="flux_schnell_bf16_int8_smoothquant_3.0_min_mean",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sd3-medium",
+            path=SD3_PATH,
+            dtype="Half",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="sd3_medium_fp16_int8_smoothquant_3.0_min_mean",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sd3-medium",
+            path=SD3_PATH,
+            dtype="Half",
+            format_type="fp8",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(89),
+        id="sd3_medium_fp16_fp8_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="fp8",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(89),
+        id="sdxl_1.0_fp16_fp8_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="fp4",
+            quant_algo="max",
+            collect_method="default",
+        ),
+        marks=minimum_sm(100),
+        id="sdxl_1.0_fp16_fp4_max_3.0_default",
+    ),
+    pytest.param(
+        DiffuserModel(
+            name="sdxl-1.0",
+            path=SDXL_PATH,
+            dtype="Half",
+            format_type="int8",
+            quant_algo="smoothquant",
+            collect_method="min-mean",
+        ),
+        id="sdxl_1.0_fp16_int8_smoothquant_3.0_min_mean",
+    ),
+]
+
+
 # The VAE (``AutoencoderKLWan``) is shared between Wan 2.2 14B and 5B, so the
 # Conv3D NVFP4 implicit-GEMM dispatch exercises the same kernel either way; we
 # parametrize both ``--model`` values to also cover the ``quantize.py`` dispatch
 # for each.
-@pytest.mark.parametrize(
-    "wan_model",
-    [
+WAN22_MODELS = [
+    pytest.param(
         Wan22Model("wan2.2-t2v-14b", None, "int8", "smoothquant", "min-mean"),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", None, "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", None, "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", "vae", "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-14b", "vae", "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-5b", "vae", "fp8", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-        pytest.param(
-            Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
-            marks=minimum_sm(89),
-        ),
-    ],
-    ids=[
-        "wan22_14b_transformer_int8_smoothquant",
-        "wan22_14b_transformer_fp8_max",
-        "wan22_14b_transformer_fp4_max",
-        "wan22_14b_vae_fp8_max",
-        "wan22_14b_vae_fp4_max",
-        "wan22_5b_vae_fp8_max",
-        "wan22_5b_vae_fp4_max",
-    ],
-)
+        id="wan22_14b_transformer_int8_smoothquant",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", None, "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_transformer_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", None, "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_transformer_fp4_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", "vae", "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_vae_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-14b", "vae", "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_14b_vae_fp4_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-5b", "vae", "fp8", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_5b_vae_fp8_max",
+    ),
+    pytest.param(
+        Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
+        marks=minimum_sm(89),
+        id="wan22_5b_vae_fp4_max",
+    ),
+]
+
+
+@pytest.mark.parametrize("model", DIFFUSER_MODELS)
+def test_diffusers_quantization(model: DiffuserModel, tmp_path: Path) -> None:
+    model.quantize(tmp_path)
+    model.restore(tmp_path)
+
+
+@pytest.mark.parametrize("wan_model", WAN22_MODELS)
 def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_path: Path) -> None:
     wan_model.quantize(tiny_wan22_path, tmp_path)
     wan_model.restore(tiny_wan22_path, tmp_path)
