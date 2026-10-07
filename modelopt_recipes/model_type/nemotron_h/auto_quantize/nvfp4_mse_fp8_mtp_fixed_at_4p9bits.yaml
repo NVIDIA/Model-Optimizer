@@ -3,17 +3,119 @@
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
-  mtp: model_type/nemotron_h/auto_quantize/mtp_w4a4_nvfp4-kv_fp8
-  search: model_type/nemotron_h/auto_quantize/nvfp4_mse_fp8_search
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+  fp8: configs/numerics/fp8
+  kv_fp8: configs/ptq/presets/kv/fp8
 
 metadata:
   recipe_type: auto_quantize
   description: >-
     Nemotron-H AutoQuantize at 4.9 effective bits over weight-MSE NVFP4, FP8, and BF16,
-    with a fixed MTP quantization policy and vision/audio paths kept in BF16.
+    with MSE-calibrated MTP experts fixed at NVFP4 W4A4 and vision/audio in BF16.
 
-quantize: {$import: mtp}
+quantize:
+  algorithm: &mse
+    method: mse
+    fp8_scale_sweep: true
+  quant_cfg:
+    - quantizer_name: "*"
+      enable: false
+    - quantizer_name: "*mtp.layers.1.mixer.experts.*weight_quantizer"
+      enable: true
+      cfg: &nvfp4_weight
+        $import: nvfp4_static
+        # Four value bits plus one FP8 scale per 16-element block.
+        effective_bits: 4.5
+    - quantizer_name: "*mtp.layers.1.mixer.experts.*input_quantizer"
+      enable: true
+      cfg: {$import: nvfp4}
+    - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*weight_quantizer"
+      enable: true
+      cfg: *nvfp4_weight
+    - quantizer_name: "*mtp.layers.1.mixer.shared_experts.*input_quantizer"
+      enable: true
+      cfg: {$import: nvfp4}
+    - quantizer_name: "*mtp.layers.0.*[kv]_bmm_quantizer"
+      enable: true
+      cfg: {$import: fp8}
+
 auto_quantize:
-  $import: search
   constraints:
     effective_bits: 4.9
+  module_search_spaces:
+    - module_name_patterns:
+        - "*language_model.layers*"
+        - "*language_model.model.layers*"
+        - "*language_model.backbone.layers*"
+      candidate_formats: &search_candidates
+        - algorithm: *mse
+          quant_cfg:
+            - quantizer_name: "*"
+              enable: false
+            - quantizer_name: "*weight_quantizer"
+              enable: true
+              cfg: *nvfp4_weight
+            - quantizer_name: "*input_quantizer"
+              enable: true
+              cfg: {$import: nvfp4}
+        - algorithm: max
+          quant_cfg:
+            - quantizer_name: "*"
+              enable: false
+            - quantizer_name: "*weight_quantizer"
+              enable: true
+              cfg: {$import: fp8}
+            - quantizer_name: "*input_quantizer"
+              enable: true
+              cfg: {$import: fp8}
+      allow_no_quant: true
+    - module_name_patterns:
+        - "*lm_head*"
+        - "*output_layer*"
+      candidate_formats: *search_candidates
+      allow_no_quant: true
+  auto_quantize_method: gradient
+  score_size: 128
+  kv_cache: {$import: kv_fp8}
+  disabled_layers:
+    - "*block_sparse_moe.gate*"
+    - "*linear_attn.conv1d*"
+    - "*linear_attn.in_proj_a*"
+    - "*linear_attn.in_proj_b*"
+    - "*mixer.conv1d*"
+    - "*mlp.gate.*"
+    - "*mlp.shared_expert_gate.*"
+    - "*shared_expert_gate*"
+    - "*proj_out.*"
+    - "*router*"
+    - "*vision*"
+    - "*visual*"
+    - "*image*"
+    - "*radio*"
+    - "*encoder*"
+    - "*model_encoder*"
+    - "*video*"
+    - "*audio*"
+    - "*speech*"
+    - "*multimodal_projector*"
+    - "*multi_modal_projector*"
+    - "*vision_projector*"
+    - "*audio_projector*"
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers
+    - "*vision*"
+    - "*visual*"
+    - "*image*"
+    - "*radio*"
+    - "*encoder*"
+    - "*model_encoder*"
+    - "*video*"
+    - "*audio*"
+    - "*speech*"
+    - "*multimodal_projector*"
+    - "*multi_modal_projector*"
+    - "*vision_projector*"
+    - "*audio_projector*"
+    - "*mtp*"
