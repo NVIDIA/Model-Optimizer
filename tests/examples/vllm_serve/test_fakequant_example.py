@@ -26,8 +26,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+import yaml
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins.vllm import VllmMLAAttention
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples/vllm_serve"
@@ -182,6 +184,73 @@ def test_fakequant_launcher_autodetects_megatron_sidecars(
     assert "fakequant_worker.FakeQuantWorker" in sys.argv
     vllm_main.assert_called_once_with()
     ray_registration.assert_called_once_with()
+
+
+@pytest.mark.parametrize("conflicting_field", ["quant_cfg", "kv_quant_cfg"])
+def test_recipe_path_rejects_manual_quant_config(conflicting_field):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    config = {"recipe_path": "/missing/recipe.yaml", "quant_cfg": None, "kv_quant_cfg": None}
+    config[conflicting_field] = "FP8_DEFAULT_CFG"
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ptq_utils.get_quant_config(config, model=None)
+
+
+@pytest.mark.parametrize(
+    ("contents", "error"),
+    [
+        ("", ValueError),
+        ("quantize: [", yaml.YAMLError),
+        ("- not\n- a mapping\n", ValueError),
+    ],
+)
+def test_invalid_recipe_yaml_is_rejected(tmp_path, contents, error):
+    ptq_utils = _load_example_module("vllm_ptq_utils")
+    recipe_path = tmp_path / "recipe.yaml"
+    recipe_path.write_text(contents)
+    config = {"recipe_path": str(recipe_path), "quant_cfg": None, "kv_quant_cfg": None}
+
+    with pytest.raises(error):
+        ptq_utils.get_quant_config(config, model=None)
+
+
+@pytest.mark.parametrize("with_weight_state", [False, True])
+def test_quantizer_state_disables_only_missing_weight_quantizers(
+    monkeypatch, tmp_path, with_weight_state
+):
+    reload_utils = _load_example_module("vllm_reload_utils")
+    monkeypatch.setattr(reload_utils, "process_state_dict_for_tp", lambda saved, _: saved)
+
+    model = torch.nn.Module()
+    model.weight_quantizer = SequentialQuantizer(
+        TensorQuantizer(amax=1.0), TensorQuantizer(amax=2.0)
+    )
+    model.experts = torch.nn.Module()
+    model.experts.w13_weight_quantizer = TensorQuantizer(amax=3.0)
+    model.experts.w2_weight_quantizer = TensorQuantizer(amax=4.0)
+    model.input_quantizer = TensorQuantizer(amax=5.0)
+    model.missing_input_quantizer = TensorQuantizer(amax=6.0)
+    checkpoint = {"input_quantizer._amax": torch.tensor(13.0)}
+    if with_weight_state:
+        checkpoint.update(
+            {
+                "weight_quantizer.0._amax": torch.tensor(11.0),
+                "experts.w2_weight_quantizer._amax": torch.tensor(12.0),
+            }
+        )
+    path = tmp_path / "quantizer_state.pth"
+    torch.save(checkpoint, path)
+
+    with pytest.warns(UserWarning, match="missing from every rank's checkpoint"):
+        restored = reload_utils.load_state_dict_from_path(str(path), model)
+
+    assert model.weight_quantizer[0].is_enabled == with_weight_state
+    assert not model.weight_quantizer[1].is_enabled
+    assert not model.experts.w13_weight_quantizer.is_enabled
+    assert model.experts.w2_weight_quantizer.is_enabled == with_weight_state
+    assert model.input_quantizer.is_enabled
+    assert model.missing_input_quantizer.is_enabled
+    assert torch.equal(restored["input_quantizer._amax"], torch.tensor(13.0))
 
 
 def _calibration_worker(

@@ -637,9 +637,12 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
 
     current_state_dict = model.state_dict()
     checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
+    local_checkpoint_quantizers = {
+        key.rsplit(".", 1)[0] for key in checkpoint_quant_keys if key in current_state_dict
+    }
     global_ckpt_key_set = _union_quantizer_keys_across_ranks(checkpoint_quant_keys)
-    # Report non-weight quantizer keys absent on every rank. Exported weights are
-    # already folded, so weight quantizers are disabled below regardless of checkpoint keys.
+    # Warn for activation state absent on every rank. Weight quantizer state is
+    # local to each shard: its absence means the exported weight is already folded.
     global_missing_non_wq = [
         key
         for key in current_state_dict
@@ -656,9 +659,12 @@ def load_state_dict_from_path(quantizer_file_path: str, model: Any) -> dict[str,
         )
 
     for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and is_weight_quantizer_state_key(
-            get_unwrapped_name(name, model)
+        quantizer_name = get_unwrapped_name(name, model)
+        if not isinstance(module, TensorQuantizer) or not is_weight_quantizer_state_key(
+            quantizer_name
         ):
+            continue
+        if quantizer_name not in local_checkpoint_quantizers:
             module.disable()
 
     # Update quant values
