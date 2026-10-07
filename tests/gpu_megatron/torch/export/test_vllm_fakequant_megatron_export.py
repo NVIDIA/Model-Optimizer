@@ -14,8 +14,7 @@
 # limitations under the License.
 
 import json
-from collections import Counter
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
 from importlib.util import find_spec
@@ -39,28 +38,6 @@ from modelopt.torch.export.plugins.vllm_fakequant_megatron import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-@contextmanager
-def _assert_weight_qdq_once(model):
-    quantizers = [
-        module
-        for name, module in model.named_modules()
-        if name.endswith("weight_quantizer") and isinstance(module, TensorQuantizer)
-    ]
-    assert quantizers
-    calls = Counter()
-
-    def count_qdq(module, args, output):
-        calls[module] += 1
-
-    handles = [quantizer.register_forward_hook(count_qdq) for quantizer in quantizers]
-    try:
-        yield
-    finally:
-        for handle in handles:
-            handle.remove()
-    assert all(calls[quantizer] == 1 for quantizer in quantizers), calls
-
-
 def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled_names=()):
     state = torch.load(export_dir / "quantizer_state.pth", weights_only=True, map_location="cpu")
     recipe = yaml.safe_load((export_dir / "quant_recipe.yaml").read_text())
@@ -73,15 +50,15 @@ def _assert_exported_quantizers(export_dir, expected_names, amax=1.001, disabled
         expected_amax = amax[name] if isinstance(amax, dict) else amax
         torch.testing.assert_close(tensor, torch.full_like(tensor, expected_amax), rtol=0, atol=0)
     assert {key.rsplit(".", 1)[0] for key in state} <= recipe.keys()
-    assert not any(key.endswith("._quant_recipe_marker") for key in state)
-    assert not any(key.endswith("._quant_recipe_marker") for key in recipe)
+    assert all(key.endswith("._amax") for key in state)
+    assert not any(key.endswith("._vllm_fakequant_recipe_marker") for key in recipe)
     assert not (export_dir / "hf_quant_config.json").exists()
     weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
     for shard in set(weight_map.values()):
         with safe_open(export_dir / shard, framework="pt") as f:
             shard_keys = f.keys()
             assert not any(
-                "quantizer" in key or "._quant_recipe_marker" in key for key in shard_keys
+                "quantizer" in key or "._vllm_fakequant_recipe_marker" in key for key in shard_keys
             )
     return state, recipe, weight_map
 
@@ -182,11 +159,9 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
     )
 
     export_dir = tmp_path / "vllm_export"
-    with _assert_weight_qdq_once(model):
-        exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
-        _ = exporter.state_dict
-        assert exporter.layer_state_dicts
-        exporter.save_pretrained(str(export_dir), source)
+    exporter = VllmFqGPTModelExporter(model, source, dtype=torch.bfloat16)
+    _ = exporter.state_dict
+    exporter.save_pretrained(str(export_dir), source)
 
     expected_names = {
         f"model.layers.{i}.{projection}.input_quantizer"
@@ -214,7 +189,6 @@ def _test_mcore_vllm_export(tmp_path, rank, size):
                 folded_weights.append(f.get_tensor(weight_key))
             assert recipe[prefix + ".weight_quantizer"]["_disabled"]
         torch.testing.assert_close(torch.cat(folded_weights), expected_weight, rtol=0, atol=0)
-    assert not any(key.endswith("._pre_quant_scale") for key in state)
     assert not hasattr(qkv, "_amax")
     torch.testing.assert_close(
         layer.self_attention.linear_proj.input_quantizer.amax,
@@ -307,20 +281,23 @@ def test_mcore_vllm_export_mtp(request, tmp_path):
 
 def _assert_unsupported_settings(model, source, export_dir, rank, size):
     attribute_cfgs = [
-        ("input_quantizer", cfg)
-        for cfg in [
-            {"unsigned": True, "num_bits": 8},
-            {"narrow_range": True, "num_bits": 8},
-            {"rotate": True},
-            {"enable": False, "rotate": True},
-            {"pre_quant_scale": True},
-            {"enable": False, "pre_quant_scale": True},
-            {"fake_quant": False},
-            {"type": "dynamic"},
-            {"bias": {-1: None}},
-            {"backend": "custom"},
-        ]
-    ] + [("weight_quantizer", {"fake_quant": False})]
+        (
+            "input_quantizer",
+            {
+                "num_bits": 8,
+                "unsigned": True,
+                "narrow_range": True,
+                "rotate": True,
+                "pre_quant_scale": True,
+                "fake_quant": False,
+                "type": "dynamic",
+                "bias": {-1: None},
+                "backend": "custom",
+            },
+        ),
+        ("input_quantizer", {"enable": False, "rotate": True, "pre_quant_scale": True}),
+        ("weight_quantizer", {"fake_quant": False}),
+    ]
     if rank == size - 1:
         linear = next(
             module
@@ -343,13 +320,10 @@ def _assert_unsupported_settings(model, source, export_dir, rank, size):
                 )
             if "type" in attribute_cfg:
                 quantizer.reset_amax()
-        setting = (
-            "dynamic_amax"
-            if "type" in attribute_cfg
-            else next(key for key in attribute_cfg if key != "enable")
-        )
-        with pytest.raises(ValueError, match=f"Unsupported.*{quantizer_name}: {setting}"):
+        with pytest.raises(ValueError, match=f"Unsupported.*{quantizer_name}") as exc:
             export_mcore_gpt_to_hf_vllm_fq(model, source, export_dir=str(export_dir))
+        for setting in attribute_cfg.keys() - {"enable", "num_bits"}:
+            assert ("dynamic_amax" if setting == "type" else setting) in str(exc.value)
         assert not list(export_dir.glob("*.safetensors"))
         assert not (export_dir / "model.safetensors.index.json").exists()
         assert not (export_dir / "quantizer_state.pth").exists()

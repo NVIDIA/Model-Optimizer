@@ -726,15 +726,9 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     with disable_compilation(model):
         mtq.quantize(model, quant_cfg, forward_loop=_forward_loop)
 
-    restored_amaxes = {}
     if quantizer_path is not None:
         reload_utils = _load_example_module("vllm_reload_utils")
         model.load_state_dict(reload_utils.load_state_dict_from_path(quantizer_path, model))
-        restored_amaxes = {
-            name: q.amax.detach().cpu()
-            for name, q in model.named_modules()
-            if isinstance(q, TensorQuantizer) and q.is_enabled
-        }
 
     parallel_linear_counts: dict[str, int] = {}
     moe_count = 0
@@ -742,7 +736,8 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
     mla_count = 0
     missing_quantizers: list[str] = []
     quantizers_without_amax: list[str] = []
-    enabled_quantizer_count = 0
+    enabled_quantizers = {}
+    restored_amaxes = {}
 
     def _missing(module, name, slots):
         return (
@@ -789,7 +784,13 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
         # after calibration. ``kv_b_proj`` is exempt — vLLM's MLA decode path
         # reads its weight directly and never calls its forward.
         if isinstance(module, TensorQuantizer) and module.is_enabled:
-            enabled_quantizer_count += 1
+            enabled_quantizers[name] = {
+                "num_bits": module.num_bits,
+                "axis": module.axis,
+                "block_sizes": module.block_sizes,
+            }
+            if quantizer_path is not None:
+                restored_amaxes[name] = module.amax.detach().cpu()
             if not hasattr(module, "_amax") and "kv_b_proj" not in name:
                 quantizers_without_amax.append(name)
 
@@ -801,12 +802,8 @@ def _quantize_and_summarize(self, recipe_path=None, quantizer_path=None):
         "mla_count": mla_count,
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
-        "enabled_quantizer_count": enabled_quantizer_count,
-        "enabled_quantizers": {
-            name: {"num_bits": m.num_bits, "axis": m.axis, "block_sizes": m.block_sizes}
-            for name, m in model.named_modules()
-            if isinstance(m, TensorQuantizer) and m.is_enabled
-        },
+        "enabled_quantizer_count": len(enabled_quantizers),
+        "enabled_quantizers": enabled_quantizers,
         "quantizer_names": sorted(
             name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
         ),
