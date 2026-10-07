@@ -29,7 +29,11 @@ except ImportError:
 
 
 # Forwarded from ``--runtime_params`` ``engine_args.<key>``; extend as needed.
+# Note: ``kv_cache_dtype`` is engine-global -- it lands on ``CacheConfig`` and so
+# applies to the draft's attention layers as well as the target's; vLLM exposes
+# no per-model knob. Unlike the ``mamba_*`` keys, which are scoped to the target.
 PASSTHROUGH_ENGINE_ARGS = (
+    "kv_cache_dtype",
     "mamba_backend",
     "mamba_ssm_cache_dtype",
     "mamba_cache_mode",
