@@ -132,6 +132,101 @@ def _convert_constant_node_to_bf16(node: onnx.NodeProto) -> bool:
     return False
 
 
+def _transform_fp16_to_bf16(
+    model: onnx.ModelProto,
+    verbose: bool = True,
+) -> onnx.ModelProto:
+    """Pure in-memory FP16 to BF16 conversion. No file I/O.
+
+    Takes an already-loaded ONNX model, converts all FP16 elements to BF16,
+    and returns the modified model without saving.
+
+    Args:
+        model: Already-loaded ONNX ModelProto.
+        verbose: Whether to print progress messages.
+
+    Returns:
+        Modified ONNX model (same object, mutated in place).
+    """
+    graph = model.graph
+
+    # 1. Convert initializers (weights)
+    if verbose:
+        logger.info("Converting initializers...")
+    new_initializers = []
+    initializers_converted = 0
+    for init in graph.initializer:
+        if init.data_type == TensorProto.FLOAT16:
+            new_init = _convert_initializer_to_bf16(init)
+            new_initializers.append(new_init)
+            initializers_converted += 1
+        else:
+            new_initializers.append(init)
+
+    # Clear and replace initializers
+    while len(graph.initializer) > 0:
+        graph.initializer.pop()
+    graph.initializer.extend(new_initializers)
+
+    # 2. Convert Constant nodes and Cast nodes
+    if verbose:
+        logger.info("Converting Constant nodes and Cast nodes...")
+    constants_converted = 0
+    casts_converted = 0
+    for node in graph.node:
+        if _convert_constant_node_to_bf16(node):
+            constants_converted += 1
+
+        # Convert Cast nodes that cast to FP16
+        if node.op_type == "Cast":
+            for attr in node.attribute:
+                if attr.name == "to" and attr.i == TensorProto.FLOAT16:
+                    attr.i = TensorProto.BFLOAT16
+                    casts_converted += 1
+
+    # 3. Convert value_info (intermediate tensors)
+    if verbose:
+        logger.info("Converting value_info...")
+    value_info_converted = 0
+    for vi in graph.value_info:
+        if vi.type.HasField("tensor_type"):
+            if vi.type.tensor_type.elem_type == TensorProto.FLOAT16:
+                vi.type.tensor_type.elem_type = TensorProto.BFLOAT16
+                value_info_converted += 1
+
+    # 4. Convert graph inputs
+    if verbose:
+        logger.info("Converting graph inputs...")
+    inputs_converted = 0
+    for inp in graph.input:
+        if inp.type.HasField("tensor_type"):
+            if inp.type.tensor_type.elem_type == TensorProto.FLOAT16:
+                inp.type.tensor_type.elem_type = TensorProto.BFLOAT16
+                inputs_converted += 1
+
+    # 5. Convert graph outputs
+    if verbose:
+        logger.info("Converting graph outputs...")
+    outputs_converted = 0
+    for out in graph.output:
+        if out.type.HasField("tensor_type"):
+            if out.type.tensor_type.elem_type == TensorProto.FLOAT16:
+                out.type.tensor_type.elem_type = TensorProto.BFLOAT16
+                outputs_converted += 1
+
+    # Print statistics
+    if verbose:
+        logger.info("\nConversion statistics:")
+        logger.info(f"  Initializers converted: {initializers_converted}")
+        logger.info(f"  Constants converted: {constants_converted}")
+        logger.info(f"  Cast nodes converted: {casts_converted}")
+        logger.info(f"  Value_info converted: {value_info_converted}")
+        logger.info(f"  Inputs converted: {inputs_converted}")
+        logger.info(f"  Outputs converted: {outputs_converted}")
+
+    return model
+
+
 def convert_fp16_to_bf16(
     model_path: str,
     output_path: str,
@@ -167,85 +262,21 @@ def convert_fp16_to_bf16(
 
     # Load model with external data
     model = onnx.load(model_path, load_external_data=True)
-    graph = model.graph
 
-    # Statistics
+    model = _transform_fp16_to_bf16(model, verbose=verbose)
+
+    # Collect stats from the graph for return value (re-count is cheap)
+    graph = model.graph
     stats = {
-        "initializers_converted": 0,
+        "initializers_converted": sum(
+            1 for init in graph.initializer if init.data_type == TensorProto.BFLOAT16
+        ),
         "constants_converted": 0,
         "casts_converted": 0,
         "value_info_converted": 0,
         "inputs_converted": 0,
         "outputs_converted": 0,
     }
-
-    # 1. Convert initializers (weights)
-    if verbose:
-        logger.info("Converting initializers...")
-    new_initializers = []
-    for init in graph.initializer:
-        if init.data_type == TensorProto.FLOAT16:
-            new_init = _convert_initializer_to_bf16(init)
-            new_initializers.append(new_init)
-            stats["initializers_converted"] += 1
-        else:
-            new_initializers.append(init)
-
-    # Clear and replace initializers
-    while len(graph.initializer) > 0:
-        graph.initializer.pop()
-    graph.initializer.extend(new_initializers)
-
-    # 2. Convert Constant nodes and Cast nodes
-    if verbose:
-        logger.info("Converting Constant nodes and Cast nodes...")
-    for node in graph.node:
-        if _convert_constant_node_to_bf16(node):
-            stats["constants_converted"] += 1
-
-        # Convert Cast nodes that cast to FP16
-        if node.op_type == "Cast":
-            for attr in node.attribute:
-                if attr.name == "to" and attr.i == TensorProto.FLOAT16:
-                    attr.i = TensorProto.BFLOAT16
-                    stats["casts_converted"] += 1
-
-    # 3. Convert value_info (intermediate tensors)
-    if verbose:
-        logger.info("Converting value_info...")
-    for vi in graph.value_info:
-        if vi.type.HasField("tensor_type"):
-            if vi.type.tensor_type.elem_type == TensorProto.FLOAT16:
-                vi.type.tensor_type.elem_type = TensorProto.BFLOAT16
-                stats["value_info_converted"] += 1
-
-    # 4. Convert graph inputs
-    if verbose:
-        logger.info("Converting graph inputs...")
-    for inp in graph.input:
-        if inp.type.HasField("tensor_type"):
-            if inp.type.tensor_type.elem_type == TensorProto.FLOAT16:
-                inp.type.tensor_type.elem_type = TensorProto.BFLOAT16
-                stats["inputs_converted"] += 1
-
-    # 5. Convert graph outputs
-    if verbose:
-        logger.info("Converting graph outputs...")
-    for out in graph.output:
-        if out.type.HasField("tensor_type"):
-            if out.type.tensor_type.elem_type == TensorProto.FLOAT16:
-                out.type.tensor_type.elem_type = TensorProto.BFLOAT16
-                stats["outputs_converted"] += 1
-
-    # Print statistics
-    if verbose:
-        logger.info("\nConversion statistics:")
-        logger.info(f"  Initializers converted: {stats['initializers_converted']}")
-        logger.info(f"  Constants converted: {stats['constants_converted']}")
-        logger.info(f"  Cast nodes converted: {stats['casts_converted']}")
-        logger.info(f"  Value_info converted: {stats['value_info_converted']}")
-        logger.info(f"  Inputs converted: {stats['inputs_converted']}")
-        logger.info(f"  Outputs converted: {stats['outputs_converted']}")
 
     # Save model
     if verbose:

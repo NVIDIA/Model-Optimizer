@@ -785,64 +785,34 @@ def _fuse_qkv_and_create_gqa(
     return qkv_matmul_nodes, gqa_nodes, qkv_nodes_to_remove
 
 
-def replace_attention_with_gqa(
-    model_path: str,
-    output_path: str,
+def _transform_gqa(
+    model: onnx.ModelProto,
     hf_model_id: str,
     max_seq_len: int = 4096,
     io_dtype: str = "float16",
-    use_external_data: bool = True,
-    external_data_name: str | None = None,
     ir_version: int | None = None,
     pack_qkv: bool = False,
     verbose: bool = True,
     trust_remote_code: bool = False,
 ) -> onnx.ModelProto:
-    """Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.
+    """Pure in-memory GQA transformation. No file I/O.
 
-    This function transforms an ONNX model exported from HuggingFace/Optimum
-    to use Microsoft's GroupQueryAttention operator, which is optimized for
-    inference with ONNX Runtime.
-
-    The transformation includes:
-    - Converting weights to target dtype (FP16/BF16) [non-quantized models only]
-    - Adding RoPE cos/sin caches
-    - Replacing attention patterns with GQA for all layers
-    - Fusing Q/K/V projections into single MatMul [non-quantized models only]
-    - Concatenating Q/K/V outputs for GQA [quantized models only]
-    - Adding past/present KV cache inputs/outputs
+    Takes an already-loaded ONNX model, applies the full GQA replacement
+    transformation, and returns the modified model without saving.
 
     Args:
-        model_path: Path to input ONNX model.
-        output_path: Path to save modified model.
+        model: Already-loaded ONNX ModelProto.
         hf_model_id: HuggingFace model ID for config.
         max_seq_len: Maximum sequence length for caches.
         io_dtype: Data type for I/O tensors ("float16", "float32", or "bfloat16").
-            If the model has FP16 initializers and "bfloat16" is specified,
-            they are automatically converted to BF16.
-        use_external_data: Save weights as external data file.
-        external_data_name: Name for external data file (default: model.onnx_data).
-        ir_version: If specified, set the ONNX IR version to this value. Useful for
-            compatibility with older ONNX Runtime versions (e.g., set to 9 for ORT 1.16).
+        ir_version: If specified, set the ONNX IR version to this value.
+        pack_qkv: For quantized models, concatenate Q/K/V outputs into packed tensor.
         verbose: Whether to print progress messages.
         trust_remote_code: Whether to trust remote code in HuggingFace model config.
 
     Returns:
-        Modified ONNX model.
-
-    Example:
-        >>> from modelopt.onnx.graph_surgery import replace_attention_with_gqa
-        >>> model = replace_attention_with_gqa(
-        ...     model_path="model_fp16.onnx",
-        ...     output_path="model_gqa.onnx",
-        ...     hf_model_id="meta-llama/Llama-2-7b-hf",
-        ...     max_seq_len=4096,
-        ...     io_dtype="float16",
-        ... )
+        Modified ONNX model (same object, mutated in place).
     """
-    if verbose:
-        logger.info(f"Loading model from: {model_path}")
-    model = onnx.load(model_path)
     graph = model.graph
 
     onnx_dtype = get_onnx_dtype(io_dtype)
@@ -1401,7 +1371,96 @@ def replace_attention_with_gqa(
         if verbose:
             logger.info(f"\nSetting IR version: {old_ir} -> {ir_version}")
 
-    # Step 13: Save the modified model
+    if verbose:
+        logger.info("\nGQA transformation complete.")
+        logger.info("\nSummary:")
+        if is_quantized:
+            logger.info("  - Mode: Quantized (INT4/INT8) - separate Q/K/V projections")
+        else:
+            logger.info("  - Mode: Standard (FP16/BF16) - fused Q/K/V weights")
+            logger.info(f"  - Added {len(all_qkv_matmul_nodes)} fused QKV MatMul nodes")
+        logger.info(f"  - Replaced {num_layers} attention subgraphs with GQA")
+        logger.info(f"  - Added cos_cache shape: {cos_cache.shape}")
+        logger.info(f"  - Added sin_cache shape: {sin_cache.shape}")
+        logger.info(f"  - Added {num_layers * 2} past_key_values inputs")
+        logger.info(f"  - Added {num_layers * 2} present outputs")
+        logger.info("  - Added attention mask reformatting subgraph")
+        logger.info(f"  - Cleaned up {sum(cleanup_stats.values())} unused graph elements")
+
+    return model
+
+
+def replace_attention_with_gqa(
+    model_path: str,
+    output_path: str,
+    hf_model_id: str,
+    max_seq_len: int = 4096,
+    io_dtype: str = "float16",
+    use_external_data: bool = True,
+    external_data_name: str | None = None,
+    ir_version: int | None = None,
+    pack_qkv: bool = False,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+) -> onnx.ModelProto:
+    """Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.
+
+    This function transforms an ONNX model exported from HuggingFace/Optimum
+    to use Microsoft's GroupQueryAttention operator, which is optimized for
+    inference with ONNX Runtime.
+
+    The transformation includes:
+    - Converting weights to target dtype (FP16/BF16) [non-quantized models only]
+    - Adding RoPE cos/sin caches
+    - Replacing attention patterns with GQA for all layers
+    - Fusing Q/K/V projections into single MatMul [non-quantized models only]
+    - Concatenating Q/K/V outputs for GQA [quantized models only]
+    - Adding past/present KV cache inputs/outputs
+
+    Args:
+        model_path: Path to input ONNX model.
+        output_path: Path to save modified model.
+        hf_model_id: HuggingFace model ID for config.
+        max_seq_len: Maximum sequence length for caches.
+        io_dtype: Data type for I/O tensors ("float16", "float32", or "bfloat16").
+            If the model has FP16 initializers and "bfloat16" is specified,
+            they are automatically converted to BF16.
+        use_external_data: Save weights as external data file.
+        external_data_name: Name for external data file (default: model.onnx_data).
+        ir_version: If specified, set the ONNX IR version to this value. Useful for
+            compatibility with older ONNX Runtime versions (e.g., set to 9 for ORT 1.16).
+        verbose: Whether to print progress messages.
+        trust_remote_code: Whether to trust remote code in HuggingFace model config.
+
+    Returns:
+        Modified ONNX model.
+
+    Example:
+        >>> from modelopt.onnx.graph_surgery import replace_attention_with_gqa
+        >>> model = replace_attention_with_gqa(
+        ...     model_path="model_fp16.onnx",
+        ...     output_path="model_gqa.onnx",
+        ...     hf_model_id="meta-llama/Llama-2-7b-hf",
+        ...     max_seq_len=4096,
+        ...     io_dtype="float16",
+        ... )
+    """
+    if verbose:
+        logger.info(f"Loading model from: {model_path}")
+    model = onnx.load(model_path)
+
+    model = _transform_gqa(
+        model,
+        hf_model_id=hf_model_id,
+        max_seq_len=max_seq_len,
+        io_dtype=io_dtype,
+        ir_version=ir_version,
+        pack_qkv=pack_qkv,
+        verbose=verbose,
+        trust_remote_code=trust_remote_code,
+    )
+
+    # Save the modified model
     if verbose:
         logger.info(f"\nSaving modified model to: {output_path}")
 
@@ -1452,21 +1511,6 @@ def replace_attention_with_gqa(
         logger.info("\n" + "=" * 60)
         logger.info("DONE! Model has been modified with GQA attention.")
         logger.info("=" * 60)
-        logger.info("\nSummary:")
-        if is_quantized:
-            logger.info("  - Mode: Quantized (INT4/INT8) - separate Q/K/V projections")
-        else:
-            logger.info("  - Mode: Standard (FP16/BF16) - fused Q/K/V weights")
-            logger.info(f"  - Added {len(all_qkv_matmul_nodes)} fused QKV MatMul nodes")
-        logger.info(f"  - Replaced {num_layers} attention subgraphs with GQA")
-        logger.info(f"  - Added cos_cache shape: {cos_cache.shape}")
-        logger.info(f"  - Added sin_cache shape: {sin_cache.shape}")
-        logger.info(f"  - Added {num_layers * 2} past_key_values inputs")
-        logger.info(f"  - Added {num_layers * 2} present outputs")
-        logger.info("  - Added attention mask reformatting subgraph")
-        logger.info(f"  - Cleaned up {sum(cleanup_stats.values())} unused graph elements")
-        if use_external_data:
-            logger.info(f"  - Weights saved to: {external_data_name}")
 
     return model
 
