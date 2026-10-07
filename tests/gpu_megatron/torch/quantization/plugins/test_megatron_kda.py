@@ -120,6 +120,8 @@ def _test_kda(rank, size, cfg, checkpoint_path):
         assert not torch.equal(forward(model), baseline)
     assert model.gated_delta_rule is kernel
 
+    # The sharded checkpoint must restore this per-module change, not recipe defaults.
+    model.linear_attention_config.state_block_v = 32
     policy = model.linear_attention_config
     mtq.disable_quantizer(model, "*")
     model.linear_attention_config = LinearAttentionConfig()
@@ -130,11 +132,15 @@ def _test_kda(rank, size, cfg, checkpoint_path):
 
     with torch.no_grad():
         expected = forward(model)
+    # A change made after conversion must survive beyond the saved recipe defaults.
+    mtq.disable_quantizer(model, "*kda_state_quantizer")
     save_distributed_checkpoint(checkpoint_path, model)
     save_sharded_modelopt_state([model], checkpoint_path)
     restored = _layer()
     restore_sharded_modelopt_state([restored], checkpoint_path)
     load_distributed_checkpoint(checkpoint_path, restored)
+    assert not restored.kda_state_quantizer.is_enabled
+    mtq.enable_quantizer(restored, "*kda_state_quantizer")
     # Megatron recomputes the core during backward, after forward's kernel wrapper exits.
     with linear_attention_training_phase(restored, [31]):
         actual = forward(restored)

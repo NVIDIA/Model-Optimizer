@@ -15,12 +15,73 @@
 
 """Shared module policy and checkpoint support for linear-attention QAT."""
 
+import fnmatch
+
+from modelopt.torch.opt.conversion import ApplyModeError
+from modelopt.torch.utils import get_unwrapped_name
+
 from ..config import QuantizerAttributeConfig
 from ..linear_attention.config import LinearAttentionConfig
 from ..linear_attention.utils import state_quantizer_config
 from ..nn import QuantModule, TensorQuantizer
 
 __all__ = []
+
+
+def _linear_attention_modules(model):
+    return {
+        get_unwrapped_name(name, model): module
+        for name, module in model.named_modules()
+        if isinstance(module, _LinearAttentionQuantMixin)
+    }
+
+
+def _apply_linear_attention_policy(model, config):
+    """Assign complete policies in rule order, before compatibility validation."""
+    modules = _linear_attention_modules(model)
+    # getattr also handles pickled configs that predate the policy field.
+    for entry in getattr(config, "linear_attention", []):
+        matches = [name for name in modules if fnmatch.fnmatch(name, entry.module_name)]
+        if not matches:
+            raise ValueError(
+                f"linear_attention rule {entry.module_name!r} matches no supported modules"
+            )
+        for name in matches:
+            modules[name].linear_attention_config = entry.cfg.model_copy(deep=True)
+
+
+def _validate_linear_attention(model):
+    """Validate configured modules after both policy and quantizers are assigned."""
+    for module in _linear_attention_modules(model).values():
+        module.validate_linear_attention()
+
+
+def _linear_attention_state(model):
+    return {
+        name: module.linear_attention_config.model_dump()
+        for name, module in _linear_attention_modules(model).items()
+    }
+
+
+def _restore_linear_attention_policy(model, saved_policies):
+    """Restore saved policies; modelopt_post_restore validates the completed state."""
+    if saved_policies is None:
+        return
+    modules = _linear_attention_modules(model)
+    if saved_policies.keys() != modules.keys():
+        raise ApplyModeError("Saved linear_attention policies do not match the restored modules")
+    for name, policy in saved_policies.items():
+        modules[name].linear_attention_config = LinearAttentionConfig(**policy)
+
+
+def _restore_legacy_linear_attention_quantizers(model, quantizer_state):
+    """Keep newly introduced, disabled handles loadable from older checkpoints."""
+    for name, module in _linear_attention_modules(model).items():
+        for handle in module.linear_attention_quantizer_names:
+            key = f"{name}.{handle}" if name else handle
+            quantizer = getattr(module, handle)
+            if key not in quantizer_state and not quantizer.is_enabled:
+                quantizer_state[key] = quantizer.get_modelopt_state()
 
 
 class _LinearAttentionQuantMixin(QuantModule):

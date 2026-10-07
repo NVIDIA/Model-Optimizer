@@ -33,7 +33,6 @@ from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
-    _apply_linear_attention_policy,
     preserve_quantizer_attributes_context,
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
@@ -390,9 +389,16 @@ def quantize(
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
+        # Defer shared plugin imports to avoid the plugin/conversion initialization cycle.
+        from .plugins.linear_attention import (
+            _apply_linear_attention_policy,
+            _validate_linear_attention,
+        )
+
         # Already quantized, so lets apply the quant_cfg from the config
         set_quantizer_by_cfg(model, quantize_config.quant_cfg)
         _apply_linear_attention_policy(model, quantize_config)
+        _validate_linear_attention(model)
     # Fail before calibration rather than after exporting an unquantized checkpoint.
     _check_weight_quantization_took_effect(model, quantize_config)
     _check_indexer_quantization_took_effect(model, quantize_config)

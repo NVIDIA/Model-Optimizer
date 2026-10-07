@@ -58,6 +58,7 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
+from ..linear_attention.config import LinearAttentionConfig
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -219,6 +220,8 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
+    if isinstance(self, _LinearAttentionQuantMixin):
+        extra_state["modelopt_linear_attention_state"] = self.linear_attention_config.model_dump()
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
@@ -296,6 +299,12 @@ def quant_module_set_extra_state(self, state: Any):
     """
     if state is None or not self.allow_post_restore:
         return
+
+    if isinstance(self, _LinearAttentionQuantMixin) and "modelopt_linear_attention_state" in state:
+        # Restore the policy before quantizer restoration invokes modelopt_post_restore.
+        self.linear_attention_config = LinearAttentionConfig(
+            **state["modelopt_linear_attention_state"]
+        )
 
     quantizer_state = state.get("modelopt_quantizer_state", None)
 
@@ -1118,6 +1127,14 @@ if HAS_DSA:
 class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
     """Wrap the kernel call in both direct and recomputed Megatron forwards."""
 
+    # PyTorch requires class-level overrides to save/load ``_extra_state``;
+    # instance-level ModelOpt callbacks alone are not sufficient for GDN or KDA.
+    def get_extra_state(self):
+        return quant_module_get_extra_state(self)
+
+    def set_extra_state(self, state):
+        quant_module_set_extra_state(self, state)
+
     def _setup(self):
         super()._setup()
         self._register_temp_attribute("_linear_attention_replay_gate_inputs", None)
@@ -1146,40 +1163,11 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
         finally:
             self.use_qk_l2norm = normalize
 
-    def _compute_gates(self, a_log, dt_bias, batch, seq_len, *gate_feats):
-        gate, inputs = super()._compute_gates(a_log, dt_bias, batch, seq_len, *gate_feats)
-        if self._serving_arithmetic and hasattr(self, "gdn_state_quantizer"):
-            # Import the optional vLLM backend only for the native precision profile.
-            from ...kernels.quantization.linear_attention.serving.forward import fused_gdn_gating
-            from ..linear_attention.utils import forward_value
-
-            raw_beta, raw_gate = gate_feats
-            if self.linear_attention_config.precision == "replayssm":
-                self._linear_attention_replay_gate_inputs = (raw_gate, raw_beta, a_log, dt_bias)
-            with torch.no_grad():
-                native_gate, native_beta = fused_gdn_gating(
-                    a_log,
-                    raw_gate.reshape(-1, raw_gate.shape[-1]).contiguous(),
-                    raw_beta.reshape(-1, raw_beta.shape[-1]).contiguous(),
-                    dt_bias,
-                )
-            gate = forward_value(gate, native_gate.reshape_as(gate))
-            inputs["beta"] = forward_value(
-                inputs["beta"], native_beta.reshape_as(inputs["beta"])
-            ).to(raw_beta.dtype)
-        return gate, inputs
-
     @contextmanager
     def _quantized_linear_attention_kernel(self):
         kernel = self.gated_delta_rule
         previous_gates = self._linear_attention_replay_gate_inputs
         if self._serving_arithmetic:
-            if not hasattr(super(), "_prepare_input_for_gated_delta_rule") or getattr(
-                self, "gdn_pre_gated_delta_rule_fusion", False
-            ):
-                raise NotImplementedError(
-                    "Serving arithmetic requires Megatron's unfused input-preparation hook"
-                )
 
             def run_kernel(*args, **kwargs):
                 kwargs["use_qk_l2norm_in_kernel"] = self.use_qk_l2norm
@@ -1218,6 +1206,13 @@ class _MegatronLinearAttentionMixin(_LinearAttentionQuantMixin):
         super().validate_linear_attention()
         if self.config.context_parallel_size > 1 and self.linear_attention_is_enabled:
             raise NotImplementedError("GDN/KDA QAT does not support Megatron context parallelism.")
+        if self._serving_arithmetic and (
+            not hasattr(super(), "_prepare_input_for_gated_delta_rule")
+            or getattr(self, "gdn_pre_gated_delta_rule_fusion", False)
+        ):
+            raise NotImplementedError(
+                "Serving arithmetic requires Megatron's unfused input-preparation hook"
+            )
 
 
 if HAS_GDN:
@@ -1230,13 +1225,30 @@ if HAS_GDN:
             GatedDeltaNetStateQuantMixin._state_quantized_chunk_gated_delta_rule
         )
 
-        # Class-level overrides so torch routes the quantizer state through ``_extra_state``
-        # (GatedDeltaNet has none); see _QuantDSAttention.
-        def get_extra_state(self):
-            return quant_module_get_extra_state(self)
+        def _compute_gates(self, a_log, dt_bias, batch, seq_len, *gate_feats):
+            gate, inputs = super()._compute_gates(a_log, dt_bias, batch, seq_len, *gate_feats)
+            if self._serving_arithmetic:
+                # Import the optional vLLM backend only for the native precision profile.
+                from ...kernels.quantization.linear_attention.serving.forward import (
+                    fused_gdn_gating,
+                )
+                from ..linear_attention.utils import forward_value
 
-        def set_extra_state(self, state):
-            quant_module_set_extra_state(self, state)
+                raw_beta, raw_gate = gate_feats
+                if self.linear_attention_config.precision == "replayssm":
+                    self._linear_attention_replay_gate_inputs = (raw_gate, raw_beta, a_log, dt_bias)
+                with torch.no_grad():
+                    native_gate, native_beta = fused_gdn_gating(
+                        a_log,
+                        raw_gate.reshape(-1, raw_gate.shape[-1]).contiguous(),
+                        raw_beta.reshape(-1, raw_beta.shape[-1]).contiguous(),
+                        dt_bias,
+                    )
+                gate = forward_value(gate, native_gate.reshape_as(gate))
+                inputs["beta"] = forward_value(
+                    inputs["beta"], native_beta.reshape_as(inputs["beta"])
+                ).to(raw_beta.dtype)
+            return gate, inputs
 
 
 if HAS_KDA:
