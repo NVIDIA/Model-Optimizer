@@ -171,6 +171,10 @@ torchrun --nproc_per_node 8 main.py \
   training.output_dir=$OUTPUT_DIR
 ```
 
+For the full workflow — dumping a teacher policy once and training several drafts
+against it, including a cross-tokenizer draft — see
+[doc/external_draft.md](doc/external_draft.md).
+
 `external.external_loss` selects the objective:
 
 | value | what it scores |
