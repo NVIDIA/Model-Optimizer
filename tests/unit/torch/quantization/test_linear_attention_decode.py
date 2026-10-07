@@ -34,9 +34,7 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
     expected = torch.cat(
         [quantizer(tile.flatten(-2)).reshape_as(tile) for tile in value.split(16, -1)], -1
     )
-    encoded = _encode(
-        value, True, 16, state=True, state_format=state_format, state_quantizer=quantizer
-    )
+    encoded = _encode(value, True, 16, state_format=state_format, state_quantizer=quantizer)
     torch.testing.assert_close(encoded.values, expected, rtol=0, atol=0)
     probe = torch.randn_like(value)
     (gradient,) = torch.autograd.grad((encoded.values * probe).sum(), value)
@@ -46,54 +44,12 @@ def test_state_qdq_matches_tensor_quantizer(state_format):
 
 
 @pytest.mark.parametrize(
-    "config",
-    [
-        {"backend": "reference", "decode": {}},
-        {"backend": "matmul", "decode": {}},
-        {"backend": "serving", "decode": {"precision": "full"}},
-    ],
-)
-def test_reference_training_is_rejected(config):
-    with pytest.raises(ValueError, match="Reference training is retired"):
-        LinearAttentionConfig(**config)
-
-
-@pytest.mark.parametrize(("precision", "window"), [("vllm_0_15", 1), ("replayssm", 4)])
-def test_native_legacy_policy_preserves_precision(precision, window, tmp_path):
-    decode = {"precision": precision, "readout": "working"}
-    if precision == "replayssm":
-        decode.update(state_codec="int8_hadamard32", mode="replay", replay={"window": window})
-    policy = LinearAttentionConfig(schema_version=2, backend="matmul", decode=decode)
-    assert policy == LinearAttentionConfig(
-        backend="serving", precision=precision, replay_window=window
-    )
-    assert "decode" not in policy.model_dump()
-    assert "state_codec" not in policy.model_dump()
-    # Reproduce the field layout saved by the old class, bypassing new validation.
-    legacy = LinearAttentionConfig()
-    legacy.__dict__.clear()
-    legacy.__dict__.update(schema_version=2, backend="matmul", decode=decode)
-    path = tmp_path / "legacy-policy.pt"
-    torch.save(legacy, path)
-    assert torch.load(path, weights_only=True) == policy
-
-
-@pytest.mark.parametrize(
-    "settings", [{"readout": "stored"}, {"prefill_state_qdq": True}, {"decay_log_step": 0.02}]
-)
-def test_serving_precision_requires_native_schedule(settings):
-    with pytest.raises(ValueError, match="Native state QAT requires"):
-        LinearAttentionConfig(backend="serving", decode=settings)
-
-
-@pytest.mark.parametrize(
     "settings",
     [
         {"replay_window": 4},
         {"precision": "replayssm", "replay_window": 0},
         {"precision": "replayssm", "replay_window": 65},
         {"precision": "replayssm", "state_block_v": 16},
-        {"decode": {}, "precision": "replayssm"},
     ],
 )
 def test_unified_policy_rejects_incompatible_settings(settings):

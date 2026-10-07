@@ -24,7 +24,7 @@ from typing import Any
 
 import torch
 
-from ..linear_attention.prefill import matmul_gdn
+from ..linear_attention.gdn import gdn_state_qat
 from .linear_attention import _LinearAttentionQuantMixin
 
 __all__ = ["GatedDeltaNetStateQuantMixin"]
@@ -73,12 +73,6 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         self.validate_linear_attention()
         if not self.linear_attention_is_enabled:
             return gated_delta_rule(*args, **kwargs)
-        if self.linear_attention_config.backend == "fla" and self.gdn_state_quantizer.is_enabled:
-            raise ValueError(
-                "Chunk-only state QAT is retired. Select backend='serving' and supply prefill "
-                "lengths through linear_attention_training_phase. "
-                "Existing state checkpoints are not silently migrated to a different QDQ schedule."
-            )
         while isinstance(gated_delta_rule, partial):
             args = (*gated_delta_rule.args, *args)
             kwargs = {**gated_delta_rule.keywords, **kwargs}
@@ -91,12 +85,10 @@ class GatedDeltaNetStateQuantMixin(_LinearAttentionQuantMixin):
         chunk_size = kwargs.pop("chunk_size", 64)
         if chunk_size != 64:
             raise ValueError("GDN fake quantization supports only chunk_size=64")
-        return matmul_gdn(
+        return gdn_state_qat(
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.gdn_state_quantizer,
-            replay_key_quantizer=self.replay_key_quantizer,
-            replay_update_quantizer=self.replay_update_quantizer,
             chunk_size=chunk_size,
             prefill_lengths=self._linear_attention_prefill_lengths,
             **kwargs,

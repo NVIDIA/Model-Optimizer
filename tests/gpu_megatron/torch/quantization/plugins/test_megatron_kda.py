@@ -33,12 +33,10 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
     linear_attention_training_phase,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
 
 KimiDeltaAttention = pytest.importorskip("megatron.core.ssm.gated_delta_net.kda").KimiDeltaAttention
 pytest.importorskip("vllm.model_executor.layers.fla.ops.kda", exc_type=ModuleNotFoundError)
@@ -132,11 +130,8 @@ def _test_kda(rank, size, cfg, checkpoint_path):
 
     with torch.no_grad():
         expected = forward(model)
-    # Old checkpoints carried a disabled WY placeholder; it must not reappear on restore.
-    model.kda_w_quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False))
     save_distributed_checkpoint(checkpoint_path, model)
     save_sharded_modelopt_state([model], checkpoint_path)
-    del model.kda_w_quantizer
     restored = _layer()
     restore_sharded_modelopt_state([restored], checkpoint_path)
     load_distributed_checkpoint(checkpoint_path, restored)
@@ -148,8 +143,6 @@ def _test_kda(rank, size, cfg, checkpoint_path):
     assert not hasattr(restored, "kda_w_quantizer")
     assert restored._linear_attention_prefill_lengths is None
     assert restored.linear_attention_config == policy
-    assert not restored.replay_key_quantizer.is_enabled
-    assert not restored.replay_update_quantizer.is_enabled
     assert restored.gated_delta_rule is kernel
     assert torch.isfinite(hidden.grad).all()
     for parameter in restored.parameters():

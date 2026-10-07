@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Minimal native-cache and backward checks for the optional ReplaySSM serving fork."""
 
 import pytest
@@ -24,14 +21,17 @@ import torch
 from modelopt.torch.quantization.linear_attention import LinearAttentionConfig, recurrent_decode
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["gdn-token", "kda-replay"])
+@pytest.fixture(
+    scope="module",
+    params=[(False, 1), (False, 4), (True, 4)],
+    ids=["gdn-token", "gdn-replay", "kda-replay"],
+)
 def compiled_replay(request):
     native = pytest.importorskip(
         "vllm.model_executor.layers.fla.ops.fused_recurrent_replayssm",
         exc_type=ModuleNotFoundError,
     )
-    channel = request.param
-    window = 4 if channel else 1
+    channel, window = request.param
     torch.manual_seed(71)
     q, k = [
         torch.nn.functional.normalize(torch.randn(5, 1, 64, device="cuda"), dim=-1).bfloat16()

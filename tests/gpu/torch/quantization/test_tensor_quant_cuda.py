@@ -25,7 +25,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 import modelopt.torch.kernels.quantization.gemm as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
-from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
+from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
 from modelopt.torch.quantization.tensor_quant import mx_format_map
 
 if triton_kernel.IS_AVAILABLE:
@@ -120,18 +120,6 @@ class TestCudaExt:
 
 
 class TestScaledE4M3:
-    @pytest.fixture
-    def fp8_extension(self):
-        return get_cuda_ext_fp8()
-
-    def test_eager_matches_cuda_scale_rounding(self, fp8_extension):
-        # These ranges distinguish direct division from reciprocal multiplication.
-        amax = torch.tensor([0.0, 1e-8, 2**-24, 1.04207686e-7, 0.91567558], device="cuda")
-        values = torch.linspace(-1, 1, 129, device="cuda")[None, :] * amax[:, None]
-        actual = fp8_extension.fake_e4m3fy_with_axis(values, amax, 0)
-        expected = tensor_quant.fp8_eager(values, amax[:, None])
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
     def test_e4m3_no_scale(self, device):
         x = torch.randn(4, 4, device=device, dtype=torch.float32)

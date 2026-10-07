@@ -17,31 +17,16 @@
 
 from functools import partial
 
-from ..linear_attention.kda import matmul_kda
+from ..linear_attention.kda import kda_state_qat
 from .linear_attention import _LinearAttentionQuantMixin
 
 __all__ = ["KimiDeltaAttentionStateQuantMixin"]
-
-
-def _discard_legacy_w_quantizer_state(quantizer_state):
-    # Early KDA checkpoints included a disabled placeholder; WY QDQ was never supported.
-    for name in list(quantizer_state):
-        if name.rsplit(".", 1)[-1] == "kda_w_quantizer":
-            if not quantizer_state[name].get("_disabled", False):
-                raise ValueError("KDA checkpoints with enabled kda_w_quantizer are unsupported")
-            del quantizer_state[name]
 
 
 class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
     """Adds state quantizers and decode-aware kernel routing to Kimi Delta Attention."""
 
     linear_attention_quantizer_names = ("kda_state_quantizer",)
-
-    def validate_linear_attention(self):
-        """Require the materialized backend for KDA numerical emulation."""
-        super().validate_linear_attention()
-        if self.linear_attention_is_enabled and self.linear_attention_config.backend == "fla":
-            raise ValueError("KDA numerical emulation requires backend='serving'")
 
     def _state_quantized_chunk_kda(self, kernel, *args, **kwargs):
         self.validate_linear_attention()
@@ -56,12 +41,10 @@ class KimiDeltaAttentionStateQuantMixin(_LinearAttentionQuantMixin):
             kernel = kernel.func
         if kernel is not chunk_kda:
             raise NotImplementedError("KDA quantization requires FLA's chunk_kda callable")
-        return matmul_kda(
+        return kda_state_qat(
             *args,
             policy=self.linear_attention_config,
             state_quantizer=self.kda_state_quantizer,
-            replay_key_quantizer=self.replay_key_quantizer,
-            replay_update_quantizer=self.replay_update_quantizer,
             prefill_lengths=self._linear_attention_prefill_lengths,
             **kwargs,
         )

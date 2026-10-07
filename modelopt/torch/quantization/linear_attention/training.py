@@ -84,8 +84,6 @@ def _prefill_decode_forward(
     state_qdq,
     state_format,
     state_quantizer,
-    replay_key_quantizer,
-    replay_update_quantizer,
     scale,
     initial_state,
     output_final_state,
@@ -101,7 +99,9 @@ def _prefill_decode_forward(
     """Run both prefill and decode phases in one differentiable training forward.
 
     Each sequence's chunked prefix produces the state for its token or ReplaySSM
-    suffix. Their outputs are joined in token order for the training loss.
+    suffix. ``recurrent_decode`` wraps that dense state in LinearAttentionState
+    and preserves its gradient connection to prefill. Outputs are joined in token
+    order; the final runtime state is reconstructed to the caller's dense layout.
 
     Args:
         prefill_lengths: Prefix token count per sequence. For 128 tokens, a value
@@ -198,8 +198,6 @@ def _prefill_decode_forward(
         suffix, carry = recurrent_decode(
             *(x[b, split:end] for x in (q, k, v, g, beta)),
             config=policy,
-            replay_key_quantizer=replay_key_quantizer,
-            replay_update_quantizer=replay_update_quantizer,
             state_qdq=state_qdq,
             state_format=state_format,
             state_quantizer=state_quantizer,

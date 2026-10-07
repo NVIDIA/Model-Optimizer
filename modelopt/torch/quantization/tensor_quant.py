@@ -50,8 +50,7 @@ def _fp8_eager(x, amax=None):
         epsilon = 1.0 / (1 << 24)
         zero_amax_mask = amax <= epsilon
         safe_amax = torch.where(zero_amax_mask, torch.ones_like(amax), amax)
-        # Use direct division, matching the CUDA extension rather than reciprocal multiplication.
-        scale = torch.div(448.0, safe_amax)
+        scale = 448.0 / safe_amax
         scale_inv = 1 / scale
         x = (x.to(torch.float32) * scale).clamp(min=-448.0, max=448.0)
     x = x.to(torch.float8_e4m3fn)

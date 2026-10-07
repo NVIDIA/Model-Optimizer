@@ -25,6 +25,7 @@ from .utils import _resolve_state_quantizer, _tile_qdq, forward_value
 __all__ = [
     "EncodedLinearAttentionTensor",
     "LinearAttentionCarry",
+    "LinearAttentionState",
     "ReplayEntry",
     "recurrent_decode",
 ]
@@ -32,7 +33,11 @@ __all__ = [
 
 @dataclass
 class EncodedLinearAttentionTensor:
-    """Fake decoded values plus optional scale metadata; no compressed storage claim."""
+    """Floating QDQ values with autograd history and optional quantization scales.
+
+    ``format`` and ``block_v`` describe the emulated encoding; ``values`` stores
+    decoded values, not packed INT8/FP8 codes. Scale metadata is non-differentiable.
+    """
 
     values: torch.Tensor
     scales: torch.Tensor | None
@@ -42,7 +47,12 @@ class EncodedLinearAttentionTensor:
 
 @dataclass
 class ReplayEntry:
-    """An already computed, encoded rank-one update and its log retention."""
+    """One saved rank-one update since the last state checkpoint.
+
+    ``key`` is [H,K] and ``update`` is the beta-scaled residual [H,V]. ReplaySSM
+    stores their BF16 forward values once. ``log_retention`` is [H] for GDN or
+    [H,K] for KDA and records this token's decay for subsequent reconstruction.
+    """
 
     key: EncodedLinearAttentionTensor
     update: EncodedLinearAttentionTensor
@@ -50,16 +60,22 @@ class ReplayEntry:
 
 
 @dataclass
-class LinearAttentionCarry:
-    """Explicit anchor/update state, position, and codec contract across calls."""
+class LinearAttentionState:
+    """Runtime state passed between recurrent tokens and successive decode calls.
 
-    anchor: EncodedLinearAttentionTensor
-    entries: tuple[ReplayEntry, ...]
-    position: int
-    started: bool
-    signature: str
-    value_basis: str = "identity"
-    precision: str = "vllm_0_15"
+    With ``replay_window=1``, every token refreshes ``anchor`` and ``entries``
+    stays empty. With a larger window, the anchor stays fixed while updates
+    accumulate; reaching the window refreshes the anchor and clears the entries.
+    Tensor values retain their autograd history for QAT/QAD across call boundaries.
+    """
+
+    anchor: EncodedLinearAttentionTensor  # Checkpoint [H,K,V]; QDQ is applied when enabled.
+    entries: tuple[ReplayEntry, ...]  # Updates since the checkpoint, in token order.
+    position: int  # Next token position, including the supplied prefix offset.
+    started: bool  # Initial-state encoding has run; resuming must not repeat it.
+    signature: str  # Execution/quantizer settings used to check compatible reuse.
+    value_basis: str = "identity"  # Anchor and updates may use the Hadamard value basis.
+    precision: str = "vllm_0_15"  # Selects the native profile's reconstruction arithmetic.
 
     @property
     def cursor(self):
@@ -67,7 +83,13 @@ class LinearAttentionCarry:
         return len(self.entries)
 
     def reconstruct(self, *, original_basis=True):
-        """Replay entries, returning the original value basis unless explicitly disabled."""
+        """Return the current dense [H,K,V] state without refreshing or quantizing it.
+
+        Apply pending updates and decay to the anchor, preserving gradients.
+        Decode uses ``original_basis=False`` to continue in the stored basis;
+        the default converts Hadamard state back for the caller's final-state output.
+        Keep this object, rather than only this tensor, to resume a replay window.
+        """
         state = _replay_state(self) if self.precision == "replayssm" else self.anchor.values
         if original_basis and self.value_basis == "hadamard32":
             # The optional serving fork owns the checkpoint basis transform.
@@ -77,6 +99,10 @@ class LinearAttentionCarry:
 
             state = restore_basis(state)
         return state
+
+
+# Compatibility name for existing imports and pickled runtime state objects.
+LinearAttentionCarry = LinearAttentionState
 
 
 def _hadamard32(value):
@@ -89,8 +115,12 @@ def _hadamard32(value):
     return value * (32**-0.5)
 
 
-def _replay_state(carry, current_gate=None):
-    """Differentiate serving's weighted BF16 ring reconstruction, including KDA decay."""
+def _replay_state(carry: LinearAttentionState, current_gate=None):
+    """Decay the anchor and add saved updates weighted by their subsequent gates.
+
+    KDA weights keys per channel; GDN weights updates per head. ``current_gate``
+    includes the next KDA token's decay before BF16 weighting, without adding its update.
+    """
     state = carry.anchor.values
     if not carry.entries:
         if current_gate is not None:
@@ -117,46 +147,26 @@ def _encode(
     enabled,
     block_v,
     *,
-    state=False,
     state_format="fp8_e4m3",
-    state_codec="tile",
     state_quantizer=None,
 ):
+    """Apply TensorQuantizer state QDQ with straight-through gradients."""
     if not enabled:
         return EncodedLinearAttentionTensor(value, None, "identity", None)
-    if state and state_quantizer is not None and state_quantizer.block_sizes is not None:
+    if state_quantizer is not None and state_quantizer.block_sizes is not None:
         # TensorQuantizer owns dynamic scales; the floating carry needs only its QDQ output.
         return EncodedLinearAttentionTensor(
             state_quantizer(value), None, state_format, state_quantizer.block_sizes[-1]
         )
-    if state and state_codec == "int8_hadamard32":
-        with torch.no_grad():
-            groups = value.float().reshape(*value.shape[:-1], -1, 32)
-            scales = (groups.abs().amax(-1) / 127).clamp_min(6e-8)
-            normalized = groups / scales.unsqueeze(-1)
-            codes = normalized.sign() * (normalized.abs() + 0.5).floor()
-            metadata = scales.to(torch.float16)
-            decoded = (codes.clamp(-127, 127) * metadata.float().unsqueeze(-1)).reshape_as(value)
-        return EncodedLinearAttentionTensor(forward_value(value, decoded), metadata, "int8", 32)
     decoded, scales = _tile_qdq(value, block_v, state_format, state_quantizer=state_quantizer)
     return EncodedLinearAttentionTensor(decoded, scales, state_format, block_v)
 
 
-def _signature(config, state_qdq, block_v, state_format, state_quantizer, replay_quantizers):
+def _signature(config, state_qdq, block_v, state_format, state_quantizer):
+    """Record the execution and quantizer settings required when resuming a state."""
     signature = config.model_dump_json() + f"/{state_qdq}/{block_v}/{state_format}"
     if state_quantizer is not None and state_quantizer.block_sizes is not None:
         signature += f"/group={state_quantizer.block_sizes[-1]}"
-    for quantizer in replay_quantizers:
-        if quantizer is None:
-            signature += "/factor=None"
-        else:
-            grouping = (
-                quantizer.block_sizes if quantizer.block_sizes is not None else quantizer.axis
-            )
-            signature += (
-                f"/factor={quantizer.is_enabled}/{quantizer._if_quant}/{quantizer.num_bits}"
-                f"/{grouping}/{quantizer.backend}/{quantizer.backend_extra_args}"
-            )
     return signature
 
 
@@ -185,8 +195,13 @@ def _prepare_carry(
     position,
     state_format,
     state_quantizer,
-    replay_quantizers,
 ):
+    """Initialize from a dense state or validate and resume an existing runtime state.
+
+    The first nonempty call applies the handoff transform/QDQ once. A resumed
+    state preserves its anchor, replay cursor, and token position; an empty call
+    leaves initial encoding deferred until a token is actually processed.
+    """
     if q.ndim != 3 or k.shape != q.shape or v.shape[:2] != q.shape[:2]:
         raise ValueError("q/k/v must have aligned [T,H,D] shapes")
     if beta.shape != q.shape[:2] or g.shape not in (beta.shape, q.shape):
@@ -203,16 +218,14 @@ def _prepare_carry(
             raise ValueError("int8_hadamard32 requires INT8 state quantization")
         if v.shape[-1] % 32 or block_v < 32:
             raise ValueError("int8_hadamard32 requires Dv divisible by 32 and block_v >= 32")
-    signature = _signature(
-        config, state_qdq, block_v, state_format, state_quantizer, replay_quantizers
-    )
+    signature = _signature(config, state_qdq, block_v, state_format, state_quantizer)
     if carry is not None and initial_state is not None:
         raise ValueError("Supply either carry or initial_state")
     shape = (q.shape[1], q.shape[2], v.shape[2])
     if carry is None:
         initial_state = q.new_zeros(shape) if initial_state is None else initial_state
-        carry = LinearAttentionCarry(
-            _encode(initial_state, False, block_v, state=True, state_format=state_format),
+        carry = LinearAttentionState(
+            _encode(initial_state, False, block_v, state_format=state_format),
             (),
             position,
             False,
@@ -224,24 +237,27 @@ def _prepare_carry(
         raise ValueError("Replay cursor must be below the refresh window")
     if len(q) and not carry.started:
         initial = _hadamard32(carry.anchor.values) if hadamard else carry.anchor.values
-        anchor = _encode(
-            initial,
-            state_qdq,
-            block_v,
-            state=True,
-            state_format=state_format,
-            state_codec=config.state_codec,
-            state_quantizer=state_quantizer,
-        )
         if config.precision == "replayssm":
             # The optional serving fork owns checkpoint rounding and Hadamard arithmetic.
             from ...kernels.quantization.linear_attention.serving.replay import checkpoint
 
             with torch.no_grad():
                 decoded, metadata = checkpoint(carry.anchor.values, state_qdq)
-            anchor.values = forward_value(initial, decoded)
-            anchor.scales = metadata
-        carry = LinearAttentionCarry(
+            anchor = EncodedLinearAttentionTensor(
+                forward_value(initial, decoded),
+                metadata,
+                "int8" if state_qdq else "identity",
+                32 if state_qdq else None,
+            )
+        else:
+            anchor = _encode(
+                initial,
+                state_qdq,
+                block_v,
+                state_format=state_format,
+                state_quantizer=state_quantizer,
+            )
+        carry = LinearAttentionState(
             anchor,
             (),
             carry.position,
@@ -264,22 +280,34 @@ def recurrent_decode(
     state_qdq=False,
     state_format="fp8_e4m3",
     state_quantizer=None,
-    replay_key_quantizer=None,
-    replay_update_quantizer=None,
     initial_state=None,
-    carry=None,
+    carry: LinearAttentionState | None = None,
     position=0,
     scale=None,
     use_qk_l2norm_in_kernel=False,
     replay_gate_inputs=None,
-):
-    """Run one preactivated sequence [T,H,D] with explicit token/replay write events.
+) -> tuple[torch.Tensor, LinearAttentionState]:
+    """Run a recurrent suffix and return its outputs and resumable runtime state.
 
-    Keys and value heads must already be aligned. Scalar GDN or per-key-channel
-    KDA log gates are accepted. Outputs and all returned carry values retain their
-    graphs. An empty call performs no write or initial-state quantization.
-    ``config`` is the same LinearAttentionConfig used by the chunked prefix.
-    Native ReplaySSM stores BF16 factors; legacy factor quantizers must remain disabled.
+    Q/K are [T,H,K], V is [T,H,V], and beta is [T,H]; heads must be aligned.
+    Log gates are [T,H] for GDN or [T,H,K] for KDA. The first token consumes the
+    handoff state after enabled QDQ. Each token reads its output from the working
+    state before checkpoint rounding; replay_window determines when that state
+    is saved. Inputs and the initial state are promoted to FP32 working values;
+    native forward values use a differentiable adjoint for training.
+
+    Args:
+        config: The same LinearAttentionConfig used by the chunked prefix.
+        initial_state: Dense [H,K,V] state in the original value basis, normally
+            from prefill. Defaults to zeros; mutually exclusive with ``carry``.
+        carry: LinearAttentionState returned by an earlier call. Pass it directly
+            to preserve the replay window and autograd history across calls.
+        position: Starting token offset when creating a state, usually the prefix
+            length. An existing carry retains its own position.
+
+    Returns:
+        Outputs [T,H,V] and the updated LinearAttentionState, both retaining their
+        graphs. An empty call performs no state write or initial-state QDQ.
     """
     state_quantizer, state_qdq, state_format = _resolve_state_quantizer(
         state_quantizer, state_qdq, state_format
@@ -291,6 +319,10 @@ def recurrent_decode(
     native_replay = config.precision == "replayssm"
     if q.device.type != "cuda":
         raise ValueError("Serving arithmetic requires CUDA")
+    # BF16 inputs need FP32 working values for both replay reconstruction and its adjoint.
+    q, k, v, g, beta = (x.float() for x in (q, k, v, g, beta))
+    if initial_state is not None:
+        initial_state = initial_state.float()
     if (
         native_replay
         and len(q)
@@ -301,9 +333,6 @@ def recurrent_decode(
         )
     ):
         raise ValueError("ReplaySSM requires power-of-two K >= 32 and raw GDN gate inputs")
-    replay_quantizers = (replay_key_quantizer, replay_update_quantizer)
-    if any(quantizer is not None and quantizer.is_enabled for quantizer in replay_quantizers):
-        raise ValueError("Replay factor QDQ is retired; keep replay key/update quantizers disabled")
     carry, signature = _prepare_carry(
         q,
         k,
@@ -318,7 +347,6 @@ def recurrent_decode(
         position,
         state_format,
         state_quantizer,
-        replay_quantizers,
     )
     if len(q) == 0:
         # Keep empty input gradients defined without introducing a state write.
@@ -390,24 +418,31 @@ def recurrent_decode(
                     update.values = forward_value(update.values, native[4])
                     gate = forward_value(gate, native[5])
                 entries = (*entries, ReplayEntry(key, update, gate))
+            # Window 1 checkpoints every token; replay checkpoints only at a full window.
+            # Between checkpoints, keep the anchor and save the native BF16 update values.
             refresh = config.replay_window == 1 or len(entries) == config.replay_window
             if refresh:
-                anchor = _encode(
-                    working,
-                    state_qdq,
-                    block_v,
-                    state=True,
-                    state_format=state_format,
-                    state_codec=config.state_codec,
-                    state_quantizer=state_quantizer,
-                )
                 if native_replay:
-                    anchor.values = forward_value(working, native[1])
-                    anchor.scales = native[2]
+                    # Native step already quantized the checkpoint; attach its values to the adjoint.
+                    anchor = EncodedLinearAttentionTensor(
+                        forward_value(working, native[1]),
+                        native[2],
+                        "int8" if state_qdq else "identity",
+                        32 if state_qdq else None,
+                    )
+                else:
+                    anchor = _encode(
+                        working,
+                        state_qdq,
+                        block_v,
+                        state_format=state_format,
+                        state_quantizer=state_quantizer,
+                    )
                 entries = ()
             else:
                 anchor = carry.anchor
-            next_carry = LinearAttentionCarry(
+            # A new container keeps tensors needed by earlier tokens' backward passes intact.
+            next_carry = LinearAttentionState(
                 anchor,
                 entries,
                 carry.position + 1,
@@ -419,6 +454,7 @@ def recurrent_decode(
             query = q[t]
             if native_replay and use_qk_l2norm_in_kernel:
                 query = query / (query.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+            # Read this token from the working state, before the next-state checkpoint QDQ.
             outputs.append(
                 native_output if serving else _sum_keys(query.unsqueeze(-1) * working) * scale
             )

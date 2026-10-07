@@ -22,7 +22,7 @@ metadata:
   description: >-
     Dynamic INT8 GDN/KDA state QDQ with 32-value Hadamard rotation during decode.
     Imports the quantized-ReplaySSM serving kernels and uses working-state readout.
-    Prefill state remains unquantized; supply per-sequence prefix lengths through
+    Fresh prefill has no internal state QDQ; supply per-sequence prefix lengths through
     linear_attention_training_phase. No calibration is required.
 quantize:
   algorithm:

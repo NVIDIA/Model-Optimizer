@@ -39,5 +39,4 @@ recipes (under `general/` or `models/`) or presets (under `presets/`).
 | `indexer_k_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer key cache (`*indexer_k_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 | `indexer_q_nvfp4.yaml` | NVFP4 fake quantization of the sparse-attention indexer query (`*indexer_q_quantizer`), global scale fixed to 1; Blackwell+ GPUs |
 
-Native ReplaySSM uses BF16 key/update vectors. Legacy `replay_key_quantizer` and
-`replay_update_quantizer` handles must remain disabled; factor QDQ is unsupported.
+Native ReplaySSM uses BF16 key/update vectors; they are not independently quantized.

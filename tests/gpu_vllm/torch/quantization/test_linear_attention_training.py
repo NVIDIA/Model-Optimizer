@@ -21,8 +21,8 @@ import torch
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.linear_attention import (
     LinearAttentionConfig,
-    matmul_gdn,
-    matmul_kda,
+    gdn_state_qat,
+    kda_state_qat,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -50,7 +50,7 @@ def compiled_serving_case(request):
         )
     ).cuda()
     forward = partial(
-        matmul_kda if kda else matmul_gdn,
+        kda_state_qat if kda else gdn_state_qat,
         *args,
         policy=policy,
         state_quantizer=quantizer,
