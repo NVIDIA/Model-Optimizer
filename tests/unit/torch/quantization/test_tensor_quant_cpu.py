@@ -23,7 +23,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
-from modelopt.torch.quantization import QuantModuleRegistry
+from modelopt.torch.quantization import QuantModuleRegistry, tensor_quant
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.nn import (
     SequentialQuantizer,
@@ -35,6 +35,54 @@ from modelopt.torch.quantization.nn import (
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
     device = "cpu"
+
+
+def test_custom_op_schemas_keep_legacy_positional_calls():
+    inputs = torch.randn(4, 32)
+    amax = torch.tensor(1.0)
+    fp8 = torch.ops.tensorrt.quantize_op(inputs, amax, 8, 4, False, False)
+    mxfp8 = torch.ops.tensorrt.dynamic_block_quantize_op.overload(inputs, 32, None, 8, 4, 9, 8)
+
+    assert (fp8.shape, fp8.dtype) == (inputs.shape, inputs.dtype)
+    assert (mxfp8.shape, mxfp8.dtype) == (inputs.shape, inputs.dtype)
+
+
+@pytest.mark.parametrize("num_bits", [8, (4, 3)])
+def test_cpu_quantizer_strict_capture_preserves_custom_op(num_bits):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, narrow_range=False))
+    quantizer.amax = torch.tensor(1.0)
+    inputs = (torch.randn(4, 32),)
+
+    exported = torch.export.export(quantizer, inputs, strict=True)
+
+    assert any(
+        node.target == torch.ops.tensorrt.quantize_op.default for node in exported.graph.nodes
+    )
+    torch.testing.assert_close(exported.module()(*inputs), quantizer(*inputs))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ("amax_shape", "num_bits", "block_size", "axis"),
+    [([], 8, None, None), ([2, 1], 8, None, 0), ([4, 1], 4, 2, 1)],
+    ids=["scalar", "per_axis", "block"],
+)
+def test_registered_cpu_quantize_matches_eager(amax_shape, num_bits, block_size, axis, dtype):
+    inputs = torch.linspace(-3, 3, 8, dtype=dtype).reshape(2, 4)
+    if block_size is not None:
+        inputs = inputs.reshape(-1, block_size)
+    amax = torch.full(amax_shape, 2.0, dtype=dtype)
+    if amax.numel() > 1:
+        amax[0] = 0
+    expected = tensor_quant.fake_tensor_quant(inputs, amax, None, num_bits, False, True)
+
+    legacy = torch.ops.tensorrt.quantize_op(inputs, amax, num_bits, 0, False, True)
+    with_metadata = torch.ops.tensorrt.quantize_op(
+        inputs, amax, num_bits, 0, False, True, "Float", block_size, axis
+    )
+
+    torch.testing.assert_close(legacy, expected, rtol=0, atol=0)
+    torch.testing.assert_close(with_metadata, expected, rtol=0, atol=0)
 
 
 class TestQuantizerAttributeConfig:
