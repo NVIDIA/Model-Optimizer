@@ -229,6 +229,9 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.INT4_AWQ_CFG])
 def test_hf_vllm_export_tiny_llama(tmp_path, quant_cfg):
     tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
+    config_path = tiny_model_dir / "config.json"
+    # Keep the config values but distinct bytes so the source copy is observable.
+    config_path.write_text("\n" + json.dumps(json.loads(config_path.read_text()), indent=4))
     _test_hf_vllm_export(tmp_path, quant_cfg, tiny_model_dir)
 
 
