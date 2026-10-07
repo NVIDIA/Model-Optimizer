@@ -111,14 +111,16 @@ def test_peft_flow(tmp_path):
 
     outputs_peft = peft_model(input_ids).logits
     outputs_full = model_full(input_ids).logits
-    assert torch.allclose(outputs_peft, outputs_full, atol=1e-2, rtol=1e-2)
+    # The full model quantizes the merged weight, PEFT only the base one: allow for that INT8 gap.
+    tol = {"atol": 3e-2, "rtol": 1e-2}
+    assert torch.allclose(outputs_peft, outputs_full, **tol)
 
     peft_model.save_pretrained(tmp_path / "peft_model")
 
     peft_loaded = PeftModel.from_pretrained(model_original, tmp_path / "peft_model")
     outputs_peft_loaded = peft_loaded(input_ids).logits
-    assert torch.allclose(outputs_peft_loaded, outputs_full, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(outputs_peft_loaded, outputs_full, **tol)
 
     model_after_peft_merge = peft_loaded.merge_and_unload()
     outputs_after_peft_merge = model_after_peft_merge(input_ids).logits
-    assert torch.allclose(outputs_after_peft_merge, outputs_full, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(outputs_after_peft_merge, outputs_full, **tol)

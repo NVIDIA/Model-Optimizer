@@ -85,10 +85,10 @@ def test_kv_quant_hf(model_getter, attn_cls):
 
     original_is_compatible_attention = None
     if attn_cls is not None:
-        # Test case for transformers < 4.48
+        # Test case for attention modules without transformers' attention interface
         # This needs:
         # 1) replace the attention class with the test attention class
-        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the transformers < 4.48 support
+        # 2) set _QuantAttention.is_compatible_attention output to False to fall back to the AST-based support
         for name, module in model_test.named_modules():
             if name.endswith(attention_module):
                 if original_is_compatible_attention is None:

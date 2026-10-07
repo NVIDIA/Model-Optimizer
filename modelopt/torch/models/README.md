@@ -21,7 +21,7 @@ __all__: list[str] = []
 register(
     ModelSpec(
         model_type="qwen3_moe",
-        min_transformers_version="4.57",
+        min_transformers_version="5.5",
         # modelopt policy, not a model fact: this model is validated for grouped export.
         export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
@@ -71,7 +71,7 @@ come from, and they must agree:
 | `min_transformers_version` | Earliest `transformers` release whose definitions match this spec; `None` for a `remote_code` model |
 
 Clamp `min_transformers_version` at the repo's minimum supported transformers (`tf_min`
-in `noxfile.py`, currently `4.57`) — a model older than the floor records the floor,
+in `noxfile.py`, currently `5.5`) — a model older than the floor records the floor,
 since nothing older is installed or tested. A model added later records its own release.
 The pair is what lets `test_specs_vs_transformers.py` assert rather than skip: it can
 tell a model that is legitimately absent on an older transformers from a spec that no
